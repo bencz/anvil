@@ -300,6 +300,7 @@ extern const anvil_backend_ops_t anvil_backend_zarch;
 extern const anvil_backend_ops_t anvil_backend_ppc32;
 extern const anvil_backend_ops_t anvil_backend_ppc64;
 extern const anvil_backend_ops_t anvil_backend_ppc64le;
+extern const anvil_backend_ops_t anvil_backend_arm64;
 
 /* Initialize all built-in backends */
 void anvil_init_backends(void);

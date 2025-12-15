@@ -28,6 +28,7 @@ void anvil_init_backends(void)
     anvil_register_backend(&anvil_backend_ppc32);
     anvil_register_backend(&anvil_backend_ppc64);
     anvil_register_backend(&anvil_backend_ppc64le);
+    anvil_register_backend(&anvil_backend_arm64);
     
     backends_initialized = true;
 }

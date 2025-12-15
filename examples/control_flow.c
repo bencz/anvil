@@ -15,59 +15,21 @@
  *   }
  * 
  * Usage: control_flow [arch]
- *   arch: x86, x86_64, s370, s390, zarch, ppc32, ppc64, ppc64le (default: x86_64)
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  */
 
 #include <anvil/anvil.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include "arch_select.h"
 
 int main(int argc, char **argv)
 {
-    anvil_arch_t arch = ANVIL_ARCH_X86_64;
-    const char *arch_name = "x86-64";
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    if (argc > 1) {
-        if (strcmp(argv[1], "x86") == 0) {
-            arch = ANVIL_ARCH_X86;
-            arch_name = "x86";
-        } else if (strcmp(argv[1], "x86_64") == 0) {
-            arch = ANVIL_ARCH_X86_64;
-            arch_name = "x86-64";
-        } else if (strcmp(argv[1], "s370") == 0) {
-            arch = ANVIL_ARCH_S370;
-            arch_name = "S/370";
-        } else if (strcmp(argv[1], "s390") == 0) {
-            arch = ANVIL_ARCH_S390;
-            arch_name = "S/390";
-        } else if (strcmp(argv[1], "zarch") == 0) {
-            arch = ANVIL_ARCH_ZARCH;
-            arch_name = "z/Architecture";
-        } else if (strcmp(argv[1], "ppc32") == 0) {
-            arch = ANVIL_ARCH_PPC32;
-            arch_name = "PowerPC 32-bit";
-        } else if (strcmp(argv[1], "ppc64") == 0) {
-            arch = ANVIL_ARCH_PPC64;
-            arch_name = "PowerPC 64-bit";
-        } else if (strcmp(argv[1], "ppc64le") == 0) {
-            arch = ANVIL_ARCH_PPC64LE;
-            arch_name = "PowerPC 64-bit LE";
-        } else {
-            fprintf(stderr, "Unknown architecture: %s\n", argv[1]);
-            return 1;
-        }
-    }
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL Control Flow Example");
     
-    fprintf(stderr, "Generating control flow example for %s...\n", arch_name);
-    
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        fprintf(stderr, "Failed to create context\n");
-        return 1;
-    }
-    
-    anvil_ctx_set_target(ctx, arch);
     anvil_module_t *mod = anvil_module_create(ctx, "ctrlflow");
     
     /* Create function: int sum_to_n(int n) */

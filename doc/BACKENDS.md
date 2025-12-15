@@ -479,6 +479,14 @@ Different architectures pass parameters differently:
 - First 8 float args: XMM0-XMM7
 - Rest on stack
 
+**ARM64 (AAPCS64):**
+- First 8 integer args: X0-X7
+- First 8 float args: D0-D7
+- Return value: X0 (integer), D0 (float)
+- Frame pointer: X29
+- Link register: X30
+- Stack pointer: SP (16-byte aligned)
+
 **IBM Mainframe (MVS/GCCMVS):**
 - R1 points to parameter list
 - Each entry is address of parameter
@@ -532,6 +540,10 @@ FACTORIAL DS    0H
 - Integer: EAX/RAX
 - Float: XMM0 or ST(0)
 
+**ARM64:**
+- Integer: X0
+- Float: D0 (double) or S0 (float)
+
 **IBM Mainframe:**
 - R15 contains return value
 
@@ -580,6 +592,12 @@ sete al             ; Set AL to 1 if equal
 movzx eax, al       ; Zero-extend to full register
 ```
 
+**ARM64:**
+```asm
+cmp x9, x10         ; Compare registers
+cset x0, eq         ; Set X0 to 1 if equal, 0 otherwise
+```
+
 **S/370:**
 ```asm
 CR    R2,R3         ; Compare registers
@@ -597,6 +615,15 @@ lea rdi, [rel fmt]  ; First arg: format string
 mov esi, 42         ; Second arg: integer
 xor eax, eax        ; No vector args
 call printf
+```
+
+**ARM64:**
+```asm
+; Call printf("Hello %d", 42)
+adrp x0, fmt        ; First arg: format string (page)
+add x0, x0, :lo12:fmt
+mov w1, #42         ; Second arg: integer
+bl printf           ; Branch with link
 ```
 
 **S/370:**

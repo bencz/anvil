@@ -1,13 +1,16 @@
 /*
  * ANVIL - Global Variables Test
  * 
- * Tests global variable support on mainframe backends (S/370, S/370-XA, S/390, z/Architecture)
+ * Tests global variable support on all backends
+ * 
+ * Usage: global_test [arch]
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  */
 
 #include "anvil/anvil.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include "arch_select.h"
 
 /*
  * Generate a simple program that uses global variables:
@@ -18,15 +21,9 @@
  *     return counter;
  * }
  */
-static void test_global_counter(anvil_ctx_t *ctx, anvil_arch_t arch)
+static void test_global_counter(anvil_ctx_t *ctx)
 {
-    const char *arch_names[] = {
-        "x86", "x86_64", "s370", "s370_xa", "s390", "zarch", "ppc32", "ppc64", "ppc64le"
-    };
-    
-    printf("\n=== Testing global variables on %s ===\n", arch_names[arch]);
-    
-    anvil_ctx_set_target(ctx, arch);
+    printf("\n=== Testing global variables ===\n");
     
     anvil_module_t *mod = anvil_module_create(ctx, "global_test");
     
@@ -72,15 +69,9 @@ static void test_global_counter(anvil_ctx_t *ctx, anvil_arch_t arch)
 /*
  * Test different global types
  */
-static void test_global_types(anvil_ctx_t *ctx, anvil_arch_t arch)
+static void test_global_types(anvil_ctx_t *ctx)
 {
-    const char *arch_names[] = {
-        "x86", "x86_64", "s370", "s370_xa", "s390", "zarch", "ppc32", "ppc64", "ppc64le"
-    };
-    
-    printf("\n=== Testing global types on %s ===\n", arch_names[arch]);
-    
-    anvil_ctx_set_target(ctx, arch);
+    printf("\n=== Testing global types ===\n");
     
     anvil_module_t *mod = anvil_module_create(ctx, "types_test");
     
@@ -117,41 +108,13 @@ static void test_global_types(anvil_ctx_t *ctx, anvil_arch_t arch)
 
 int main(int argc, char **argv)
 {
-    printf("ANVIL Global Variables Test\n");
-    printf("============================\n");
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        fprintf(stderr, "Failed to create context\n");
-        return 1;
-    }
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL Global Variables Test");
     
-    /* Test on mainframe architectures */
-    anvil_arch_t mainframe_archs[] = {
-        ANVIL_ARCH_S370,
-        ANVIL_ARCH_S370_XA,
-        ANVIL_ARCH_S390,
-        ANVIL_ARCH_ZARCH
-    };
-    
-    int num_archs = sizeof(mainframe_archs) / sizeof(mainframe_archs[0]);
-    
-    /* Allow filtering by architecture name */
-    anvil_arch_t selected_arch = ANVIL_ARCH_COUNT;
-    if (argc > 1) {
-        if (strcmp(argv[1], "s370") == 0) selected_arch = ANVIL_ARCH_S370;
-        else if (strcmp(argv[1], "s370_xa") == 0) selected_arch = ANVIL_ARCH_S370_XA;
-        else if (strcmp(argv[1], "s390") == 0) selected_arch = ANVIL_ARCH_S390;
-        else if (strcmp(argv[1], "zarch") == 0) selected_arch = ANVIL_ARCH_ZARCH;
-    }
-    
-    for (int i = 0; i < num_archs; i++) {
-        if (selected_arch != ANVIL_ARCH_COUNT && mainframe_archs[i] != selected_arch) {
-            continue;
-        }
-        test_global_counter(ctx, mainframe_archs[i]);
-        test_global_types(ctx, mainframe_archs[i]);
-    }
+    test_global_counter(ctx);
+    test_global_types(ctx);
     
     anvil_ctx_destroy(ctx);
     

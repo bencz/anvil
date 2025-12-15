@@ -40,8 +40,13 @@ anvil/
 │       ├── s370/s370.c       # IBM S/370 backend
 │       ├── s370_xa/s370_xa.c # IBM S/370-XA backend
 │       ├── s390/s390.c       # IBM S/390 backend
-│       └── zarch/zarch.c     # IBM z/Architecture backend
+│       ├── zarch/zarch.c     # IBM z/Architecture backend
+│       ├── ppc32/ppc32.c     # PowerPC 32-bit backend
+│       ├── ppc64/ppc64.c     # PowerPC 64-bit BE backend
+│       ├── ppc64le/ppc64le.c # PowerPC 64-bit LE backend
+│       └── arm64/arm64.c     # ARM64/AArch64 backend
 ├── examples/
+│   ├── arch_select.h         # Common architecture selection utility
 │   ├── simple.c              # Basic usage example
 │   └── multiarch.c           # Multi-architecture example
 ├── Makefile

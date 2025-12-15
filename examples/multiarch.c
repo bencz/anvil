@@ -112,7 +112,8 @@ int main(void)
         { ANVIL_ARCH_ZARCH,   "z/Arch (64-bit)",      "output_zarch.asm" },
         // { ANVIL_ARCH_PPC32,   "PowerPC 32-bit",       "output_ppc32.s" },
         // { ANVIL_ARCH_PPC64,   "PowerPC 64-bit BE",    "output_ppc64.s" },
-        // { ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE",    "output_ppc64le.s" }
+        // { ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE",    "output_ppc64le.s" },
+        { ANVIL_ARCH_ARM64,   "ARM64 (AArch64)",      "output_arm64.s" }
     };
     
     size_t num_targets = sizeof(targets) / sizeof(targets[0]);

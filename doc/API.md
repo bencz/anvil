@@ -853,6 +853,10 @@ typedef enum {
     ANVIL_ARCH_S370_XA,     // IBM S/370-XA (31-bit)
     ANVIL_ARCH_S390,        // IBM S/390 (31-bit)
     ANVIL_ARCH_ZARCH,       // IBM z/Architecture (64-bit)
+    ANVIL_ARCH_PPC32,       // PowerPC 32-bit
+    ANVIL_ARCH_PPC64,       // PowerPC 64-bit BE
+    ANVIL_ARCH_PPC64LE,     // PowerPC 64-bit LE
+    ANVIL_ARCH_ARM64,       // ARM64/AArch64
     ANVIL_ARCH_COUNT
 } anvil_arch_t;
 ```

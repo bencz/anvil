@@ -40,7 +40,8 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/zarch/zarch.c \
 	$(SRC_DIR)/backend/ppc32/ppc32.c \
 	$(SRC_DIR)/backend/ppc64/ppc64.c \
-	$(SRC_DIR)/backend/ppc64le/ppc64le.c
+	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
+	$(SRC_DIR)/backend/arm64/arm64.c
 
 OPT_SRCS = \
 	$(SRC_DIR)/opt/opt.c \

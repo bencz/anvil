@@ -13,130 +13,21 @@
  *   }
  * 
  * Usage: floating_point [arch] [fp_format]
- *   arch: s370, s370_xa, s390, zarch, x86, x86_64, ppc32, ppc64, ppc64le
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  *   fp_format: hfp, ieee (only for s390 and zarch)
  */
 
 #include <anvil/anvil.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-
-static void print_fp_format_info(anvil_fp_format_t fp_format)
-{
-    switch (fp_format) {
-        case ANVIL_FP_IEEE754:
-            printf("  FP Format: IEEE 754 (binary floating-point)\n");
-            break;
-        case ANVIL_FP_HFP:
-            printf("  FP Format: IBM HFP (hexadecimal floating-point)\n");
-            break;
-        case ANVIL_FP_HFP_IEEE:
-            printf("  FP Format: HFP + IEEE 754 (both supported)\n");
-            break;
-    }
-}
+#include "arch_select.h"
 
 int main(int argc, char **argv)
 {
-    anvil_arch_t arch = ANVIL_ARCH_ZARCH;
-    const char *arch_name = "z/Architecture";
-    anvil_fp_format_t fp_format = ANVIL_FP_HFP_IEEE;  /* Default for zarch */
-    bool fp_format_specified = false;
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    /* Parse architecture */
-    if (argc > 1) {
-        if (strcmp(argv[1], "s370") == 0) {
-            arch = ANVIL_ARCH_S370;
-            arch_name = "S/370";
-            fp_format = ANVIL_FP_HFP;
-        } else if (strcmp(argv[1], "s370_xa") == 0) {
-            arch = ANVIL_ARCH_S370_XA;
-            arch_name = "S/370-XA";
-            fp_format = ANVIL_FP_HFP;
-        } else if (strcmp(argv[1], "s390") == 0) {
-            arch = ANVIL_ARCH_S390;
-            arch_name = "S/390";
-            fp_format = ANVIL_FP_HFP;  /* Default, but can be changed */
-        } else if (strcmp(argv[1], "zarch") == 0) {
-            arch = ANVIL_ARCH_ZARCH;
-            arch_name = "z/Architecture";
-            fp_format = ANVIL_FP_HFP_IEEE;
-        } else if (strcmp(argv[1], "x86") == 0) {
-            arch = ANVIL_ARCH_X86;
-            arch_name = "x86";
-            fp_format = ANVIL_FP_IEEE754;
-        } else if (strcmp(argv[1], "x86_64") == 0) {
-            arch = ANVIL_ARCH_X86_64;
-            arch_name = "x86-64";
-            fp_format = ANVIL_FP_IEEE754;
-        } else if (strcmp(argv[1], "ppc32") == 0) {
-            arch = ANVIL_ARCH_PPC32;
-            arch_name = "PowerPC 32-bit";
-            fp_format = ANVIL_FP_IEEE754;
-        } else if (strcmp(argv[1], "ppc64") == 0) {
-            arch = ANVIL_ARCH_PPC64;
-            arch_name = "PowerPC 64-bit";
-            fp_format = ANVIL_FP_IEEE754;
-        } else if (strcmp(argv[1], "ppc64le") == 0) {
-            arch = ANVIL_ARCH_PPC64LE;
-            arch_name = "PowerPC 64-bit LE";
-            fp_format = ANVIL_FP_IEEE754;
-        } else {
-            fprintf(stderr, "Unknown architecture: %s\n", argv[1]);
-            fprintf(stderr, "Available: s370, s370_xa, s390, zarch, x86, x86_64, ppc32, ppc64, ppc64le\n");
-            return 1;
-        }
-    }
-    
-    /* Parse FP format (optional, only for s390 and zarch) */
-    if (argc > 2) {
-        fp_format_specified = true;
-        if (strcmp(argv[2], "hfp") == 0) {
-            fp_format = ANVIL_FP_HFP;
-        } else if (strcmp(argv[2], "ieee") == 0) {
-            fp_format = ANVIL_FP_IEEE754;
-        } else {
-            fprintf(stderr, "Unknown FP format: %s\n", argv[2]);
-            fprintf(stderr, "Available: hfp, ieee\n");
-            return 1;
-        }
-    }
-    
-    printf("=== ANVIL Floating-Point Example ===\n");
-    printf("Target: %s\n", arch_name);
-    
-    /* Create context */
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        fprintf(stderr, "Failed to create context\n");
-        return 1;
-    }
-    
-    /* Set target architecture */
-    if (anvil_ctx_set_target(ctx, arch) != ANVIL_OK) {
-        fprintf(stderr, "Failed to set target: %s\n", anvil_ctx_get_error(ctx));
-        anvil_ctx_destroy(ctx);
-        return 1;
-    }
-    
-    /* Set FP format if specified */
-    if (fp_format_specified) {
-        anvil_error_t err = anvil_ctx_set_fp_format(ctx, fp_format);
-        if (err != ANVIL_OK) {
-            fprintf(stderr, "Failed to set FP format: %s\n", anvil_ctx_get_error(ctx));
-            anvil_ctx_destroy(ctx);
-            return 1;
-        }
-    }
-    
-    /* Get and display architecture info */
-    const anvil_arch_info_t *info = anvil_ctx_get_arch_info(ctx);
-    printf("  Address bits: %d\n", info->addr_bits);
-    printf("  Endianness: %s\n", info->endian == ANVIL_ENDIAN_LITTLE ? "little" : "big");
-    printf("  FPRs: %d\n", info->num_fpr);
-    print_fp_format_info(anvil_ctx_get_fp_format(ctx));
-    printf("\n");
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL Floating-Point Example");
     
     /* Create module */
     anvil_module_t *mod = anvil_module_create(ctx, "fptest");

@@ -1,25 +1,18 @@
 /*
  * ANVIL String Support Test
  * Tests string constant generation for all architectures
+ * 
+ * Usage: string_test [arch]
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  */
 
 #include <anvil/anvil.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include "arch_select.h"
 
-static void test_strings(anvil_arch_t arch, const char *arch_name)
+static void test_strings(anvil_ctx_t *ctx)
 {
-    printf("=== Testing strings for %s ===\n\n", arch_name);
-    
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        fprintf(stderr, "Failed to create context\n");
-        return;
-    }
-    
-    anvil_ctx_set_target(ctx, arch);
-    
     anvil_module_t *mod = anvil_module_create(ctx, "strtest");
     
     /* Create function type: char* get_message(void) */
@@ -64,39 +57,17 @@ static void test_strings(anvil_arch_t arch, const char *arch_name)
     }
     
     anvil_module_destroy(mod);
-    anvil_ctx_destroy(ctx);
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        printf("Usage: %s <arch>\n", argv[0]);
-        printf("  arch: s370, s390, zarch, x86, x86_64, ppc32, ppc64, ppc64le\n");
-        return 1;
-    }
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    const char *arch_str = argv[1];
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL String Test");
     
-    if (strcmp(arch_str, "s370") == 0) {
-        test_strings(ANVIL_ARCH_S370, "S/370");
-    } else if (strcmp(arch_str, "s390") == 0) {
-        test_strings(ANVIL_ARCH_S390, "S/390");
-    } else if (strcmp(arch_str, "zarch") == 0) {
-        test_strings(ANVIL_ARCH_ZARCH, "z/Architecture");
-    } else if (strcmp(arch_str, "x86") == 0) {
-        test_strings(ANVIL_ARCH_X86, "x86");
-    } else if (strcmp(arch_str, "x86_64") == 0) {
-        test_strings(ANVIL_ARCH_X86_64, "x86-64");
-    } else if (strcmp(arch_str, "ppc32") == 0) {
-        test_strings(ANVIL_ARCH_PPC32, "PowerPC 32-bit");
-    } else if (strcmp(arch_str, "ppc64") == 0) {
-        test_strings(ANVIL_ARCH_PPC64, "PowerPC 64-bit");
-    } else if (strcmp(arch_str, "ppc64le") == 0) {
-        test_strings(ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE");
-    } else {
-        fprintf(stderr, "Unknown architecture: %s\n", arch_str);
-        return 1;
-    }
+    test_strings(ctx);
     
+    anvil_ctx_destroy(ctx);
     return 0;
 }

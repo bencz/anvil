@@ -56,6 +56,7 @@ anvil_module_codegen(mod, &output, &len);
 | PowerPC 32 | `ANVIL_ARCH_PPC32` | 32 | Big | Down | IEEE 754 |
 | PowerPC 64 | `ANVIL_ARCH_PPC64` | 64 | Big | Down | IEEE 754 |
 | PowerPC 64 LE | `ANVIL_ARCH_PPC64LE` | 64 | Little | Down | IEEE 754 |
+| ARM64 | `ANVIL_ARCH_ARM64` | 64 | Little | Down | IEEE 754 |
 
 **FP Format Legend:**
 - **IEEE 754**: Standard IEEE floating-point

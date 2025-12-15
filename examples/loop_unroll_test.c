@@ -3,12 +3,16 @@
  * 
  * Demonstrates the loop unrolling optimization pass.
  * Tests both full unrolling (small trip count) and partial unrolling.
+ * 
+ * Usage: loop_unroll_test [arch]
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  */
 
 #include <anvil/anvil.h>
 #include <anvil/anvil_opt.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "arch_select.h"
 
 /* Helper to print generated code */
 static void print_code(anvil_module_t *mod, const char *title)
@@ -247,33 +251,18 @@ static void test_mul_loop(anvil_ctx_t *ctx)
     anvil_ctx_set_opt_level(ctx, ANVIL_OPT_NONE);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    printf("ANVIL Loop Unrolling Test\n");
-    printf("=========================\n");
-    printf("Target: IBM S/390 (mainframe backend is complete)\n");
-    fflush(stdout);
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    /* Create context with S/390 target */
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        printf("Failed to create context\n");
-        return 1;
-    }
-    printf("Context created\n");
-    fflush(stdout);
-    
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_S390);
-    printf("Target set\n");
-    fflush(stdout);
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL Loop Unrolling Test");
     
     /* Run tests */
     test_full_unroll(ctx);
     
     printf("\n=== Loop unrolling tests completed ===\n");
-    fflush(stdout);
     
-    /* Note: Context cleanup may cause issues - this is a known limitation */
     anvil_ctx_destroy(ctx);
     
     return 0;

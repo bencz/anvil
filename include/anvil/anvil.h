@@ -42,6 +42,7 @@ typedef enum {
     ANVIL_ARCH_PPC32,        /* PowerPC 32-bit, big-endian, stack grows down */
     ANVIL_ARCH_PPC64,        /* PowerPC 64-bit, big-endian, stack grows down */
     ANVIL_ARCH_PPC64LE,      /* PowerPC 64-bit, little-endian, stack grows down */
+    ANVIL_ARCH_ARM64,        /* ARM64/AArch64, little-endian, stack grows down */
     ANVIL_ARCH_COUNT
 } anvil_arch_t;
 

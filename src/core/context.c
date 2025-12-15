@@ -135,6 +135,20 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .has_condition_codes = true,
         .has_delay_slots = false
+    },
+    [ANVIL_ARCH_ARM64] = {
+        .arch = ANVIL_ARCH_ARM64,
+        .name = "ARM64",
+        .ptr_size = 8,
+        .addr_bits = 64,
+        .word_size = 8,
+        .num_gpr = 31,
+        .num_fpr = 32,
+        .endian = ANVIL_ENDIAN_LITTLE,
+        .stack_dir = ANVIL_STACK_DOWN,
+        .fp_format = ANVIL_FP_IEEE754,
+        .has_condition_codes = true,
+        .has_delay_slots = false
     }
 };
 

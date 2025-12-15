@@ -24,6 +24,7 @@ A C library for compiler code generation with support for multiple architectures
 | PowerPC 32 | 32 | Big | Down | IEEE 754 | GAS |
 | PowerPC 64 | 64 | Big | Down | IEEE 754 | GAS |
 | PowerPC 64 LE | 64 | Little | Down | IEEE 754 | GAS |
+| ARM64 | 64 | Little | Down | IEEE 754 | GAS |
 
 **Floating-Point Formats:**
 - **IEEE 754**: Standard IEEE floating-point (binary)
@@ -198,6 +199,7 @@ int main(void)
 | S/370 | MVS | R1 points to parameter list |
 | S/390 | MVS | R1 points to parameter list |
 | z/Arch | z/OS 64-bit | R1 points to parameter list (64-bit) |
+| ARM64 | AAPCS64 | x0-x7 for args, x0 for return |
 
 ## Mainframe Notes
 

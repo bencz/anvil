@@ -3,62 +3,22 @@
  * 
  * Demonstrates basic usage of the ANVIL library to generate
  * a simple function that adds two numbers.
+ * 
+ * Usage: simple [arch]
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
  */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include "anvil/anvil.h"
+#include "arch_select.h"
 
 int main(int argc, char **argv)
 {
-    anvil_arch_t target = ANVIL_ARCH_X86_64;
+    anvil_ctx_t *ctx;
+    arch_config_t config;
     
-    /* Parse command line for target architecture */
-    if (argc > 1) {
-        if (strcmp(argv[1], "x86") == 0) {
-            target = ANVIL_ARCH_X86;
-        } else if (strcmp(argv[1], "x86-64") == 0 || strcmp(argv[1], "x64") == 0) {
-            target = ANVIL_ARCH_X86_64;
-        } else if (strcmp(argv[1], "s370") == 0) {
-            target = ANVIL_ARCH_S370;
-        } else if (strcmp(argv[1], "s390") == 0) {
-            target = ANVIL_ARCH_S390;
-        } else if (strcmp(argv[1], "zarch") == 0 || strcmp(argv[1], "z") == 0) {
-            target = ANVIL_ARCH_ZARCH;
-        } else if (strcmp(argv[1], "ppc32") == 0 || strcmp(argv[1], "ppc") == 0) {
-            target = ANVIL_ARCH_PPC32;
-        } else if (strcmp(argv[1], "ppc64") == 0) {
-            target = ANVIL_ARCH_PPC64;
-        } else if (strcmp(argv[1], "ppc64le") == 0) {
-            target = ANVIL_ARCH_PPC64LE;
-        } else {
-            fprintf(stderr, "Unknown target: %s\n", argv[1]);
-            fprintf(stderr, "Available: x86, x86-64, s370, s390, zarch, ppc32, ppc64, ppc64le\n");
-            return 1;
-        }
-    }
-    
-    /* Create context */
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    if (!ctx) {
-        fprintf(stderr, "Failed to create context\n");
-        return 1;
-    }
-    
-    /* Set target architecture */
-    if (anvil_ctx_set_target(ctx, target) != ANVIL_OK) {
-        fprintf(stderr, "Failed to set target: %s\n", anvil_ctx_get_error(ctx));
-        anvil_ctx_destroy(ctx);
-        return 1;
-    }
-    
-    /* Get architecture info */
-    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
-    printf("Target: %s (%d-bit, %s-endian, stack grows %s)\n",
-           arch->name, arch->addr_bits,
-           arch->endian == ANVIL_ENDIAN_LITTLE ? "little" : "big",
-           arch->stack_dir == ANVIL_STACK_DOWN ? "down" : "up");
+    EXAMPLE_SETUP(argc, argv, ctx, config, "ANVIL Simple Example");
     
     /* Create module */
     anvil_module_t *mod = anvil_module_create(ctx, "example");
