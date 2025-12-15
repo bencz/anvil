@@ -440,6 +440,12 @@ static void s370_emit_instr(s370_backend_t *be, anvil_instr_t *instr)
     if (!instr) return;
     
     switch (instr->op) {
+        case ANVIL_OP_PHI:
+            /* PHI nodes are SSA abstractions - at codegen time they become
+             * copies in predecessor blocks. For simple register allocation,
+             * the value should already be in R15 from the predecessor. */
+            break;
+            
         case ANVIL_OP_ALLOCA:
             /* Allocate space in dynamic area for local variable */
             /* Register the stack slot for this ALLOCA result */

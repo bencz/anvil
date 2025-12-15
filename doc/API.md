@@ -13,8 +13,9 @@ Complete API reference for the ANVIL library.
 7. [IR Builder API](#ir-builder-api)
 8. [Constants API](#constants-api)
 9. [Global Variables API](#global-variables-api)
-10. [Enumerations](#enumerations)
-11. [Structures](#structures)
+10. [Optimization API](#optimization-api)
+11. [Enumerations](#enumerations)
+12. [Structures](#structures)
 
 ## Context API
 
@@ -892,6 +893,140 @@ typedef enum {
     ANVIL_OP_PHI,
     ANVIL_OP_SELECT
 } anvil_op_t;
+```
+
+## Optimization API
+
+The optimization API provides IR optimization passes. Include `<anvil/anvil_opt.h>`.
+
+### anvil_ctx_set_opt_level
+
+```c
+anvil_error_t anvil_ctx_set_opt_level(anvil_ctx_t *ctx, anvil_opt_level_t level);
+```
+
+Sets the optimization level for the context.
+
+**Parameters:**
+- `ctx`: Context
+- `level`: Optimization level (`ANVIL_OPT_NONE`, `ANVIL_OPT_BASIC`, `ANVIL_OPT_STANDARD`, `ANVIL_OPT_AGGRESSIVE`)
+
+**Returns:** `ANVIL_OK` on success.
+
+### anvil_ctx_get_opt_level
+
+```c
+anvil_opt_level_t anvil_ctx_get_opt_level(anvil_ctx_t *ctx);
+```
+
+Gets the current optimization level.
+
+**Returns:** Current optimization level.
+
+### anvil_ctx_get_pass_manager
+
+```c
+anvil_pass_manager_t *anvil_ctx_get_pass_manager(anvil_ctx_t *ctx);
+```
+
+Gets or creates the pass manager for the context.
+
+**Returns:** Pass manager pointer.
+
+### anvil_module_optimize
+
+```c
+anvil_error_t anvil_module_optimize(anvil_module_t *mod);
+```
+
+Runs all enabled optimization passes on the module.
+
+**Parameters:**
+- `mod`: Module to optimize
+
+**Returns:** `ANVIL_OK` on success.
+
+**Example:**
+```c
+anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+anvil_module_optimize(mod);
+anvil_module_codegen(mod, &output, &len);
+```
+
+### anvil_pass_manager_create
+
+```c
+anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx);
+```
+
+Creates a new pass manager.
+
+**Returns:** Pass manager pointer, or NULL on failure.
+
+### anvil_pass_manager_destroy
+
+```c
+void anvil_pass_manager_destroy(anvil_pass_manager_t *pm);
+```
+
+Destroys a pass manager.
+
+### anvil_pass_manager_set_level
+
+```c
+void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level);
+```
+
+Sets optimization level, enabling/disabling passes accordingly.
+
+### anvil_pass_manager_enable
+
+```c
+void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+```
+
+Enables a specific optimization pass.
+
+### anvil_pass_manager_disable
+
+```c
+void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+```
+
+Disables a specific optimization pass.
+
+### anvil_pass_manager_run_module
+
+```c
+bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod);
+```
+
+Runs all enabled passes on a module.
+
+**Returns:** `true` if any changes were made.
+
+### anvil_pass_manager_run_func
+
+```c
+bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func);
+```
+
+Runs all enabled passes on a function.
+
+**Returns:** `true` if any changes were made.
+
+### Built-in Pass Functions
+
+```c
+bool anvil_pass_const_fold(anvil_func_t *func);    // Constant folding
+bool anvil_pass_dce(anvil_func_t *func);           // Dead code elimination
+bool anvil_pass_simplify_cfg(anvil_func_t *func);  // CFG simplification
+bool anvil_pass_strength_reduce(anvil_func_t *func); // Strength reduction
+bool anvil_pass_copy_prop(anvil_func_t *func);     // Copy propagation
+bool anvil_pass_dead_store(anvil_func_t *func);    // Dead store elimination
+bool anvil_pass_load_elim(anvil_func_t *func);     // Redundant load elimination
+bool anvil_pass_loop_unroll(anvil_func_t *func);   // Loop unrolling (experimental)
+bool anvil_pass_cse(anvil_func_t *func);           // Common subexpression elimination
 ```
 
 ## Structures

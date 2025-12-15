@@ -11,6 +11,7 @@ This documentation provides comprehensive technical details about the ANVIL libr
 | [API.md](API.md) | Complete API reference with all functions, types, and enums |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Internal architecture and design decisions |
 | [IR.md](IR.md) | Intermediate Representation specification |
+| [OPTIMIZATION.md](OPTIMIZATION.md) | IR optimization passes and pass manager |
 | [BACKENDS.md](BACKENDS.md) | Backend system and how to implement new backends |
 | [MAINFRAME.md](MAINFRAME.md) | IBM Mainframe backends (S/370, S/390, z/Architecture) |
 | [HACKING.md](HACKING.md) | Guide for contributors and hackers |

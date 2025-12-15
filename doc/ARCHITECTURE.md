@@ -47,6 +47,15 @@ ANVIL follows a classic compiler backend design with these main components:
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
+│                   Pass Manager (anvil_pass_manager_t)                │
+│                                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
+│  │ConstFold │  │   DCE    │  │ Strength │  │SimplifyCFG│            │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘            │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
 │                      Backend (anvil_backend_t)                       │
 │                                                                      │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
@@ -482,6 +491,98 @@ src/
 2. **Extensibility**: Easy to add new architectures
 3. **Maintainability**: Changes to one backend don't affect others
 4. **Specialization**: Each backend can optimize for its target
+
+## Optimization Infrastructure
+
+ANVIL includes a pass manager for IR optimization.
+
+### Pass Manager (anvil_pass_manager_t)
+
+```c
+struct anvil_pass_manager {
+    anvil_ctx_t *ctx;
+    anvil_opt_level_t level;
+    bool enabled[ANVIL_PASS_COUNT];
+    anvil_pass_info_t *custom_passes;
+    size_t num_custom;
+};
+```
+
+**Responsibilities:**
+- Manages optimization passes
+- Controls which passes are enabled
+- Runs passes in correct order
+- Supports custom pass registration
+
+### Built-in Passes
+
+| Pass | Description | Min Level |
+|------|-------------|-----------|
+| Constant Folding | Evaluate constant expressions | O1 |
+| DCE | Remove unused instructions | O1 |
+| Copy Propagation | Replace uses of copied values | O1 |
+| CFG Simplification | Merge blocks, remove unreachable | O2 |
+| Strength Reduction | Replace expensive ops | O2 |
+| Dead Store Elimination | Remove overwritten stores | O2 |
+| Load Elimination | Reuse loaded values | O2 |
+| CSE | Common subexpression elimination | O2 |
+| Loop Unrolling | Unroll small loops (experimental) | O3 |
+
+### Pass Execution Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         IR (Before)                                  │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │    Constant Folding     │
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │         DCE             │
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │   CFG Simplification    │
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │   Strength Reduction    │
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │    Custom Passes        │
+                    └─────────────────────────┘
+                                  │
+                    ┌─────────────────────────┐
+                    │   Changed? Loop back    │◄──┐
+                    └─────────────────────────┘   │
+                                  │ yes           │
+                                  └───────────────┘
+                                  │ no
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         IR (After)                                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `include/anvil/anvil_opt.h` | Public optimization API |
+| `src/opt/opt.c` | Pass manager implementation |
+| `src/opt/const_fold.c` | Constant folding pass |
+| `src/opt/dce.c` | Dead code elimination |
+| `src/opt/simplify_cfg.c` | CFG simplification |
+| `src/opt/strength_reduce.c` | Strength reduction |
+| `src/opt/ctx_opt.c` | Context integration |
 
 ## Thread Safety
 

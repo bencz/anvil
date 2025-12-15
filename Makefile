@@ -42,7 +42,20 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc64/ppc64.c \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c
 
-ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS)
+OPT_SRCS = \
+	$(SRC_DIR)/opt/opt.c \
+	$(SRC_DIR)/opt/const_fold.c \
+	$(SRC_DIR)/opt/dce.c \
+	$(SRC_DIR)/opt/simplify_cfg.c \
+	$(SRC_DIR)/opt/strength_reduce.c \
+	$(SRC_DIR)/opt/copy_prop.c \
+	$(SRC_DIR)/opt/dead_store.c \
+	$(SRC_DIR)/opt/load_elim.c \
+	$(SRC_DIR)/opt/cse.c \
+	$(SRC_DIR)/opt/loop_unroll.c \
+	$(SRC_DIR)/opt/ctx_opt.c
+
+ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS)
 
 # Object files
 OBJS = $(ALL_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -56,7 +69,11 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/hello_world \
 	$(BUILD_DIR)/examples/string_test \
 	$(BUILD_DIR)/examples/array_test \
-	$(BUILD_DIR)/examples/struct_test
+	$(BUILD_DIR)/examples/struct_test \
+	$(BUILD_DIR)/examples/optimization_test \
+	$(BUILD_DIR)/examples/loop_unroll_test \
+	$(BUILD_DIR)/examples/memory_opt_test \
+	$(BUILD_DIR)/examples/cse_test
 
 .PHONY: all clean lib examples install
 

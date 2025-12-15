@@ -3,6 +3,7 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_opt.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -176,6 +177,11 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx)
     /* Cleanup backend */
     if (ctx->backend && ctx->backend->ops->cleanup) {
         ctx->backend->ops->cleanup(ctx->backend);
+    }
+    
+    /* Cleanup pass manager */
+    if (ctx->pass_manager) {
+        anvil_pass_manager_destroy(ctx->pass_manager);
     }
     
     free(ctx);

@@ -244,6 +244,10 @@ struct anvil_ctx {
     /* Error handling */
     char error_msg[256];
     anvil_error_t last_error;
+    
+    /* Optimization */
+    struct anvil_pass_manager *pass_manager;
+    int opt_level;  /* anvil_opt_level_t */
 };
 
 /* ============================================================================

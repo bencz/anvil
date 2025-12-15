@@ -445,6 +445,10 @@ static void zarch_emit_instr(zarch_backend_t *be, anvil_instr_t *instr)
     if (!instr) return;
     
     switch (instr->op) {
+        case ANVIL_OP_PHI:
+            /* PHI nodes are SSA abstractions - value already in R15 from predecessor */
+            break;
+            
         case ANVIL_OP_ALLOCA:
             /* Allocate space in dynamic area for local variable */
             {

@@ -430,6 +430,18 @@ static void s390_emit_instr(s390_backend_t *be, anvil_instr_t *instr)
     if (!instr) return;
     
     switch (instr->op) {
+        case ANVIL_OP_PHI:
+            /* PHI nodes are handled specially during block emission.
+             * At code generation time, PHI nodes become copies in predecessor blocks.
+             * Here we just need to ensure the result is available.
+             * The actual value selection happens via the predecessor's branch.
+             * 
+             * For simple cases, we can treat PHI as a no-op since the value
+             * should already be in R15 from the predecessor block.
+             */
+            /* PHI result is already in R15 from predecessor - just mark it */
+            break;
+            
         case ANVIL_OP_ALLOCA:
             /* Allocate space in dynamic area for local variable */
             {

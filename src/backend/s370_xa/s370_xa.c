@@ -378,6 +378,10 @@ static void s370_xa_emit_instr(s370_xa_backend_t *be, anvil_instr_t *instr)
     if (!instr) return;
     
     switch (instr->op) {
+        case ANVIL_OP_PHI:
+            /* PHI nodes are SSA abstractions - value already in R15 from predecessor */
+            break;
+            
         case ANVIL_OP_ALLOCA:
             {
                 int offset = s370_xa_add_stack_slot(be, instr->result);

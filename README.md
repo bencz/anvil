@@ -7,6 +7,7 @@ A C library for compiler code generation with support for multiple architectures
 * Portable IR: Architecture-independent intermediate representation
 * Multiple Backends: Support for x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit
 * Assembly Output: Generates assembly text (HLASM for mainframes, GAS for x86/PPC)
+* **IR Optimization**: Configurable optimization passes (constant folding, DCE, strength reduction)
 * Extensible: Plugin architecture for adding new backends
 * Opcode Ready: Design prepared for future binary code generation
 
@@ -310,13 +311,83 @@ anvil_register_backend(&anvil_backend_myarch);
 - **Direct stack access**: Load/Store directly from stack slots without intermediate registers
 - **Relative branches**: J/JNZ instead of B/BNZ for better performance (S/390+)
 
+## IR Optimization
+
+ANVIL includes a configurable optimization pass infrastructure that can be enabled or disabled.
+
+### Optimization Levels
+
+| Level | Name | Description |
+|-------|------|-------------|
+| O0 | `ANVIL_OPT_NONE` | No optimization (default) |
+| O1 | `ANVIL_OPT_BASIC` | Constant folding, DCE, copy propagation |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop unrolling |
+
+### Available Passes
+
+* **Constant Folding**: Evaluates constant expressions at compile time (`3 + 5` → `8`)
+* **Dead Code Elimination (DCE)**: Removes unused instructions
+* **Strength Reduction**: Replaces expensive ops with cheaper ones (`x * 8` → `x << 3`)
+* **CFG Simplification**: Merges blocks, removes unreachable code
+* **Copy Propagation**: Replaces uses of copied values with originals
+* **Dead Store Elimination**: Removes stores overwritten before read
+* **Redundant Load Elimination**: Reuses loaded values from same address
+* **Common Subexpression Elimination (CSE)**: Reuses computed values
+* **Loop Unrolling**: Unrolls small loops with known trip counts (O3, experimental)
+
+### Usage
+
+```c
+#include <anvil/anvil_opt.h>
+
+// Set optimization level
+anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+
+// Optimize module before codegen
+anvil_module_optimize(mod);
+
+// Or fine-grained control
+anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
+anvil_pass_manager_enable(pm, ANVIL_PASS_CONST_FOLD);
+anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
+```
+
+### Example: Constant Folding (S/390)
+
+**Before optimization:**
+```hlasm
+         LA    R2,3            Load constant 3
+         AHI   R2,5            Add 5
+         LR    R15,R2          Result in R15
+```
+
+**After optimization:**
+```hlasm
+         LA    R15,8           Load constant 8 directly
+```
+
+### Example: Strength Reduction (S/390)
+
+**Before optimization:**
+```hlasm
+         LA    R3,8            Load constant 8
+         MSR   R2,R3           Multiply (expensive)
+```
+
+**After optimization:**
+```hlasm
+         LA    R3,3            Load shift amount
+         SLL   R2,0(R3)        Shift left by 3 (x * 8 = x << 3)
+```
+
 ## Roadmap
 
-* IR optimization pass infrastructure
 * Global variable initializers
 * Binary opcode generation
 * ASI/AGSI optimization (Add to Storage Immediate)
 * Register allocation improvements
+* Common subexpression elimination
 * ARM/AArch64 support
 * RISC-V support
 * Debug info (DWARF)

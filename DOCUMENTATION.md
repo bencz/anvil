@@ -1103,6 +1103,173 @@ R15      EQU   15
          END   ADD
 ```
 
+## IR Optimization
+
+ANVIL includes a configurable optimization pass infrastructure.
+
+### Optimization Levels
+
+| Level | Constant | Description |
+|-------|----------|-------------|
+| O0 | `ANVIL_OPT_NONE` | No optimization (default) |
+| O1 | `ANVIL_OPT_BASIC` | Constant folding, dead code elimination |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + common subexpression elimination |
+
+### Pass Manager API
+
+```c
+#include <anvil/anvil_opt.h>
+
+/* Create pass manager */
+anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx);
+void anvil_pass_manager_destroy(anvil_pass_manager_t *pm);
+
+/* Set optimization level */
+void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level);
+anvil_opt_level_t anvil_pass_manager_get_level(anvil_pass_manager_t *pm);
+
+/* Enable/disable individual passes */
+void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+
+/* Run passes */
+bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func);
+bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod);
+
+/* Register custom pass */
+anvil_error_t anvil_pass_manager_register(anvil_pass_manager_t *pm, 
+                                           const anvil_pass_info_t *pass);
+```
+
+### Context Integration API
+
+```c
+/* Set/get optimization level for context */
+anvil_error_t anvil_ctx_set_opt_level(anvil_ctx_t *ctx, anvil_opt_level_t level);
+anvil_opt_level_t anvil_ctx_get_opt_level(anvil_ctx_t *ctx);
+
+/* Get pass manager for context */
+anvil_pass_manager_t *anvil_ctx_get_pass_manager(anvil_ctx_t *ctx);
+
+/* Optimize module */
+anvil_error_t anvil_module_optimize(anvil_module_t *mod);
+```
+
+### Available Passes
+
+| Pass ID | Name | Description | Min Level |
+|---------|------|-------------|-----------|
+| `ANVIL_PASS_CONST_FOLD` | Constant Folding | Evaluate constant expressions | O1 |
+| `ANVIL_PASS_DCE` | Dead Code Elimination | Remove unused instructions | O1 |
+| `ANVIL_PASS_COPY_PROP` | Copy Propagation | Replace uses of copied values | O1 |
+| `ANVIL_PASS_SIMPLIFY_CFG` | CFG Simplification | Merge blocks, remove unreachable | O2 |
+| `ANVIL_PASS_STRENGTH_REDUCE` | Strength Reduction | Replace expensive ops | O2 |
+| `ANVIL_PASS_DEAD_STORE` | Dead Store Elimination | Remove overwritten stores | O2 |
+| `ANVIL_PASS_LOAD_ELIM` | Load Elimination | Reuse loaded values | O2 |
+| `ANVIL_PASS_COMMON_SUBEXPR` | CSE | Common subexpression elimination | O2 |
+| `ANVIL_PASS_LOOP_UNROLL` | Loop Unrolling | Unroll small loops (experimental) | O3 |
+
+### Built-in Pass Functions
+
+```c
+/* Can be called directly for custom pipelines */
+bool anvil_pass_const_fold(anvil_func_t *func);
+bool anvil_pass_dce(anvil_func_t *func);
+bool anvil_pass_simplify_cfg(anvil_func_t *func);
+bool anvil_pass_strength_reduce(anvil_func_t *func);
+bool anvil_pass_copy_prop(anvil_func_t *func);
+bool anvil_pass_dead_store(anvil_func_t *func);
+bool anvil_pass_load_elim(anvil_func_t *func);
+bool anvil_pass_loop_unroll(anvil_func_t *func);   // Experimental
+bool anvil_pass_cse(anvil_func_t *func);
+```
+
+### Usage Example
+
+```c
+#include <anvil/anvil.h>
+#include <anvil/anvil_opt.h>
+
+int main(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create();
+    anvil_ctx_set_target(ctx, ANVIL_ARCH_S390);
+    
+    /* Enable O2 optimization */
+    anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+    
+    anvil_module_t *mod = anvil_module_create(ctx, "test");
+    
+    /* ... build IR ... */
+    
+    /* Optimize before codegen */
+    anvil_module_optimize(mod);
+    
+    /* Generate code */
+    char *output = NULL;
+    size_t len = 0;
+    anvil_module_codegen(mod, &output, &len);
+    
+    printf("%s", output);
+    
+    free(output);
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+    
+    return 0;
+}
+```
+
+### Constant Folding Examples
+
+The constant folding pass evaluates:
+
+| Expression | Result |
+|------------|--------|
+| `3 + 5` | `8` |
+| `x + 0` | `x` |
+| `x * 1` | `x` |
+| `x * 0` | `0` |
+| `x - x` | `0` |
+| `x & x` | `x` |
+| `x ^ x` | `0` |
+
+### Strength Reduction Examples
+
+| Original | Optimized |
+|----------|-----------|
+| `x * 2` | `x << 1` |
+| `x * 4` | `x << 2` |
+| `x * 8` | `x << 3` |
+| `x / 2` (unsigned) | `x >> 1` |
+| `x % 8` (unsigned) | `x & 7` |
+
+### Custom Pass Registration
+
+```c
+/* Define custom pass function */
+bool my_custom_pass(anvil_func_t *func)
+{
+    bool changed = false;
+    /* ... optimization logic ... */
+    return changed;
+}
+
+/* Register with pass manager */
+anvil_pass_info_t my_pass = {
+    .id = ANVIL_PASS_COUNT,  /* Use next available ID */
+    .name = "my-pass",
+    .description = "My custom optimization",
+    .run = my_custom_pass,
+    .min_level = ANVIL_OPT_BASIC
+};
+
+anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
+anvil_pass_manager_register(pm, &my_pass);
+```
+
 ## Building and Linking
 
 ### Compilation

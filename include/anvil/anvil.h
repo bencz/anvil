@@ -4,7 +4,6 @@
  * A portable IR library for compiler code generation
  * Supports multiple backends: x86, x86-64, S/370, S/390, z/Architecture
  * 
- * Copyright (c) 2024
  */
 
 #ifndef ANVIL_H
