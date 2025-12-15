@@ -619,11 +619,11 @@ call printf
 
 **ARM64:**
 ```asm
-; Call printf("Hello %d", 42)
-adrp x0, fmt        ; First arg: format string (page)
-add x0, x0, :lo12:fmt
-mov w1, #42         ; Second arg: integer
-bl printf           ; Branch with link
+// Call printf("Hello %d", 42)
+adrp x0, fmt            // Load page address of fmt
+add x0, x0, :lo12:fmt   // Add page offset
+mov w1, #42             // Second arg: integer
+bl printf               // Branch with link
 ```
 
 **S/370:**
