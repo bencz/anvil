@@ -1,0 +1,932 @@
+# ANVIL API Reference
+
+Complete API reference for the ANVIL library.
+
+## Table of Contents
+
+1. [Context API](#context-api)
+2. [Module API](#module-api)
+3. [Function API](#function-api)
+4. [Block API](#block-api)
+5. [Type API](#type-api)
+6. [Value API](#value-api)
+7. [IR Builder API](#ir-builder-api)
+8. [Constants API](#constants-api)
+9. [Global Variables API](#global-variables-api)
+10. [Enumerations](#enumerations)
+11. [Structures](#structures)
+
+## Context API
+
+The context is the root object managing all ANVIL resources.
+
+### anvil_ctx_create
+
+```c
+anvil_ctx_t *anvil_ctx_create(void);
+```
+
+Creates a new ANVIL context.
+
+**Returns:** Pointer to new context, or NULL on failure.
+
+**Example:**
+```c
+anvil_ctx_t *ctx = anvil_ctx_create();
+if (!ctx) {
+    fprintf(stderr, "Failed to create context\n");
+    return 1;
+}
+```
+
+### anvil_ctx_destroy
+
+```c
+void anvil_ctx_destroy(anvil_ctx_t *ctx);
+```
+
+Destroys a context and frees all associated resources.
+
+**Parameters:**
+- `ctx`: Context to destroy
+
+**Note:** This does NOT free modules. Destroy modules first with `anvil_module_destroy`.
+
+### anvil_ctx_set_target
+
+```c
+anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch);
+```
+
+Sets the target architecture for code generation.
+
+**Parameters:**
+- `ctx`: Context
+- `arch`: Target architecture enum value
+
+**Returns:** `ANVIL_OK` on success, error code on failure.
+
+**Example:**
+```c
+anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+```
+
+### anvil_ctx_get_target
+
+```c
+anvil_arch_t anvil_ctx_get_target(anvil_ctx_t *ctx);
+```
+
+Gets the current target architecture.
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Current target architecture.
+
+### anvil_set_insert_point
+
+```c
+void anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
+```
+
+Sets the current insertion point for IR building.
+
+**Parameters:**
+- `ctx`: Context
+- `block`: Block to insert instructions into
+
+**Example:**
+```c
+anvil_block_t *entry = anvil_func_get_entry(func);
+anvil_set_insert_point(ctx, entry);
+// Now all anvil_build_* calls will insert into 'entry'
+```
+
+### anvil_get_insert_block
+
+```c
+anvil_block_t *anvil_get_insert_block(anvil_ctx_t *ctx);
+```
+
+Gets the current insertion block.
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Current insertion block, or NULL if none set.
+
+## Module API
+
+Modules represent compilation units.
+
+### anvil_module_create
+
+```c
+anvil_module_t *anvil_module_create(anvil_ctx_t *ctx, const char *name);
+```
+
+Creates a new module.
+
+**Parameters:**
+- `ctx`: Context
+- `name`: Module name (used in generated code)
+
+**Returns:** Pointer to new module, or NULL on failure.
+
+**Example:**
+```c
+anvil_module_t *mod = anvil_module_create(ctx, "my_module");
+```
+
+### anvil_module_destroy
+
+```c
+void anvil_module_destroy(anvil_module_t *mod);
+```
+
+Destroys a module and all its contents (functions, globals).
+
+**Parameters:**
+- `mod`: Module to destroy
+
+### anvil_module_codegen
+
+```c
+anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *len);
+```
+
+Generates assembly code for the entire module.
+
+**Parameters:**
+- `mod`: Module to generate code for
+- `output`: Pointer to receive allocated output string
+- `len`: Pointer to receive output length (optional, can be NULL)
+
+**Returns:** `ANVIL_OK` on success, error code on failure.
+
+**Note:** Caller must free the output string with `free()`.
+
+**Example:**
+```c
+char *asm_code = NULL;
+size_t len = 0;
+anvil_error_t err = anvil_module_codegen(mod, &asm_code, &len);
+if (err == ANVIL_OK) {
+    printf("%s", asm_code);
+    free(asm_code);
+}
+```
+
+### anvil_module_get_function
+
+```c
+anvil_func_t *anvil_module_get_function(anvil_module_t *mod, const char *name);
+```
+
+Finds a function by name.
+
+**Parameters:**
+- `mod`: Module
+- `name`: Function name
+
+**Returns:** Function pointer, or NULL if not found.
+
+## Function API
+
+Functions contain basic blocks and have signatures.
+
+### anvil_func_create
+
+```c
+anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
+                                 anvil_type_t *type, anvil_linkage_t linkage);
+```
+
+Creates a new function.
+
+**Parameters:**
+- `mod`: Parent module
+- `name`: Function name
+- `type`: Function type (created with `anvil_type_func`)
+- `linkage`: Linkage type
+
+**Returns:** Pointer to new function, or NULL on failure.
+
+**Example:**
+```c
+anvil_type_t *i32 = anvil_type_i32(ctx);
+anvil_type_t *params[] = { i32, i32 };
+anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 2, false);
+anvil_func_t *func = anvil_func_create(mod, "add", func_type, ANVIL_LINK_EXTERNAL);
+```
+
+### anvil_func_get_entry
+
+```c
+anvil_block_t *anvil_func_get_entry(anvil_func_t *func);
+```
+
+Gets the entry basic block of a function.
+
+**Parameters:**
+- `func`: Function
+
+**Returns:** Entry block (automatically created with the function).
+
+### anvil_func_get_param
+
+```c
+anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index);
+```
+
+Gets a function parameter by index.
+
+**Parameters:**
+- `func`: Function
+- `index`: Parameter index (0-based)
+
+**Returns:** Parameter value, or NULL if index out of range.
+
+**Example:**
+```c
+anvil_value_t *a = anvil_func_get_param(func, 0);  // First parameter
+anvil_value_t *b = anvil_func_get_param(func, 1);  // Second parameter
+```
+
+### anvil_func_get_param_count
+
+```c
+size_t anvil_func_get_param_count(anvil_func_t *func);
+```
+
+Gets the number of parameters.
+
+**Parameters:**
+- `func`: Function
+
+**Returns:** Number of parameters.
+
+### anvil_func_get_name
+
+```c
+const char *anvil_func_get_name(anvil_func_t *func);
+```
+
+Gets the function name.
+
+**Parameters:**
+- `func`: Function
+
+**Returns:** Function name string.
+
+## Block API
+
+Basic blocks are sequences of instructions.
+
+### anvil_block_create
+
+```c
+anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name);
+```
+
+Creates a new basic block.
+
+**Parameters:**
+- `func`: Parent function
+- `name`: Block name (used as label in generated code)
+
+**Returns:** Pointer to new block, or NULL on failure.
+
+**Example:**
+```c
+anvil_block_t *then_bb = anvil_block_create(func, "then");
+anvil_block_t *else_bb = anvil_block_create(func, "else");
+anvil_block_t *merge_bb = anvil_block_create(func, "merge");
+```
+
+### anvil_block_get_parent
+
+```c
+anvil_func_t *anvil_block_get_parent(anvil_block_t *block);
+```
+
+Gets the parent function of a block.
+
+**Parameters:**
+- `block`: Block
+
+**Returns:** Parent function.
+
+### anvil_block_get_name
+
+```c
+const char *anvil_block_get_name(anvil_block_t *block);
+```
+
+Gets the block name.
+
+**Parameters:**
+- `block`: Block
+
+**Returns:** Block name string.
+
+## Type API
+
+Types define the shape of values.
+
+### Primitive Types
+
+```c
+anvil_type_t *anvil_type_void(anvil_ctx_t *ctx);
+anvil_type_t *anvil_type_i1(anvil_ctx_t *ctx);    // Boolean
+anvil_type_t *anvil_type_i8(anvil_ctx_t *ctx);    // Signed 8-bit
+anvil_type_t *anvil_type_i16(anvil_ctx_t *ctx);   // Signed 16-bit
+anvil_type_t *anvil_type_i32(anvil_ctx_t *ctx);   // Signed 32-bit
+anvil_type_t *anvil_type_i64(anvil_ctx_t *ctx);   // Signed 64-bit
+anvil_type_t *anvil_type_u8(anvil_ctx_t *ctx);    // Unsigned 8-bit
+anvil_type_t *anvil_type_u16(anvil_ctx_t *ctx);   // Unsigned 16-bit
+anvil_type_t *anvil_type_u32(anvil_ctx_t *ctx);   // Unsigned 32-bit
+anvil_type_t *anvil_type_u64(anvil_ctx_t *ctx);   // Unsigned 64-bit
+anvil_type_t *anvil_type_f32(anvil_ctx_t *ctx);   // 32-bit float
+anvil_type_t *anvil_type_f64(anvil_ctx_t *ctx);   // 64-bit double
+```
+
+### anvil_type_ptr
+
+```c
+anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee);
+```
+
+Creates a pointer type.
+
+**Parameters:**
+- `ctx`: Context
+- `pointee`: Type being pointed to
+
+**Returns:** Pointer type.
+
+**Example:**
+```c
+anvil_type_t *i32 = anvil_type_i32(ctx);
+anvil_type_t *i32_ptr = anvil_type_ptr(ctx, i32);  // i32*
+```
+
+### anvil_type_array
+
+```c
+anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count);
+```
+
+Creates an array type.
+
+**Parameters:**
+- `ctx`: Context
+- `elem`: Element type
+- `count`: Number of elements
+
+**Returns:** Array type.
+
+**Example:**
+```c
+anvil_type_t *i32 = anvil_type_i32(ctx);
+anvil_type_t *arr = anvil_type_array(ctx, i32, 10);  // [10 x i32]
+```
+
+### anvil_type_struct
+
+```c
+anvil_type_t *anvil_type_struct(anvil_ctx_t *ctx, const char *name,
+                                 anvil_type_t **fields, size_t num_fields);
+```
+
+Creates a struct type.
+
+**Parameters:**
+- `ctx`: Context
+- `name`: Struct name (can be NULL for anonymous)
+- `fields`: Array of field types
+- `num_fields`: Number of fields
+
+**Returns:** Struct type.
+
+**Example:**
+```c
+anvil_type_t *fields[] = {
+    anvil_type_i32(ctx),  // x
+    anvil_type_i32(ctx),  // y
+};
+anvil_type_t *point = anvil_type_struct(ctx, "Point", fields, 2);
+```
+
+### anvil_type_func
+
+```c
+anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
+                               anvil_type_t **params, size_t num_params,
+                               bool variadic);
+```
+
+Creates a function type.
+
+**Parameters:**
+- `ctx`: Context
+- `ret`: Return type
+- `params`: Array of parameter types
+- `num_params`: Number of parameters
+- `variadic`: True if function accepts variable arguments
+
+**Returns:** Function type.
+
+**Example:**
+```c
+anvil_type_t *i32 = anvil_type_i32(ctx);
+anvil_type_t *params[] = { i32, i32 };
+anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 2, false);
+// int(int, int)
+```
+
+### Type Query Functions
+
+```c
+anvil_type_kind_t anvil_type_get_kind(anvil_type_t *type);
+size_t anvil_type_get_size(anvil_type_t *type);
+size_t anvil_type_get_align(anvil_type_t *type);
+bool anvil_type_is_integer(anvil_type_t *type);
+bool anvil_type_is_float(anvil_type_t *type);
+bool anvil_type_is_pointer(anvil_type_t *type);
+bool anvil_type_is_aggregate(anvil_type_t *type);
+```
+
+## IR Builder API
+
+The IR builder creates instructions.
+
+### Arithmetic Operations
+
+```c
+anvil_value_t *anvil_build_add(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                anvil_value_t *rhs, const char *name);
+```
+Integer or float addition.
+
+```c
+anvil_value_t *anvil_build_sub(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                anvil_value_t *rhs, const char *name);
+```
+Integer or float subtraction.
+
+```c
+anvil_value_t *anvil_build_mul(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                anvil_value_t *rhs, const char *name);
+```
+Integer or float multiplication.
+
+```c
+anvil_value_t *anvil_build_sdiv(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                 anvil_value_t *rhs, const char *name);
+```
+Signed integer division.
+
+```c
+anvil_value_t *anvil_build_udiv(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                 anvil_value_t *rhs, const char *name);
+```
+Unsigned integer division.
+
+```c
+anvil_value_t *anvil_build_smod(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                 anvil_value_t *rhs, const char *name);
+```
+Signed integer modulo (remainder).
+
+```c
+anvil_value_t *anvil_build_umod(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                 anvil_value_t *rhs, const char *name);
+```
+Unsigned integer modulo.
+
+```c
+anvil_value_t *anvil_build_neg(anvil_ctx_t *ctx, anvil_value_t *val,
+                                const char *name);
+```
+Integer or float negation.
+
+### Bitwise Operations
+
+```c
+anvil_value_t *anvil_build_and(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                anvil_value_t *rhs, const char *name);
+```
+Bitwise AND.
+
+```c
+anvil_value_t *anvil_build_or(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                               anvil_value_t *rhs, const char *name);
+```
+Bitwise OR.
+
+```c
+anvil_value_t *anvil_build_xor(anvil_ctx_t *ctx, anvil_value_t *lhs,
+                                anvil_value_t *rhs, const char *name);
+```
+Bitwise XOR.
+
+```c
+anvil_value_t *anvil_build_not(anvil_ctx_t *ctx, anvil_value_t *val,
+                                const char *name);
+```
+Bitwise NOT (complement).
+
+```c
+anvil_value_t *anvil_build_shl(anvil_ctx_t *ctx, anvil_value_t *val,
+                                anvil_value_t *amt, const char *name);
+```
+Shift left.
+
+```c
+anvil_value_t *anvil_build_shr(anvil_ctx_t *ctx, anvil_value_t *val,
+                                anvil_value_t *amt, const char *name);
+```
+Logical shift right (zero-fill).
+
+```c
+anvil_value_t *anvil_build_sar(anvil_ctx_t *ctx, anvil_value_t *val,
+                                anvil_value_t *amt, const char *name);
+```
+Arithmetic shift right (sign-extend).
+
+### Comparison Operations
+
+All comparison operations return an `i1` (boolean) value.
+
+```c
+// Signed comparisons
+anvil_value_t *anvil_build_cmp_eq(ctx, lhs, rhs, name);   // Equal
+anvil_value_t *anvil_build_cmp_ne(ctx, lhs, rhs, name);   // Not equal
+anvil_value_t *anvil_build_cmp_lt(ctx, lhs, rhs, name);   // Less than
+anvil_value_t *anvil_build_cmp_le(ctx, lhs, rhs, name);   // Less or equal
+anvil_value_t *anvil_build_cmp_gt(ctx, lhs, rhs, name);   // Greater than
+anvil_value_t *anvil_build_cmp_ge(ctx, lhs, rhs, name);   // Greater or equal
+
+// Unsigned comparisons
+anvil_value_t *anvil_build_cmp_ult(ctx, lhs, rhs, name);  // Unsigned less than
+anvil_value_t *anvil_build_cmp_ule(ctx, lhs, rhs, name);  // Unsigned less or equal
+anvil_value_t *anvil_build_cmp_ugt(ctx, lhs, rhs, name);  // Unsigned greater than
+anvil_value_t *anvil_build_cmp_uge(ctx, lhs, rhs, name);  // Unsigned greater or equal
+```
+
+### Memory Operations
+
+```c
+anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type,
+                                   const char *name);
+```
+Allocates space on the stack. Returns a pointer to the allocated space.
+
+```c
+anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_value_t *ptr,
+                                 const char *name);
+```
+Loads a value from memory.
+
+```c
+anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
+                                  anvil_value_t *ptr);
+```
+Stores a value to memory. Returns NULL (store has no result).
+
+```c
+anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_value_t *ptr,
+                                anvil_value_t **indices, size_t num_indices,
+                                const char *name);
+```
+Get Element Pointer. Computes address of a sub-element.
+
+**Example:**
+```c
+// Allocate an i32
+anvil_value_t *ptr = anvil_build_alloca(ctx, anvil_type_i32(ctx), "x");
+
+// Store 42 to it
+anvil_value_t *val = anvil_const_i32(ctx, 42);
+anvil_build_store(ctx, val, ptr);
+
+// Load it back
+anvil_value_t *loaded = anvil_build_load(ctx, ptr, "loaded");
+```
+
+### Control Flow Operations
+
+```c
+anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
+```
+Unconditional branch to a block.
+
+```c
+anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
+                                    anvil_block_t *then_block,
+                                    anvil_block_t *else_block);
+```
+Conditional branch. If `cond` is true, branches to `then_block`, otherwise to `else_block`.
+
+```c
+anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_value_t *func,
+                                 anvil_value_t **args, size_t num_args,
+                                 const char *name);
+```
+Calls a function.
+
+```c
+anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
+```
+Returns a value from the function.
+
+```c
+anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx);
+```
+Returns void from the function.
+
+**Example:**
+```c
+// if (a > b) { return a; } else { return b; }
+anvil_block_t *then_bb = anvil_block_create(func, "then");
+anvil_block_t *else_bb = anvil_block_create(func, "else");
+
+anvil_value_t *cmp = anvil_build_cmp_gt(ctx, a, b, "cmp");
+anvil_build_br_cond(ctx, cmp, then_bb, else_bb);
+
+anvil_set_insert_point(ctx, then_bb);
+anvil_build_ret(ctx, a);
+
+anvil_set_insert_point(ctx, else_bb);
+anvil_build_ret(ctx, b);
+```
+
+### Type Conversion Operations
+
+```c
+anvil_value_t *anvil_build_trunc(anvil_ctx_t *ctx, anvil_value_t *val,
+                                  anvil_type_t *type, const char *name);
+```
+Truncates to a smaller integer type.
+
+```c
+anvil_value_t *anvil_build_zext(anvil_ctx_t *ctx, anvil_value_t *val,
+                                 anvil_type_t *type, const char *name);
+```
+Zero-extends to a larger integer type.
+
+```c
+anvil_value_t *anvil_build_sext(anvil_ctx_t *ctx, anvil_value_t *val,
+                                 anvil_type_t *type, const char *name);
+```
+Sign-extends to a larger integer type.
+
+```c
+anvil_value_t *anvil_build_bitcast(anvil_ctx_t *ctx, anvil_value_t *val,
+                                    anvil_type_t *type, const char *name);
+```
+Reinterprets bits as a different type (same size required).
+
+```c
+anvil_value_t *anvil_build_ptrtoint(anvil_ctx_t *ctx, anvil_value_t *val,
+                                     anvil_type_t *type, const char *name);
+```
+Converts pointer to integer.
+
+```c
+anvil_value_t *anvil_build_inttoptr(anvil_ctx_t *ctx, anvil_value_t *val,
+                                     anvil_type_t *type, const char *name);
+```
+Converts integer to pointer.
+
+### PHI and Select
+
+```c
+anvil_value_t *anvil_build_phi(anvil_ctx_t *ctx, anvil_type_t *type,
+                                const char *name);
+```
+Creates a PHI node for SSA form.
+
+```c
+void anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val,
+                             anvil_block_t *block);
+```
+Adds an incoming value to a PHI node.
+
+```c
+anvil_value_t *anvil_build_select(anvil_ctx_t *ctx, anvil_value_t *cond,
+                                   anvil_value_t *then_val,
+                                   anvil_value_t *else_val, const char *name);
+```
+Selects between two values based on a condition (like ternary operator).
+
+**Example:**
+```c
+// PHI node for loop variable
+anvil_set_insert_point(ctx, loop_header);
+anvil_value_t *i = anvil_build_phi(ctx, anvil_type_i32(ctx), "i");
+anvil_phi_add_incoming(i, anvil_const_i32(ctx, 0), entry_block);
+anvil_phi_add_incoming(i, i_next, loop_body);
+```
+
+## Constants API
+
+```c
+anvil_value_t *anvil_const_i8(anvil_ctx_t *ctx, int8_t val);
+anvil_value_t *anvil_const_i16(anvil_ctx_t *ctx, int16_t val);
+anvil_value_t *anvil_const_i32(anvil_ctx_t *ctx, int32_t val);
+anvil_value_t *anvil_const_i64(anvil_ctx_t *ctx, int64_t val);
+anvil_value_t *anvil_const_u8(anvil_ctx_t *ctx, uint8_t val);
+anvil_value_t *anvil_const_u16(anvil_ctx_t *ctx, uint16_t val);
+anvil_value_t *anvil_const_u32(anvil_ctx_t *ctx, uint32_t val);
+anvil_value_t *anvil_const_u64(anvil_ctx_t *ctx, uint64_t val);
+anvil_value_t *anvil_const_f32(anvil_ctx_t *ctx, float val);
+anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val);
+anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
+anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
+```
+
+**Example:**
+```c
+anvil_value_t *forty_two = anvil_const_i32(ctx, 42);
+anvil_value_t *pi = anvil_const_f64(ctx, 3.14159265359);
+anvil_value_t *null_ptr = anvil_const_null(ctx, anvil_type_ptr(ctx, anvil_type_i8(ctx)));
+```
+
+## Global Variables API
+
+```c
+anvil_global_t *anvil_global_create(anvil_module_t *mod, const char *name,
+                                     anvil_type_t *type, anvil_value_t *init);
+```
+
+Creates a global variable.
+
+**Parameters:**
+- `mod`: Parent module
+- `name`: Variable name
+- `type`: Variable type
+- `init`: Initial value (can be NULL)
+
+**Returns:** Global variable handle.
+
+```c
+anvil_value_t *anvil_global_get_value(anvil_global_t *global);
+```
+
+Gets the value representing the global's address.
+
+## Enumerations
+
+### anvil_arch_t
+
+```c
+typedef enum {
+    ANVIL_ARCH_UNKNOWN = 0,
+    ANVIL_ARCH_X86,         // x86 32-bit
+    ANVIL_ARCH_X86_64,      // x86-64
+    ANVIL_ARCH_S370,        // IBM S/370 (24-bit)
+    ANVIL_ARCH_S370_XA,     // IBM S/370-XA (31-bit)
+    ANVIL_ARCH_S390,        // IBM S/390 (31-bit)
+    ANVIL_ARCH_ZARCH,       // IBM z/Architecture (64-bit)
+    ANVIL_ARCH_COUNT
+} anvil_arch_t;
+```
+
+### anvil_error_t
+
+```c
+typedef enum {
+    ANVIL_OK = 0,           // Success
+    ANVIL_ERR_NOMEM,        // Out of memory
+    ANVIL_ERR_INVALID_ARG,  // Invalid argument
+    ANVIL_ERR_NOT_FOUND,    // Resource not found
+    ANVIL_ERR_TYPE_MISMATCH,// Type mismatch
+    ANVIL_ERR_NO_BACKEND,   // No backend for target architecture
+    ANVIL_ERR_CODEGEN       // Code generation error
+} anvil_error_t;
+```
+
+### anvil_linkage_t
+
+```c
+typedef enum {
+    ANVIL_LINK_INTERNAL,    // Static/internal linkage (not exported)
+    ANVIL_LINK_EXTERNAL,    // External linkage (exported)
+    ANVIL_LINK_WEAK         // Weak linkage
+} anvil_linkage_t;
+```
+
+### anvil_type_kind_t
+
+```c
+typedef enum {
+    ANVIL_TYPE_VOID,
+    ANVIL_TYPE_INT,
+    ANVIL_TYPE_FLOAT,
+    ANVIL_TYPE_PTR,
+    ANVIL_TYPE_ARRAY,
+    ANVIL_TYPE_STRUCT,
+    ANVIL_TYPE_FUNC
+} anvil_type_kind_t;
+```
+
+### anvil_op_t
+
+```c
+typedef enum {
+    // Arithmetic
+    ANVIL_OP_ADD,
+    ANVIL_OP_SUB,
+    ANVIL_OP_MUL,
+    ANVIL_OP_SDIV,
+    ANVIL_OP_UDIV,
+    ANVIL_OP_SMOD,
+    ANVIL_OP_UMOD,
+    ANVIL_OP_NEG,
+    
+    // Bitwise
+    ANVIL_OP_AND,
+    ANVIL_OP_OR,
+    ANVIL_OP_XOR,
+    ANVIL_OP_NOT,
+    ANVIL_OP_SHL,
+    ANVIL_OP_SHR,
+    ANVIL_OP_SAR,
+    
+    // Comparison
+    ANVIL_OP_CMP_EQ,
+    ANVIL_OP_CMP_NE,
+    ANVIL_OP_CMP_LT,
+    ANVIL_OP_CMP_LE,
+    ANVIL_OP_CMP_GT,
+    ANVIL_OP_CMP_GE,
+    ANVIL_OP_CMP_ULT,
+    ANVIL_OP_CMP_ULE,
+    ANVIL_OP_CMP_UGT,
+    ANVIL_OP_CMP_UGE,
+    
+    // Memory
+    ANVIL_OP_ALLOCA,
+    ANVIL_OP_LOAD,
+    ANVIL_OP_STORE,
+    ANVIL_OP_GEP,
+    
+    // Control flow
+    ANVIL_OP_BR,
+    ANVIL_OP_BR_COND,
+    ANVIL_OP_CALL,
+    ANVIL_OP_RET,
+    
+    // Conversion
+    ANVIL_OP_TRUNC,
+    ANVIL_OP_ZEXT,
+    ANVIL_OP_SEXT,
+    ANVIL_OP_BITCAST,
+    ANVIL_OP_PTRTOINT,
+    ANVIL_OP_INTTOPTR,
+    
+    // Misc
+    ANVIL_OP_PHI,
+    ANVIL_OP_SELECT
+} anvil_op_t;
+```
+
+## Structures
+
+### anvil_arch_info_t
+
+```c
+typedef struct {
+    anvil_arch_t arch;
+    const char *name;
+    int ptr_size;           // Pointer size in bytes
+    int addr_bits;          // Address bits (24, 31, 32, 64)
+    int word_size;          // Native word size in bytes
+    int num_gpr;            // Number of general purpose registers
+    int num_fpr;            // Number of floating point registers
+    anvil_endian_t endian;  // ANVIL_ENDIAN_LITTLE or ANVIL_ENDIAN_BIG
+    anvil_stack_dir_t stack_dir; // ANVIL_STACK_DOWN or ANVIL_STACK_UP
+    bool has_condition_codes;
+    bool has_delay_slots;
+} anvil_arch_info_t;
+```
+
+### anvil_backend_ops_t
+
+```c
+typedef struct {
+    const char *name;
+    anvil_arch_t arch;
+    
+    anvil_error_t (*init)(anvil_backend_t *be, anvil_ctx_t *ctx);
+    void (*cleanup)(anvil_backend_t *be);
+    anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
+                                     char **output, size_t *len);
+    anvil_error_t (*codegen_func)(anvil_backend_t *be, anvil_func_t *func,
+                                   char **output, size_t *len);
+    const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
+} anvil_backend_ops_t;
+```

@@ -1,0 +1,20 @@
+# Build directories
+build/
+lib/
+
+# Object files
+*.o
+
+# Static libraries
+*.a
+
+# Editor/IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
