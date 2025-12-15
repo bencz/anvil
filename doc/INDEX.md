@@ -2,7 +2,7 @@
 
 ## Overview
 
-This documentation provides comprehensive technical details about the ANVIL library for compiler developers, contributors, and LLM-based code generation systems.
+This documentation provides comprehensive technical details about the ANVIL library for compiler developers, contributors
 
 ## Documents
 
