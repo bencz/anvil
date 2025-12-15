@@ -53,7 +53,8 @@ Source (.c) → Preprocessor → Lexer → Parser → Sema → Codegen → Assem
 | Test | Description |
 |------|-------------|
 | `typedef_simple.c` | Basic typedef (`typedef int INT;`) |
-| `advanced_types.c` | Typedef, nested structs, unions, linked lists |
+| `typedef_multi.c` | Multiple typedef names (`typedef int A, *PA;`) |
+| `advanced_types.c` | Typedef, nested structs, unions, arrays in structs |
 | `struct_test.c` | Complex struct with nested structs |
 | `preprocessor_test.c` | `#if`, `#elif`, `#else`, `#define`, macros |
 | `bitwise.c` | Bitwise operations (`&`, `|`, `^`, `~`, `<<`, `>>`) |
@@ -148,7 +149,5 @@ When working with MCC code:
 
 ### Current Limitations
 
-- Multiple typedef names in single declaration (`typedef int A, B;`)
-- Arrays in struct fields (`int arr[10]`)
 - Bitfields
 - Stringification (`#`) and token pasting (`##`) in macros

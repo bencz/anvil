@@ -18,3 +18,7 @@ lib/
 # OS files
 .DS_Store
 Thumbs.db
+
+samples/mcc/*.asm
+samples/mcc/obj
+samples/mcc/mcc

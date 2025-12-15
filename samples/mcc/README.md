@@ -17,8 +17,9 @@ A minimal C89 compiler implementation using ANVIL for code generation. MCC demon
   - Type qualifiers: `const`, `volatile`
   - Storage classes: `auto`, `register`, `static`, `extern`, `typedef`
   - Derived types: pointers, arrays, structs, unions, enums, functions
-  - `typedef` support for type aliases
+  - `typedef` with multiple names (`typedef int INT, *PINT;`)
   - Nested structs and unions
+  - Arrays in struct fields (`int data[10]`)
   - Struct/union with embedded anonymous unions/structs
 - **Code generation** via ANVIL IR for multiple architectures:
   - IBM S/370, S/370-XA, S/390, z/Architecture (HLASM output)
@@ -158,6 +159,7 @@ mcc/
 │   ├── bitwise.c           # Bitwise operations test
 │   ├── preprocessor_test.c # Preprocessor test
 │   ├── typedef_simple.c    # Basic typedef test
+│   ├── typedef_multi.c     # Multiple typedef names test
 │   ├── advanced_types.c    # Advanced types (typedef, nested structs, unions)
 │   └── ...
 ├── docs/               # Documentation
@@ -197,9 +199,8 @@ mcc/
 
 ### Current Limitations
 
-- Multiple typedef names in single declaration (`typedef int A, B;`)
-- Arrays in struct fields (`int arr[10]`)
 - Bitfields
+- Stringification (`#`) and token pasting (`##`) in macros
 
 ## License
 

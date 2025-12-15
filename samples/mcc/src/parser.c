@@ -600,11 +600,38 @@ static mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                     int num_fields = 0;
                     
                     while (!mcc_parser_check(p, TOK_RBRACE) && !mcc_parser_check(p, TOK_EOF)) {
-                        mcc_type_t *field_type = parse_type_specifier(p);
+                        mcc_type_t *field_base_type = parse_type_specifier(p);
                         
                         /* Parse field declarator(s) */
                         do {
+                            /* Parse pointer(s) for this field */
+                            mcc_type_t *field_type = field_base_type;
+                            while (mcc_parser_match(p, TOK_STAR)) {
+                                mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                                ptr->kind = TYPE_POINTER;
+                                ptr->data.pointer.pointee = field_type;
+                                field_type = ptr;
+                            }
+                            
                             mcc_token_t *field_name = mcc_parser_expect(p, TOK_IDENT, "field name");
+                            
+                            /* Parse array brackets for this field */
+                            while (mcc_parser_match(p, TOK_LBRACKET)) {
+                                size_t arr_size = 0;
+                                if (!mcc_parser_check(p, TOK_RBRACKET)) {
+                                    mcc_ast_node_t *size_expr = parse_expression(p);
+                                    if (size_expr && size_expr->kind == AST_INT_LIT) {
+                                        arr_size = size_expr->data.int_lit.value;
+                                    }
+                                }
+                                mcc_parser_expect(p, TOK_RBRACKET, "]");
+                                
+                                mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                                arr->kind = TYPE_ARRAY;
+                                arr->data.array.element = field_type;
+                                arr->data.array.length = arr_size;
+                                field_type = arr;
+                            }
                             
                             mcc_struct_field_t *field = mcc_alloc(p->ctx, sizeof(mcc_struct_field_t));
                             field->name = mcc_strdup(p->ctx, field_name->text);
@@ -1221,8 +1248,13 @@ static mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         return func;
     }
     
-    /* Variable declaration */
-    /* Parse array brackets */
+    /* Variable/typedef declaration - handle multiple declarators */
+    /* First declarator already has name parsed, now handle the rest */
+    
+    /* Build type for first declarator (may have pointer from type_specifier) */
+    mcc_type_t *decl_type = base_type;
+    
+    /* Parse array brackets for first declarator */
     while (mcc_parser_match(p, TOK_LBRACKET)) {
         size_t array_size = 0;
         if (!mcc_parser_check(p, TOK_RBRACKET)) {
@@ -1235,12 +1267,71 @@ static mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         
         mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
         arr->kind = TYPE_ARRAY;
-        arr->data.array.element = base_type;
+        arr->data.array.element = decl_type;
         arr->data.array.length = array_size;
-        base_type = arr;
+        decl_type = arr;
     }
     
-    /* Parse initializer */
+    /* Handle typedef - may have multiple names */
+    if (is_typedef) {
+        /* Register first typedef name */
+        mcc_typedef_entry_t *entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
+        entry->name = name;
+        entry->type = decl_type;
+        entry->next = p->typedefs;
+        p->typedefs = entry;
+        
+        /* Parse additional typedef names separated by comma */
+        while (mcc_parser_match(p, TOK_COMMA)) {
+            /* Parse pointer(s) for this declarator */
+            mcc_type_t *next_type = base_type;
+            while (mcc_parser_match(p, TOK_STAR)) {
+                mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                ptr->kind = TYPE_POINTER;
+                ptr->data.pointer.pointee = next_type;
+                next_type = ptr;
+            }
+            
+            /* Get next name */
+            mcc_token_t *next_tok = mcc_parser_expect(p, TOK_IDENT, "typedef name");
+            const char *next_name = mcc_strdup(p->ctx, next_tok->text);
+            
+            /* Parse array brackets */
+            while (mcc_parser_match(p, TOK_LBRACKET)) {
+                size_t arr_size = 0;
+                if (!mcc_parser_check(p, TOK_RBRACKET)) {
+                    mcc_ast_node_t *size_expr = parse_expression(p);
+                    if (size_expr && size_expr->kind == AST_INT_LIT) {
+                        arr_size = size_expr->data.int_lit.value;
+                    }
+                }
+                mcc_parser_expect(p, TOK_RBRACKET, "]");
+                
+                mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                arr->kind = TYPE_ARRAY;
+                arr->data.array.element = next_type;
+                arr->data.array.length = arr_size;
+                next_type = arr;
+            }
+            
+            /* Register this typedef */
+            mcc_typedef_entry_t *next_entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
+            next_entry->name = next_name;
+            next_entry->type = next_type;
+            next_entry->next = p->typedefs;
+            p->typedefs = next_entry;
+        }
+        
+        mcc_parser_expect(p, TOK_SEMICOLON, ";");
+        
+        /* Return a typedef declaration node for the first name */
+        mcc_ast_node_t *td = mcc_ast_create(p->ctx, AST_TYPEDEF_DECL, loc);
+        td->data.typedef_decl.name = name;
+        td->data.typedef_decl.type = decl_type;
+        return td;
+    }
+    
+    /* Parse initializer for variable */
     mcc_ast_node_t *init = NULL;
     if (mcc_parser_match(p, TOK_ASSIGN)) {
         if (mcc_parser_check(p, TOK_LBRACE)) {
@@ -1276,24 +1367,9 @@ static mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     
     mcc_parser_expect(p, TOK_SEMICOLON, ";");
     
-    /* Handle typedef */
-    if (is_typedef) {
-        mcc_typedef_entry_t *entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
-        entry->name = name;
-        entry->type = base_type;
-        entry->next = p->typedefs;
-        p->typedefs = entry;
-        
-        /* Return a typedef declaration node */
-        mcc_ast_node_t *td = mcc_ast_create(p->ctx, AST_TYPEDEF_DECL, loc);
-        td->data.typedef_decl.name = name;
-        td->data.typedef_decl.type = base_type;
-        return td;
-    }
-    
     mcc_ast_node_t *var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
     var->data.var_decl.name = name;
-    var->data.var_decl.var_type = base_type;
+    var->data.var_decl.var_type = decl_type;
     var->data.var_decl.init = init;
     var->data.var_decl.is_static = (storage == STORAGE_STATIC);
     var->data.var_decl.is_extern = (storage == STORAGE_EXTERN);

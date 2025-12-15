@@ -12,25 +12,35 @@ typedef long LONG;
 typedef int *PINT;
 typedef char *STRING;
 
-/* Test 3: Typedef struct with tag */
+/* Test 3: Typedef struct with multiple names */
 typedef struct point {
     int x;
     int y;
-} Point;
+} Point, *PPoint;
 
-/* Test 4: Typedef struct without tag (anonymous) */
+/* Test 4: Typedef struct without tag (anonymous) with multiple names */
 typedef struct {
     int width;
     int height;
-} Size;
+} Size, *PSize;
 
-/* Test 5: Struct with nested struct (using typedef) */
+/* Test 5: Multiple typedef aliases */
+typedef int Integer, Int32, *PInteger;
+
+/* Test 6: Struct with nested struct (using typedef) */
 typedef struct {
     Point top_left;
     Point bottom_right;
 } Rect;
 
-/* Test 6: Struct with union inside */
+/* Test 7: Struct with array field */
+typedef struct {
+    int data[10];
+    char name[32];
+    int count;
+} ArrayStruct;
+
+/* Test 8: Struct with union inside */
 typedef struct {
     int type;
     union {
