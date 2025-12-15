@@ -124,9 +124,18 @@ anvil_module_codegen(mod, &output, &len);
 - **VL Bit**: NOT cleared, allowing full 31/64-bit addressing
 - **Block Labels**: `FUNCNAME$BLOCKNAME` format
 
+### Global Variables Support
+- Full support for global variables on all backends
+- Direct load/store to globals (no intermediate address calculation)
+- Type-aware storage allocation (C, H, F, FD, E, D for mainframes)
+- Support for initialized globals with `DC` (Define Constant)
+- UPPERCASE naming convention for mainframes (GCCMVS compatible)
+- Example: `examples/global_test.c`
+
 ### Mainframe Optimizations
 - **AHI/AGHI**: Immediate addition (S/390, z/Architecture)
 - **Relative branches**: J/JNZ for better performance
 - **Direct stack access**: No intermediate registers for locals
+- **Direct global access**: L/ST for S/370-S/390, LGRL/STGRL for z/Architecture
 - **Native FP conversion**: CFDBR for IEEE float→int (z/Architecture)
 - **Stack-based code**: Faster than GETMAIN/FREEMAIN

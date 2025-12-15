@@ -138,6 +138,7 @@ int main(void)
 * `anvil_build_store` : Store to memory
 * `anvil_build_gep` : Get Element Pointer (array indexing)
 * `anvil_build_struct_gep` : Get Struct Field Pointer
+* `anvil_module_add_global` : Add global variable
 
 ### Control Flow
 
@@ -311,6 +312,14 @@ anvil_register_backend(&anvil_backend_myarch);
 - **Direct stack access**: Load/Store directly from stack slots without intermediate registers
 - **Relative branches**: J/JNZ instead of B/BNZ for better performance (S/390+)
 
+### Global Variables Support
+- Full support for global variables on all mainframe backends
+- Direct load/store to globals without intermediate address calculation
+- Type-aware storage allocation (C, H, F, FD, E, D)
+- Support for initialized globals with `DC` (Define Constant)
+- UPPERCASE naming convention (GCCMVS compatible)
+- Example: `examples/global_test.c`
+
 ## IR Optimization
 
 ANVIL includes a configurable optimization pass infrastructure that can be enabled or disabled.
@@ -383,7 +392,6 @@ anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
 
 ## Roadmap
 
-* Global variable initializers
 * Binary opcode generation
 * ASI/AGSI optimization (Add to Storage Immediate)
 * Register allocation improvements

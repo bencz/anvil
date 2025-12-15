@@ -758,26 +758,87 @@ anvil_value_t *null_ptr = anvil_const_null(ctx, anvil_type_ptr(ctx, anvil_type_i
 
 ## Global Variables API
 
+### anvil_module_add_global
+
 ```c
-anvil_global_t *anvil_global_create(anvil_module_t *mod, const char *name,
-                                     anvil_type_t *type, anvil_value_t *init);
+anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
+                                        anvil_type_t *type, anvil_linkage_t linkage);
 ```
 
-Creates a global variable.
+Creates a global variable in the module.
 
 **Parameters:**
 - `mod`: Parent module
 - `name`: Variable name
 - `type`: Variable type
-- `init`: Initial value (can be NULL)
+- `linkage`: Linkage type (ANVIL_LINK_INTERNAL or ANVIL_LINK_EXTERNAL)
 
-**Returns:** Global variable handle.
+**Returns:** Value representing the global variable (can be used with load/store).
 
+**Example:**
 ```c
-anvil_value_t *anvil_global_get_value(anvil_global_t *global);
+// Create a global integer counter
+anvil_value_t *counter = anvil_module_add_global(mod, "counter", 
+    anvil_type_i32(ctx), ANVIL_LINK_INTERNAL);
+
+// Load from global
+anvil_value_t *val = anvil_build_load(ctx, anvil_type_i32(ctx), counter, "val");
+
+// Store to global
+anvil_value_t *new_val = anvil_build_add(ctx, val, anvil_const_i32(ctx, 1), "inc");
+anvil_build_store(ctx, new_val, counter);
 ```
 
-Gets the value representing the global's address.
+### anvil_module_add_extern
+
+```c
+anvil_value_t *anvil_module_add_extern(anvil_module_t *mod, const char *name,
+                                        anvil_type_t *type);
+```
+
+Declares an external global variable (defined elsewhere).
+
+**Parameters:**
+- `mod`: Parent module
+- `name`: Variable name
+- `type`: Variable type
+
+**Returns:** Value representing the external global.
+
+### Mainframe Backend Support
+
+Global variables are fully supported on all mainframe backends (S/370, S/370-XA, S/390, z/Architecture):
+
+| Type | HLASM Storage | Size |
+|------|---------------|------|
+| i8/u8 | `DS C` | 1 byte |
+| i16/u16 | `DS H` | 2 bytes |
+| i32/u32/ptr | `DS F` | 4 bytes |
+| i64/u64 | `DS FD` | 8 bytes |
+| f32 | `DS E` | 4 bytes |
+| f64 | `DS D` | 8 bytes |
+
+**Generated Code Example (S/370):**
+```hlasm
+*        Global variables (static)
+COUNTER  DS    F                  Global variable
+
+*        In function code:
+         L     R15,COUNTER            Load from global
+         ...
+         ST    R2,COUNTER            Store to global
+```
+
+**Generated Code Example (z/Architecture):**
+```hlasm
+*        Global variables (static)
+COUNTER  DS    F                  Global variable
+
+*        In function code:
+         LGRL  R15,COUNTER            Load from global (relative long)
+         ...
+         STGRL R2,COUNTER            Store to global (relative long)
+```
 
 ## Enumerations
 

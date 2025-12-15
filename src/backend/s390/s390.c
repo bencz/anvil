@@ -409,8 +409,18 @@ static void s390_emit_load_value(s390_backend_t *be, anvil_value_t *val, int tar
             break;
             
         case ANVIL_VAL_GLOBAL:
-            anvil_strbuf_appendf(&be->code, "         L     %s,%s            Load global\n",
-                s390_reg_names[target_reg], val->name);
+            /* Load global value - use LA for address, L for value */
+            {
+                char upper_name[64];
+                s390_uppercase(upper_name, val->name, sizeof(upper_name));
+                if (val->type && val->type->kind == ANVIL_TYPE_PTR) {
+                    anvil_strbuf_appendf(&be->code, "         LA    %s,%s            Load global address\n",
+                        s390_reg_names[target_reg], upper_name);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "         L     %s,%s            Load global value\n",
+                        s390_reg_names[target_reg], upper_name);
+                }
+            }
             break;
             
         case ANVIL_VAL_FUNC:
@@ -562,6 +572,13 @@ static void s390_emit_instr(s390_backend_t *be, anvil_instr_t *instr)
                     break;
                 }
             }
+            /* Check if loading from a global variable */
+            if (instr->operands[0]->kind == ANVIL_VAL_GLOBAL) {
+                char upper_name[64];
+                s390_uppercase(upper_name, instr->operands[0]->name, sizeof(upper_name));
+                anvil_strbuf_appendf(&be->code, "         L     R15,%s            Load from global\n", upper_name);
+                break;
+            }
             s390_emit_load_value(be, instr->operands[0], S390_R2);
             anvil_strbuf_append(&be->code, "         L     R15,0(,R2)        Load from address\n");
             break;
@@ -577,6 +594,14 @@ static void s390_emit_instr(s390_backend_t *be, anvil_instr_t *instr)
                     anvil_strbuf_appendf(&be->code, "         ST    R2,%d(,R13)        Store to stack slot\n", offset);
                     break;
                 }
+            }
+            /* Check if storing to a global variable */
+            if (instr->operands[1]->kind == ANVIL_VAL_GLOBAL) {
+                char upper_name[64];
+                s390_uppercase(upper_name, instr->operands[1]->name, sizeof(upper_name));
+                s390_emit_load_value(be, instr->operands[0], S390_R2);
+                anvil_strbuf_appendf(&be->code, "         ST    R2,%s            Store to global\n", upper_name);
+                break;
             }
             s390_emit_load_value(be, instr->operands[0], S390_R2);
             s390_emit_load_value(be, instr->operands[1], S390_R3);
@@ -1094,8 +1119,59 @@ static anvil_error_t s390_codegen_module(anvil_backend_t *be, anvil_module_t *mo
         anvil_strbuf_append(&priv->code, "*\n");
         anvil_strbuf_append(&priv->code, "*        Global variables (static)\n");
         for (anvil_global_t *g = mod->globals; g; g = g->next) {
-            anvil_strbuf_appendf(&priv->code, "%-8s DS    F                  Global variable\n",
-                g->value->name);
+            char upper_name[64];
+            s390_uppercase(upper_name, g->value->name, sizeof(upper_name));
+            
+            const char *ds_type = "F";
+            anvil_type_t *type = g->value->type;
+            
+            if (type) {
+                switch (type->kind) {
+                    case ANVIL_TYPE_I8:
+                    case ANVIL_TYPE_U8:
+                        ds_type = "C";
+                        break;
+                    case ANVIL_TYPE_I16:
+                    case ANVIL_TYPE_U16:
+                        ds_type = "H";
+                        break;
+                    case ANVIL_TYPE_I32:
+                    case ANVIL_TYPE_U32:
+                    case ANVIL_TYPE_PTR:
+                        ds_type = "F";
+                        break;
+                    case ANVIL_TYPE_I64:
+                    case ANVIL_TYPE_U64:
+                        ds_type = "FD";
+                        break;
+                    case ANVIL_TYPE_F32:
+                        ds_type = "E";
+                        break;
+                    case ANVIL_TYPE_F64:
+                        ds_type = "D";
+                        break;
+                    default:
+                        ds_type = "F";
+                        break;
+                }
+            }
+            
+            if (g->value->data.global.init) {
+                anvil_value_t *init = g->value->data.global.init;
+                if (init->kind == ANVIL_VAL_CONST_INT) {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DC    %s'%lld'            Global variable (initialized)\n",
+                        upper_name, ds_type, (long long)init->data.i);
+                } else if (init->kind == ANVIL_VAL_CONST_FLOAT) {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DC    %s'%g'             Global variable (initialized)\n",
+                        upper_name, ds_type, init->data.f);
+                } else {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DS    %s                  Global variable\n",
+                        upper_name, ds_type);
+                }
+            } else {
+                anvil_strbuf_appendf(&priv->code, "%-8s DS    %s                  Global variable\n",
+                    upper_name, ds_type);
+            }
         }
     }
     

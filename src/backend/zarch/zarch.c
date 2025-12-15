@@ -423,9 +423,20 @@ static void zarch_emit_load_value(zarch_backend_t *be, anvil_value_t *val, int t
             break;
             
         case ANVIL_VAL_GLOBAL:
-            /* Use relative long addressing */
-            anvil_strbuf_appendf(&be->code, "         LGRL  %s,%s            Load global\n",
-                zarch_reg_names[target_reg], val->name);
+            /* Load global value - use LARL for address, LGRL for value */
+            {
+                char upper_name[64];
+                zarch_uppercase(upper_name, val->name, sizeof(upper_name));
+                if (val->type && val->type->kind == ANVIL_TYPE_PTR) {
+                    /* Load address of global using relative long */
+                    anvil_strbuf_appendf(&be->code, "         LARL  %s,%s            Load global address\n",
+                        zarch_reg_names[target_reg], upper_name);
+                } else {
+                    /* Load value from global using relative long */
+                    anvil_strbuf_appendf(&be->code, "         LGRL  %s,%s            Load global value\n",
+                        zarch_reg_names[target_reg], upper_name);
+                }
+            }
             break;
             
         case ANVIL_VAL_FUNC:
@@ -582,6 +593,14 @@ static void zarch_emit_instr(zarch_backend_t *be, anvil_instr_t *instr)
                     break;
                 }
             }
+            /* Check if loading from a global variable */
+            if (instr->operands[0]->kind == ANVIL_VAL_GLOBAL) {
+                char upper_name[64];
+                zarch_uppercase(upper_name, instr->operands[0]->name, sizeof(upper_name));
+                /* Use LGRL - Load Relative Long for 64-bit */
+                anvil_strbuf_appendf(&be->code, "         LGRL  R15,%s            Load from global\n", upper_name);
+                break;
+            }
             zarch_emit_load_value(be, instr->operands[0], ZARCH_R2);
             anvil_strbuf_append(&be->code, "         LG    R15,0(,R2)        Load 64-bit from address\n");
             break;
@@ -597,6 +616,15 @@ static void zarch_emit_instr(zarch_backend_t *be, anvil_instr_t *instr)
                     anvil_strbuf_appendf(&be->code, "         STG   R2,%d(,R13)        Store to stack slot\n", offset);
                     break;
                 }
+            }
+            /* Check if storing to a global variable */
+            if (instr->operands[1]->kind == ANVIL_VAL_GLOBAL) {
+                char upper_name[64];
+                zarch_uppercase(upper_name, instr->operands[1]->name, sizeof(upper_name));
+                zarch_emit_load_value(be, instr->operands[0], ZARCH_R2);
+                /* Use STGRL - Store Relative Long for 64-bit globals */
+                anvil_strbuf_appendf(&be->code, "         STGRL R2,%s            Store to global\n", upper_name);
+                break;
             }
             zarch_emit_load_value(be, instr->operands[0], ZARCH_R2);
             zarch_emit_load_value(be, instr->operands[1], ZARCH_R3);
@@ -1154,8 +1182,59 @@ static anvil_error_t zarch_codegen_module(anvil_backend_t *be, anvil_module_t *m
         anvil_strbuf_append(&priv->code, "*\n");
         anvil_strbuf_append(&priv->code, "*        Global variables (static)\n");
         for (anvil_global_t *g = mod->globals; g; g = g->next) {
-            anvil_strbuf_appendf(&priv->code, "%-8s DS    FD                 Global variable (64-bit)\n",
-                g->value->name);
+            char upper_name[64];
+            zarch_uppercase(upper_name, g->value->name, sizeof(upper_name));
+            
+            const char *ds_type = "FD";  /* Default: doubleword (8 bytes) for 64-bit */
+            anvil_type_t *type = g->value->type;
+            
+            if (type) {
+                switch (type->kind) {
+                    case ANVIL_TYPE_I8:
+                    case ANVIL_TYPE_U8:
+                        ds_type = "C";   /* Character (1 byte) */
+                        break;
+                    case ANVIL_TYPE_I16:
+                    case ANVIL_TYPE_U16:
+                        ds_type = "H";   /* Halfword (2 bytes) */
+                        break;
+                    case ANVIL_TYPE_I32:
+                    case ANVIL_TYPE_U32:
+                        ds_type = "F";   /* Fullword (4 bytes) */
+                        break;
+                    case ANVIL_TYPE_I64:
+                    case ANVIL_TYPE_U64:
+                    case ANVIL_TYPE_PTR:
+                        ds_type = "FD";  /* Doubleword (8 bytes) */
+                        break;
+                    case ANVIL_TYPE_F32:
+                        ds_type = "E";   /* Short FP (4 bytes) */
+                        break;
+                    case ANVIL_TYPE_F64:
+                        ds_type = "D";   /* Long FP (8 bytes) */
+                        break;
+                    default:
+                        ds_type = "FD";
+                        break;
+                }
+            }
+            
+            if (g->value->data.global.init) {
+                anvil_value_t *init = g->value->data.global.init;
+                if (init->kind == ANVIL_VAL_CONST_INT) {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DC    %s'%lld'            Global variable (initialized)\n",
+                        upper_name, ds_type, (long long)init->data.i);
+                } else if (init->kind == ANVIL_VAL_CONST_FLOAT) {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DC    %s'%g'             Global variable (initialized)\n",
+                        upper_name, ds_type, init->data.f);
+                } else {
+                    anvil_strbuf_appendf(&priv->code, "%-8s DS    %s                  Global variable\n",
+                        upper_name, ds_type);
+                }
+            } else {
+                anvil_strbuf_appendf(&priv->code, "%-8s DS    %s                  Global variable\n",
+                    upper_name, ds_type);
+            }
         }
     }
     

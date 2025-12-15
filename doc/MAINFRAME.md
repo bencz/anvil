@@ -1056,6 +1056,77 @@ The dynamic storage area includes space for FP temporaries:
 +160  Local variables start
 ```
 
+## Global Variables
+
+Global variables are fully supported on all mainframe backends. They are emitted as static storage in the CSECT.
+
+### Storage Types
+
+| ANVIL Type | HLASM | Size | Description |
+|------------|-------|------|-------------|
+| i8/u8 | `DS C` | 1 byte | Character |
+| i16/u16 | `DS H` | 2 bytes | Halfword |
+| i32/u32/ptr | `DS F` | 4 bytes | Fullword |
+| i64/u64 | `DS FD` | 8 bytes | Doubleword |
+| f32 | `DS E` | 4 bytes | Short FP |
+| f64 | `DS D` | 8 bytes | Long FP |
+
+### Naming Convention
+
+Global variable names are converted to UPPERCASE for GCCMVS compatibility:
+- `counter` → `COUNTER`
+- `my_global` → `MY_GLOBAL`
+
+### Generated Code
+
+**Declaration (at end of CSECT):**
+```hlasm
+*        Global variables (static)
+COUNTER  DS    F                  Global variable
+G_FLOAT  DS    E                  Global variable
+G_DOUBLE DS    D                  Global variable
+```
+
+**With initializer:**
+```hlasm
+COUNTER  DC    F'42'              Global variable (initialized)
+G_FLOAT  DC    E'3.14'            Global variable (initialized)
+```
+
+### Load/Store Instructions
+
+**S/370, S/370-XA, S/390:**
+```hlasm
+*        Load from global
+         L     R15,COUNTER            Load global value
+
+*        Store to global
+         ST    R2,COUNTER            Store to global
+```
+
+**z/Architecture (uses relative long addressing):**
+```hlasm
+*        Load from global (relative long)
+         LGRL  R15,COUNTER            Load global value
+
+*        Store to global (relative long)
+         STGRL R2,COUNTER            Store to global
+```
+
+### Example Usage
+
+```c
+// Create global variable
+anvil_value_t *counter = anvil_module_add_global(mod, "counter", 
+    anvil_type_i32(ctx), ANVIL_LINK_INTERNAL);
+
+// In function: load, increment, store
+anvil_value_t *val = anvil_build_load(ctx, anvil_type_i32(ctx), counter, "val");
+anvil_value_t *one = anvil_const_i32(ctx, 1);
+anvil_value_t *new_val = anvil_build_add(ctx, val, one, "new_val");
+anvil_build_store(ctx, new_val, counter);
+```
+
 ## Debugging Tips
 
 1. **Check save area chaining**: Verify +4 and +8 offsets are correct

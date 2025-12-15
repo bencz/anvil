@@ -73,7 +73,8 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/optimization_test \
 	$(BUILD_DIR)/examples/loop_unroll_test \
 	$(BUILD_DIR)/examples/memory_opt_test \
-	$(BUILD_DIR)/examples/cse_test
+	$(BUILD_DIR)/examples/cse_test \
+	$(BUILD_DIR)/examples/global_test
 
 .PHONY: all clean lib examples install
 

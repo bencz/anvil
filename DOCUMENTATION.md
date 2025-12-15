@@ -226,9 +226,40 @@ void anvil_module_destroy(anvil_module_t *mod);
 anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *len);
 
 // Global variables
-anvil_global_t *anvil_global_create(anvil_module_t *mod, const char *name,
-                                     anvil_type_t *type, anvil_value_t *init);
+anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
+                                        anvil_type_t *type, anvil_linkage_t linkage);
+
+// External declarations
+anvil_value_t *anvil_module_add_extern(anvil_module_t *mod, const char *name,
+                                        anvil_type_t *type);
 ```
+
+### Global Variables
+
+Global variables are module-level storage that persists across function calls. They are supported on all backends including mainframes.
+
+```c
+// Create a global integer variable
+anvil_value_t *counter = anvil_module_add_global(mod, "counter", 
+    anvil_type_i32(ctx), ANVIL_LINK_INTERNAL);
+
+// Use in a function - load value
+anvil_value_t *val = anvil_build_load(ctx, anvil_type_i32(ctx), counter, "val");
+
+// Store to global
+anvil_build_store(ctx, new_val, counter);
+```
+
+**Mainframe Backend Notes:**
+- Global names are converted to UPPERCASE (GCCMVS convention)
+- Storage types are selected based on variable type:
+  - `C` (1 byte) for i8/u8
+  - `H` (2 bytes) for i16/u16
+  - `F` (4 bytes) for i32/u32/pointers
+  - `FD` (8 bytes) for i64/u64
+  - `E` (4 bytes) for f32
+  - `D` (8 bytes) for f64
+- Direct load/store instructions are used (`L`/`ST` for S/370-S/390, `LGRL`/`STGRL` for z/Architecture)
 
 ### Function Functions
 
