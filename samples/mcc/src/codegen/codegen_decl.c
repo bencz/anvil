@@ -88,10 +88,8 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
 {
     anvil_type_t *type = codegen_type(cg, var->data.var_decl.var_type);
     
-    anvil_linkage_t linkage = var->data.var_decl.is_static ?
-        ANVIL_LINK_INTERNAL : ANVIL_LINK_EXTERNAL;
-    
-    anvil_module_add_global(cg->anvil_mod, var->data.var_decl.name, type, linkage);
+    /* Use cache to avoid duplicate global definitions */
+    codegen_get_or_add_global(cg, var->data.var_decl.name, type);
 }
 
 /* Generate code for any declaration */

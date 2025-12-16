@@ -190,8 +190,45 @@ static const char *arm64_get_reg(int reg, int size)
     return arm64_xreg_names[reg];
 }
 
-/* Add stack slot for local variable or instruction result */
-static int arm64_add_stack_slot(arm64_backend_t *be, anvil_value_t *val)
+/* Get size of a type in bytes */
+static int arm64_type_size(anvil_type_t *type)
+{
+    if (!type) return 8;
+    
+    switch (type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_U8:
+            return 1;
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_U16:
+            return 2;
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_U32:
+        case ANVIL_TYPE_F32:
+            return 4;
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U64:
+        case ANVIL_TYPE_F64:
+        case ANVIL_TYPE_PTR:
+            return 8;
+        case ANVIL_TYPE_ARRAY:
+            return type->data.array.count * arm64_type_size(type->data.array.elem);
+        case ANVIL_TYPE_STRUCT:
+            /* Sum of all field sizes (simplified, no padding) */
+            {
+                int size = 0;
+                for (size_t i = 0; i < type->data.struc.num_fields; i++) {
+                    size += arm64_type_size(type->data.struc.fields[i]);
+                }
+                return size > 0 ? size : 8;
+            }
+        default:
+            return 8;
+    }
+}
+
+/* Add a stack slot for a value with specified size */
+static int arm64_add_stack_slot_sized(arm64_backend_t *be, anvil_value_t *val, int size)
 {
     if (be->num_stack_slots >= be->stack_slots_cap) {
         size_t new_cap = be->stack_slots_cap ? be->stack_slots_cap * 2 : 16;
@@ -202,8 +239,9 @@ static int arm64_add_stack_slot(arm64_backend_t *be, anvil_value_t *val)
         be->stack_slots_cap = new_cap;
     }
     
-    /* ARM64 stack grows down, allocate 8 bytes per slot */
-    be->next_stack_offset += 8;
+    /* ARM64 stack grows down, allocate requested size (8-byte aligned) */
+    int aligned_size = (size + 7) & ~7;
+    be->next_stack_offset += aligned_size;
     int offset = be->next_stack_offset;
     
     be->stack_slots[be->num_stack_slots].value = val;
@@ -211,6 +249,12 @@ static int arm64_add_stack_slot(arm64_backend_t *be, anvil_value_t *val)
     be->num_stack_slots++;
     
     return offset;
+}
+
+/* Add a stack slot for a value (default 8 bytes) */
+static int arm64_add_stack_slot(arm64_backend_t *be, anvil_value_t *val)
+{
+    return arm64_add_stack_slot_sized(be, val, 8);
 }
 
 /* Get stack slot offset for a value */
@@ -1248,7 +1292,14 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             if (instr->op == ANVIL_OP_ALLOCA) {
-                arm64_add_stack_slot(be, instr->result);
+                /* Allocate based on the pointee type size */
+                int size = 8;
+                if (instr->result && instr->result->type && 
+                    instr->result->type->kind == ANVIL_TYPE_PTR &&
+                    instr->result->type->data.pointee) {
+                    size = arm64_type_size(instr->result->type->data.pointee);
+                }
+                arm64_add_stack_slot_sized(be, instr->result, size);
             }
             /* Pre-allocate slots for all instructions that produce results */
             if (instr->result && instr->op != ANVIL_OP_ALLOCA) {
