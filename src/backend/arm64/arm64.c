@@ -1135,7 +1135,20 @@ static void arm64_emit_strings(arm64_backend_t *be)
     for (size_t i = 0; i < be->num_strings; i++) {
         arm64_string_entry_t *entry = &be->strings[i];
         anvil_strbuf_appendf(&be->data, "%s:\n", entry->label);
-        anvil_strbuf_appendf(&be->data, "\t.asciz \"%s\"\n", entry->str);
+        anvil_strbuf_append(&be->data, "\t.asciz \"");
+        
+        /* Escape special characters */
+        for (const char *p = entry->str; *p; p++) {
+            switch (*p) {
+                case '\n': anvil_strbuf_append(&be->data, "\\n"); break;
+                case '\r': anvil_strbuf_append(&be->data, "\\r"); break;
+                case '\t': anvil_strbuf_append(&be->data, "\\t"); break;
+                case '\\': anvil_strbuf_append(&be->data, "\\\\"); break;
+                case '"':  anvil_strbuf_append(&be->data, "\\\""); break;
+                default:   anvil_strbuf_append_char(&be->data, *p); break;
+            }
+        }
+        anvil_strbuf_append(&be->data, "\"\n");
     }
     
     anvil_strbuf_append(&be->data, "\n");
