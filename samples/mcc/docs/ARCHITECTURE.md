@@ -342,7 +342,19 @@ int ptr_size = arch_info->ptr_size;   /* 4 for ILP32, 8 for LP64 */
 int word_size = arch_info->word_size;
 ```
 
-This ensures that `sizeof(void*)` returns 4 on 32-bit targets (x86, S/370) and 8 on 64-bit targets (x86_64, ARM64), regardless of the host machine.
+This ensures correct `sizeof` results regardless of the host machine:
+
+| Target | Address Bits | `sizeof(void*)` | `sizeof(long)` |
+|--------|--------------|-----------------|----------------|
+| x86 | 32 | 4 | 4 |
+| S/370 | 24 | 4 | 4 |
+| S/370-XA | 31 | 4 | 4 |
+| S/390 | 31 | 4 | 4 |
+| x86_64 | 64 | 8 | 8 |
+| z/Architecture | 64 | 8 | 8 |
+| ARM64 | 64 | 8 | 8 |
+
+Note: IBM mainframes (S/370, S/390) use 32-bit pointers even with 24/31-bit addressing.
 
 ## Extending MCC
 

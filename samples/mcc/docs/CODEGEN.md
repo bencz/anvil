@@ -653,4 +653,4 @@ size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
 }
 ```
 
-This ensures correct `sizeof` results when cross-compiling (e.g., compiling for 32-bit S/370 on a 64-bit host).
+This ensures correct `sizeof` results when cross-compiling (e.g., compiling for 32-bit S/370 on a 64-bit host, or for 31-bit S/390 on x86_64).

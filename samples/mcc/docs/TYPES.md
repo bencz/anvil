@@ -246,9 +246,23 @@ Type sizes are determined by the target architecture using ANVIL's `anvil_arch_g
 
 | Model | `int` | `long` | `pointer` | Architectures |
 |-------|-------|--------|-----------|---------------|
-| **ILP32** | 4 | 4 | 4 | x86, S/370, S/370-XA, S/390, PPC32 |
-| **LP64** | 4 | 8 | 8 | x86_64, z/Architecture, PPC64, PPC64LE, ARM64 |
+| **ILP32** | 4 | 4 | 4 | x86, S/370 (24-bit), S/370-XA (31-bit), S/390 (31-bit), PPC32 |
+| **LP64** | 4 | 8 | 8 | x86_64, z/Architecture (64-bit), PPC64, PPC64LE, ARM64 |
 | **Darwin LP64** | 4 | 8 | 8 | ARM64-macOS (long double = 8) |
+| **LLP64** | 4 | 4 | 8 | Windows x64 (requires `ANVIL_ABI_WIN64`) |
+
+### IBM Mainframe Addressing Modes
+
+IBM mainframes have unique addressing modes that don't directly map to pointer sizes:
+
+| Architecture | Address Bits | Pointer Size | Data Model |
+|--------------|--------------|--------------|------------|
+| S/370 | 24-bit | 4 bytes | ILP32 |
+| S/370-XA | 31-bit | 4 bytes | ILP32 |
+| S/390 | 31-bit | 4 bytes | ILP32 |
+| z/Architecture | 64-bit | 8 bytes | LP64 |
+
+Note: Even with 24-bit or 31-bit addressing, pointers are stored in 32-bit registers/memory on S/370 and S/390.
 
 ### Default Type Sizes
 
