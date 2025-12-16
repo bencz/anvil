@@ -326,37 +326,48 @@ Features are organized into 4 words (256 total features):
 - [x] Stringification operator (`#`)
 - [x] Token pasting operator (`##`)
 - [x] String literal concatenation
-- [ ] Bitfields (not yet implemented)
+- [x] Bitfields (parsing only, codegen incomplete)
 
-### C99 - In Progress
-- [ ] `long long` type
-- [ ] `_Bool` type
-- [ ] `restrict` qualifier
-- [ ] `inline` functions
-- [ ] Mixed declarations and code
-- [ ] For-loop declarations
-- [ ] Variable Length Arrays
-- [ ] Designated initializers
-- [ ] Compound literals
-- [ ] `//` line comments
-- [ ] `__func__`
+### C99 - Mostly Complete
+- [x] `long long` type
+- [x] `_Bool` type
+- [x] `restrict` qualifier (parsing only)
+- [x] `inline` functions (parsing only)
+- [x] Mixed declarations and code
+- [x] For-loop declarations
+- [x] Variable Length Arrays (parsing only)
+- [x] Designated initializers (parsing only)
+- [x] Compound literals (parsing only)
+- [x] `//` line comments
+- [x] `__func__` predefined identifier
 - [x] Variadic macros (`__VA_ARGS__`)
-- [ ] Hexadecimal float literals
+- [x] Hexadecimal float literals
+
+### C11 - Partial
+- [x] `_Generic` selection (parsing only)
+- [x] `_Static_assert` (parsing, evaluation has issues)
+- [x] `_Alignas` / `_Alignof` (parsing only)
+- [x] `_Atomic` type qualifier (parsing only)
+- [x] `_Noreturn` function specifier (parsing only)
+- [x] `_Thread_local` storage class (parsing only)
+- [ ] Anonymous structs/unions (has bugs)
 
 ### C23 - Partial
 - [x] `#elifdef` / `#elifndef` directives
 - [x] `__VA_OPT__` for variadic macros
-- [ ] `nullptr` constant
-- [ ] `constexpr` specifier
-- [ ] `typeof` / `typeof_unqual`
-- [ ] Binary literals (`0b`)
-- [ ] Digit separators (`'`)
+- [x] `typeof` / `typeof_unqual`
+- [x] Binary literals (`0b`)
+- [x] Digit separators (`'`)
+- [x] `[[attributes]]` syntax
+- [x] `nullptr` constant (parsing only)
+- [x] `constexpr` specifier (parsing only)
+- [x] `true` / `false` keywords
 
-### GNU Extensions - Planned
-- [ ] `__attribute__`
+### GNU Extensions - Partial
+- [x] `__attribute__` (parsing only)
 - [ ] Inline assembly
 - [ ] Statement expressions
-- [ ] typeof
+- [x] `__typeof__` (alias for typeof)
 
 ## Architecture
 
