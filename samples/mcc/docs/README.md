@@ -68,23 +68,23 @@ All files share:
 | `c_std.c` | ~500 | C language standards and feature system |
 | `context.c` | ~280 | Compiler context, feature checking |
 | `types.c` | ~590 | Type system (includes C99 long long) |
-| `codegen.c` | ~1100 | ANVIL IR generation |
 
 **Modular Components:**
 
 | Directory | Files | Description |
-|-----------|-------|-------------|
+|-----------|-------|-----------|
 | `src/lexer/` | 9 files | Modular lexer with C standard support |
 | `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
-| `src/parser/` | 5 files | Modular parser with C standard support |
+| `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
+| `src/codegen/` | 5 files | Modular code generator with ANVIL integration |
 
 ### Test Suite
 
 Tests are organized by C standard in the `tests/` directory:
 
 | Directory | Standard | Description |
-|-----------|----------|-------------|
+|-----------|----------|-----------|
 | `tests/c89/` | C89 | Basic types, control flow, operators, functions, structs, typedef, preprocessor |
 | `tests/c99/` | C99 | Comments, declarations, literals, preprocessor, types |
 | `tests/c11/` | C11 | Anonymous structs, `_Generic`, keywords, `_Static_assert` |
@@ -94,10 +94,35 @@ Tests are organized by C standard in the `tests/` directory:
 
 **Running Tests:**
 
+The build system uses modular Makefiles in `mk/` for organized test targets:
+
 ```bash
-make test        # Run standard tests (C89, C99, C11, C23)
-make test-cross  # Run cross-standard tests
-make test-all    # Run all tests
+# Syntax Tests (using -fsyntax-only)
+make test              # Run all syntax tests
+make test-syntax-c89   # Run C89 syntax tests only
+make test-syntax-c99   # Run C99 syntax tests only
+make test-syntax-c11   # Run C11 syntax tests only
+make test-syntax-c23   # Run C23 syntax tests only
+make test-syntax-gnu   # Run GNU extension tests
+make test-quick        # Quick test (C89 only)
+
+# Code Generation Tests
+make test-codegen           # Basic code generation tests
+make test-codegen-x86_64    # x86_64 code generation
+make test-codegen-arm64     # ARM64 code generation
+make test-codegen-arm64-macos  # ARM64 macOS code generation
+make test-codegen-s370      # S/370 code generation
+make test-codegen-multifile # Multi-file compilation
+make test-codegen-all-arch  # All architectures
+
+# Cross-Standard Tests
+make test-cross        # Verify warnings for features in older standards
+
+# Combined
+make test-all          # Run all tests (syntax + codegen + cross)
+
+# Help
+make help              # Show all available targets
 ```
 
 **Cross-Standard Tests:**
@@ -209,26 +234,26 @@ When working with MCC code:
 2. Add lexer recognition in `src/lexer/lex_operator.c`
 3. Add to operator precedence in `src/parser/parse_expr.c`
 4. Add type checking in `src/sema/sema_expr.c`
-5. Add code generation in `src/codegen.c`
+5. Add code generation in `src/codegen/codegen_expr.c`
 
 **Adding a new statement:**
 1. Add AST node type in `include/ast.h`
 2. Add parsing in `src/parser/parse_stmt.c`
 3. Add semantic analysis in `src/sema/sema_stmt.c`
-4. Add code generation in `src/codegen.c`
+4. Add code generation in `src/codegen/codegen_stmt.c`
 
 **Adding a new expression:**
 1. Add AST node type in `include/ast.h`
 2. Add parsing in `src/parser/parse_expr.c`
 3. Add semantic analysis in `src/sema/sema_expr.c`
-4. Add code generation in `src/codegen.c`
+4. Add code generation in `src/codegen/codegen_expr.c`
 
 **Adding a new type:**
 1. Add type kind in `include/types.h`
 2. Add parsing in `src/parser/parse_type.c`
 3. Add type creation in `src/types.c`
 4. Add semantic analysis in `src/sema/sema_type.c`
-5. Add code generation in `src/codegen.c`
+5. Add code generation in `src/codegen/codegen_type.c`
 
 **Adding a typedef:**
 - Typedefs are handled in the parser
@@ -265,3 +290,5 @@ When working with MCC code:
 - **Multiple Variable Declarations**: Full support for `int a, b, c;` with `AST_DECL_LIST` node
 - **Cross-Standard Warnings**: Warnings when using features from newer standards in older modes
 - **Organized Test Suite**: Tests organized by C standard (C89, C99, C11, C23, GNU) with cross-standard tests
+- **Modular Code Generator**: Refactored `codegen.c` into `src/codegen/` with 5 modular files
+- **Modular Build System**: Makefile split into `mk/` with separate config, rules, and test files

@@ -170,7 +170,18 @@ Semantic analysis performs type checking and symbol resolution:
 - `mcc_symtab_t`: Symbol table (hash table with scope chain)
 - `mcc_symbol_t`: Symbol entry (name, type, kind, scope)
 
-### 5. Code Generation (`codegen.c`)
+### 5. Code Generation (`src/codegen/`)
+
+The code generator is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `codegen_internal.h` | Internal header with structures and function declarations |
+| `codegen.c` | Main module - public API, local/string/label/function management |
+| `codegen_type.c` | Type conversion from MCC types to ANVIL types |
+| `codegen_expr.c` | Expression code generation (literals, operators, calls, casts) |
+| `codegen_stmt.c` | Statement code generation (if, while, for, switch, return) |
+| `codegen_decl.c` | Declaration code generation (functions, global variables) |
 
 The code generator translates AST to ANVIL IR:
 
@@ -178,6 +189,7 @@ The code generator translates AST to ANVIL IR:
 - **Expression evaluation**: Recursive traversal
 - **Control flow**: Branches, loops, labels
 - **Memory operations**: Load, store, alloca, GEP
+- **Type mapping**: C types to ANVIL types
 
 **Key data structures:**
 - `mcc_codegen_t`: Code generator state

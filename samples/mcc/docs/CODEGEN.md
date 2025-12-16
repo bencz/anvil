@@ -6,6 +6,51 @@ This document describes the code generator component of MCC.
 
 The code generator translates the AST into ANVIL IR, which is then lowered to target-specific assembly. This two-stage approach allows MCC to target multiple architectures without duplicating code generation logic.
 
+## File Organization
+
+The code generator is organized into modular files in `src/codegen/`:
+
+| File | Description |
+|------|-------------|
+| `codegen_internal.h` | Internal header with structures and function declarations |
+| `codegen.c` | Main module - public API, local/string/label/function management |
+| `codegen_type.c` | Type conversion from MCC types to ANVIL types |
+| `codegen_expr.c` | Expression code generation (literals, operators, calls, casts) |
+| `codegen_stmt.c` | Statement code generation (if, while, for, switch, return) |
+| `codegen_decl.c` | Declaration code generation (functions, global variables) |
+
+### Module Responsibilities
+
+**codegen.c** (Main Module)
+- Public API: `mcc_codegen_create()`, `mcc_codegen_destroy()`, `mcc_codegen_generate()`
+- Architecture mapping: `codegen_mcc_to_anvil_arch()`
+- Local variable management: `codegen_find_local()`, `codegen_add_local()`
+- String literal pool: `codegen_get_string_literal()`
+- Label management: `codegen_get_label_block()`
+- Function table: `codegen_find_func()`, `codegen_add_func()`, `codegen_get_or_declare_func()`
+- Block management: `codegen_set_current_block()`, `codegen_block_has_terminator()`
+
+**codegen_type.c** (Type Conversion)
+- `codegen_type()`: Convert MCC type to ANVIL type
+- Handles all type kinds: void, char, short, int, long, float, double, pointer, array, struct, union, function
+
+**codegen_expr.c** (Expression Generation)
+- `codegen_expr()`: Generate code for any expression, returns `anvil_value_t*`
+- `codegen_lvalue()`: Generate code for lvalue (returns pointer)
+- Handles: literals, identifiers, binary/unary operators, ternary, calls, subscript, member access, casts, sizeof, comma
+
+**codegen_stmt.c** (Statement Generation)
+- `codegen_stmt()`: Generate code for any statement
+- `codegen_compound_stmt()`: Compound statement `{ ... }`
+- `codegen_if_stmt()`, `codegen_while_stmt()`, `codegen_do_stmt()`, `codegen_for_stmt()`
+- `codegen_switch_stmt()`, `codegen_return_stmt()`
+- Handles: break, continue, goto, labels, local variable declarations
+
+**codegen_decl.c** (Declaration Generation)
+- `codegen_decl()`: Generate code for any declaration
+- `codegen_func()`: Generate code for function definition
+- `codegen_global_var()`: Generate code for global variable
+
 ## ANVIL Integration
 
 MCC uses the ANVIL library for:
@@ -121,8 +166,11 @@ C types are mapped to ANVIL types:
 | `struct S` | `anvil_type_struct` | Sum of fields |
 
 ```c
-static anvil_type_t *mcc_codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
+/* In src/codegen/codegen_type.c */
+anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
+    if (!type) return anvil_type_i32(cg->anvil_ctx);
+    
     switch (type->kind) {
         case TYPE_VOID:   return anvil_type_void(cg->anvil_ctx);
         case TYPE_CHAR:   return anvil_type_i8(cg->anvil_ctx);
@@ -133,13 +181,27 @@ static anvil_type_t *mcc_codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_DOUBLE: return anvil_type_f64(cg->anvil_ctx);
         case TYPE_POINTER:
             return anvil_type_ptr(cg->anvil_ctx, 
-                                  mcc_codegen_type(cg, type->data.pointer.pointee));
-        case TYPE_STRUCT: {
+                                  codegen_type(cg, type->data.pointer.pointee));
+        case TYPE_STRUCT:
+        case TYPE_UNION: {
             /* Build struct type from fields */
-            anvil_type_t **fields = /* ... */;
-            return anvil_type_struct(cg->anvil_ctx, tag, fields, num_fields);
+            int num_fields = type->data.record.num_fields;
+            anvil_type_t **field_types = mcc_alloc(cg->mcc_ctx,
+                num_fields * sizeof(anvil_type_t*));
+            int i = 0;
+            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next, i++) {
+                field_types[i] = codegen_type(cg, f->type);
+            }
+            return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_fields);
         }
-        /* ... */
+        case TYPE_FUNCTION: {
+            anvil_type_t *ret_type = codegen_type(cg, type->data.function.return_type);
+            /* ... build param types ... */
+            return anvil_type_func(cg->anvil_ctx, ret_type, param_types, num_params,
+                                   type->data.function.is_variadic);
+        }
+        default:
+            return anvil_type_i32(cg->anvil_ctx);
     }
 }
 ```
@@ -149,21 +211,22 @@ static anvil_type_t *mcc_codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
 Expressions are generated recursively:
 
 ```c
-static anvil_value_t *mcc_codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
+/* In src/codegen/codegen_expr.c */
+anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 {
     switch (expr->kind) {
         case AST_INT_LIT:
             return anvil_const_i32(cg->anvil_ctx, expr->data.int_lit.value);
             
         case AST_IDENT_EXPR: {
-            anvil_value_t *ptr = find_local(cg, expr->data.ident_expr.name);
-            anvil_type_t *type = mcc_codegen_type(cg, expr->type);
+            anvil_value_t *ptr = codegen_find_local(cg, expr->data.ident_expr.name);
+            anvil_type_t *type = codegen_type(cg, expr->type);
             return anvil_build_load(cg->anvil_ctx, type, ptr, "load");
         }
         
         case AST_BINARY_EXPR: {
-            anvil_value_t *lhs = mcc_codegen_expr(cg, expr->data.binary_expr.lhs);
-            anvil_value_t *rhs = mcc_codegen_expr(cg, expr->data.binary_expr.rhs);
+            anvil_value_t *lhs = codegen_expr(cg, expr->data.binary_expr.lhs);
+            anvil_value_t *rhs = codegen_expr(cg, expr->data.binary_expr.rhs);
             
             switch (expr->data.binary_expr.op) {
                 case BINOP_ADD:
@@ -179,13 +242,13 @@ static anvil_value_t *mcc_codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         case AST_CALL_EXPR: {
             /* Generate arguments */
             anvil_value_t **args = /* ... */;
-            anvil_func_t *func = get_or_declare_func(cg, /* ... */);
+            anvil_func_t *func = codegen_get_or_declare_func(cg, /* ... */);
             return anvil_build_call(cg->anvil_ctx, func, args, num_args, "call");
         }
         
         case AST_MEMBER_EXPR: {
             /* Struct field access */
-            anvil_value_t *obj = mcc_codegen_expr(cg, expr->data.member_expr.object);
+            anvil_value_t *obj = codegen_expr(cg, expr->data.member_expr.object);
             if (expr->data.member_expr.is_arrow) {
                 /* obj is already a pointer */
             } else {
@@ -206,14 +269,15 @@ static anvil_value_t *mcc_codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 ### Variable Declaration
 
 ```c
+/* In src/codegen/codegen_stmt.c */
 case AST_VAR_DECL: {
-    anvil_type_t *type = mcc_codegen_type(cg, stmt->data.var_decl.var_type);
+    anvil_type_t *type = codegen_type(cg, stmt->data.var_decl.var_type);
     anvil_value_t *alloca = anvil_build_alloca(cg->anvil_ctx, type, 
                                                 stmt->data.var_decl.name);
-    add_local(cg, stmt->data.var_decl.name, alloca);
+    codegen_add_local(cg, stmt->data.var_decl.name, alloca);
     
     if (stmt->data.var_decl.init) {
-        anvil_value_t *init = mcc_codegen_expr(cg, stmt->data.var_decl.init);
+        anvil_value_t *init = codegen_expr(cg, stmt->data.var_decl.init);
         anvil_build_store(cg->anvil_ctx, init, alloca);
     }
     break;
@@ -223,8 +287,9 @@ case AST_VAR_DECL: {
 ### If Statement
 
 ```c
+/* In src/codegen/codegen_stmt.c */
 case AST_IF_STMT: {
-    anvil_value_t *cond = mcc_codegen_expr(cg, stmt->data.if_stmt.cond);
+    anvil_value_t *cond = codegen_expr(cg, stmt->data.if_stmt.cond);
     
     anvil_block_t *then_bb = anvil_block_create(cg->anvil_ctx, "if.then");
     anvil_block_t *else_bb = stmt->data.if_stmt.else_stmt 
@@ -258,6 +323,7 @@ case AST_IF_STMT: {
 ### While Statement
 
 ```c
+/* In src/codegen/codegen_stmt.c */
 case AST_WHILE_STMT: {
     anvil_block_t *cond_bb = anvil_block_create(cg->anvil_ctx, "while.cond");
     anvil_block_t *body_bb = anvil_block_create(cg->anvil_ctx, "while.body");
