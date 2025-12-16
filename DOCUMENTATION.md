@@ -1814,6 +1814,71 @@ anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
 anvil_pass_manager_register(pm, &my_pass);
 ```
 
+## ARM64 Backend Details
+
+The ARM64 backend supports both Linux (AAPCS64) and macOS (Darwin) ABIs.
+
+### ABI Differences
+
+| Feature | Linux | macOS (Darwin) |
+|---------|-------|----------------|
+| Symbol prefix | None | Underscore (`_`) |
+| Global relocation | `:lo12:name` | `name@PAGEOFF` |
+| Page relocation | `name` | `name@PAGE` |
+| Object format | ELF | Mach-O |
+| `.type` directive | Yes | No |
+
+### Stack Frame Layout
+
+```
+Higher addresses
+┌─────────────────────┐
+│   Caller's frame    │
+├─────────────────────┤ ← x29 (FP) after prologue
+│   Saved x29, x30    │  (16 bytes, pre-indexed)
+├─────────────────────┤
+│   Local variables   │  (alloca slots)
+│   SSA temporaries   │  (instruction results)
+│   Spilled params    │  (x0-x7 saved here)
+├─────────────────────┤ ← SP after prologue
+Lower addresses
+```
+
+### Stack Slot Allocation
+
+The backend calculates stack frame size based on:
+- **ALLOCA instructions**: Size based on pointee type (arrays get full element count × element size)
+- **Instruction results**: 8 bytes each for SSA temporaries
+- **Function parameters**: 8 bytes each for spilled registers
+
+```c
+/* Example: int arr[5] allocates 20 bytes (5 × 4), aligned to 24 */
+anvil_type_t *arr_type = anvil_type_array(ctx, anvil_type_i32(ctx), 5);
+anvil_value_t *arr = anvil_build_alloca(ctx, arr_type, "arr");
+```
+
+### Global Variable Access
+
+**Linux:**
+```asm
+adrp x9, counter
+ldr w0, [x9, :lo12:counter]
+```
+
+**macOS:**
+```asm
+adrp x9, _counter@PAGE
+ldr w0, [x9, _counter@PAGEOFF]
+```
+
+### Large Stack Offsets
+
+For offsets > 255 bytes, the backend uses x16 as scratch:
+```asm
+sub x16, x29, #512
+ldr x0, [x16]
+```
+
 ## Advanced Examples
 
 ANVIL includes three advanced examples that demonstrate generating linkable libraries:

@@ -836,6 +836,86 @@ for (size_t i = 0; i < func->num_params; i++) {
 }
 ```
 
+### Array Stack Allocation
+
+When allocating arrays via `ANVIL_OP_ALLOCA`, the backend must calculate the correct size based on the pointee type:
+
+```c
+static int arm64_type_size(anvil_type_t *type)
+{
+    if (!type) return 8;
+    
+    switch (type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_U8:
+            return 1;
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_U16:
+            return 2;
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_U32:
+        case ANVIL_TYPE_F32:
+            return 4;
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U64:
+        case ANVIL_TYPE_F64:
+        case ANVIL_TYPE_PTR:
+            return 8;
+        case ANVIL_TYPE_ARRAY:
+            return type->data.array.count * arm64_type_size(type->data.array.elem);
+        case ANVIL_TYPE_STRUCT:
+            /* Sum of field sizes */
+            int size = 0;
+            for (size_t i = 0; i < type->data.struc.num_fields; i++) {
+                size += arm64_type_size(type->data.struc.fields[i]);
+            }
+            return size > 0 ? size : 8;
+        default:
+            return 8;
+    }
+}
+
+/* In arm64_emit_func first pass: */
+if (instr->op == ANVIL_OP_ALLOCA) {
+    int size = 8;
+    if (instr->result && instr->result->type && 
+        instr->result->type->kind == ANVIL_TYPE_PTR &&
+        instr->result->type->data.pointee) {
+        size = arm64_type_size(instr->result->type->data.pointee);
+    }
+    arm64_add_stack_slot_sized(be, instr->result, size);
+}
+```
+
+### Global Variable Access (macOS vs Linux)
+
+The backend must use different relocation syntax for global variables:
+
+**Linux (ELF):**
+```asm
+adrp x9, counter
+ldr w0, [x9, :lo12:counter]
+str w9, [x10, :lo12:counter]
+```
+
+**macOS (Mach-O):**
+```asm
+adrp x9, _counter@PAGE
+ldr w0, [x9, _counter@PAGEOFF]
+str w9, [x10, _counter@PAGEOFF]
+```
+
+Implementation:
+```c
+if (arm64_is_darwin(be)) {
+    emit("\tadrp x9, %s%s@PAGE\n", prefix, name);
+    emit("\tldr w0, [x9, %s%s@PAGEOFF]\n", prefix, name);
+} else {
+    emit("\tadrp x9, %s\n", name);
+    emit("\tldr w0, [x9, :lo12:%s]\n", name);
+}
+```
+
 ## Debugging Tips
 
 1. **Print IR**: Add debug output to see what IR you're processing
