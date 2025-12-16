@@ -494,3 +494,57 @@ if (mcc_sema_analyze(sema, ast)) {
 mcc_sema_destroy(sema);
 mcc_context_destroy(ctx);
 ```
+
+## Recent Fixes
+
+### Enum Constants Registration
+
+Enum constants are now properly registered in the symbol table:
+
+```c
+/* In sema_decl.c - analyze_enum_decl() */
+for (mcc_enum_const_t *c = enum_type->data.enumeration.constants; c; c = c->next) {
+    mcc_symbol_t *sym = mcc_symtab_define(sema->symtab,
+        c->name, SYM_ENUM_CONST, int_type, decl->location);
+    if (sym) {
+        sym->data.enum_value = (int)c->value;
+    }
+}
+```
+
+This also applies to `typedef enum { ... } Name;` declarations.
+
+### AST_DECL_LIST Support
+
+Multiple variable declarations (`int a, b, c;`) are now properly analyzed:
+
+```c
+/* In sema_stmt.c - sema_analyze_compound_stmt() */
+if (s->kind == AST_VAR_DECL || s->kind == AST_FUNC_DECL || s->kind == AST_DECL_LIST) {
+    sema_analyze_decl(sema, s);
+}
+```
+
+### C99 For Loop Declarations
+
+For loops with declarations (`for (int i = 0; ...)`) now check `init_decl`:
+
+```c
+/* In sema_stmt.c - sema_analyze_for_stmt() */
+if (stmt->data.for_stmt.init_decl) {
+    sema_analyze_decl(sema, stmt->data.for_stmt.init_decl);
+} else if (stmt->data.for_stmt.init) {
+    /* ... */
+}
+```
+
+### Integer Type Checking
+
+`TYPE_LONG_LONG` and `TYPE_BOOL` are now recognized as integer types:
+
+```c
+/* In types.c - mcc_type_is_integer() */
+case TYPE_LONG_LONG:
+case TYPE_BOOL:
+    return true;
+```

@@ -663,3 +663,57 @@ primary_expr = IDENT | INT_LIT | FLOAT_LIT | STRING_LIT | '(' expr ')'
              | 'nullptr'                        /* C23 */
              | 'true' | 'false'                 /* C23 */
 ```
+
+## Recent Fixes
+
+### Function Parameter Names
+
+`parse_function_suffix` now captures parameter names:
+
+```c
+/* In parse_type.c - parse_function_suffix() */
+if (parse_check(p, TOK_IDENT)) {
+    param_name = mcc_strdup(p->ctx, p->peek->text);
+    parse_advance(p);
+    /* Parse array brackets if present */
+}
+```
+
+### Struct Completeness
+
+Structs are now marked as complete after definition:
+
+```c
+/* In parse_type.c - parse_struct_or_union() */
+stype->data.record.fields = fields;
+stype->data.record.num_fields = num_fields;
+stype->data.record.is_complete = true;  /* Added */
+```
+
+### Enum Type in AST
+
+`AST_ENUM_DECL` now includes the enum type for accessing constants:
+
+```c
+/* In ast.h */
+struct {
+    const char *tag;
+    mcc_ast_node_t **enumerators;
+    size_t num_enumerators;
+    bool is_definition;
+    struct mcc_type *enum_type;  /* Added for accessing enum constants */
+} enum_decl;
+```
+
+### AST_DECL_LIST in AST Dump
+
+Multiple declarations are now properly displayed:
+
+```c
+/* In ast.c */
+case AST_DECL_LIST:
+    for (size_t i = 0; i < node->data.decl_list.num_decls; i++) {
+        ast_dump_node(node->data.decl_list.decls[i], out, indent + 1);
+    }
+    break;
+```

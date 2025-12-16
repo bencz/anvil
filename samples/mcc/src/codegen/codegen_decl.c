@@ -36,6 +36,7 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
         ANVIL_LINK_INTERNAL : ANVIL_LINK_EXTERNAL;
     cg->current_func = anvil_func_create(cg->anvil_mod, func->data.func_decl.name, 
                                           func_type, linkage);
+    cg->current_func_name = func->data.func_decl.name;  /* For __func__ (C99) */
     
     /* Register function in mapping */
     mcc_symbol_t *func_sym = mcc_symtab_lookup(cg->symtab, func->data.func_decl.name);

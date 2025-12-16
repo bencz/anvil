@@ -334,27 +334,27 @@ Key ANVIL APIs used:
 1. Add token type in `include/token.h`
 2. Add lexer recognition in `src/lexer/lex_operator.c`
 3. Add parser handling in `src/parser/parse_expr.c`
-4. Add type checking in `src/sema.c`
-5. Add code generation in `src/codegen.c`
+4. Add type checking in `src/sema/sema_expr.c`
+5. Add code generation in `src/codegen/codegen_expr.c`
 
 ### Adding a new statement
 
 1. Add AST node type in `include/ast.h`
 2. Add parser function in `src/parser/parse_stmt.c`
-3. Add semantic analysis in `src/sema.c`
-4. Add code generation in `src/codegen.c`
+3. Add semantic analysis in `src/sema/sema_stmt.c`
+4. Add code generation in `src/codegen/codegen_stmt.c`
 
 ### Adding a new expression
 
 1. Add AST node type in `include/ast.h`
 2. Add parser function in `src/parser/parse_expr.c`
-3. Add semantic analysis in `src/sema.c`
-4. Add code generation in `src/codegen.c`
+3. Add semantic analysis in `src/sema/sema_expr.c`
+4. Add code generation in `src/codegen/codegen_expr.c`
 
 ### Adding a new type
 
 1. Add type kind in `include/types.h`
 2. Add type parsing in `src/parser/parse_type.c`
 3. Add type creation function in `src/types.c`
-4. Add type checking rules in `src/sema.c`
-5. Add code generation support in `src/codegen.c`
+4. Add type checking rules in `src/sema/sema_type.c`
+5. Add code generation support in `src/codegen/codegen_type.c`

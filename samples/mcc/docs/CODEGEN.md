@@ -572,3 +572,38 @@ MCC supports optimization levels:
 - **-O3**: Aggressive optimizations
 
 Optimizations are performed by ANVIL on the IR before code generation.
+
+## Recent Fixes
+
+### Long Long Literals
+
+Integer literals with `LL` or `ULL` suffix now use `anvil_const_i64`:
+
+```c
+/* In codegen_expr.c - codegen_expr() */
+case AST_INT_LIT: {
+    switch (expr->data.int_lit.suffix) {
+        case INT_SUFFIX_LL:
+        case INT_SUFFIX_ULL:
+            return anvil_const_i64(cg->anvil_ctx, (int64_t)expr->data.int_lit.value);
+        case INT_SUFFIX_L:
+        case INT_SUFFIX_UL:
+            return anvil_const_i64(cg->anvil_ctx, (int64_t)expr->data.int_lit.value);
+        default:
+            return anvil_const_i32(cg->anvil_ctx, (int32_t)expr->data.int_lit.value);
+    }
+}
+```
+
+### C99 For Loop Declarations
+
+For loops with declarations now handle `init_decl`:
+
+```c
+/* In codegen_stmt.c - codegen_for_stmt() */
+if (stmt->data.for_stmt.init_decl) {
+    codegen_stmt(cg, stmt->data.for_stmt.init_decl);
+} else if (stmt->data.for_stmt.init) {
+    codegen_expr(cg, stmt->data.for_stmt.init);
+}
+```

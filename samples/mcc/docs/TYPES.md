@@ -403,3 +403,30 @@ printf("int[10] size: %d\n", mcc_type_size(int_array));   /* 40 */
 
 mcc_type_context_destroy(types);
 ```
+
+## Recent Fixes
+
+### Integer Type Checking
+
+`mcc_type_is_integer()` now includes `TYPE_LONG_LONG` and `TYPE_BOOL`:
+
+```c
+/* In types.c */
+bool mcc_type_is_integer(mcc_type_t *type)
+{
+    switch (type->kind) {
+        case TYPE_CHAR:
+        case TYPE_SHORT:
+        case TYPE_INT:
+        case TYPE_LONG:
+        case TYPE_LONG_LONG:  /* Added */
+        case TYPE_BOOL:       /* Added */
+        case TYPE_ENUM:
+            return true;
+        default:
+            return false;
+    }
+}
+```
+
+This ensures proper type compatibility checking for C99 `long long` and C99/C23 `_Bool`/`bool` types.

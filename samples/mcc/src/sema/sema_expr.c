@@ -6,6 +6,7 @@
  */
 
 #include "sema_internal.h"
+#include <string.h>
 
 /* ============================================================
  * Literal Analysis
@@ -84,21 +85,38 @@ static mcc_type_t *analyze_string_lit(mcc_sema_t *sema, mcc_ast_node_t *expr)
 
 static mcc_type_t *analyze_ident_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
-    mcc_symbol_t *sym = mcc_symtab_lookup(sema->symtab, expr->data.ident_expr.name);
+    const char *name = expr->data.ident_expr.name;
+    
+    /* C99: __func__ predefined identifier */
+    if (strcmp(name, "__func__") == 0) {
+        if (!sema_has_feature(sema, MCC_FEAT_FUNC_NAME)) {
+            mcc_warning_at(sema->ctx, expr->location,
+                           "__func__ is a C99 feature");
+        }
+        /* __func__ is equivalent to a static const char array */
+        /* containing the function name, decays to const char* */
+        mcc_type_t *char_type = mcc_type_char(sema->types);
+        char_type->qualifiers |= QUAL_CONST;
+        expr->type = mcc_type_pointer(sema->types, char_type);
+        expr->data.ident_expr.is_func_name = true;
+        return expr->type;
+    }
+    
+    mcc_symbol_t *sym = mcc_symtab_lookup(sema->symtab, name);
     if (!sym) {
         /* C89 allows implicit function declarations */
         if (sema_has_implicit_func_decl(sema)) {
             mcc_warning_at(sema->ctx, expr->location,
                            "implicit declaration of function '%s'",
-                           expr->data.ident_expr.name);
+                           name);
             /* Create implicit declaration: int name() */
             mcc_type_t *func_type = mcc_type_function(sema->types,
                 mcc_type_int(sema->types), NULL, 0, false);
-            sym = mcc_symtab_define(sema->symtab, expr->data.ident_expr.name,
+            sym = mcc_symtab_define(sema->symtab, name,
                                     SYM_FUNC, func_type, expr->location);
         } else {
             mcc_error_at(sema->ctx, expr->location,
-                         SEMA_ERR_UNDECLARED_IDENT, expr->data.ident_expr.name);
+                         SEMA_ERR_UNDECLARED_IDENT, name);
             return NULL;
         }
     }

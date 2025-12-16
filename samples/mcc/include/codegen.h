@@ -24,6 +24,7 @@ struct mcc_codegen {
     /* Current function being generated */
     anvil_func_t *current_func;
     anvil_block_t *current_block;
+    const char *current_func_name;  /* For __func__ (C99) */
     
     /* For break/continue */
     anvil_block_t *break_target;

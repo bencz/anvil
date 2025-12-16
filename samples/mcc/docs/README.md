@@ -274,6 +274,14 @@ When working with MCC code:
 
 ### Recent Improvements
 
+- **Function Parameter Names**: Fixed `parse_function_suffix` to capture parameter names in function declarations
+- **Struct Completeness**: Fixed parser to mark structs as `is_complete = true` after definition
+- **C99 For Loop Declarations**: Full support for `for (int i = 0; ...)` with `init_decl` in AST
+- **Enum Constants in Symbol Table**: Enum constants are now registered in the symbol table for lookup
+- **Typedef with Enum**: Enum constants in `typedef enum { ... } Name;` are properly registered
+- **Long Long Literals**: Code generator uses `anvil_const_i64` for `LL` and `ULL` suffixed literals
+- **Integer Type Checking**: `TYPE_LONG_LONG` and `TYPE_BOOL` added to `mcc_type_is_integer()`
+- **AST_DECL_LIST Support**: Multiple declarations (`int a, b, c;`) properly analyzed by sema
 - **Modular Semantic Analyzer**: Refactored `sema.c` into `src/sema/` with 6 modular files
 - **C99 long long**: Added `mcc_type_llong()` and `mcc_type_ullong()` for 64-bit integer types
 - **Multiple Typedef Names**: Support for `typedef int INT, *PINT, **PPINT;` syntax

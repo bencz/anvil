@@ -44,6 +44,13 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             mcc_symbol_t *sym = expr->data.ident_expr.symbol;
             const char *name = expr->data.ident_expr.name;
             
+            /* C99: __func__ predefined identifier */
+            if (expr->data.ident_expr.is_func_name) {
+                /* Get current function name as string literal */
+                const char *func_name = cg->current_func_name ? cg->current_func_name : "";
+                return codegen_get_string_literal(cg, func_name);
+            }
+            
             /* Try to find local by name */
             anvil_value_t *ptr = codegen_find_local(cg, name);
             

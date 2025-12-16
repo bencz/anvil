@@ -343,6 +343,7 @@ struct mcc_ast_node {
         struct {
             const char *name;
             void *symbol;           /* Resolved symbol (set by sema) */
+            bool is_func_name;      /* True if __func__ (C99) */
         } ident_expr;
         
         /* Integer literal */
