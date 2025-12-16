@@ -124,14 +124,15 @@ typedef enum {
 /* ============================================================================
  * CPU Feature Flags
  * ============================================================================
- * Bitfield for available CPU features. Each architecture uses different
- * bit ranges to avoid conflicts when combining features.
+ * Each architecture has its own feature namespace (bits 0-63).
+ * Features are stored per-architecture, allowing up to 64 features each.
+ * This design is scalable - each architecture can grow independently.
  */
 
 typedef uint64_t anvil_cpu_features_t;
 
 /* ----------------------------------------------------------------------------
- * PowerPC Features (bits 0-15)
+ * PowerPC Features (bits 0-63, PPC namespace)
  * ---------------------------------------------------------------------------- */
 #define ANVIL_FEATURE_PPC_ALTIVEC       (1ULL << 0)   /* AltiVec/VMX SIMD */
 #define ANVIL_FEATURE_PPC_VSX           (1ULL << 1)   /* VSX (Vector-Scalar) */
@@ -148,65 +149,69 @@ typedef uint64_t anvil_cpu_features_t;
 #define ANVIL_FEATURE_PPC_POWER9_VEC    (1ULL << 12)  /* POWER9 vector extensions */
 #define ANVIL_FEATURE_PPC_MMA           (1ULL << 13)  /* Matrix-Multiply Assist (POWER10) */
 #define ANVIL_FEATURE_PPC_PCREL         (1ULL << 14)  /* PC-relative addressing (POWER10) */
+/* Room for 49 more PPC features (bits 15-63) */
 
 /* ----------------------------------------------------------------------------
- * IBM Mainframe Features (bits 16-31)
+ * IBM Mainframe Features (bits 0-63, z/Arch namespace)
  * ---------------------------------------------------------------------------- */
-#define ANVIL_FEATURE_ZARCH_DFP         (1ULL << 16)  /* Decimal Floating Point */
-#define ANVIL_FEATURE_ZARCH_EIMM        (1ULL << 17)  /* Extended Immediate */
-#define ANVIL_FEATURE_ZARCH_GIE         (1ULL << 18)  /* General Instructions Extension */
-#define ANVIL_FEATURE_ZARCH_HFP_EXT     (1ULL << 19)  /* HFP Extensions */
-#define ANVIL_FEATURE_ZARCH_HIGHWORD    (1ULL << 20)  /* High-word facility */
-#define ANVIL_FEATURE_ZARCH_INTERLOCKED (1ULL << 21)  /* Interlocked access */
-#define ANVIL_FEATURE_ZARCH_LOADSTORE   (1ULL << 22)  /* Load/Store on Condition */
-#define ANVIL_FEATURE_ZARCH_MISCEXT     (1ULL << 23)  /* Miscellaneous Extensions */
-#define ANVIL_FEATURE_ZARCH_MISCEXT2    (1ULL << 24)  /* Miscellaneous Extensions 2 */
-#define ANVIL_FEATURE_ZARCH_MISCEXT3    (1ULL << 25)  /* Miscellaneous Extensions 3 */
-#define ANVIL_FEATURE_ZARCH_POPCOUNT    (1ULL << 26)  /* Population count */
-#define ANVIL_FEATURE_ZARCH_VECTOR      (1ULL << 27)  /* Vector facility */
-#define ANVIL_FEATURE_ZARCH_VECTOR_ENH1 (1ULL << 28)  /* Vector enhancements 1 */
-#define ANVIL_FEATURE_ZARCH_VECTOR_ENH2 (1ULL << 29)  /* Vector enhancements 2 */
-#define ANVIL_FEATURE_ZARCH_NNPA        (1ULL << 30)  /* Neural Network Processing Assist */
+#define ANVIL_FEATURE_ZARCH_DFP         (1ULL << 0)   /* Decimal Floating Point */
+#define ANVIL_FEATURE_ZARCH_EIMM        (1ULL << 1)   /* Extended Immediate */
+#define ANVIL_FEATURE_ZARCH_GIE         (1ULL << 2)   /* General Instructions Extension */
+#define ANVIL_FEATURE_ZARCH_HFP_EXT     (1ULL << 3)   /* HFP Extensions */
+#define ANVIL_FEATURE_ZARCH_HIGHWORD    (1ULL << 4)   /* High-word facility */
+#define ANVIL_FEATURE_ZARCH_INTERLOCKED (1ULL << 5)   /* Interlocked access */
+#define ANVIL_FEATURE_ZARCH_LOADSTORE   (1ULL << 6)   /* Load/Store on Condition */
+#define ANVIL_FEATURE_ZARCH_MISCEXT     (1ULL << 7)   /* Miscellaneous Extensions */
+#define ANVIL_FEATURE_ZARCH_MISCEXT2    (1ULL << 8)   /* Miscellaneous Extensions 2 */
+#define ANVIL_FEATURE_ZARCH_MISCEXT3    (1ULL << 9)   /* Miscellaneous Extensions 3 */
+#define ANVIL_FEATURE_ZARCH_POPCOUNT    (1ULL << 10)  /* Population count */
+#define ANVIL_FEATURE_ZARCH_VECTOR      (1ULL << 11)  /* Vector facility */
+#define ANVIL_FEATURE_ZARCH_VECTOR_ENH1 (1ULL << 12)  /* Vector enhancements 1 */
+#define ANVIL_FEATURE_ZARCH_VECTOR_ENH2 (1ULL << 13)  /* Vector enhancements 2 */
+#define ANVIL_FEATURE_ZARCH_NNPA        (1ULL << 14)  /* Neural Network Processing Assist */
+/* Room for 49 more z/Arch features (bits 15-63) */
 
 /* ----------------------------------------------------------------------------
- * ARM64 Features (bits 32-47)
+ * ARM64 Features (bits 0-63, ARM64 namespace)
  * ---------------------------------------------------------------------------- */
-#define ANVIL_FEATURE_ARM64_NEON        (1ULL << 32)  /* NEON SIMD (always on ARMv8) */
-#define ANVIL_FEATURE_ARM64_FP16        (1ULL << 33)  /* Half-precision FP */
-#define ANVIL_FEATURE_ARM64_DOTPROD     (1ULL << 34)  /* Dot product instructions */
-#define ANVIL_FEATURE_ARM64_ATOMICS     (1ULL << 35)  /* LSE atomics */
-#define ANVIL_FEATURE_ARM64_CRC32       (1ULL << 36)  /* CRC32 instructions */
-#define ANVIL_FEATURE_ARM64_SHA1        (1ULL << 37)  /* SHA-1 crypto */
-#define ANVIL_FEATURE_ARM64_SHA256      (1ULL << 38)  /* SHA-256 crypto */
-#define ANVIL_FEATURE_ARM64_AES         (1ULL << 39)  /* AES crypto */
-#define ANVIL_FEATURE_ARM64_SVE         (1ULL << 40)  /* Scalable Vector Extension */
-#define ANVIL_FEATURE_ARM64_SVE2        (1ULL << 41)  /* SVE2 */
-#define ANVIL_FEATURE_ARM64_BF16        (1ULL << 42)  /* BFloat16 */
-#define ANVIL_FEATURE_ARM64_I8MM        (1ULL << 43)  /* Int8 matrix multiply */
-#define ANVIL_FEATURE_ARM64_RCPC        (1ULL << 44)  /* Release Consistent processor consistent */
-#define ANVIL_FEATURE_ARM64_JSCVT       (1ULL << 45)  /* JavaScript conversion */
-#define ANVIL_FEATURE_ARM64_FCMA        (1ULL << 46)  /* Complex number multiply-add */
-#define ANVIL_FEATURE_ARM64_SME         (1ULL << 47)  /* Scalable Matrix Extension */
+#define ANVIL_FEATURE_ARM64_NEON        (1ULL << 0)   /* NEON SIMD (always on ARMv8) */
+#define ANVIL_FEATURE_ARM64_FP16        (1ULL << 1)   /* Half-precision FP */
+#define ANVIL_FEATURE_ARM64_DOTPROD     (1ULL << 2)   /* Dot product instructions */
+#define ANVIL_FEATURE_ARM64_ATOMICS     (1ULL << 3)   /* LSE atomics */
+#define ANVIL_FEATURE_ARM64_CRC32       (1ULL << 4)   /* CRC32 instructions */
+#define ANVIL_FEATURE_ARM64_SHA1        (1ULL << 5)   /* SHA-1 crypto */
+#define ANVIL_FEATURE_ARM64_SHA256      (1ULL << 6)   /* SHA-256 crypto */
+#define ANVIL_FEATURE_ARM64_AES         (1ULL << 7)   /* AES crypto */
+#define ANVIL_FEATURE_ARM64_SVE         (1ULL << 8)   /* Scalable Vector Extension */
+#define ANVIL_FEATURE_ARM64_SVE2        (1ULL << 9)   /* SVE2 */
+#define ANVIL_FEATURE_ARM64_BF16        (1ULL << 10)  /* BFloat16 */
+#define ANVIL_FEATURE_ARM64_I8MM        (1ULL << 11)  /* Int8 matrix multiply */
+#define ANVIL_FEATURE_ARM64_RCPC        (1ULL << 12)  /* Release Consistent processor consistent */
+#define ANVIL_FEATURE_ARM64_JSCVT       (1ULL << 13)  /* JavaScript conversion */
+#define ANVIL_FEATURE_ARM64_FCMA        (1ULL << 14)  /* Complex number multiply-add */
+#define ANVIL_FEATURE_ARM64_SME         (1ULL << 15)  /* Scalable Matrix Extension */
+/* Room for 48 more ARM64 features (bits 16-63) */
 
 /* ----------------------------------------------------------------------------
- * x86/x86-64 Features (bits 48-63)
+ * x86/x86-64 Features (bits 0-63, x86 namespace)
  * ---------------------------------------------------------------------------- */
-#define ANVIL_FEATURE_X86_MMX           (1ULL << 48)  /* MMX */
-#define ANVIL_FEATURE_X86_SSE           (1ULL << 49)  /* SSE */
-#define ANVIL_FEATURE_X86_SSE2          (1ULL << 50)  /* SSE2 */
-#define ANVIL_FEATURE_X86_SSE3          (1ULL << 51)  /* SSE3 */
-#define ANVIL_FEATURE_X86_SSSE3         (1ULL << 52)  /* SSSE3 */
-#define ANVIL_FEATURE_X86_SSE41         (1ULL << 53)  /* SSE4.1 */
-#define ANVIL_FEATURE_X86_SSE42         (1ULL << 54)  /* SSE4.2 */
-#define ANVIL_FEATURE_X86_AVX           (1ULL << 55)  /* AVX */
-#define ANVIL_FEATURE_X86_AVX2          (1ULL << 56)  /* AVX2 */
-#define ANVIL_FEATURE_X86_AVX512F       (1ULL << 57)  /* AVX-512 Foundation */
-#define ANVIL_FEATURE_X86_FMA           (1ULL << 58)  /* FMA3 */
-#define ANVIL_FEATURE_X86_BMI1          (1ULL << 59)  /* Bit Manipulation 1 */
-#define ANVIL_FEATURE_X86_BMI2          (1ULL << 60)  /* Bit Manipulation 2 */
-#define ANVIL_FEATURE_X86_POPCNT        (1ULL << 61)  /* Population count */
-#define ANVIL_FEATURE_X86_LZCNT         (1ULL << 62)  /* Leading zero count */
-#define ANVIL_FEATURE_X86_MOVBE         (1ULL << 63)  /* MOVBE instruction */
+#define ANVIL_FEATURE_X86_MMX           (1ULL << 0)   /* MMX */
+#define ANVIL_FEATURE_X86_SSE           (1ULL << 1)   /* SSE */
+#define ANVIL_FEATURE_X86_SSE2          (1ULL << 2)   /* SSE2 */
+#define ANVIL_FEATURE_X86_SSE3          (1ULL << 3)   /* SSE3 */
+#define ANVIL_FEATURE_X86_SSSE3         (1ULL << 4)   /* SSSE3 */
+#define ANVIL_FEATURE_X86_SSE41         (1ULL << 5)   /* SSE4.1 */
+#define ANVIL_FEATURE_X86_SSE42         (1ULL << 6)   /* SSE4.2 */
+#define ANVIL_FEATURE_X86_AVX           (1ULL << 7)   /* AVX */
+#define ANVIL_FEATURE_X86_AVX2          (1ULL << 8)   /* AVX2 */
+#define ANVIL_FEATURE_X86_AVX512F       (1ULL << 9)   /* AVX-512 Foundation */
+#define ANVIL_FEATURE_X86_FMA           (1ULL << 10)  /* FMA3 */
+#define ANVIL_FEATURE_X86_BMI1          (1ULL << 11)  /* Bit Manipulation 1 */
+#define ANVIL_FEATURE_X86_BMI2          (1ULL << 12)  /* Bit Manipulation 2 */
+#define ANVIL_FEATURE_X86_POPCNT        (1ULL << 13)  /* Population count */
+#define ANVIL_FEATURE_X86_LZCNT         (1ULL << 14)  /* Leading zero count */
+#define ANVIL_FEATURE_X86_MOVBE         (1ULL << 15)  /* MOVBE instruction */
+/* Room for 48 more x86 features (bits 16-63) */
 
 /* ============================================================================
  * Feature Helper Macros
