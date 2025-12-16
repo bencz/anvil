@@ -90,7 +90,6 @@ bool sema_check_function(mcc_sema_t *sema, mcc_type_t *type, mcc_location_t loc)
 
 bool sema_check_complete_type(mcc_sema_t *sema, mcc_type_t *type, mcc_location_t loc)
 {
-    (void)sema;
     (void)loc;
     if (!type) return false;
     
@@ -99,8 +98,13 @@ bool sema_check_complete_type(mcc_sema_t *sema, mcc_type_t *type, mcc_location_t
         return false;
     }
     
-    /* Array with unknown size is incomplete */
+    /* Array with unknown size is incomplete, unless it's a VLA (C99) */
     if (mcc_type_is_array(type) && type->data.array.length == 0) {
+        /* VLA: array with size expression but no constant length */
+        if (type->data.array.is_vla && sema_has_vla(sema)) {
+            /* VLA is complete in C99 */
+            return true;
+        }
         return false;
     }
     
