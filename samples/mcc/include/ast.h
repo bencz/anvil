@@ -32,6 +32,7 @@ typedef enum {
     AST_ENUM_DECL,          /* Enum declaration */
     AST_ENUMERATOR,         /* Enum constant */
     AST_FIELD_DECL,         /* Struct/union field */
+    AST_DECL_LIST,          /* Multiple declarations: int a, b, c; */
     
     /* Statements */
     AST_COMPOUND_STMT,      /* { ... } */
@@ -197,6 +198,12 @@ struct mcc_ast_node {
             const char *name;
             struct mcc_type *type;
         } typedef_decl;
+        
+        /* Declaration list (int a, b, c;) */
+        struct {
+            mcc_ast_node_t **decls;
+            size_t num_decls;
+        } decl_list;
         
         /* Struct/Union declaration */
         struct {

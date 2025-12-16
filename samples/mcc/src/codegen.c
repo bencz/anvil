@@ -848,6 +848,13 @@ static void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
             break;
         }
         
+        case AST_DECL_LIST:
+            /* Multiple declarations: int a, b, c; */
+            for (size_t i = 0; i < stmt->data.decl_list.num_decls; i++) {
+                codegen_stmt(cg, stmt->data.decl_list.decls[i]);
+            }
+            break;
+        
         default:
             break;
     }
@@ -1136,6 +1143,12 @@ void mcc_codegen_decl(mcc_codegen_t *cg, mcc_ast_node_t *decl)
             break;
         case AST_VAR_DECL:
             mcc_codegen_global_var(cg, decl);
+            break;
+        case AST_DECL_LIST:
+            /* Multiple declarations: int a, b, c; */
+            for (size_t i = 0; i < decl->data.decl_list.num_decls; i++) {
+                mcc_codegen_decl(cg, decl->data.decl_list.decls[i]);
+            }
             break;
         default:
             break;

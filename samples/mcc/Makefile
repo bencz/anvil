@@ -117,38 +117,93 @@ clean:
 
 # Run tests
 test: $(TARGET)
-	@echo "Running tests..."
-	@echo "=== C89 Tests ==="
-	@for f in tests/hello.c tests/arithmetic.c tests/bitwise.c tests/control_flow.c \
-	          tests/simple_bitwise.c tests/simple_struct.c tests/typedef_simple.c \
-	          tests/typedef_multi.c tests/advanced_types.c tests/preprocessor_test.c \
-	          tests/line_continuation_test.c tests/multiline_macro_test.c; do \
+	@echo "Running MCC Test Suite..."
+	@echo ""
+	@echo "=== C89 Tests (tests/c89/) ==="
+	@passed=0; failed=0; \
+	for f in tests/c89/*.c; do \
 		if [ -f "$$f" ]; then \
-			echo -n "Testing $$f... "; \
-			./$(TARGET) -I includes -fsyntax-only $$f 2>/dev/null && echo "OK" || echo "FAILED"; \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=c89 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
 		fi; \
-	done
-	@echo "=== C99 Tests ==="
-	@for f in tests/c99_keywords_test.c tests/line_comment_test.c; do \
+	done; \
+	echo "  C89: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "=== C99 Tests (tests/c99/) ==="
+	@passed=0; failed=0; \
+	for f in tests/c99/*.c; do \
 		if [ -f "$$f" ]; then \
-			echo -n "Testing $$f... "; \
-			./$(TARGET) -std=c99 -I includes -fsyntax-only $$f 2>/dev/null && echo "OK" || echo "FAILED"; \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=c99 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
 		fi; \
-	done
-	@echo "=== C11 Tests ==="
-	@for f in tests/c11_keywords_test.c tests/generic_test.c; do \
+	done; \
+	echo "  C99: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "=== C11 Tests (tests/c11/) ==="
+	@passed=0; failed=0; \
+	for f in tests/c11/*.c; do \
 		if [ -f "$$f" ]; then \
-			echo -n "Testing $$f... "; \
-			./$(TARGET) -std=c11 -I includes -fsyntax-only $$f 2>/dev/null && echo "OK" || echo "FAILED"; \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=c11 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
 		fi; \
-	done
-	@echo "=== Tests with includes ==="
-	@for f in tests/struct_test.c; do \
+	done; \
+	echo "  C11: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "=== C23 Tests (tests/c23/) ==="
+	@passed=0; failed=0; \
+	for f in tests/c23/*.c; do \
 		if [ -f "$$f" ]; then \
-			echo -n "Testing $$f... "; \
-			./$(TARGET) -I includes -fsyntax-only $$f 2>/dev/null && echo "OK" || echo "FAILED"; \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=c23 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
 		fi; \
-	done
+	done; \
+	echo "  C23: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "=== GNU Extension Tests (tests/gnu/) ==="
+	@passed=0; failed=0; \
+	for f in tests/gnu/*.c; do \
+		if [ -f "$$f" ]; then \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=gnu99 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
+		fi; \
+	done; \
+	echo "  GNU: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "=== Legacy Tests (tests/*.c) ==="
+	@passed=0; failed=0; \
+	for f in tests/*.c; do \
+		if [ -f "$$f" ]; then \
+			printf "  %-40s " "$$f"; \
+			if ./$(TARGET) -std=c99 -I includes -fsyntax-only "$$f" 2>/dev/null; then \
+				echo "OK"; passed=$$((passed+1)); \
+			else \
+				echo "FAILED"; failed=$$((failed+1)); \
+			fi; \
+		fi; \
+	done; \
+	echo "  Legacy: $$passed passed, $$failed failed"
+	@echo ""
+	@echo "Test suite complete."
 
 # Install (to parent project)
 install: $(TARGET)

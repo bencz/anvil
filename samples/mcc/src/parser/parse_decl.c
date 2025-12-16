@@ -294,15 +294,78 @@ mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
         init = parse_initializer(p);
     }
     
-    parse_expect(p, TOK_SEMICOLON, ";");
-    
+    /* Create first variable declaration */
     mcc_ast_node_t *var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
     var->data.var_decl.name = name;
     var->data.var_decl.var_type = decl_type;
     var->data.var_decl.init = init;
     var->data.var_decl.is_static = (storage == STORAGE_STATIC);
     var->data.var_decl.is_extern = (storage == STORAGE_EXTERN);
-    return var;
+    
+    /* Check for multiple variable declarations: int a, b, c; */
+    if (!parse_check(p, TOK_COMMA)) {
+        parse_expect(p, TOK_SEMICOLON, ";");
+        return var;
+    }
+    
+    /* Multiple declarations - create a declaration list */
+    mcc_ast_node_t **decls = NULL;
+    size_t num_decls = 0;
+    size_t cap_decls = 0;
+    
+    /* Add first declaration to list */
+    if (num_decls >= cap_decls) {
+        cap_decls = cap_decls ? cap_decls * 2 : 4;
+        decls = mcc_realloc(p->ctx, decls, num_decls * sizeof(mcc_ast_node_t*),
+                            cap_decls * sizeof(mcc_ast_node_t*));
+    }
+    decls[num_decls++] = var;
+    
+    /* Get base type by stripping pointers/arrays from decl_type */
+    mcc_type_t *base = decl_type;
+    while (base && base->kind == TYPE_POINTER) {
+        base = base->data.pointer.pointee;
+    }
+    while (base && base->kind == TYPE_ARRAY) {
+        base = base->data.array.element;
+    }
+    
+    /* Parse additional declarations */
+    while (parse_match(p, TOK_COMMA)) {
+        /* Parse next declarator */
+        parse_declarator_result_t next_decl = parse_declarator(p, base, false);
+        
+        /* Parse initializer for this variable */
+        mcc_ast_node_t *next_init = NULL;
+        if (parse_match(p, TOK_ASSIGN)) {
+            next_init = parse_initializer(p);
+        }
+        
+        /* Create variable declaration node */
+        mcc_ast_node_t *next_var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
+        next_var->data.var_decl.name = next_decl.name;
+        next_var->data.var_decl.var_type = next_decl.type;
+        next_var->data.var_decl.init = next_init;
+        next_var->data.var_decl.is_static = (storage == STORAGE_STATIC);
+        next_var->data.var_decl.is_extern = (storage == STORAGE_EXTERN);
+        
+        /* Add to list */
+        if (num_decls >= cap_decls) {
+            cap_decls = cap_decls ? cap_decls * 2 : 4;
+            decls = mcc_realloc(p->ctx, decls, num_decls * sizeof(mcc_ast_node_t*),
+                                cap_decls * sizeof(mcc_ast_node_t*));
+        }
+        decls[num_decls++] = next_var;
+    }
+    
+    parse_expect(p, TOK_SEMICOLON, ";");
+    
+    /* Create declaration list node */
+    mcc_ast_node_t *list = mcc_ast_create(p->ctx, AST_DECL_LIST, loc);
+    list->data.decl_list.decls = decls;
+    list->data.decl_list.num_decls = num_decls;
+    
+    return list;
 }
 
 /* ============================================================

@@ -225,6 +225,17 @@ bool sema_analyze_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
         case AST_VAR_DECL:
             return sema_analyze_var_decl(sema, decl);
             
+        case AST_DECL_LIST: {
+            /* Multiple declarations: int a, b, c; */
+            bool success = true;
+            for (size_t i = 0; i < decl->data.decl_list.num_decls; i++) {
+                if (!sema_analyze_decl(sema, decl->data.decl_list.decls[i])) {
+                    success = false;
+                }
+            }
+            return success;
+        }
+            
         case AST_TYPEDEF_DECL:
             return analyze_typedef_decl(sema, decl);
             

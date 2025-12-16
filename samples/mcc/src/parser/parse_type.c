@@ -493,11 +493,15 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
             case TOK_SHORT:
                 parse_advance(p);
                 type_spec = 3;
-                break;
+                continue; /* Allow 'short int' */
             case TOK_INT:
                 parse_advance(p);
-                type_spec = 4;
-                break;
+                /* 'int' after 'short' or 'long' is redundant but valid */
+                if (type_spec == 0) {
+                    type_spec = 4;
+                }
+                /* If type_spec is already set (short, long, long long), keep it */
+                continue;
             case TOK_LONG:
                 parse_advance(p);
                 long_count++;
