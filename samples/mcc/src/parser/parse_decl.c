@@ -297,8 +297,14 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     /* C11: _Static_assert */
     if (parse_check(p, TOK__STATIC_ASSERT) || parse_check(p, TOK_STATIC_ASSERT)) {
         if (!parse_has_static_assert(p)) {
-            mcc_warning_at(p->ctx, loc,
-                "'_Static_assert' is a C11 extension");
+            mcc_error_at(p->ctx, loc,
+                "'_Static_assert' requires C11 or later");
+            /* Skip to semicolon to recover */
+            while (!parse_check(p, TOK_SEMICOLON) && !parse_check(p, TOK_EOF)) {
+                parse_advance(p);
+            }
+            if (parse_check(p, TOK_SEMICOLON)) parse_advance(p);
+            return NULL;
         }
         parse_advance(p);
         parse_expect(p, TOK_LPAREN, "(");
@@ -312,6 +318,48 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         node->data.static_assert.expr = expr;
         node->data.static_assert.message = mcc_strdup(p->ctx, msg->literal.string_val.value);
         return node;
+    }
+    
+    /* C11: _Alignas - give clear error if not available */
+    if (parse_check(p, TOK__ALIGNAS)) {
+        if (!parse_has_alignas(p)) {
+            mcc_error_at(p->ctx, loc,
+                "'_Alignas' requires C11 or later");
+            /* Skip to semicolon to recover */
+            while (!parse_check(p, TOK_SEMICOLON) && !parse_check(p, TOK_EOF)) {
+                parse_advance(p);
+            }
+            if (parse_check(p, TOK_SEMICOLON)) parse_advance(p);
+            return NULL;
+        }
+    }
+    
+    /* C11: _Noreturn - give clear error if not available */
+    if (parse_check(p, TOK__NORETURN)) {
+        if (!parse_has_noreturn(p)) {
+            mcc_error_at(p->ctx, loc,
+                "'_Noreturn' requires C11 or later");
+            /* Skip to semicolon to recover */
+            while (!parse_check(p, TOK_SEMICOLON) && !parse_check(p, TOK_EOF)) {
+                parse_advance(p);
+            }
+            if (parse_check(p, TOK_SEMICOLON)) parse_advance(p);
+            return NULL;
+        }
+    }
+    
+    /* C11: _Thread_local - give clear error if not available */
+    if (parse_check(p, TOK__THREAD_LOCAL)) {
+        if (!parse_has_thread_local(p)) {
+            mcc_error_at(p->ctx, loc,
+                "'_Thread_local' requires C11 or later");
+            /* Skip to semicolon to recover */
+            while (!parse_check(p, TOK_SEMICOLON) && !parse_check(p, TOK_EOF)) {
+                parse_advance(p);
+            }
+            if (parse_check(p, TOK_SEMICOLON)) parse_advance(p);
+            return NULL;
+        }
     }
     
     /* Parse storage class */
@@ -343,10 +391,7 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
                 continue;
             case TOK__THREAD_LOCAL:
             case TOK_THREAD_LOCAL:
-                if (!parse_has_thread_local(p)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "'_Thread_local' is a C11 extension");
-                }
+                /* Note: C11 check already done above */
                 parse_advance(p);
                 /* Thread local can combine with static or extern */
                 if (storage == STORAGE_NONE) {

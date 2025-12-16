@@ -91,19 +91,13 @@ bool parse_is_declaration_start(mcc_parser_t *p)
         case TOK_INLINE:
             return parse_has_inline(p);
         
-        /* C11: _Noreturn, _Thread_local */
+        /* C11: _Noreturn, _Thread_local, _Alignas, _Static_assert
+         * Always return true so parser can give clear error messages */
         case TOK__NORETURN:
-            return parse_has_noreturn(p);
         case TOK__THREAD_LOCAL:
-            return parse_has_thread_local(p);
-        
-        /* C11: _Alignas */
         case TOK__ALIGNAS:
-            return parse_has_alignas(p);
-        
-        /* C11: _Static_assert */
         case TOK__STATIC_ASSERT:
-            return parse_has_static_assert(p);
+            return true;
         
         /* C23: constexpr */
         case TOK_CONSTEXPR:

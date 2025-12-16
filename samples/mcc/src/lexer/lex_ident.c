@@ -92,7 +92,16 @@ mcc_token_type_t lex_lookup_keyword(mcc_lexer_t *lex, const char *name, size_t l
             /* Check if keyword requires a specific C standard feature */
             mcc_feature_id_t feat = keywords[i].required_feature;
             if (feat != MCC_FEAT_COUNT && !lex_has_feature(lex, feat)) {
-                /* Keyword not available in current standard - treat as identifier */
+                /* Keywords starting with underscore followed by uppercase are reserved
+                 * in all C standards, so we should recognize them and let the parser
+                 * give a proper error message about the required C standard */
+                if (name[0] == '_' && len > 1 && isupper((unsigned char)name[1])) {
+                    /* Reserved identifier - return as keyword so parser can give
+                     * a clear error message about C standard requirements */
+                    return keywords[i].type;
+                }
+                /* Other keywords (like 'inline', 'restrict', 'true', 'false', etc.)
+                 * should be treated as identifiers in older standards */
                 return TOK_IDENT;
             }
             
