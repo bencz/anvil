@@ -14,12 +14,12 @@ static void print_version(void)
 
 static void print_usage(const char *prog)
 {
-    printf("Usage: %s [options] <input.c>\n", prog);
+    printf("Usage: %s [options] <input.c> [input2.c ...]\n", prog);
     printf("\nOptions:\n");
     printf("  -o <file>         Output file (default: stdout)\n");
     printf("  -arch=<arch>      Target architecture:\n");
     printf("                      x86, x86_64, s370, s370_xa, s390, zarch\n");
-    printf("                      ppc32, ppc64, ppc64le, arm64\n");
+    printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
     printf("  -O<level>         Optimization level (0-3)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
@@ -32,6 +32,7 @@ static void print_usage(const char *prog)
     printf("  -v                Verbose output\n");
     printf("  --version         Print version\n");
     printf("  --help            Print this help\n");
+    printf("\nMultiple input files are compiled into a single output.\n");
 }
 
 static mcc_arch_t parse_arch(const char *name)
@@ -45,17 +46,21 @@ static mcc_arch_t parse_arch(const char *name)
     if (strcmp(name, "ppc32") == 0 || strcmp(name, "ppc") == 0) return MCC_ARCH_PPC32;
     if (strcmp(name, "ppc64") == 0) return MCC_ARCH_PPC64;
     if (strcmp(name, "ppc64le") == 0) return MCC_ARCH_PPC64LE;
-    if (strcmp(name, "arm64") == 0) return MCC_ARCH_ARM64;
+    if (strcmp(name, "arm64") == 0 || strcmp(name, "aarch64") == 0) return MCC_ARCH_ARM64;
+    if (strcmp(name, "arm64_macos") == 0 || strcmp(name, "macos") == 0) return MCC_ARCH_ARM64_MACOS;
     return MCC_ARCH_COUNT; /* Invalid */
 }
 
-static int compile_file(mcc_context_t *ctx, const char *filename)
+/* Parse a single file and return AST (used for multi-file compilation) */
+static mcc_ast_node_t *parse_file(mcc_context_t *ctx, const char *filename,
+                                   mcc_preprocessor_t **out_pp,
+                                   mcc_parser_t **out_parser)
 {
     /* Create preprocessor */
     mcc_preprocessor_t *pp = mcc_preprocessor_create(ctx);
     if (!pp) {
         mcc_fatal(ctx, "Failed to create preprocessor");
-        return 1;
+        return NULL;
     }
     
     /* Add include paths */
@@ -84,7 +89,7 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     mcc_token_t *tokens = mcc_preprocessor_run(pp, filename);
     if (mcc_has_errors(ctx)) {
         mcc_preprocessor_destroy(pp);
-        return 1;
+        return NULL;
     }
     
     /* Preprocess only? */
@@ -92,14 +97,15 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         /* Output preprocessed tokens */
         FILE *out = stdout;
         if (ctx->options.output_file) {
-            out = fopen(ctx->options.output_file, "w");
+            out = fopen(ctx->options.output_file, "a"); /* Append for multi-file */
             if (!out) {
                 mcc_fatal(ctx, "Cannot open output file: %s", ctx->options.output_file);
                 mcc_preprocessor_destroy(pp);
-                return 1;
+                return NULL;
             }
         }
         
+        fprintf(out, "/* File: %s */\n", filename);
         for (mcc_token_t *tok = tokens; tok && tok->type != TOK_EOF; tok = tok->next) {
             if (tok->has_space) fputc(' ', out);
             fprintf(out, "%s", mcc_token_to_string(tok));
@@ -108,7 +114,7 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         
         if (ctx->options.output_file) fclose(out);
         mcc_preprocessor_destroy(pp);
-        return 0;
+        return NULL; /* Signal preprocess-only mode */
     }
     
     /* Create parser */
@@ -116,7 +122,7 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     if (!parser) {
         mcc_fatal(ctx, "Failed to create parser");
         mcc_preprocessor_destroy(pp);
-        return 1;
+        return NULL;
     }
     
     /* Parse */
@@ -124,6 +130,30 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     if (mcc_has_errors(ctx)) {
         mcc_parser_destroy(parser);
         mcc_preprocessor_destroy(pp);
+        return NULL;
+    }
+    
+    /* Return preprocessor and parser for later cleanup */
+    *out_pp = pp;
+    *out_parser = parser;
+    
+    return ast;
+}
+
+/* Compile a single file (legacy function for backward compatibility) */
+static int compile_file(mcc_context_t *ctx, const char *filename)
+{
+    mcc_preprocessor_t *pp = NULL;
+    mcc_parser_t *parser = NULL;
+    
+    mcc_ast_node_t *ast = parse_file(ctx, filename, &pp, &parser);
+    
+    /* Handle preprocess-only mode */
+    if (ctx->options.preprocess_only) {
+        return mcc_has_errors(ctx) ? 1 : 0;
+    }
+    
+    if (!ast) {
         return 1;
     }
     
@@ -203,6 +233,206 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     return 0;
 }
 
+/* Compile multiple files into a single output */
+static int compile_files(mcc_context_t *ctx, const char **files, size_t num_files)
+{
+    if (num_files == 0) {
+        mcc_fatal(ctx, "No input files");
+        return 1;
+    }
+    
+    /* For single file, use the simpler path */
+    if (num_files == 1) {
+        return compile_file(ctx, files[0]);
+    }
+    
+    /* Arrays to hold parsed data from each file */
+    mcc_ast_node_t **asts = calloc(num_files, sizeof(mcc_ast_node_t*));
+    mcc_preprocessor_t **pps = calloc(num_files, sizeof(mcc_preprocessor_t*));
+    mcc_parser_t **parsers = calloc(num_files, sizeof(mcc_parser_t*));
+    
+    if (!asts || !pps || !parsers) {
+        mcc_fatal(ctx, "Out of memory");
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 1;
+    }
+    
+    /* Parse all files */
+    for (size_t i = 0; i < num_files; i++) {
+        if (ctx->options.verbose) {
+            fprintf(stderr, "Parsing: %s\n", files[i]);
+        }
+        
+        asts[i] = parse_file(ctx, files[i], &pps[i], &parsers[i]);
+        
+        /* Handle preprocess-only mode */
+        if (ctx->options.preprocess_only) {
+            continue;
+        }
+        
+        if (!asts[i]) {
+            /* Cleanup on error */
+            for (size_t j = 0; j < i; j++) {
+                if (parsers[j]) mcc_parser_destroy(parsers[j]);
+                if (pps[j]) mcc_preprocessor_destroy(pps[j]);
+            }
+            free(asts);
+            free(pps);
+            free(parsers);
+            return 1;
+        }
+    }
+    
+    /* Handle preprocess-only mode */
+    if (ctx->options.preprocess_only) {
+        free(asts);
+        free(pps);
+        free(parsers);
+        return mcc_has_errors(ctx) ? 1 : 0;
+    }
+    
+    /* Dump AST? */
+    if (ctx->options.emit_ast) {
+        FILE *out = stdout;
+        if (ctx->options.output_file) {
+            out = fopen(ctx->options.output_file, "w");
+        }
+        for (size_t i = 0; i < num_files; i++) {
+            fprintf(out, "/* File: %s */\n", files[i]);
+            mcc_ast_dump(asts[i], out);
+            fprintf(out, "\n");
+        }
+        if (ctx->options.output_file) fclose(out);
+        
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 0;
+    }
+    
+    /* Syntax only? */
+    if (ctx->options.syntax_only) {
+        printf("Syntax OK (%zu files)\n", num_files);
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 0;
+    }
+    
+    /* Create shared semantic analyzer */
+    mcc_sema_t *sema = mcc_sema_create(ctx);
+    
+    /* Analyze all files with shared symbol table */
+    for (size_t i = 0; i < num_files; i++) {
+        if (ctx->options.verbose) {
+            fprintf(stderr, "Analyzing: %s\n", files[i]);
+        }
+        
+        if (!mcc_sema_analyze(sema, asts[i])) {
+            mcc_sema_destroy(sema);
+            for (size_t j = 0; j < num_files; j++) {
+                if (parsers[j]) mcc_parser_destroy(parsers[j]);
+                if (pps[j]) mcc_preprocessor_destroy(pps[j]);
+            }
+            free(asts);
+            free(pps);
+            free(parsers);
+            return 1;
+        }
+    }
+    
+    /* Code generation - use shared symtab and types from sema */
+    mcc_codegen_t *cg = mcc_codegen_create(ctx, sema->symtab, sema->types);
+    mcc_codegen_set_target(cg, ctx->options.arch);
+    mcc_codegen_set_opt_level(cg, ctx->options.opt_level);
+    
+    /* Add all ASTs to the same module */
+    for (size_t i = 0; i < num_files; i++) {
+        if (ctx->options.verbose) {
+            fprintf(stderr, "Generating code: %s\n", files[i]);
+        }
+        
+        if (!mcc_codegen_add_ast(cg, asts[i])) {
+            mcc_codegen_destroy(cg);
+            mcc_sema_destroy(sema);
+            for (size_t j = 0; j < num_files; j++) {
+                if (parsers[j]) mcc_parser_destroy(parsers[j]);
+                if (pps[j]) mcc_preprocessor_destroy(pps[j]);
+            }
+            free(asts);
+            free(pps);
+            free(parsers);
+            return 1;
+        }
+    }
+    
+    /* Finalize code generation */
+    if (!mcc_codegen_finalize(cg)) {
+        mcc_codegen_destroy(cg);
+        mcc_sema_destroy(sema);
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 1;
+    }
+    
+    /* Get output */
+    size_t output_len;
+    char *output = mcc_codegen_get_output(cg, &output_len);
+    
+    /* Write output */
+    FILE *out = stdout;
+    if (ctx->options.output_file) {
+        out = fopen(ctx->options.output_file, "w");
+        if (!out) {
+            mcc_fatal(ctx, "Cannot open output file: %s", ctx->options.output_file);
+            free(output);
+            mcc_codegen_destroy(cg);
+            mcc_sema_destroy(sema);
+            for (size_t i = 0; i < num_files; i++) {
+                if (parsers[i]) mcc_parser_destroy(parsers[i]);
+                if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+            }
+            free(asts);
+            free(pps);
+            free(parsers);
+            return 1;
+        }
+    }
+    
+    fwrite(output, 1, output_len, out);
+    
+    if (ctx->options.output_file) fclose(out);
+    
+    /* Cleanup */
+    free(output);
+    mcc_codegen_destroy(cg);
+    mcc_sema_destroy(sema);
+    for (size_t i = 0; i < num_files; i++) {
+        if (parsers[i]) mcc_parser_destroy(parsers[i]);
+        if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+    }
+    free(asts);
+    free(pps);
+    free(parsers);
+    
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     mcc_options_t opts = {0};
@@ -218,7 +448,10 @@ int main(int argc, char **argv)
     size_t num_defines = 0;
     size_t cap_defines = 0;
     
-    const char *input_file = NULL;
+    /* Multiple input files support */
+    const char **input_files = NULL;
+    size_t num_input_files = 0;
+    size_t cap_input_files = 0;
     
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -322,15 +555,15 @@ int main(int argc, char **argv)
             return 1;
         }
         
-        /* Input file */
-        if (input_file) {
-            fprintf(stderr, "Error: Multiple input files not supported\n");
-            return 1;
+        /* Input file - add to list */
+        if (num_input_files >= cap_input_files) {
+            cap_input_files = cap_input_files ? cap_input_files * 2 : 8;
+            input_files = realloc(input_files, cap_input_files * sizeof(char*));
         }
-        input_file = arg;
+        input_files[num_input_files++] = arg;
     }
     
-    if (!input_file) {
+    if (num_input_files == 0) {
         fprintf(stderr, "Error: No input file\n");
         print_usage(argv[0]);
         return 1;
@@ -340,6 +573,8 @@ int main(int argc, char **argv)
     opts.num_include_paths = num_include_paths;
     opts.defines = defines;
     opts.num_defines = num_defines;
+    opts.input_files = input_files;
+    opts.num_input_files = num_input_files;
     
     /* Create context */
     mcc_context_t *ctx = mcc_context_create();
@@ -350,8 +585,8 @@ int main(int argc, char **argv)
     
     mcc_context_set_options(ctx, &opts);
     
-    /* Compile */
-    int result = compile_file(ctx, input_file);
+    /* Compile all files */
+    int result = compile_files(ctx, input_files, num_input_files);
     
     /* Print diagnostics summary */
     if (ctx->error_count > 0 || ctx->warning_count > 0) {
@@ -363,6 +598,7 @@ int main(int argc, char **argv)
     mcc_context_destroy(ctx);
     free(include_paths);
     free(defines);
+    free(input_files);
     
     return result;
 }

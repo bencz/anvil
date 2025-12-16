@@ -39,8 +39,14 @@ make clean && make
 ## Usage
 
 ```bash
-# Compile C source to assembly (default: S/390)
-./mcc -o output.asm input.c
+# Compile C source to assembly (default: x86-64)
+./mcc -o output.s input.c
+
+# Compile multiple files into a single output
+./mcc -o output.s main.c utils.c math.c
+
+# With verbose output to see progress
+./mcc -v -o output.s file1.c file2.c file3.c
 
 # Specify target architecture
 ./mcc -arch=s370 -o output.asm input.c      # IBM S/370
@@ -48,6 +54,8 @@ make clean && make
 ./mcc -arch=zarch -o output.asm input.c     # z/Architecture
 ./mcc -arch=x86 -o output.s input.c         # x86 32-bit
 ./mcc -arch=x86_64 -o output.s input.c      # x86-64
+./mcc -arch=arm64 -o output.s input.c       # ARM64 (Linux)
+./mcc -arch=arm64_macos -o output.s input.c # ARM64 (Apple Silicon/macOS)
 
 # Add include paths
 ./mcc -Iincludes -o output.asm input.c
@@ -55,8 +63,11 @@ make clean && make
 # Set optimization level
 ./mcc -O2 -o output.asm input.c
 
+# Check syntax only (multiple files supported)
+./mcc -fsyntax-only file1.c file2.c
+
 # Dump AST (for debugging)
-./mcc -dump-ast input.c
+./mcc -ast-dump input.c
 ```
 
 ## Standard Library Headers
@@ -161,6 +172,10 @@ mcc/
 │   ├── typedef_simple.c    # Basic typedef test
 │   ├── typedef_multi.c     # Multiple typedef names test
 │   ├── advanced_types.c    # Advanced types (typedef, nested structs, unions)
+│   ├── multi_file/         # Multi-file compilation tests
+│   │   ├── main_test.c     # Main file with external function calls
+│   │   ├── math_funcs.c    # Math functions (add, subtract, multiply, square)
+│   │   └── utils.c         # Utility functions (abs_val, max, min)
 │   └── ...
 ├── docs/               # Documentation
 │   ├── ARCHITECTURE.md # Detailed architecture

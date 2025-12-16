@@ -81,6 +81,12 @@ void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level);
 /* Main code generation entry point */
 bool mcc_codegen_generate(mcc_codegen_t *cg, mcc_ast_node_t *ast);
 
+/* Add AST from another file to the same module (multi-file support) */
+bool mcc_codegen_add_ast(mcc_codegen_t *cg, mcc_ast_node_t *ast);
+
+/* Finalize code generation after all files have been added */
+bool mcc_codegen_finalize(mcc_codegen_t *cg);
+
 /* Get generated code */
 char *mcc_codegen_get_output(mcc_codegen_t *cg, size_t *len);
 

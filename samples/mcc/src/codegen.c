@@ -9,18 +9,25 @@
 static anvil_arch_t mcc_to_anvil_arch(mcc_arch_t arch)
 {
     switch (arch) {
-        case MCC_ARCH_X86:      return ANVIL_ARCH_X86;
-        case MCC_ARCH_X86_64:   return ANVIL_ARCH_X86_64;
-        case MCC_ARCH_S370:     return ANVIL_ARCH_S370;
-        case MCC_ARCH_S370_XA:  return ANVIL_ARCH_S370_XA;
-        case MCC_ARCH_S390:     return ANVIL_ARCH_S390;
-        case MCC_ARCH_ZARCH:    return ANVIL_ARCH_ZARCH;
-        case MCC_ARCH_PPC32:    return ANVIL_ARCH_PPC32;
-        case MCC_ARCH_PPC64:    return ANVIL_ARCH_PPC64;
-        case MCC_ARCH_PPC64LE:  return ANVIL_ARCH_PPC64LE;
-        case MCC_ARCH_ARM64:    return ANVIL_ARCH_ARM64;
-        default:                return ANVIL_ARCH_X86_64;
+        case MCC_ARCH_X86:         return ANVIL_ARCH_X86;
+        case MCC_ARCH_X86_64:      return ANVIL_ARCH_X86_64;
+        case MCC_ARCH_S370:        return ANVIL_ARCH_S370;
+        case MCC_ARCH_S370_XA:     return ANVIL_ARCH_S370_XA;
+        case MCC_ARCH_S390:        return ANVIL_ARCH_S390;
+        case MCC_ARCH_ZARCH:       return ANVIL_ARCH_ZARCH;
+        case MCC_ARCH_PPC32:       return ANVIL_ARCH_PPC32;
+        case MCC_ARCH_PPC64:       return ANVIL_ARCH_PPC64;
+        case MCC_ARCH_PPC64LE:     return ANVIL_ARCH_PPC64LE;
+        case MCC_ARCH_ARM64:       return ANVIL_ARCH_ARM64;
+        case MCC_ARCH_ARM64_MACOS: return ANVIL_ARCH_ARM64;  /* Same arch, different ABI */
+        default:                   return ANVIL_ARCH_X86_64;
     }
+}
+
+/* Check if architecture uses Darwin ABI */
+static bool mcc_arch_is_darwin(mcc_arch_t arch)
+{
+    return arch == MCC_ARCH_ARM64_MACOS;
 }
 
 mcc_codegen_t *mcc_codegen_create(mcc_context_t *ctx, mcc_symtab_t *symtab,
@@ -51,6 +58,11 @@ void mcc_codegen_destroy(mcc_codegen_t *cg)
 void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
 {
     anvil_ctx_set_target(cg->anvil_ctx, mcc_to_anvil_arch(arch));
+    
+    /* Set Darwin ABI for macOS ARM64 */
+    if (mcc_arch_is_darwin(arch)) {
+        anvil_ctx_set_abi(cg->anvil_ctx, ANVIL_ABI_DARWIN);
+    }
 }
 
 void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level)
@@ -1145,6 +1157,34 @@ bool mcc_codegen_generate(mcc_codegen_t *cg, mcc_ast_node_t *ast)
         mcc_codegen_decl(cg, ast->data.translation_unit.decls[i]);
     }
     
+    return !mcc_has_errors(cg->mcc_ctx);
+}
+
+/* Add AST from another file to the same module (multi-file support) */
+bool mcc_codegen_add_ast(mcc_codegen_t *cg, mcc_ast_node_t *ast)
+{
+    if (!ast || ast->kind != AST_TRANSLATION_UNIT) {
+        return false;
+    }
+    
+    /* Create module if not already created */
+    if (!cg->anvil_mod) {
+        cg->anvil_mod = anvil_module_create(cg->anvil_ctx, "mcc_output");
+    }
+    
+    /* Generate code for all declarations in this AST */
+    for (size_t i = 0; i < ast->data.translation_unit.num_decls; i++) {
+        mcc_codegen_decl(cg, ast->data.translation_unit.decls[i]);
+    }
+    
+    return !mcc_has_errors(cg->mcc_ctx);
+}
+
+/* Finalize code generation after all files have been added */
+bool mcc_codegen_finalize(mcc_codegen_t *cg)
+{
+    /* Currently nothing special to do - module is ready for codegen */
+    /* Future: could add link-time optimizations, symbol resolution checks, etc. */
     return !mcc_has_errors(cg->mcc_ctx);
 }
 

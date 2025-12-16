@@ -44,6 +44,7 @@ typedef enum {
     MCC_ARCH_PPC64,
     MCC_ARCH_PPC64LE,
     MCC_ARCH_ARM64,
+    MCC_ARCH_ARM64_MACOS,   /* ARM64 with Darwin ABI (Apple Silicon) */
     MCC_ARCH_COUNT
 } mcc_arch_t;
 
@@ -65,6 +66,10 @@ struct mcc_options {
     bool preprocess_only;       /* -E */
     bool syntax_only;           /* -fsyntax-only */
     bool emit_ast;              /* -ast-dump */
+    
+    /* Input files (multiple file support) */
+    const char **input_files;
+    size_t num_input_files;
     
     /* Include paths */
     const char **include_paths;

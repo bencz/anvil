@@ -10,6 +10,50 @@ MCC is a complete C89 compiler frontend that generates code through the ANVIL in
 Source Code → Preprocessor → Lexer → Parser → Semantic Analysis → Code Generation → Assembly
 ```
 
+### Multi-File Compilation
+
+MCC supports compiling multiple source files into a single output. The compilation flow for multiple files:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   file1.c   │     │   file2.c   │     │   file3.c   │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Preprocess  │     │ Preprocess  │     │ Preprocess  │
+│   + Parse   │     │   + Parse   │     │   + Parse   │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│    AST 1    │     │    AST 2    │     │    AST 3    │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           │
+                           ▼
+                 ┌─────────────────┐
+                 │  Shared Sema    │  (common symbol table)
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │ Shared Codegen  │  (single ANVIL module)
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  Assembly Out   │
+                 └─────────────────┘
+```
+
+Key aspects:
+- Each file is preprocessed and parsed independently
+- All ASTs share a common semantic analyzer (symbol table)
+- All code is generated into a single ANVIL module
+- Functions defined in one file can be called from another
+
 ## Compilation Pipeline
 
 ### 1. Preprocessor (`preprocessor.c`)

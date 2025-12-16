@@ -22,6 +22,26 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 Source (.c) → Preprocessor → Lexer → Parser → Sema → Codegen → Assembly
 ```
 
+### Multi-File Compilation
+
+MCC supports compiling multiple source files into a single output:
+
+```bash
+# Compile multiple files
+./mcc -o output.s file1.c file2.c file3.c
+
+# With verbose output to see progress
+./mcc -v -arch=x86_64 -o output.s main.c utils.c math.c
+
+# Check syntax of multiple files
+./mcc -fsyntax-only file1.c file2.c
+```
+
+All files share:
+- A common symbol table (functions/variables visible across files)
+- A single ANVIL module (all code in one output)
+- Shared type context
+
 ### Key Data Structures
 
 | Structure | File | Purpose |
@@ -59,6 +79,7 @@ Source (.c) → Preprocessor → Lexer → Parser → Sema → Codegen → Assem
 | `preprocessor_test.c` | `#if`, `#elif`, `#else`, `#define`, macros |
 | `bitwise.c` | Bitwise operations (`&`, `|`, `^`, `~`, `<<`, `>>`) |
 | `simple_struct.c` | Basic struct with member access |
+| `multi_file/` | Multi-file compilation tests |
 
 ### Supported C89 Features
 
@@ -104,6 +125,8 @@ Source (.c) → Preprocessor → Lexer → Parser → Sema → Codegen → Assem
 | x86 | AT&T | cdecl |
 | x86-64 | AT&T | System V AMD64 |
 | PowerPC | GAS | AIX/ELF |
+| ARM64 | GAS | AAPCS64 (Linux) |
+| ARM64 macOS | GAS | Darwin ABI (Apple Silicon) |
 
 ## For Assistants
 

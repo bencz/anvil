@@ -25,6 +25,8 @@ MCC uses the ANVIL library for:
 | `ANVIL_ARCH_X86_64` | AT&T | x86-64 |
 | `ANVIL_ARCH_PPC32` | GAS | PowerPC 32-bit |
 | `ANVIL_ARCH_PPC64` | GAS | PowerPC 64-bit |
+| `ANVIL_ARCH_ARM64` | GAS | ARM64 (Linux) |
+| `ANVIL_ARCH_ARM64` + Darwin ABI | GAS | ARM64 (Apple Silicon/macOS) |
 
 ## Code Generator API
 
@@ -91,8 +93,14 @@ void mcc_codegen_destroy(mcc_codegen_t *cg);
 void mcc_codegen_set_target(mcc_codegen_t *cg, anvil_arch_t arch);
 void mcc_codegen_set_opt_level(mcc_codegen_t *cg, int level);
 
-/* Code generation */
+/* Single-file code generation */
 bool mcc_codegen_generate(mcc_codegen_t *cg, mcc_ast_node_t *ast);
+
+/* Multi-file code generation */
+bool mcc_codegen_add_ast(mcc_codegen_t *cg, mcc_ast_node_t *ast);
+bool mcc_codegen_finalize(mcc_codegen_t *cg);
+
+/* Get output */
 char *mcc_codegen_get_output(mcc_codegen_t *cg, size_t *len);
 ```
 
@@ -427,6 +435,65 @@ ADD$ENTRY DS    0H
          LM    R0,R12,20(,R13)
          BR    R14
          DROP  R12
+```
+
+## Multi-File Compilation
+
+MCC supports compiling multiple source files into a single output. This is useful for projects with separate compilation units.
+
+### Usage
+
+```bash
+# Compile multiple files into one output
+./mcc -o output.s file1.c file2.c file3.c
+
+# With verbose output
+./mcc -v -arch=x86_64 -o output.s main.c utils.c math.c
+```
+
+### How It Works
+
+1. **Parsing Phase**: Each file is preprocessed and parsed independently, producing separate ASTs
+2. **Semantic Analysis**: All ASTs are analyzed with a shared symbol table, allowing cross-file references
+3. **Code Generation**: All ASTs are added to a single ANVIL module using `mcc_codegen_add_ast()`
+4. **Finalization**: `mcc_codegen_finalize()` is called to complete code generation
+5. **Output**: A single assembly file containing all functions and globals
+
+### API for Multi-File
+
+```c
+/* Create codegen with shared symbol table */
+mcc_codegen_t *cg = mcc_codegen_create(ctx, shared_symtab, shared_types);
+mcc_codegen_set_target(cg, arch);
+
+/* Add each file's AST */
+for (int i = 0; i < num_files; i++) {
+    mcc_codegen_add_ast(cg, asts[i]);
+}
+
+/* Finalize and get output */
+mcc_codegen_finalize(cg);
+char *output = mcc_codegen_get_output(cg, &len);
+```
+
+### Cross-File References
+
+Functions declared in one file can be called from another:
+
+**math.c:**
+```c
+int add(int a, int b) {
+    return a + b;
+}
+```
+
+**main.c:**
+```c
+int add(int a, int b);  /* Declaration */
+
+int main(void) {
+    return add(1, 2);   /* Call function from math.c */
+}
 ```
 
 ## Optimization
