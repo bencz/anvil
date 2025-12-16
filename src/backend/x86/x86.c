@@ -40,6 +40,12 @@ typedef struct {
     size_t len;
 } x86_string_entry_t;
 
+/* Stack slot for local variables */
+typedef struct {
+    anvil_value_t *value;
+    int offset;
+} x86_stack_slot_t;
+
 /* Backend private data */
 typedef struct {
     anvil_strbuf_t code;
@@ -48,11 +54,20 @@ typedef struct {
     int label_counter;
     int string_counter;
     int stack_offset;
+    int next_stack_offset;
+    
+    /* Stack slots for local variables */
+    x86_stack_slot_t *stack_slots;
+    size_t num_stack_slots;
+    size_t stack_slots_cap;
     
     /* String table */
     x86_string_entry_t *strings;
     size_t num_strings;
     size_t strings_cap;
+    
+    /* Current function being generated */
+    anvil_func_t *current_func;
 } x86_backend_t;
 
 static const anvil_arch_info_t x86_arch_info = {
@@ -95,8 +110,43 @@ static void x86_cleanup(anvil_backend_t *be)
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
     free(priv->strings);
+    free(priv->stack_slots);
     free(priv);
     be->priv = NULL;
+}
+
+/* Add stack slot for local variable */
+static int x86_add_stack_slot(x86_backend_t *be, anvil_value_t *val)
+{
+    if (be->num_stack_slots >= be->stack_slots_cap) {
+        size_t new_cap = be->stack_slots_cap ? be->stack_slots_cap * 2 : 16;
+        x86_stack_slot_t *new_slots = realloc(be->stack_slots,
+            new_cap * sizeof(x86_stack_slot_t));
+        if (!new_slots) return -1;
+        be->stack_slots = new_slots;
+        be->stack_slots_cap = new_cap;
+    }
+    
+    /* x86 stack grows down, allocate 4 bytes per slot */
+    be->next_stack_offset += 4;
+    int offset = be->next_stack_offset;
+    
+    be->stack_slots[be->num_stack_slots].value = val;
+    be->stack_slots[be->num_stack_slots].offset = offset;
+    be->num_stack_slots++;
+    
+    return offset;
+}
+
+/* Get stack slot offset for a value */
+static int x86_get_stack_slot(x86_backend_t *be, anvil_value_t *val)
+{
+    for (size_t i = 0; i < be->num_stack_slots; i++) {
+        if (be->stack_slots[i].value == val) {
+            return be->stack_slots[i].offset;
+        }
+    }
+    return -1;
 }
 
 static const anvil_arch_info_t *x86_get_arch_info(anvil_backend_t *be)
@@ -181,6 +231,96 @@ static const char *x86_add_string(x86_backend_t *be, const char *str)
     return entry->label;
 }
 
+/* Load a value into a register */
+static void x86_emit_load_value(x86_backend_t *be, anvil_value_t *val, int target_reg, anvil_syntax_t syntax)
+{
+    if (!val) return;
+    
+    const char *reg = x86_gpr_names[target_reg];
+    
+    switch (val->kind) {
+        case ANVIL_VAL_CONST_INT:
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_appendf(&be->code, "\tmovl $%lld, %%%s\n", (long long)val->data.i, reg);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov %s, %lld\n", reg, (long long)val->data.i);
+            }
+            break;
+            
+        case ANVIL_VAL_CONST_NULL:
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_appendf(&be->code, "\txorl %%%s, %%%s\n", reg, reg);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\txor %s, %s\n", reg, reg);
+            }
+            break;
+            
+        case ANVIL_VAL_CONST_STRING:
+            {
+                const char *label = x86_add_string(be, val->data.str ? val->data.str : "");
+                if (syntax == ANVIL_SYNTAX_GAS) {
+                    anvil_strbuf_appendf(&be->code, "\tmovl $%s, %%%s\n", label, reg);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tmov %s, %s\n", reg, label);
+                }
+            }
+            break;
+            
+        case ANVIL_VAL_PARAM:
+            /* Parameters are at positive offsets from EBP (cdecl: return addr + saved ebp = 8) */
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_appendf(&be->code, "\tmovl %zu(%%ebp), %%%s\n", 8 + val->data.param.index * 4, reg);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov %s, [ebp+%zu]\n", reg, 8 + val->data.param.index * 4);
+            }
+            break;
+            
+        case ANVIL_VAL_INSTR:
+            if (val->data.instr && val->data.instr->op == ANVIL_OP_ALLOCA) {
+                /* Load address of stack slot */
+                int offset = x86_get_stack_slot(be, val);
+                if (offset >= 0) {
+                    if (syntax == ANVIL_SYNTAX_GAS) {
+                        anvil_strbuf_appendf(&be->code, "\tleal -%d(%%ebp), %%%s\n", offset, reg);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tlea %s, [ebp-%d]\n", reg, offset);
+                    }
+                }
+            } else {
+                /* Result should be in EAX by convention */
+                if (target_reg != X86_EAX) {
+                    if (syntax == ANVIL_SYNTAX_GAS) {
+                        anvil_strbuf_appendf(&be->code, "\tmovl %%eax, %%%s\n", reg);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tmov %s, eax\n", reg);
+                    }
+                }
+            }
+            break;
+            
+        case ANVIL_VAL_GLOBAL:
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_appendf(&be->code, "\tmovl $%s, %%%s\n", val->name, reg);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov %s, %s\n", reg, val->name);
+            }
+            break;
+            
+        case ANVIL_VAL_FUNC:
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_appendf(&be->code, "\tmovl $%s, %%%s\n", val->name, reg);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov %s, %s\n", reg, val->name);
+            }
+            break;
+            
+        default:
+            anvil_strbuf_appendf(&be->code, "\t# Unknown value kind %d\n", val->kind);
+            break;
+    }
+}
+
+/* Legacy emit_value for backward compatibility */
 static void x86_emit_value(x86_backend_t *be, anvil_value_t *val, anvil_syntax_t syntax)
 {
     if (!val) return;
@@ -247,289 +387,318 @@ static void x86_emit_instr(x86_backend_t *be, anvil_instr_t *instr, anvil_syntax
     if (!instr) return;
     
     switch (instr->op) {
+        case ANVIL_OP_PHI:
+            break;
+            
+        case ANVIL_OP_ALLOCA:
+            {
+                int offset = x86_add_stack_slot(be, instr->result);
+                if (syntax == ANVIL_SYNTAX_GAS) {
+                    anvil_strbuf_appendf(&be->code, "\tmovl $0, -%d(%%ebp)\n", offset);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tmov dword [ebp-%d], 0\n", offset);
+                }
+            }
+            break;
+            
         case ANVIL_OP_ADD:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\taddl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\taddl %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tadd eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\tadd eax, ecx\n");
             }
             break;
             
         case ANVIL_OP_SUB:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tsubl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\tsubl %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tsub eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\tsub eax, ecx\n");
             }
             break;
             
         case ANVIL_OP_MUL:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\timull ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\timull %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\timul eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\timul eax, ecx\n");
             }
             break;
             
         case ANVIL_OP_SDIV:
-        case ANVIL_OP_UDIV:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tcdq\n");
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %ecx\n");
-                anvil_strbuf_appendf(&be->code, "\t%s %%ecx\n", 
-                    instr->op == ANVIL_OP_SDIV ? "idivl" : "divl");
+                anvil_strbuf_append(&be->code, "\tcdq\n\tidivl %ecx\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tcdq\n\tmov ecx, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_appendf(&be->code, "\n\t%s ecx\n",
-                    instr->op == ANVIL_OP_SDIV ? "idiv" : "div");
+                anvil_strbuf_append(&be->code, "\tcdq\n\tidiv ecx\n");
+            }
+            break;
+            
+        case ANVIL_OP_UDIV:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\txorl %edx, %edx\n\tdivl %ecx\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\txor edx, edx\n\tdiv ecx\n");
+            }
+            break;
+            
+        case ANVIL_OP_SMOD:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tcdq\n\tidivl %ecx\n\tmovl %edx, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tcdq\n\tidiv ecx\n\tmov eax, edx\n");
+            }
+            break;
+            
+        case ANVIL_OP_UMOD:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\txorl %edx, %edx\n\tdivl %ecx\n\tmovl %edx, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\txor edx, edx\n\tdiv ecx\n\tmov eax, edx\n");
             }
             break;
             
         case ANVIL_OP_AND:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tandl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\tandl %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tand eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\tand eax, ecx\n");
             }
             break;
             
         case ANVIL_OP_OR:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\torl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\torl %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tor eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\tor eax, ecx\n");
             }
             break;
             
         case ANVIL_OP_XOR:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\txorl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
+                anvil_strbuf_append(&be->code, "\txorl %ecx, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\txor eax, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n");
+                anvil_strbuf_append(&be->code, "\txor eax, ecx\n");
+            }
+            break;
+            
+        case ANVIL_OP_NOT:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tnotl %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tnot eax\n");
+            }
+            break;
+            
+        case ANVIL_OP_NEG:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tnegl %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tneg eax\n");
             }
             break;
             
         case ANVIL_OP_SHL:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %ecx\n");
                 anvil_strbuf_append(&be->code, "\tshll %cl, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov ecx, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n\tshl eax, cl\n");
+                anvil_strbuf_append(&be->code, "\tshl eax, cl\n");
             }
             break;
             
         case ANVIL_OP_SHR:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %ecx\n");
                 anvil_strbuf_append(&be->code, "\tshrl %cl, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov ecx, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n\tshr eax, cl\n");
+                anvil_strbuf_append(&be->code, "\tshr eax, cl\n");
             }
             break;
             
         case ANVIL_OP_SAR:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %ecx\n");
                 anvil_strbuf_append(&be->code, "\tsarl %cl, %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov ecx, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n\tsar eax, cl\n");
+                anvil_strbuf_append(&be->code, "\tsar eax, cl\n");
             }
             break;
             
         case ANVIL_OP_LOAD:
+            if (instr->operands[0]->kind == ANVIL_VAL_INSTR &&
+                instr->operands[0]->data.instr &&
+                instr->operands[0]->data.instr->op == ANVIL_OP_ALLOCA) {
+                int offset = x86_get_stack_slot(be, instr->operands[0]);
+                if (offset >= 0) {
+                    if (syntax == ANVIL_SYNTAX_GAS) {
+                        anvil_strbuf_appendf(&be->code, "\tmovl -%d(%%ebp), %%eax\n", offset);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tmov eax, [ebp-%d]\n", offset);
+                    }
+                    break;
+                }
+            }
+            if (instr->operands[0]->kind == ANVIL_VAL_GLOBAL) {
+                if (syntax == ANVIL_SYNTAX_GAS) {
+                    anvil_strbuf_appendf(&be->code, "\tmovl %s, %%eax\n", instr->operands[0]->name);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tmov eax, [%s]\n", instr->operands[0]->name);
+                }
+                break;
+            }
+            x86_emit_load_value(be, instr->operands[0], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tmovl (%eax), %eax\n");
+                anvil_strbuf_append(&be->code, "\tmovl (%ecx), %eax\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov eax, [eax]\n");
+                anvil_strbuf_append(&be->code, "\tmov eax, [ecx]\n");
             }
             break;
             
         case ANVIL_OP_STORE:
+            if (instr->operands[1]->kind == ANVIL_VAL_INSTR &&
+                instr->operands[1]->data.instr &&
+                instr->operands[1]->data.instr->op == ANVIL_OP_ALLOCA) {
+                int offset = x86_get_stack_slot(be, instr->operands[1]);
+                if (offset >= 0) {
+                    x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                    if (syntax == ANVIL_SYNTAX_GAS) {
+                        anvil_strbuf_appendf(&be->code, "\tmovl %%eax, -%d(%%ebp)\n", offset);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tmov [ebp-%d], eax\n", offset);
+                    }
+                    break;
+                }
+            }
+            if (instr->operands[1]->kind == ANVIL_VAL_GLOBAL) {
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                if (syntax == ANVIL_SYNTAX_GAS) {
+                    anvil_strbuf_appendf(&be->code, "\tmovl %%eax, %s\n", instr->operands[1]->name);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tmov [%s], eax\n", instr->operands[1]->name);
+                }
+                break;
+            }
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
             if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, ", %ecx\n");
                 anvil_strbuf_append(&be->code, "\tmovl %eax, (%ecx)\n");
             } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov ecx, ");
-                x86_emit_value(be, instr->operands[1], syntax);
-                anvil_strbuf_append(&be->code, "\n\tmov [ecx], eax\n");
+                anvil_strbuf_append(&be->code, "\tmov [ecx], eax\n");
+            }
+            break;
+            
+        case ANVIL_OP_GEP:
+            {
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                if (instr->num_operands > 1) {
+                    x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+                    int elem_size = 4;
+                    if (instr->result && instr->result->type &&
+                        instr->result->type->kind == ANVIL_TYPE_PTR &&
+                        instr->result->type->data.pointee) {
+                        switch (instr->result->type->data.pointee->kind) {
+                            case ANVIL_TYPE_I8: case ANVIL_TYPE_U8: elem_size = 1; break;
+                            case ANVIL_TYPE_I16: case ANVIL_TYPE_U16: elem_size = 2; break;
+                            case ANVIL_TYPE_I64: case ANVIL_TYPE_U64: case ANVIL_TYPE_F64: elem_size = 8; break;
+                            default: elem_size = 4; break;
+                        }
+                    }
+                    if (syntax == ANVIL_SYNTAX_GAS) {
+                        if (elem_size == 1) anvil_strbuf_append(&be->code, "\tleal (%eax,%ecx,1), %eax\n");
+                        else if (elem_size == 2) anvil_strbuf_append(&be->code, "\tleal (%eax,%ecx,2), %eax\n");
+                        else if (elem_size == 4) anvil_strbuf_append(&be->code, "\tleal (%eax,%ecx,4), %eax\n");
+                        else if (elem_size == 8) anvil_strbuf_append(&be->code, "\tleal (%eax,%ecx,8), %eax\n");
+                        else { anvil_strbuf_appendf(&be->code, "\timull $%d, %%ecx\n\taddl %%ecx, %%eax\n", elem_size); }
+                    } else {
+                        if (elem_size == 1) anvil_strbuf_append(&be->code, "\tlea eax, [eax+ecx*1]\n");
+                        else if (elem_size == 2) anvil_strbuf_append(&be->code, "\tlea eax, [eax+ecx*2]\n");
+                        else if (elem_size == 4) anvil_strbuf_append(&be->code, "\tlea eax, [eax+ecx*4]\n");
+                        else if (elem_size == 8) anvil_strbuf_append(&be->code, "\tlea eax, [eax+ecx*8]\n");
+                        else { anvil_strbuf_appendf(&be->code, "\timul ecx, %d\n\tadd eax, ecx\n", elem_size); }
+                    }
+                }
+            }
+            break;
+            
+        case ANVIL_OP_STRUCT_GEP:
+            {
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                int offset = 0;
+                if (instr->aux_type && instr->aux_type->kind == ANVIL_TYPE_STRUCT &&
+                    instr->num_operands > 1 && instr->operands[1]->kind == ANVIL_VAL_CONST_INT) {
+                    unsigned idx = (unsigned)instr->operands[1]->data.i;
+                    if (idx < instr->aux_type->data.struc.num_fields)
+                        offset = (int)instr->aux_type->data.struc.offsets[idx];
+                }
+                if (offset != 0) {
+                    if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_appendf(&be->code, "\taddl $%d, %%eax\n", offset);
+                    else anvil_strbuf_appendf(&be->code, "\tadd eax, %d\n", offset);
+                }
             }
             break;
             
         case ANVIL_OP_BR:
-            if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_appendf(&be->code, "\tjmp .L%s\n", instr->true_block->name);
-            } else {
-                anvil_strbuf_appendf(&be->code, "\tjmp .L%s\n", instr->true_block->name);
+            if (instr->true_block) {
+                anvil_strbuf_appendf(&be->code, "\tjmp .L%s_%s\n", be->current_func->name, instr->true_block->name);
             }
             break;
             
         case ANVIL_OP_BR_COND:
-            if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_append(&be->code, "\tmovl ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, ", %eax\n");
-                anvil_strbuf_append(&be->code, "\ttestl %eax, %eax\n");
-                anvil_strbuf_appendf(&be->code, "\tjnz .L%s\n", instr->true_block->name);
-                anvil_strbuf_appendf(&be->code, "\tjmp .L%s\n", instr->false_block->name);
-            } else {
-                anvil_strbuf_append(&be->code, "\tmov eax, ");
-                x86_emit_value(be, instr->operands[0], syntax);
-                anvil_strbuf_append(&be->code, "\n\ttest eax, eax\n");
-                anvil_strbuf_appendf(&be->code, "\tjnz .L%s\n", instr->true_block->name);
-                anvil_strbuf_appendf(&be->code, "\tjmp .L%s\n", instr->false_block->name);
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\ttestl %eax, %eax\n");
+            else anvil_strbuf_append(&be->code, "\ttest eax, eax\n");
+            if (instr->true_block && instr->false_block) {
+                anvil_strbuf_appendf(&be->code, "\tjnz .L%s_%s\n", be->current_func->name, instr->true_block->name);
+                anvil_strbuf_appendf(&be->code, "\tjmp .L%s_%s\n", be->current_func->name, instr->false_block->name);
             }
             break;
             
         case ANVIL_OP_RET:
-            if (instr->num_operands > 0) {
-                if (syntax == ANVIL_SYNTAX_GAS) {
-                    anvil_strbuf_append(&be->code, "\tmovl ");
-                    x86_emit_value(be, instr->operands[0], syntax);
-                    anvil_strbuf_append(&be->code, ", %eax\n");
-                } else {
-                    anvil_strbuf_append(&be->code, "\tmov eax, ");
-                    x86_emit_value(be, instr->operands[0], syntax);
-                    anvil_strbuf_append(&be->code, "\n");
-                }
-            }
+            if (instr->num_operands > 0 && instr->operands[0])
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
             x86_emit_epilogue(be, syntax);
             break;
             
         case ANVIL_OP_CALL:
-            /* Push arguments in reverse order (cdecl) */
             for (int i = (int)instr->num_operands - 1; i >= 1; i--) {
-                if (syntax == ANVIL_SYNTAX_GAS) {
-                    anvil_strbuf_append(&be->code, "\tpushl ");
-                    x86_emit_value(be, instr->operands[i], syntax);
-                    anvil_strbuf_append(&be->code, "\n");
-                } else {
-                    anvil_strbuf_append(&be->code, "\tpush ");
-                    x86_emit_value(be, instr->operands[i], syntax);
-                    anvil_strbuf_append(&be->code, "\n");
-                }
+                x86_emit_load_value(be, instr->operands[i], X86_EAX, syntax);
+                if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\tpushl %eax\n");
+                else anvil_strbuf_append(&be->code, "\tpush eax\n");
             }
-            if (syntax == ANVIL_SYNTAX_GAS) {
-                anvil_strbuf_appendf(&be->code, "\tcall %s\n", instr->operands[0]->name);
-                if (instr->num_operands > 1) {
-                    anvil_strbuf_appendf(&be->code, "\taddl $%zu, %%esp\n", 
-                        (instr->num_operands - 1) * 4);
-                }
-            } else {
-                anvil_strbuf_appendf(&be->code, "\tcall %s\n", instr->operands[0]->name);
-                if (instr->num_operands > 1) {
-                    anvil_strbuf_appendf(&be->code, "\tadd esp, %zu\n",
-                        (instr->num_operands - 1) * 4);
-                }
+            anvil_strbuf_appendf(&be->code, "\tcall %s\n", instr->operands[0]->name);
+            if (instr->num_operands > 1) {
+                if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_appendf(&be->code, "\taddl $%zu, %%esp\n", (instr->num_operands - 1) * 4);
+                else anvil_strbuf_appendf(&be->code, "\tadd esp, %zu\n", (instr->num_operands - 1) * 4);
             }
             break;
             
-        case ANVIL_OP_CMP_EQ:
-        case ANVIL_OP_CMP_NE:
-        case ANVIL_OP_CMP_LT:
-        case ANVIL_OP_CMP_LE:
-        case ANVIL_OP_CMP_GT:
-        case ANVIL_OP_CMP_GE:
+        case ANVIL_OP_CMP_EQ: case ANVIL_OP_CMP_NE: case ANVIL_OP_CMP_LT:
+        case ANVIL_OP_CMP_LE: case ANVIL_OP_CMP_GT: case ANVIL_OP_CMP_GE:
             {
                 const char *setcc;
                 switch (instr->op) {
@@ -541,24 +710,283 @@ static void x86_emit_instr(x86_backend_t *be, anvil_instr_t *instr, anvil_syntax
                     case ANVIL_OP_CMP_GE: setcc = "setge"; break;
                     default: setcc = "sete"; break;
                 }
-                
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
                 if (syntax == ANVIL_SYNTAX_GAS) {
-                    anvil_strbuf_append(&be->code, "\tmovl ");
-                    x86_emit_value(be, instr->operands[0], syntax);
-                    anvil_strbuf_append(&be->code, ", %eax\n");
-                    anvil_strbuf_append(&be->code, "\tcmpl ");
-                    x86_emit_value(be, instr->operands[1], syntax);
-                    anvil_strbuf_append(&be->code, ", %eax\n");
+                    anvil_strbuf_append(&be->code, "\tcmpl %ecx, %eax\n");
                     anvil_strbuf_appendf(&be->code, "\t%s %%al\n", setcc);
                     anvil_strbuf_append(&be->code, "\tmovzbl %al, %eax\n");
                 } else {
-                    anvil_strbuf_append(&be->code, "\tmov eax, ");
-                    x86_emit_value(be, instr->operands[0], syntax);
-                    anvil_strbuf_append(&be->code, "\n\tcmp eax, ");
-                    x86_emit_value(be, instr->operands[1], syntax);
-                    anvil_strbuf_appendf(&be->code, "\n\t%s al\n", setcc);
+                    anvil_strbuf_append(&be->code, "\tcmp eax, ecx\n");
+                    anvil_strbuf_appendf(&be->code, "\t%s al\n", setcc);
                     anvil_strbuf_append(&be->code, "\tmovzx eax, al\n");
                 }
+            }
+            break;
+            
+        case ANVIL_OP_CMP_ULT: case ANVIL_OP_CMP_ULE: case ANVIL_OP_CMP_UGT: case ANVIL_OP_CMP_UGE:
+            {
+                const char *setcc;
+                switch (instr->op) {
+                    case ANVIL_OP_CMP_ULT: setcc = "setb"; break;
+                    case ANVIL_OP_CMP_ULE: setcc = "setbe"; break;
+                    case ANVIL_OP_CMP_UGT: setcc = "seta"; break;
+                    case ANVIL_OP_CMP_UGE: setcc = "setae"; break;
+                    default: setcc = "setb"; break;
+                }
+                x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+                x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+                if (syntax == ANVIL_SYNTAX_GAS) {
+                    anvil_strbuf_append(&be->code, "\tcmpl %ecx, %eax\n");
+                    anvil_strbuf_appendf(&be->code, "\t%s %%al\n", setcc);
+                    anvil_strbuf_append(&be->code, "\tmovzbl %al, %eax\n");
+                } else {
+                    anvil_strbuf_append(&be->code, "\tcmp eax, ecx\n");
+                    anvil_strbuf_appendf(&be->code, "\t%s al\n", setcc);
+                    anvil_strbuf_append(&be->code, "\tmovzx eax, al\n");
+                }
+            }
+            break;
+            
+        case ANVIL_OP_TRUNC:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            break;
+            
+        case ANVIL_OP_ZEXT:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (instr->operands[0]->type) {
+                if (instr->operands[0]->type->kind == ANVIL_TYPE_I8 || instr->operands[0]->type->kind == ANVIL_TYPE_U8) {
+                    if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\tmovzbl %al, %eax\n");
+                    else anvil_strbuf_append(&be->code, "\tmovzx eax, al\n");
+                } else if (instr->operands[0]->type->kind == ANVIL_TYPE_I16 || instr->operands[0]->type->kind == ANVIL_TYPE_U16) {
+                    if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\tmovzwl %ax, %eax\n");
+                    else anvil_strbuf_append(&be->code, "\tmovzx eax, ax\n");
+                }
+            }
+            break;
+            
+        case ANVIL_OP_SEXT:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (instr->operands[0]->type) {
+                if (instr->operands[0]->type->kind == ANVIL_TYPE_I8) {
+                    if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\tmovsbl %al, %eax\n");
+                    else anvil_strbuf_append(&be->code, "\tmovsx eax, al\n");
+                } else if (instr->operands[0]->type->kind == ANVIL_TYPE_I16) {
+                    if (syntax == ANVIL_SYNTAX_GAS) anvil_strbuf_append(&be->code, "\tmovswl %ax, %eax\n");
+                    else anvil_strbuf_append(&be->code, "\tmovsx eax, ax\n");
+                }
+            }
+            break;
+            
+        case ANVIL_OP_BITCAST: case ANVIL_OP_PTRTOINT: case ANVIL_OP_INTTOPTR:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            break;
+            
+        case ANVIL_OP_SELECT:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            x86_emit_load_value(be, instr->operands[2], X86_EDX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\ttestl %eax, %eax\n\tcmovzl %edx, %ecx\n\tmovl %ecx, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\ttest eax, eax\n\tcmovz ecx, edx\n\tmov eax, ecx\n");
+            }
+            break;
+            
+        /* Floating-point operations using SSE2 */
+        case ANVIL_OP_FADD:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tmovd %ecx, %xmm1\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\taddsd %xmm1, %xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\taddss %xmm1, %xmm0\n");
+                anvil_strbuf_append(&be->code, "\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tmovd xmm1, ecx\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\taddsd xmm0, xmm1\n");
+                else
+                    anvil_strbuf_append(&be->code, "\taddss xmm0, xmm1\n");
+                anvil_strbuf_append(&be->code, "\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FSUB:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tmovd %ecx, %xmm1\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tsubsd %xmm1, %xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tsubss %xmm1, %xmm0\n");
+                anvil_strbuf_append(&be->code, "\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tmovd xmm1, ecx\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tsubsd xmm0, xmm1\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tsubss xmm0, xmm1\n");
+                anvil_strbuf_append(&be->code, "\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FMUL:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tmovd %ecx, %xmm1\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tmulsd %xmm1, %xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tmulss %xmm1, %xmm0\n");
+                anvil_strbuf_append(&be->code, "\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tmovd xmm1, ecx\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tmulsd xmm0, xmm1\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tmulss xmm0, xmm1\n");
+                anvil_strbuf_append(&be->code, "\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FDIV:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tmovd %ecx, %xmm1\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tdivsd %xmm1, %xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tdivss %xmm1, %xmm0\n");
+                anvil_strbuf_append(&be->code, "\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tmovd xmm1, ecx\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tdivsd xmm0, xmm1\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tdivss xmm0, xmm1\n");
+                anvil_strbuf_append(&be->code, "\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FNEG:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\txorl $0x80000000, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\txor eax, 0x80000000\n");
+            }
+            break;
+            
+        case ANVIL_OP_FABS:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tandl $0x7FFFFFFF, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tand eax, 0x7FFFFFFF\n");
+            }
+            break;
+            
+        case ANVIL_OP_FCMP:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            x86_emit_load_value(be, instr->operands[1], X86_ECX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tmovd %ecx, %xmm1\n");
+                anvil_strbuf_append(&be->code, "\tucomiss %xmm1, %xmm0\n");
+                anvil_strbuf_append(&be->code, "\tseta %al\n\tmovzbl %al, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tmovd xmm1, ecx\n");
+                anvil_strbuf_append(&be->code, "\tucomiss xmm0, xmm1\n");
+                anvil_strbuf_append(&be->code, "\tseta al\n\tmovzx eax, al\n");
+            }
+            break;
+            
+        case ANVIL_OP_SITOFP:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvtsi2sd %eax, %xmm0\n\tmovq %xmm0, %eax\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvtsi2ss %eax, %xmm0\n\tmovd %xmm0, %eax\n");
+            } else {
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvtsi2sd xmm0, eax\n\tmovq eax, xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvtsi2ss xmm0, eax\n\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_UITOFP:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovl %eax, %eax\n");  /* Zero-extend */
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvtsi2sd %eax, %xmm0\n\tmovq %xmm0, %eax\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvtsi2ss %eax, %xmm0\n\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmov eax, eax\n");
+                if (instr->result && instr->result->type && instr->result->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvtsi2sd xmm0, eax\n\tmovq eax, xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvtsi2ss xmm0, eax\n\tmovd eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FPTOSI:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n");
+                if (instr->operands[0]->type && instr->operands[0]->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvttsd2si %xmm0, %eax\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvttss2si %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n");
+                if (instr->operands[0]->type && instr->operands[0]->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvttsd2si eax, xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvttss2si eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FPTOUI:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n");
+                if (instr->operands[0]->type && instr->operands[0]->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvttsd2si %xmm0, %eax\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvttss2si %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n");
+                if (instr->operands[0]->type && instr->operands[0]->type->kind == ANVIL_TYPE_F64)
+                    anvil_strbuf_append(&be->code, "\tcvttsd2si eax, xmm0\n");
+                else
+                    anvil_strbuf_append(&be->code, "\tcvttss2si eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FPEXT:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovd %eax, %xmm0\n\tcvtss2sd %xmm0, %xmm0\n\tmovq %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovd xmm0, eax\n\tcvtss2sd xmm0, xmm0\n\tmovq eax, xmm0\n");
+            }
+            break;
+            
+        case ANVIL_OP_FPTRUNC:
+            x86_emit_load_value(be, instr->operands[0], X86_EAX, syntax);
+            if (syntax == ANVIL_SYNTAX_GAS) {
+                anvil_strbuf_append(&be->code, "\tmovq %eax, %xmm0\n\tcvtsd2ss %xmm0, %xmm0\n\tmovd %xmm0, %eax\n");
+            } else {
+                anvil_strbuf_append(&be->code, "\tmovq xmm0, eax\n\tcvtsd2ss xmm0, xmm0\n\tmovd eax, xmm0\n");
             }
             break;
             
@@ -572,8 +1000,10 @@ static void x86_emit_block(x86_backend_t *be, anvil_block_t *block, anvil_syntax
 {
     if (!block) return;
     
-    /* Emit label */
-    anvil_strbuf_appendf(&be->code, ".L%s:\n", block->name);
+    /* Emit label with function prefix */
+    if (block != be->current_func->blocks) {
+        anvil_strbuf_appendf(&be->code, ".L%s_%s:\n", be->current_func->name, block->name);
+    }
     
     /* Emit instructions */
     for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
@@ -583,10 +1013,24 @@ static void x86_emit_block(x86_backend_t *be, anvil_block_t *block, anvil_syntax
 
 static void x86_emit_func(x86_backend_t *be, anvil_func_t *func, anvil_syntax_t syntax)
 {
-    if (!func) return;
+    if (!func || func->is_declaration) return;
     
-    /* Calculate stack size for locals */
-    func->stack_size = 16; /* Minimum for alignment */
+    be->current_func = func;
+    be->num_stack_slots = 0;
+    be->next_stack_offset = 0;
+    
+    /* First pass: count stack slots needed */
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
+            if (instr->op == ANVIL_OP_ALLOCA) {
+                x86_add_stack_slot(be, instr->result);
+            }
+        }
+    }
+    
+    /* Calculate stack size (16-byte aligned) */
+    func->stack_size = (be->next_stack_offset + 15) & ~15;
+    if (func->stack_size < 16) func->stack_size = 16;
     
     /* Emit prologue */
     x86_emit_prologue(be, func, syntax);

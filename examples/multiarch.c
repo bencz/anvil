@@ -105,14 +105,14 @@ int main(void)
         const char *name;
         const char *filename;
     } targets[] = {
-        // { ANVIL_ARCH_X86,     "x86 (32-bit)",         "output_x86.s" },
-        // { ANVIL_ARCH_X86_64,  "x86-64 (64-bit)",      "output_x64.s" },
+        { ANVIL_ARCH_X86,     "x86 (32-bit)",         "output_x86.s" },
+        { ANVIL_ARCH_X86_64,  "x86-64 (64-bit)",      "output_x64.s" },
         { ANVIL_ARCH_S370,    "S/370 (24-bit)",       "output_s370.asm" },
         { ANVIL_ARCH_S390,    "S/390 (31-bit)",       "output_s390.asm" },
         { ANVIL_ARCH_ZARCH,   "z/Arch (64-bit)",      "output_zarch.asm" },
-        // { ANVIL_ARCH_PPC32,   "PowerPC 32-bit",       "output_ppc32.s" },
-        // { ANVIL_ARCH_PPC64,   "PowerPC 64-bit BE",    "output_ppc64.s" },
-        // { ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE",    "output_ppc64le.s" },
+        { ANVIL_ARCH_PPC32,   "PowerPC 32-bit",       "output_ppc32.s" },
+        { ANVIL_ARCH_PPC64,   "PowerPC 64-bit BE",    "output_ppc64.s" },
+        { ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE",    "output_ppc64le.s" },
         { ANVIL_ARCH_ARM64,   "ARM64 (AArch64)",      "output_arm64.s" }
     };
     
