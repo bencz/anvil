@@ -58,9 +58,9 @@ ANVIL follows a classic compiler backend design with these main components:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      Backend (anvil_backend_t)                       │
 │                                                                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-│  │   x86    │  │  x86-64  │  │  S/370   │  │  z/Arch  │  ...       │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘            │
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐  │
+│  │ x86  │ │x86-64│ │S/370 │ │S/390 │ │z/Arch│ │ PPC  │ │ARM64 │  │
+│  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘  │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
@@ -331,8 +331,13 @@ static const anvil_backend_ops_t *backends[] = {
     &anvil_backend_x86,
     &anvil_backend_x86_64,
     &anvil_backend_s370,
+    &anvil_backend_s370_xa,
     &anvil_backend_s390,
     &anvil_backend_zarch,
+    &anvil_backend_ppc32,
+    &anvil_backend_ppc64,
+    &anvil_backend_ppc64le,
+    &anvil_backend_arm64,
 };
 
 const anvil_backend_ops_t *anvil_get_backend(anvil_arch_t arch) {
@@ -460,14 +465,63 @@ src/
     ├── x86_64/
     │   └── x86_64.c   # x86-64 backend
     ├── s370/
-    │   └── s370.c     # IBM S/370 backend
+    │   └── s370.c     # IBM S/370 backend (24-bit)
     ├── s370_xa/
-    │   └── s370_xa.c  # IBM S/370-XA backend
+    │   └── s370_xa.c  # IBM S/370-XA backend (31-bit)
     ├── s390/
-    │   └── s390.c     # IBM S/390 backend
-    └── zarch/
-        └── zarch.c    # IBM z/Architecture backend
+    │   └── s390.c     # IBM S/390 backend (31-bit)
+    ├── zarch/
+    │   └── zarch.c    # IBM z/Architecture backend (64-bit)
+    ├── ppc32/
+    │   └── ppc32.c    # PowerPC 32-bit backend (big-endian)
+    ├── ppc64/
+    │   └── ppc64.c    # PowerPC 64-bit backend (big-endian)
+    ├── ppc64le/
+    │   └── ppc64le.c  # PowerPC 64-bit backend (little-endian)
+    └── arm64/
+        └── arm64.c    # ARM64/AArch64 backend
 ```
+
+## Supported Architectures
+
+ANVIL supports the following target architectures:
+
+| Architecture | Enum | Bits | Endian | Stack | FP Format | ABI |
+|--------------|------|------|--------|-------|-----------|-----|
+| x86 | `ANVIL_ARCH_X86` | 32 | Little | Down | IEEE 754 | CDECL |
+| x86-64 | `ANVIL_ARCH_X86_64` | 64 | Little | Down | IEEE 754 | System V / Win64 |
+| S/370 | `ANVIL_ARCH_S370` | 24 | Big | Up | HFP | MVS Linkage |
+| S/370-XA | `ANVIL_ARCH_S370_XA` | 31 | Big | Up | HFP | MVS Linkage |
+| S/390 | `ANVIL_ARCH_S390` | 31 | Big | Up | HFP/IEEE | MVS Linkage |
+| z/Architecture | `ANVIL_ARCH_ZARCH` | 64 | Big | Up | HFP/IEEE | MVS Linkage |
+| PowerPC 32 | `ANVIL_ARCH_PPC32` | 32 | Big | Down | IEEE 754 | System V |
+| PowerPC 64 | `ANVIL_ARCH_PPC64` | 64 | Big | Down | IEEE 754 | ELFv1 |
+| PowerPC 64 LE | `ANVIL_ARCH_PPC64LE` | 64 | Little | Down | IEEE 754 | ELFv2 |
+| ARM64 | `ANVIL_ARCH_ARM64` | 64 | Little | Down | IEEE 754 | AAPCS64 |
+
+### Architecture-Specific Features
+
+**x86/x86-64:**
+- Multiple syntax options: GAS (AT&T), NASM, MASM
+- System V and Windows ABIs supported
+- Full floating-point support via SSE/SSE2
+
+**IBM Mainframe (S/370, S/390, z/Architecture):**
+- HLASM syntax output
+- GCCMVS compatibility mode
+- Hexadecimal Floating Point (HFP) and IEEE 754 support
+- Chained save areas for stack management
+- Uppercase symbol names
+
+**PowerPC:**
+- Big-endian (PPC32, PPC64) and little-endian (PPC64LE) variants
+- ELFv1 (PPC64) and ELFv2 (PPC64LE) ABIs
+- Full floating-point support
+
+**ARM64:**
+- AAPCS64 calling convention
+- Linux (ELF) and macOS (Darwin/Mach-O) support
+- Different symbol naming conventions per OS
 
 ## Design Decisions
 
