@@ -245,9 +245,9 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
         mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
         
         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
-            /* Check for # (stringification) operator */
+            /* Check for # (stringification) operator - C89 feature */
             if (body_tok->type == TOK_HASH && body_tok->next && 
-                body_tok->next->type == TOK_IDENT && pp_has_stringify(pp)) {
+                body_tok->next->type == TOK_IDENT) {
                 mcc_token_t *param_tok = body_tok->next;
                 int param_idx = pp_find_param_index(macro, param_tok->text);
                 
@@ -255,44 +255,57 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 bool is_va_args = macro->is_variadic && 
                                   strcmp(param_tok->text, "__VA_ARGS__") == 0;
                 
-                if (param_idx >= 0 && param_idx < num_args) {
-                    /* Stringify the unexpanded argument */
-                    mcc_token_t *str_tok = pp_stringify_tokens(pp, args[param_idx]);
-                    str_tok->next = NULL;
-                    if (!expanded_head) expanded_head = str_tok;
-                    if (expanded_tail) expanded_tail->next = str_tok;
-                    expanded_tail = str_tok;
-                    body_tok = param_tok; /* Skip the parameter token */
-                    continue;
-                } else if (is_va_args && pp_has_variadic_macros(pp)) {
-                    /* Stringify all variadic arguments */
-                    mcc_token_t *va_head = NULL, *va_tail = NULL;
-                    for (int i = macro->num_params; i < num_args; i++) {
-                        if (i > macro->num_params) {
-                            mcc_token_t *comma = mcc_token_create(pp->ctx);
-                            comma->type = TOK_COMMA;
-                            comma->text = ",";
-                            comma->has_space = false;
-                            comma->next = NULL;
-                            if (!va_head) va_head = comma;
-                            if (va_tail) va_tail->next = comma;
-                            va_tail = comma;
-                        }
-                        for (mcc_token_t *t = args[i]; t; t = t->next) {
-                            mcc_token_t *copy = mcc_token_copy(pp->ctx, t);
-                            copy->next = NULL;
-                            if (!va_head) va_head = copy;
-                            if (va_tail) va_tail->next = copy;
-                            va_tail = copy;
-                        }
+                if (param_idx >= 0 || is_va_args) {
+                    /* Check if stringification is supported */
+                    if (!pp_has_stringify(pp)) {
+                        mcc_error(pp->ctx, "Stringification operator '#' not supported in current mode");
+                        continue;
                     }
-                    mcc_token_t *str_tok = pp_stringify_tokens(pp, va_head);
-                    str_tok->next = NULL;
-                    if (!expanded_head) expanded_head = str_tok;
-                    if (expanded_tail) expanded_tail->next = str_tok;
-                    expanded_tail = str_tok;
-                    body_tok = param_tok;
-                    continue;
+                    
+                    if (param_idx >= 0 && param_idx < num_args) {
+                        /* Stringify the unexpanded argument */
+                        mcc_token_t *str_tok = pp_stringify_tokens(pp, args[param_idx]);
+                        str_tok->next = NULL;
+                        if (!expanded_head) expanded_head = str_tok;
+                        if (expanded_tail) expanded_tail->next = str_tok;
+                        expanded_tail = str_tok;
+                        body_tok = param_tok; /* Skip the parameter token */
+                        continue;
+                    } else if (is_va_args) {
+                        /* Check if variadic macros are supported (C99+) */
+                        if (!pp_has_variadic_macros(pp)) {
+                            mcc_error(pp->ctx, "__VA_ARGS__ requires C99 or later (-std=c99)");
+                            continue;
+                        }
+                        /* Stringify all variadic arguments */
+                        mcc_token_t *va_head = NULL, *va_tail = NULL;
+                        for (int i = macro->num_params; i < num_args; i++) {
+                            if (i > macro->num_params) {
+                                mcc_token_t *comma = mcc_token_create(pp->ctx);
+                                comma->type = TOK_COMMA;
+                                comma->text = ",";
+                                comma->has_space = false;
+                                comma->next = NULL;
+                                if (!va_head) va_head = comma;
+                                if (va_tail) va_tail->next = comma;
+                                va_tail = comma;
+                            }
+                            for (mcc_token_t *t = args[i]; t; t = t->next) {
+                                mcc_token_t *copy = mcc_token_copy(pp->ctx, t);
+                                copy->next = NULL;
+                                if (!va_head) va_head = copy;
+                                if (va_tail) va_tail->next = copy;
+                                va_tail = copy;
+                            }
+                        }
+                        mcc_token_t *str_tok = pp_stringify_tokens(pp, va_head);
+                        str_tok->next = NULL;
+                        if (!expanded_head) expanded_head = str_tok;
+                        if (expanded_tail) expanded_tail->next = str_tok;
+                        expanded_tail = str_tok;
+                        body_tok = param_tok;
+                        continue;
+                    }
                 }
             }
             

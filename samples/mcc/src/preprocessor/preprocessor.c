@@ -205,22 +205,26 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                                     continue;
                                 }
                                 
-                                /* Check for __VA_ARGS__ */
+                                /* Check for __VA_ARGS__ (C99+) */
                                 if (macro->is_variadic && strcmp(body_tok->text, "__VA_ARGS__") == 0) {
-                                    /* Add all variadic arguments */
-                                    for (int i = macro->num_params; i < num_args; i++) {
-                                        if (i > macro->num_params) {
-                                            mcc_token_t *comma = mcc_token_create(pp->ctx);
-                                            comma->type = TOK_COMMA;
-                                            comma->text = ",";
-                                            comma->next = NULL;
-                                            APPEND_EXP(comma);
-                                        }
-                                        mcc_token_t *arg_list = expanded_args ? expanded_args[i] : args[i];
-                                        for (mcc_token_t *a = arg_list; a; a = a->next) {
-                                            mcc_token_t *copy = mcc_token_copy(pp->ctx, a);
-                                            copy->next = NULL;
-                                            APPEND_EXP(copy);
+                                    if (!pp_has_variadic_macros(pp)) {
+                                        mcc_error(pp->ctx, "__VA_ARGS__ requires C99 or later (-std=c99)");
+                                    } else {
+                                        /* Add all variadic arguments */
+                                        for (int i = macro->num_params; i < num_args; i++) {
+                                            if (i > macro->num_params) {
+                                                mcc_token_t *comma = mcc_token_create(pp->ctx);
+                                                comma->type = TOK_COMMA;
+                                                comma->text = ",";
+                                                comma->next = NULL;
+                                                APPEND_EXP(comma);
+                                            }
+                                            mcc_token_t *arg_list = expanded_args ? expanded_args[i] : args[i];
+                                            for (mcc_token_t *a = arg_list; a; a = a->next) {
+                                                mcc_token_t *copy = mcc_token_copy(pp->ctx, a);
+                                                copy->next = NULL;
+                                                APPEND_EXP(copy);
+                                            }
                                         }
                                     }
                                     continue;
