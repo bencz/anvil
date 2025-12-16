@@ -324,9 +324,9 @@ Features are organized into 4 words (256 total features):
 - [x] All operators
 - [x] Preprocessor (#define, #include, #if, etc.)
 - [x] Stringification operator (`#`)
+- [x] Token pasting operator (`##`)
 - [x] String literal concatenation
 - [ ] Bitfields (not yet implemented)
-- [ ] Token pasting (`##`) (not yet implemented)
 
 ### C99 - In Progress
 - [ ] `long long` type

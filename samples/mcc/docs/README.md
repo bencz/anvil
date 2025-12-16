@@ -306,3 +306,4 @@ When working with MCC code:
 - **`__VA_OPT__` (C23)**: Conditional expansion based on presence of variadic arguments
 - **String Literal Concatenation**: Adjacent string literals are concatenated by the parser
 - **Token `raw_text` Field**: Tokens store original source text with quotes for preprocessor output
+- **Token Pasting Operator (`##`)**: Full support for concatenating tokens in macros

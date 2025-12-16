@@ -469,6 +469,7 @@ static inline bool pp_has_elifdef(mcc_preprocessor_t *pp)
 | Feature | C89 | C99 | C11 | C23 | GNU |
 |---------|-----|-----|-----|-----|-----|
 | `#` (stringification) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `##` (token pasting) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `__VA_ARGS__` | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `_Pragma()` | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `#elifdef` | ❌ | ❌ | ❌ | ✅ | ❌ |
@@ -570,10 +571,52 @@ CALL(func, 1, 2);         /* func(1, 2) */
 
 **Note:** `__VA_OPT__` requires `-std=c23` or later.
 
+## Token Pasting Operator (`##`)
+
+The `##` operator concatenates two tokens into a single token (C89+):
+
+```c
+#define PASTE(a, b) a ## b
+#define MAKE_VAR(n) var_ ## n
+#define MAKE_FUNC(name) func_ ## name
+
+int PASTE(my, var) = 42;    /* int myvar = 42; */
+int MAKE_VAR(1) = 1;        /* int var_1 = 1; */
+void MAKE_FUNC(test)(void); /* void func_test(void); */
+
+/* Creating identifiers from numbers */
+#define CONCAT_NUM(a, b) a ## b
+int x = CONCAT_NUM(12, 34); /* int x = 1234; */
+```
+
+### Token Pasting Rules
+
+1. The `##` operator cannot appear at the beginning or end of a macro body
+2. Both operands are converted to their text representation before concatenation
+3. The result is re-lexed to produce a valid token
+4. If the result is not a valid token, a warning is issued
+5. Whitespace around `##` is ignored
+
+### Common Use Cases
+
+```c
+/* Generic data structure generation */
+#define DECLARE_LIST(type) \
+    typedef struct type ## _list { \
+        type *data; \
+        int size; \
+    } type ## _list_t
+
+DECLARE_LIST(int);   /* Creates int_list and int_list_t */
+
+/* Function name generation */
+#define TEST(name) void test_ ## name(void)
+TEST(addition) { /* ... */ }  /* void test_addition(void) */
+```
+
 ## Limitations
 
 Current limitations of the MCC preprocessor:
 
-1. **No token pasting (`##`)**: The `##` operator to concatenate tokens is not implemented
-2. **No `#pragma once`**: Use traditional include guards instead
-3. **No computed includes**: `#include` with macro-expanded filename is not supported
+1. **No `#pragma once`**: Use traditional include guards instead
+2. **No computed includes**: `#include` with macro-expanded filename is not supported

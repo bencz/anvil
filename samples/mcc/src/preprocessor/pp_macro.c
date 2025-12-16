@@ -304,8 +304,11 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                         /* Use unexpanded argument for ## */
                         right_tokens = args[param_idx];
                     } else if (macro->is_variadic && strcmp(right_tok->text, "__VA_ARGS__") == 0) {
-                        /* Use first variadic argument */
-                        if (num_args > macro->num_params) {
+                        /* __VA_ARGS__ requires C99+ */
+                        if (!pp_has_variadic_macros(pp)) {
+                            mcc_error(pp->ctx, "__VA_ARGS__ requires C99 or later (-std=c99)");
+                        } else if (num_args > macro->num_params) {
+                            /* Use first variadic argument */
                             right_tokens = args[macro->num_params];
                         }
                     }
