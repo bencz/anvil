@@ -10,6 +10,34 @@
 typedef struct mcc_ast_node mcc_ast_node_t;
 struct mcc_type;
 
+/* C23 Attribute kinds */
+typedef enum {
+    MCC_ATTR_NONE = 0,
+    MCC_ATTR_DEPRECATED,        /* [[deprecated]] or [[deprecated("msg")]] */
+    MCC_ATTR_FALLTHROUGH,       /* [[fallthrough]] */
+    MCC_ATTR_NODISCARD,         /* [[nodiscard]] or [[nodiscard("msg")]] */
+    MCC_ATTR_MAYBE_UNUSED,      /* [[maybe_unused]] */
+    MCC_ATTR_NORETURN,          /* [[noreturn]] */
+    MCC_ATTR_UNSEQUENCED,       /* [[unsequenced]] */
+    MCC_ATTR_REPRODUCIBLE,      /* [[reproducible]] */
+    /* GNU attributes */
+    MCC_ATTR_GNU_PACKED,        /* __attribute__((packed)) */
+    MCC_ATTR_GNU_ALIGNED,       /* __attribute__((aligned(n))) */
+    MCC_ATTR_GNU_PURE,          /* __attribute__((pure)) */
+    MCC_ATTR_GNU_CONST,         /* __attribute__((const)) */
+    MCC_ATTR_GNU_UNUSED,        /* __attribute__((unused)) */
+    MCC_ATTR_UNKNOWN            /* Unknown attribute */
+} mcc_attr_kind_t;
+
+/* Attribute structure */
+typedef struct mcc_attribute {
+    mcc_attr_kind_t kind;
+    const char *name;           /* Original attribute name */
+    const char *message;        /* Optional message (for deprecated, nodiscard) */
+    int alignment;              /* For aligned attribute */
+    struct mcc_attribute *next;
+} mcc_attribute_t;
+
 /* Generic association for _Generic (C11) */
 typedef struct mcc_generic_assoc {
     struct mcc_type *type;          /* NULL for default association */
@@ -162,7 +190,7 @@ struct mcc_ast_node {
             size_t num_decls;
         } translation_unit;
         
-        /* Function declaration */
+        /* Function declaration/definition */
         struct {
             const char *name;
             struct mcc_type *func_type;
@@ -174,6 +202,7 @@ struct mcc_ast_node {
             bool is_variadic;       /* Has ... parameter */
             bool is_inline;         /* C99 inline */
             bool is_noreturn;       /* C11 _Noreturn */
+            mcc_attribute_t *attrs; /* C23/GNU attributes */
         } func_decl;
         
         /* Variable declaration */
@@ -185,6 +214,7 @@ struct mcc_ast_node {
             bool is_extern;
             bool is_const;
             bool is_volatile;
+            mcc_attribute_t *attrs; /* C23/GNU attributes */
         } var_decl;
         
         /* Parameter declaration */

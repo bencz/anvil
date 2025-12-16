@@ -119,4 +119,14 @@ static inline bool lex_has_binary_literals(mcc_lexer_t *lex)
     return lex_has_feature(lex, MCC_FEAT_BINARY_LIT);
 }
 
+static inline bool lex_has_digit_separators(mcc_lexer_t *lex)
+{
+    return lex_has_feature(lex, MCC_FEAT_DIGIT_SEP);
+}
+
+static inline bool lex_has_u8_char_literals(mcc_lexer_t *lex)
+{
+    return lex_has_feature(lex, MCC_FEAT_UTF8_CHAR_LIT);
+}
+
 #endif /* MCC_LEX_INTERNAL_H */

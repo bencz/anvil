@@ -43,6 +43,9 @@ mcc_token_t *lex_number(mcc_lexer_t *lex)
                 (base == 2 && (next == '0' || next == '1')) ||
                 (base == 10 && isdigit(next)) ||
                 (base == 8 && next >= '0' && next <= '7')) {
+                if (!lex_has_digit_separators(lex)) {
+                    mcc_warning(lex->ctx, "digit separators are a C23 feature");
+                }
                 lex_advance(lex);  /* Skip the separator */
                 continue;
             }
@@ -67,6 +70,9 @@ mcc_token_t *lex_number(mcc_lexer_t *lex)
             /* Read fractional digits with optional digit separators */
             while (1) {
                 if (lex->current == '\'' && isdigit(lex_peek_next(lex))) {
+                    if (!lex_has_digit_separators(lex)) {
+                        mcc_warning(lex->ctx, "digit separators are a C23 feature");
+                    }
                     lex_advance(lex);  /* Skip separator */
                     continue;
                 }

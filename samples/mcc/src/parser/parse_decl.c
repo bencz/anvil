@@ -242,9 +242,23 @@ end_params:
  * Variable Declaration
  * ============================================================ */
 
+/* Forward declaration for parse_variable_decl with attributes */
+static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_t *decl_type,
+                                     const char *name, mcc_storage_class_t storage,
+                                     bool is_typedef, mcc_location_t loc,
+                                     mcc_attribute_t *attrs);
+
 mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
                                      const char *name, mcc_storage_class_t storage,
                                      bool is_typedef, mcc_location_t loc)
+{
+    return parse_variable_decl_with_attrs(p, decl_type, name, storage, is_typedef, loc, NULL);
+}
+
+static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_t *decl_type,
+                                     const char *name, mcc_storage_class_t storage,
+                                     bool is_typedef, mcc_location_t loc,
+                                     mcc_attribute_t *attrs)
 {
     /* Type is already fully parsed by parse_declarator */
     
@@ -301,6 +315,7 @@ mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
     var->data.var_decl.init = init;
     var->data.var_decl.is_static = (storage == STORAGE_STATIC);
     var->data.var_decl.is_extern = (storage == STORAGE_EXTERN);
+    var->data.var_decl.attrs = attrs;
     
     /* Check for multiple variable declarations: int a, b, c; */
     if (!parse_check(p, TOK_COMMA)) {
@@ -372,9 +387,88 @@ mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
  * Declaration (main entry point)
  * ============================================================ */
 
+/* Parse a single C23 attribute and return its kind */
+static mcc_attr_kind_t parse_attribute_name(const char *name)
+{
+    if (strcmp(name, "deprecated") == 0) return MCC_ATTR_DEPRECATED;
+    if (strcmp(name, "fallthrough") == 0) return MCC_ATTR_FALLTHROUGH;
+    if (strcmp(name, "nodiscard") == 0) return MCC_ATTR_NODISCARD;
+    if (strcmp(name, "maybe_unused") == 0) return MCC_ATTR_MAYBE_UNUSED;
+    if (strcmp(name, "noreturn") == 0) return MCC_ATTR_NORETURN;
+    if (strcmp(name, "unsequenced") == 0) return MCC_ATTR_UNSEQUENCED;
+    if (strcmp(name, "reproducible") == 0) return MCC_ATTR_REPRODUCIBLE;
+    return MCC_ATTR_UNKNOWN;
+}
+
+/* Parse C23 attributes [[...]] and return attribute list */
+static mcc_attribute_t *parse_attributes(mcc_parser_t *p)
+{
+    mcc_attribute_t *attrs = NULL;
+    mcc_attribute_t *tail = NULL;
+    
+    while (parse_check(p, TOK_LBRACKET2)) {
+        if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
+            mcc_warning_at(p->ctx, p->peek->location,
+                "attribute syntax [[...]] is a C23 feature");
+        }
+        parse_advance(p);  /* Skip [[ */
+        
+        /* Parse attributes inside [[ ]] */
+        while (!parse_check(p, TOK_RBRACKET2) && !parse_check(p, TOK_EOF)) {
+            if (parse_check(p, TOK_IDENT)) {
+                mcc_attribute_t *attr = mcc_alloc(p->ctx, sizeof(mcc_attribute_t));
+                attr->name = mcc_strdup(p->ctx, p->peek->text);
+                attr->kind = parse_attribute_name(p->peek->text);
+                attr->message = NULL;
+                attr->alignment = 0;
+                attr->next = NULL;
+                
+                parse_advance(p);  /* Consume attribute name */
+                
+                /* Check for attribute arguments */
+                if (parse_match(p, TOK_LPAREN)) {
+                    /* Parse attribute argument (e.g., deprecated("message")) */
+                    if (parse_check(p, TOK_STRING_LIT)) {
+                        attr->message = mcc_strdup(p->ctx, p->peek->literal.string_val.value);
+                        parse_advance(p);
+                    } else if (parse_check(p, TOK_INT_LIT)) {
+                        attr->alignment = (int)p->peek->literal.int_val.value;
+                        parse_advance(p);
+                    }
+                    parse_expect(p, TOK_RPAREN, ")");
+                }
+                
+                /* Add to list */
+                if (!attrs) attrs = attr;
+                if (tail) tail->next = attr;
+                tail = attr;
+            }
+            
+            /* Skip comma between attributes */
+            if (!parse_match(p, TOK_COMMA)) {
+                break;
+            }
+        }
+        
+        parse_expect(p, TOK_RBRACKET2, "]]");
+    }
+    
+    return attrs;
+}
+
+/* Skip C23 attributes [[...]] (for places where we don't need to store them) */
+static void parse_skip_attributes(mcc_parser_t *p)
+{
+    mcc_attribute_t *attrs = parse_attributes(p);
+    (void)attrs;  /* Attributes parsed but not used here */
+}
+
 mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
 {
     mcc_location_t loc = p->peek->location;
+    
+    /* C23: Parse attributes [[...]] */
+    mcc_attribute_t *attrs = parse_attributes(p);
     
     /* C11: _Static_assert */
     if (parse_check(p, TOK__STATIC_ASSERT) || parse_check(p, TOK_STATIC_ASSERT)) {
@@ -588,9 +682,17 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         func->data.func_decl.is_variadic = decl_type->data.function.is_variadic;
         func->data.func_decl.is_inline = base_type->is_inline;
         func->data.func_decl.is_noreturn = base_type->is_noreturn;
+        func->data.func_decl.attrs = attrs;
+        
+        /* Check for [[noreturn]] attribute */
+        for (mcc_attribute_t *a = attrs; a; a = a->next) {
+            if (a->kind == MCC_ATTR_NORETURN) {
+                func->data.func_decl.is_noreturn = true;
+            }
+        }
         return func;
     }
     
     /* Variable/typedef declaration */
-    return parse_variable_decl(p, decl_type, name, storage, is_typedef, loc);
+    return parse_variable_decl_with_attrs(p, decl_type, name, storage, is_typedef, loc, attrs);
 }

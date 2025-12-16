@@ -145,12 +145,16 @@ mcc_token_t *lex_identifier(mcc_lexer_t *lex)
         /* u8 prefix (C11 for strings, C23 for chars) */
         if (len == 2 && prefix[0] == 'u' && prefix[1] == '8') {
             if (is_char) {
+                if (!lex_has_u8_char_literals(lex)) {
+                    mcc_warning(lex->ctx, "u8 character literals are a C23 feature");
+                }
                 return lex_char_literal(lex);
             } else {
+                /* u8 strings are C11 */
                 return lex_string_literal(lex);
             }
         }
-        /* u, U, L prefixes (C11) */
+        /* u, U, L prefixes (C11 for u/U, C89 for L) */
         if (len == 1 && (prefix[0] == 'u' || prefix[0] == 'U' || prefix[0] == 'L')) {
             if (is_char) {
                 return lex_char_literal(lex);

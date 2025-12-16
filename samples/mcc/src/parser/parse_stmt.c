@@ -330,8 +330,32 @@ mcc_ast_node_t *parse_labeled_stmt(mcc_parser_t *p)
  * Statement (main dispatcher)
  * ============================================================ */
 
+/* Skip C23 attributes [[...]] */
+static void skip_attributes(mcc_parser_t *p)
+{
+    while (parse_check(p, TOK_LBRACKET2)) {
+        if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
+            mcc_warning_at(p->ctx, p->peek->location,
+                "attribute syntax [[...]] is a C23 feature");
+        }
+        parse_advance(p);  /* Skip [[ */
+        int depth = 1;
+        while (depth > 0 && !parse_check(p, TOK_EOF)) {
+            if (parse_check(p, TOK_LBRACKET2)) {
+                depth++;
+            } else if (parse_check(p, TOK_RBRACKET2)) {
+                depth--;
+            }
+            parse_advance(p);
+        }
+    }
+}
+
 mcc_ast_node_t *parse_statement(mcc_parser_t *p)
 {
+    /* C23: Skip attributes [[...]] */
+    skip_attributes(p);
+    
     mcc_token_t *tok = p->peek;
     mcc_ast_node_t *node;
     

@@ -489,30 +489,88 @@ void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 
 ### Implementation Status
 
-| Feature | Standard | Status |
-|---------|----------|--------|
-| `long long` | C99 | ✅ Implemented |
-| `_Bool` | C99 | ✅ Implemented |
-| `restrict` | C99 | ✅ Implemented |
-| `inline` | C99 | ✅ Implemented |
-| Mixed declarations | C99 | ✅ Implemented |
-| `for` loop declarations | C99 | ✅ Implemented |
-| Compound literals | C99 | ✅ Implemented |
-| Designated initializers | C99 | ✅ Implemented |
-| Flexible array members | C99 | ✅ Implemented |
-| VLA (Variable Length Arrays) | C99 | ⚠️ Parsing only |
-| `_Alignof` | C11 | ✅ Implemented |
-| `_Static_assert` | C11 | ✅ Implemented |
-| `_Generic` | C11 | ✅ Implemented |
-| `_Noreturn` | C11 | ✅ Implemented |
-| `_Thread_local` | C11 | ✅ Implemented |
-| `_Atomic` | C11 | ⚠️ Parsing only |
-| Anonymous structs/unions | C11 | ✅ Implemented |
-| `nullptr` | C23 | ✅ Implemented |
-| `true`/`false` keywords | C23 | ✅ Implemented |
-| Statement expressions | GNU | ✅ Implemented |
-| Labels as values | GNU | ✅ Implemented |
-| Case ranges | GNU | ⚠️ Parsing only |
+**C99 Features:**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `long long` | ✅ Implemented | 64-bit integer type |
+| `_Bool` | ✅ Implemented | Boolean type |
+| `restrict` | ✅ Implemented | Pointer aliasing hint |
+| `inline` | ✅ Implemented | Inline functions |
+| Mixed declarations | ✅ Implemented | Declarations after statements |
+| `for` loop declarations | ✅ Implemented | `for (int i = 0; ...)` |
+| Compound literals | ✅ Implemented | `(int[]){1, 2, 3}` |
+| Designated initializers | ✅ Implemented | `.field = value` |
+| Flexible array members | ✅ Implemented | `struct { int n; char data[]; }` |
+| VLA | ⚠️ Parsing only | Variable Length Arrays |
+| Hex floats | ✅ Implemented | `0x1.0p10` |
+| `//` comments | ✅ Implemented | Line comments |
+
+**C11 Features:**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `_Alignas` | ✅ Implemented | Alignment specifier with AST storage |
+| `_Alignof` | ✅ Implemented | Alignment query (supports expressions) |
+| `_Static_assert` | ✅ Implemented | Compile-time assertions |
+| `_Generic` | ✅ Implemented | Type-generic selection |
+| `_Noreturn` | ✅ Implemented | No-return function specifier |
+| `_Thread_local` | ✅ Implemented | Thread-local storage |
+| `_Atomic` | ✅ Implemented | Atomic type qualifier |
+| Anonymous structs/unions | ✅ Implemented | Unnamed struct/union members |
+
+**C23 Features:**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `[[attributes]]` | ✅ Implemented | Standard attributes with AST storage |
+| `[[deprecated]]` | ✅ Implemented | Deprecation attribute |
+| `[[nodiscard]]` | ✅ Implemented | Must-use return value |
+| `[[maybe_unused]]` | ✅ Implemented | Suppress unused warnings |
+| `[[noreturn]]` | ✅ Implemented | No-return attribute |
+| `[[fallthrough]]` | ✅ Implemented | Switch fallthrough |
+| `typeof` | ✅ Implemented | Type-of operator |
+| `typeof_unqual` | ✅ Implemented | Unqualified type-of |
+| `nullptr` | ✅ Implemented | Null pointer constant |
+| `true`/`false` | ✅ Implemented | Boolean keywords |
+| `bool` keyword | ✅ Implemented | Boolean type keyword |
+| Binary literals | ✅ Implemented | `0b1010` |
+| Digit separators | ✅ Implemented | `1'000'000` |
+| `u8` char literals | ✅ Implemented | `u8'A'` |
+| `static_assert` | ✅ Implemented | Without message |
+
+**GNU Extensions:**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Statement expressions | ⚠️ Pending | `({ ... })` |
+| Labels as values | ⚠️ Pending | `&&label` |
+| Case ranges | ⚠️ Pending | `case 'a' ... 'z':` |
+| `__typeof__` | ⚠️ Pending | GNU typeof |
+| `__attribute__` | ⚠️ Pending | GNU attributes |
+
+### Cross-Standard Warnings
+
+MCC emits warnings when features from newer standards are used in older modes:
+
+```bash
+# Using C99 features in C89 mode
+./mcc -std=c89 file.c
+# warning: 'inline' is a keyword in C99; treating as identifier
+# warning: '_Bool' is a C99 extension
+# warning: long long is a C99 feature
+
+# Using C11 features in C99 mode
+./mcc -std=c99 file.c
+# error: '_Static_assert' requires C11 or later
+# warning: '_Noreturn' is a C11 extension
+
+# Using C23 features in C11 mode
+./mcc -std=c11 file.c
+# warning: 'typeof' is a keyword in C23; treating as identifier
+# warning: attribute syntax [[...]] is a C23 feature
+# warning: digit separators are a C23 feature
+```
 
 ### Extending the Feature System
 

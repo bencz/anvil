@@ -205,8 +205,68 @@ test: $(TARGET)
 	@echo ""
 	@echo "Test suite complete."
 
+# Cross-standard tests (verify warnings for features used in older standards)
+test-cross: $(TARGET)
+	@echo "Running Cross-Standard Tests..."
+	@echo "(These tests verify that warnings are emitted for newer features in older standards)"
+	@echo ""
+	@echo "=== C99 features in C89 mode ==="
+	@printf "  %-40s " "tests/cross/c99_in_c89.c"
+	@output=$$(./$(TARGET) -std=c89 -I includes -fsyntax-only tests/cross/c99_in_c89.c 2>&1); \
+	warnings=$$(echo "$$output" | grep -c "warning\|extension" || true); \
+	if [ "$$warnings" -gt 0 ]; then \
+		echo "OK ($$warnings warnings)"; \
+	else \
+		echo "MISSING WARNINGS"; \
+	fi
+	@echo ""
+	@echo "=== C11 features in C99 mode ==="
+	@printf "  %-40s " "tests/cross/c11_in_c99.c"
+	@output=$$(./$(TARGET) -std=c99 -I includes -fsyntax-only tests/cross/c11_in_c99.c 2>&1); \
+	warnings=$$(echo "$$output" | grep -c "warning\|extension\|error\|requires" || true); \
+	if [ "$$warnings" -gt 0 ]; then \
+		echo "OK ($$warnings diagnostics)"; \
+	else \
+		echo "MISSING WARNINGS"; \
+	fi
+	@echo ""
+	@echo "=== C11 features in C89 mode ==="
+	@printf "  %-40s " "tests/cross/c11_in_c89.c"
+	@output=$$(./$(TARGET) -std=c89 -I includes -fsyntax-only tests/cross/c11_in_c89.c 2>&1); \
+	warnings=$$(echo "$$output" | grep -c "warning\|extension\|error\|requires" || true); \
+	if [ "$$warnings" -gt 0 ]; then \
+		echo "OK ($$warnings diagnostics)"; \
+	else \
+		echo "MISSING WARNINGS"; \
+	fi
+	@echo ""
+	@echo "=== C23 features in C11 mode ==="
+	@printf "  %-40s " "tests/cross/c23_in_c11.c"
+	@output=$$(./$(TARGET) -std=c11 -I includes -fsyntax-only tests/cross/c23_in_c11.c 2>&1); \
+	warnings=$$(echo "$$output" | grep -c "warning\|extension\|error\|C23" || true); \
+	if [ "$$warnings" -gt 0 ]; then \
+		echo "OK ($$warnings diagnostics)"; \
+	else \
+		echo "MISSING WARNINGS"; \
+	fi
+	@echo ""
+	@echo "=== C23 features in C89 mode ==="
+	@printf "  %-40s " "tests/cross/c23_in_c89.c"
+	@output=$$(./$(TARGET) -std=c89 -I includes -fsyntax-only tests/cross/c23_in_c89.c 2>&1); \
+	warnings=$$(echo "$$output" | grep -c "warning\|extension\|error\|C23" || true); \
+	if [ "$$warnings" -gt 0 ]; then \
+		echo "OK ($$warnings diagnostics)"; \
+	else \
+		echo "MISSING WARNINGS"; \
+	fi
+	@echo ""
+	@echo "Cross-standard tests complete."
+
+# Run all tests including cross-standard
+test-all: test test-cross
+
 # Install (to parent project)
 install: $(TARGET)
 	cp $(TARGET) ../../bin/
 
-.PHONY: all clean test install
+.PHONY: all clean test test-cross test-all install

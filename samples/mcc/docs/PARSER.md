@@ -558,13 +558,80 @@ Example usage:
 const char *name = _Generic(x, int: "int", float: "float", default: "other");
 ```
 
+## C23 Attributes
+
+MCC supports C23 standard attributes with full AST storage:
+
+### Attribute Structure
+
+```c
+typedef enum {
+    MCC_ATTR_NONE = 0,
+    MCC_ATTR_DEPRECATED,        /* [[deprecated]] or [[deprecated("msg")]] */
+    MCC_ATTR_FALLTHROUGH,       /* [[fallthrough]] */
+    MCC_ATTR_NODISCARD,         /* [[nodiscard]] or [[nodiscard("msg")]] */
+    MCC_ATTR_MAYBE_UNUSED,      /* [[maybe_unused]] */
+    MCC_ATTR_NORETURN,          /* [[noreturn]] */
+    MCC_ATTR_UNSEQUENCED,       /* [[unsequenced]] */
+    MCC_ATTR_REPRODUCIBLE,      /* [[reproducible]] */
+    MCC_ATTR_UNKNOWN            /* Unknown attribute */
+} mcc_attr_kind_t;
+
+typedef struct mcc_attribute {
+    mcc_attr_kind_t kind;
+    const char *name;           /* Original attribute name */
+    const char *message;        /* Optional message (for deprecated, nodiscard) */
+    int alignment;              /* For aligned attribute */
+    struct mcc_attribute *next;
+} mcc_attribute_t;
+```
+
+### Parsing Attributes
+
+Attributes are parsed by `parse_attributes()` in `parse_decl.c`:
+
+```c
+/* Parse C23 attributes [[...]] and return attribute list */
+static mcc_attribute_t *parse_attributes(mcc_parser_t *p);
+```
+
+Attributes are stored in declaration nodes:
+
+```c
+/* In func_decl */
+mcc_attribute_t *attrs;  /* C23/GNU attributes */
+
+/* In var_decl */
+mcc_attribute_t *attrs;  /* C23/GNU attributes */
+```
+
+### Attribute Semantics
+
+- `[[noreturn]]` sets `func_decl.is_noreturn = true`
+- `[[deprecated("msg")]]` stores message in `attr->message`
+- Unknown attributes are stored with `MCC_ATTR_UNKNOWN` kind
+
+### Cross-Standard Warnings
+
+When attributes are used in older standards:
+
+```c
+if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
+    mcc_warning_at(p->ctx, p->peek->location,
+        "attribute syntax [[...]] is a C23 feature");
+}
+```
+
 ## Grammar Summary
 
 ```
 translation_unit = { declaration }
 
-declaration = function_decl | var_decl | struct_decl | typedef_decl
+declaration = attribute_list? function_decl | var_decl | struct_decl | typedef_decl
             | static_assert_decl  /* C11 */
+
+attribute_list = { '[[' attribute { ',' attribute } ']]' }
+attribute = IDENT [ '(' argument ')' ]
 
 function_decl = type_spec declarator ( compound_stmt | ';' )
 

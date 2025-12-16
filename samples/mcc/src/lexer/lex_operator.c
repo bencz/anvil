@@ -231,11 +231,23 @@ mcc_token_t *lex_operator(mcc_lexer_t *lex)
             break;
             
         case '[':
-            tok = lex_make_token(lex, TOK_LBRACKET);
+            if (lex->current == '[') {
+                /* C23: [[ attribute syntax */
+                lex_advance(lex);
+                tok = lex_make_token(lex, TOK_LBRACKET2);
+            } else {
+                tok = lex_make_token(lex, TOK_LBRACKET);
+            }
             break;
             
         case ']':
-            tok = lex_make_token(lex, TOK_RBRACKET);
+            if (lex->current == ']') {
+                /* C23: ]] attribute syntax */
+                lex_advance(lex);
+                tok = lex_make_token(lex, TOK_RBRACKET2);
+            } else {
+                tok = lex_make_token(lex, TOK_RBRACKET);
+            }
             break;
             
         case '{':

@@ -159,6 +159,10 @@ typedef enum {
     TOK_ELLIPSIS,       /* ... */
     TOK_NEWLINE,        /* Used by preprocessor */
     
+    /* C23: Attribute syntax */
+    TOK_LBRACKET2,      /* [[ */
+    TOK_RBRACKET2,      /* ]] */
+    
     TOK_COUNT
 } mcc_token_type_t;
 

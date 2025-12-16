@@ -850,6 +850,21 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                 break;
             }
             
+            /* C23: Skip attributes [[...]] on parameters */
+            while (parse_check(p, TOK_LBRACKET2)) {
+                if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "attribute syntax [[...]] is a C23 feature");
+                }
+                parse_advance(p);  /* Skip [[ */
+                int depth = 1;
+                while (depth > 0 && !parse_check(p, TOK_EOF)) {
+                    if (parse_check(p, TOK_LBRACKET2)) depth++;
+                    else if (parse_check(p, TOK_RBRACKET2)) depth--;
+                    parse_advance(p);
+                }
+            }
+            
             /* Parse parameter type */
             mcc_type_t *param_base = parse_type_specifier(p);
             mcc_type_t *param_type = parse_abstract_declarator(p, param_base);

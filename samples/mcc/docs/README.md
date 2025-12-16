@@ -79,7 +79,38 @@ All files share:
 | `src/parser/` | 5 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
 
-### Test Files
+### Test Suite
+
+Tests are organized by C standard in the `tests/` directory:
+
+| Directory | Standard | Description |
+|-----------|----------|-------------|
+| `tests/c89/` | C89 | Basic types, control flow, operators, functions, structs, typedef, preprocessor |
+| `tests/c99/` | C99 | Comments, declarations, literals, preprocessor, types |
+| `tests/c11/` | C11 | Anonymous structs, `_Generic`, keywords, `_Static_assert` |
+| `tests/c23/` | C23 | Attributes, keywords, literals, `typeof` |
+| `tests/gnu/` | GNU | GNU extensions (in progress) |
+| `tests/cross/` | Cross | Cross-standard tests (C99 in C89, C11 in C99, etc.) |
+
+**Running Tests:**
+
+```bash
+make test        # Run standard tests (C89, C99, C11, C23)
+make test-cross  # Run cross-standard tests
+make test-all    # Run all tests
+```
+
+**Cross-Standard Tests:**
+
+| Test | Description |
+|------|-------------|
+| `c99_in_c89.c` | C99 features compiled with `-std=c89` (should warn) |
+| `c11_in_c99.c` | C11 features compiled with `-std=c99` (should warn) |
+| `c11_in_c89.c` | C11 features compiled with `-std=c89` (should warn) |
+| `c23_in_c11.c` | C23 features compiled with `-std=c11` (should warn) |
+| `c23_in_c89.c` | C23 features compiled with `-std=c89` (should warn) |
+
+**Legacy Tests:**
 
 | Test | Description |
 |------|-------------|
@@ -227,3 +258,10 @@ When working with MCC code:
 - **_Generic (C11)**: Full parsing with AST storage for type associations
 - **_Static_assert (C11)**: Support in structs and at file scope
 - **Thread Local Storage (C11)**: `_Thread_local` keyword support
+- **C11 Keywords**: `_Alignas`, `_Alignof`, `_Atomic`, `_Noreturn` with proper parsing
+- **C23 Attributes**: `[[deprecated]]`, `[[nodiscard]]`, `[[maybe_unused]]`, `[[noreturn]]`, `[[fallthrough]]` with AST storage
+- **C23 typeof**: `typeof` and `typeof_unqual` type specifiers
+- **C23 Literals**: Binary literals (`0b1010`), digit separators (`1'000'000`), `u8` character literals
+- **Multiple Variable Declarations**: Full support for `int a, b, c;` with `AST_DECL_LIST` node
+- **Cross-Standard Warnings**: Warnings when using features from newer standards in older modes
+- **Organized Test Suite**: Tests organized by C standard (C89, C99, C11, C23, GNU) with cross-standard tests
