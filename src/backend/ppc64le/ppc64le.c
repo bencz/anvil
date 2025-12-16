@@ -156,6 +156,28 @@ static void ppc64le_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void ppc64le_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    ppc64le_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->next_stack_offset = 0;
+    priv->stack_offset = 0;
+    priv->local_offset = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->frame_size = 0;
+    priv->current_func = NULL;
+}
+
 /* Add stack slot for local variable */
 static int ppc64le_add_stack_slot(ppc64le_backend_t *be, anvil_value_t *val)
 {
@@ -1100,6 +1122,7 @@ const anvil_backend_ops_t anvil_backend_ppc64le = {
     .arch = ANVIL_ARCH_PPC64LE,
     .init = ppc64le_init,
     .cleanup = ppc64le_cleanup,
+    .reset = ppc64le_reset,
     .codegen_module = ppc64le_codegen_module,
     .codegen_func = ppc64le_codegen_func,
     .get_arch_info = ppc64le_get_arch_info

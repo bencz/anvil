@@ -142,6 +142,27 @@ static void s390_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void s390_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    s390_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->local_vars_size = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->literal_counter = 0;
+    priv->max_call_args = 0;
+    priv->current_func = NULL;
+}
+
 /* Get stack slot offset for an ALLOCA result value */
 static int s390_get_stack_slot(s390_backend_t *be, anvil_value_t *val)
 {
@@ -1266,6 +1287,7 @@ const anvil_backend_ops_t anvil_backend_s390 = {
     .arch = ANVIL_ARCH_S390,
     .init = s390_init,
     .cleanup = s390_cleanup,
+    .reset = s390_reset,
     .codegen_module = s390_codegen_module,
     .codegen_func = s390_codegen_func,
     .get_arch_info = s390_get_arch_info

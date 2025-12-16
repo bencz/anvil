@@ -147,6 +147,28 @@ static void ppc32_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void ppc32_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    ppc32_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->next_stack_offset = 0;
+    priv->stack_offset = 0;
+    priv->local_offset = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->frame_size = 0;
+    priv->current_func = NULL;
+}
+
 /* Add stack slot for local variable */
 static int ppc32_add_stack_slot(ppc32_backend_t *be, anvil_value_t *val)
 {
@@ -1054,6 +1076,7 @@ const anvil_backend_ops_t anvil_backend_ppc32 = {
     .arch = ANVIL_ARCH_PPC32,
     .init = ppc32_init,
     .cleanup = ppc32_cleanup,
+    .reset = ppc32_reset,
     .codegen_module = ppc32_codegen_module,
     .codegen_func = ppc32_codegen_func,
     .get_arch_info = ppc32_get_arch_info

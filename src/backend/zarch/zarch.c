@@ -155,6 +155,27 @@ static void zarch_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void zarch_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    zarch_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->local_vars_size = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->literal_counter = 0;
+    priv->max_call_args = 0;
+    priv->current_func = NULL;
+}
+
 /* Get stack slot offset for an ALLOCA result value */
 static int zarch_get_stack_slot(zarch_backend_t *be, anvil_value_t *val)
 {
@@ -1329,6 +1350,7 @@ const anvil_backend_ops_t anvil_backend_zarch = {
     .arch = ANVIL_ARCH_ZARCH,
     .init = zarch_init,
     .cleanup = zarch_cleanup,
+    .reset = zarch_reset,
     .codegen_module = zarch_codegen_module,
     .codegen_func = zarch_codegen_func,
     .get_arch_info = zarch_get_arch_info

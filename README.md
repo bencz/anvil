@@ -276,6 +276,7 @@ const anvil_backend_ops_t anvil_backend_myarch = {
     .arch = ANVIL_ARCH_MYARCH,
     .init = myarch_init,
     .cleanup = myarch_cleanup,
+    .reset = myarch_reset,  // Clear cached IR pointers (optional but recommended)
     .codegen_module = myarch_codegen_module,
     .codegen_func = myarch_codegen_func,
     .get_arch_info = myarch_get_arch_info
@@ -396,6 +397,13 @@ Recent fixes to the ARM64 backend for robust code generation:
 - **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
 - **Type-aware load/store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit)
 - **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
+
+### Memory Management Improvements
+Improved cleanup flow to prevent dangling pointers and use-after-free issues:
+
+- **Backend reset function**: New `reset` callback in `anvil_backend_ops_t` to clear cached IR pointers
+- **Safe cleanup order**: `anvil_ctx_destroy()` now resets backend state before destroying modules
+- **All backends updated**: x86, x86-64, ARM64, S/370, S/370-XA, S/390, z/Architecture, PPC32, PPC64, PPC64LE
 
 ### Advanced Examples
 Three advanced examples demonstrate ANVIL's capabilities for generating linkable libraries:

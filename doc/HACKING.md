@@ -354,6 +354,46 @@ anvil_module_codegen(mod, &output, NULL);
 free(output);
 ```
 
+### Backend Cleanup and Reset
+
+Backends must implement proper cleanup to avoid memory leaks and dangling pointers:
+
+```c
+// cleanup: Free all backend resources
+static void myarch_cleanup(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    myarch_backend_t *priv = be->priv;
+    anvil_strbuf_destroy(&priv->code);
+    free(priv->stack_slots);  // Free arrays
+    free(priv->strings);
+    free(priv);
+    be->priv = NULL;
+}
+
+// reset: Clear cached IR pointers (called before module destruction)
+static void myarch_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    myarch_backend_t *priv = be->priv;
+    
+    // Clear stack_slots (contain pointers to anvil_value_t)
+    priv->num_stack_slots = 0;
+    
+    // Clear string table (contain pointers to string data)
+    priv->num_strings = 0;
+    
+    // Reset counters
+    priv->label_counter = 0;
+}
+```
+
+**Why `reset` is important:**
+- Backends cache pointers to `anvil_value_t` in stack slots and string tables
+- When `anvil_ctx_destroy()` is called, modules are destroyed (freeing IR values)
+- If backend still holds pointers to freed values → **dangling pointers**
+- `reset` is called BEFORE module destruction to clear these cached pointers
+
 ### Null Checks
 
 ```c

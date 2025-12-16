@@ -509,6 +509,9 @@ typedef struct anvil_backend_ops {
     /* Cleanup backend */
     void (*cleanup)(anvil_backend_t *be);
     
+    /* Reset backend state (clear cached pointers to IR values) */
+    void (*reset)(anvil_backend_t *be);
+    
     /* Generate code for a module */
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);

@@ -89,6 +89,9 @@ typedef struct {
     // Free backend resources
     void (*cleanup)(anvil_backend_t *be);
     
+    // Clear cached IR pointers (called before module destruction)
+    void (*reset)(anvil_backend_t *be);
+    
     // Generate code for entire module
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
@@ -197,6 +200,18 @@ static void myarch_cleanup(anvil_backend_t *be)
     anvil_strbuf_destroy(&priv->data);
     free(priv);
     be->priv = NULL;
+}
+
+static void myarch_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    myarch_backend_t *priv = be->priv;
+    
+    // Clear cached pointers to anvil_value_t
+    // This prevents dangling pointers when modules are destroyed
+    priv->label_counter = 0;
+    // Reset any stack_slots, strings, or other cached IR pointers
 }
 
 static const anvil_arch_info_t *myarch_get_arch_info(anvil_backend_t *be)
@@ -455,6 +470,7 @@ const anvil_backend_ops_t anvil_backend_myarch = {
     .arch = ANVIL_ARCH_MYARCH,
     .init = myarch_init,
     .cleanup = myarch_cleanup,
+    .reset = myarch_reset,
     .codegen_module = myarch_codegen_module,
     .codegen_func = myarch_codegen_func,
     .get_arch_info = myarch_get_arch_info

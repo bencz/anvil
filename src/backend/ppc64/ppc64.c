@@ -102,6 +102,28 @@ static void ppc64_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void ppc64_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    ppc64_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->next_stack_offset = 0;
+    priv->stack_offset = 0;
+    priv->local_offset = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->frame_size = 0;
+    priv->current_func = NULL;
+}
+
 /* ============================================================================
  * Stack Slot Management
  * ============================================================================ */
@@ -256,6 +278,7 @@ const anvil_backend_ops_t anvil_backend_ppc64 = {
     .arch = ANVIL_ARCH_PPC64,
     .init = ppc64_init,
     .cleanup = ppc64_cleanup,
+    .reset = ppc64_reset,
     .codegen_module = ppc64_codegen_module,
     .codegen_func = ppc64_codegen_func,
     .get_arch_info = ppc64_get_arch_info

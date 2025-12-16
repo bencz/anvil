@@ -1444,6 +1444,7 @@ typedef struct {
     
     anvil_error_t (*init)(anvil_backend_t *be, anvil_ctx_t *ctx);
     void (*cleanup)(anvil_backend_t *be);
+    void (*reset)(anvil_backend_t *be);  // Clear cached IR pointers (optional)
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
     anvil_error_t (*codegen_func)(anvil_backend_t *be, anvil_func_t *func,
@@ -1451,3 +1452,17 @@ typedef struct {
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
 } anvil_backend_ops_t;
 ```
+
+**Fields:**
+| Field | Description |
+|-------|-------------|
+| `name` | Human-readable backend name |
+| `arch` | Architecture enum value |
+| `init` | Initialize backend state |
+| `cleanup` | Free all backend resources |
+| `reset` | Clear cached pointers to IR values (prevents dangling pointers) |
+| `codegen_module` | Generate assembly for entire module |
+| `codegen_func` | Generate assembly for single function |
+| `get_arch_info` | Return architecture information |
+
+**Note:** The `reset` function is called by `anvil_ctx_destroy()` before destroying modules. This ensures that any cached pointers to `anvil_value_t` in backend data structures (like stack slots or string tables) are cleared before the IR values are freed.

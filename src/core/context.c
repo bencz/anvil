@@ -516,7 +516,15 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx)
 {
     if (!ctx) return;
     
-    /* Destroy all modules */
+    /* Reset backend state FIRST (while IR values are still valid)
+     * This clears any cached pointers to anvil_value_t in stack_slots/strings */
+    if (ctx->backend) {
+        if (ctx->backend->ops && ctx->backend->ops->reset) {
+            ctx->backend->ops->reset(ctx->backend);
+        }
+    }
+    
+    /* Destroy all modules (frees all IR values) */
     anvil_module_t *mod = ctx->modules;
     while (mod) {
         anvil_module_t *next = mod->next;
@@ -529,7 +537,7 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx)
         anvil_pool_destroy(ctx->pool);
     }
     
-    /* Cleanup backend */
+    /* Cleanup backend (now safe - no dangling pointers) */
     if (ctx->backend) {
         if (ctx->backend->ops && ctx->backend->ops->cleanup) {
             ctx->backend->ops->cleanup(ctx->backend);

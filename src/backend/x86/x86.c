@@ -115,6 +115,26 @@ static void x86_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void x86_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    x86_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->next_stack_offset = 0;
+    priv->stack_offset = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->current_func = NULL;
+}
+
 /* Add stack slot for local variable */
 static int x86_add_stack_slot(x86_backend_t *be, anvil_value_t *val)
 {
@@ -1157,6 +1177,7 @@ const anvil_backend_ops_t anvil_backend_x86 = {
     .arch = ANVIL_ARCH_X86,
     .init = x86_init,
     .cleanup = x86_cleanup,
+    .reset = x86_reset,
     .codegen_module = x86_codegen_module,
     .codegen_func = x86_codegen_func,
     .get_arch_info = x86_get_arch_info

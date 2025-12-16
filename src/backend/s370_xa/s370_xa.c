@@ -134,6 +134,27 @@ static void s370_xa_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void s370_xa_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    s370_xa_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->local_vars_size = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->literal_counter = 0;
+    priv->max_call_args = 0;
+    priv->current_func = NULL;
+}
+
 static int s370_xa_get_stack_slot(s370_xa_backend_t *be, anvil_value_t *val)
 {
     for (size_t i = 0; i < be->num_stack_slots; i++) {
@@ -1047,6 +1068,7 @@ const anvil_backend_ops_t anvil_backend_s370_xa = {
     .arch = ANVIL_ARCH_S370_XA,
     .init = s370_xa_init,
     .cleanup = s370_xa_cleanup,
+    .reset = s370_xa_reset,
     .codegen_module = s370_xa_codegen_module,
     .codegen_func = s370_xa_codegen_func,
     .get_arch_info = s370_xa_get_arch_info

@@ -144,6 +144,26 @@ static void arm64_cleanup(anvil_backend_t *be)
     be->priv = NULL;
 }
 
+static void arm64_reset(anvil_backend_t *be)
+{
+    if (!be || !be->priv) return;
+    
+    arm64_backend_t *priv = be->priv;
+    
+    /* Clear stack slots (contain pointers to anvil_value_t) */
+    priv->num_stack_slots = 0;
+    priv->next_stack_offset = 0;
+    
+    /* Clear string table (contain pointers to string data) */
+    priv->num_strings = 0;
+    priv->string_counter = 0;
+    
+    /* Reset other state */
+    priv->label_counter = 0;
+    priv->stack_size = 0;
+    priv->current_func = NULL;
+}
+
 static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
 {
     (void)be;
@@ -1462,6 +1482,7 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .arch = ANVIL_ARCH_ARM64,
     .init = arm64_init,
     .cleanup = arm64_cleanup,
+    .reset = arm64_reset,
     .codegen_module = arm64_codegen_module,
     .codegen_func = arm64_codegen_func,
     .get_arch_info = arm64_get_arch_info
