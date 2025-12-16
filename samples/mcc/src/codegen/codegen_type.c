@@ -81,6 +81,10 @@ size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_POINTER:
             return ptr_size;
         
+        case TYPE_LONG:
+            /* long size depends on data model: LP64 = 8, ILP32 = 4 */
+            return (ptr_size == 8) ? 8 : 4;
+        
         case TYPE_ARRAY:
             return codegen_sizeof(cg, type->data.array.element) * type->data.array.length;
         

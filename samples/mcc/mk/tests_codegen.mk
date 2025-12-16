@@ -152,8 +152,11 @@ test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64
 	@echo "All architecture tests complete."
 
 # ============================================================
-# Execution Tests (compile and run)
+# Execution Tests (compile and run, compare with native compiler)
 # ============================================================
+
+test-exec: $(TARGET)
+	@$(TESTDIR)/exec/run_exec_tests.sh
 
 test-run: $(TARGET) | $(TEST_OUTPUT_DIR)
 	@echo "=== Execution Tests ==="

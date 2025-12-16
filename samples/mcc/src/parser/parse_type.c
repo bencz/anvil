@@ -698,16 +698,16 @@ done:
     mcc_type_t *type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
     
     switch (type_spec) {
-        case 1: type->kind = TYPE_VOID; break;
-        case 2: type->kind = TYPE_CHAR; break;
-        case 3: type->kind = TYPE_SHORT; break;
-        case 4: type->kind = TYPE_INT; break;
-        case 5: type->kind = TYPE_LONG; break;
-        case 6: type->kind = TYPE_FLOAT; break;
-        case 7: type->kind = TYPE_DOUBLE; break;
-        case 8: type->kind = TYPE_LONG_LONG; break;
-        case 9: type->kind = TYPE_BOOL; break;
-        default: type->kind = TYPE_INT; break;
+        case 1: type->kind = TYPE_VOID; type->size = 0; type->align = 1; break;
+        case 2: type->kind = TYPE_CHAR; type->size = 1; type->align = 1; break;
+        case 3: type->kind = TYPE_SHORT; type->size = 2; type->align = 2; break;
+        case 4: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
+        case 5: type->kind = TYPE_LONG; type->size = 4; type->align = 4; break; /* Will be corrected by codegen_sizeof */
+        case 6: type->kind = TYPE_FLOAT; type->size = 4; type->align = 4; break;
+        case 7: type->kind = TYPE_DOUBLE; type->size = 8; type->align = 8; break;
+        case 8: type->kind = TYPE_LONG_LONG; type->size = 8; type->align = 8; break;
+        case 9: type->kind = TYPE_BOOL; type->size = 1; type->align = 1; break;
+        default: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
     }
     
     type->is_unsigned = is_unsigned;
