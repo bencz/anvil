@@ -44,13 +44,14 @@ void anvil_module_destroy(anvil_module_t *mod)
     while (func) {
         anvil_func_t *next = func->next;
         
-        /* Destroy blocks - three passes to avoid use-after-free:
-         * Pass 1: Free constant operands (before results are freed)
-         * Pass 2: Free instruction results 
-         * Pass 3: Free instructions and blocks */
+        /* Destroy blocks - collect unique constants first, then free everything */
         anvil_block_t *block = func->blocks;
         
-        /* Pass 1: Free constant operands first (while we can still check kind) */
+        /* Collect unique constant pointers to avoid double-free */
+        #define MAX_CONSTS 1024
+        anvil_value_t *consts[MAX_CONSTS];
+        size_t num_consts = 0;
+        
         for (anvil_block_t *b = block; b; b = b->next) {
             for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 for (size_t i = 0; i < instr->num_operands; i++) {
@@ -59,18 +60,32 @@ void anvil_module_destroy(anvil_module_t *mod)
                                op->kind == ANVIL_VAL_CONST_FLOAT ||
                                op->kind == ANVIL_VAL_CONST_NULL ||
                                op->kind == ANVIL_VAL_CONST_STRING)) {
-                        if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
-                            free((void*)op->data.str);
+                        /* Check if already in list */
+                        bool found = false;
+                        for (size_t j = 0; j < num_consts; j++) {
+                            if (consts[j] == op) { found = true; break; }
                         }
-                        free(op->name);
-                        free(op);
-                        instr->operands[i] = NULL;
+                        if (!found && num_consts < MAX_CONSTS) {
+                            consts[num_consts++] = op;
+                        }
                     }
+                    instr->operands[i] = NULL;
                 }
             }
         }
         
-        /* Pass 2: Free all instruction results */
+        /* Free collected constants */
+        for (size_t i = 0; i < num_consts; i++) {
+            anvil_value_t *op = consts[i];
+            if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
+                free((void*)op->data.str);
+            }
+            free(op->name);
+            free(op);
+        }
+        #undef MAX_CONSTS
+        
+        /* Free all instruction results */
         for (anvil_block_t *b = block; b; b = b->next) {
             for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 if (instr->result) {
@@ -81,7 +96,7 @@ void anvil_module_destroy(anvil_module_t *mod)
             }
         }
         
-        /* Pass 3: Free instructions and blocks */
+        /* Free instructions and blocks */
         while (block) {
             anvil_block_t *bnext = block->next;
             
