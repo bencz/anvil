@@ -455,8 +455,28 @@ typedef enum {
 typedef enum {
     ANVIL_LINK_INTERNAL,    // Static/internal linkage
     ANVIL_LINK_EXTERNAL,    // External linkage (visible)
-    ANVIL_LINK_WEAK         // Weak linkage
+    ANVIL_LINK_WEAK,        // Weak linkage
+    ANVIL_LINK_COMMON       // Common linkage
 } anvil_linkage_t;
+```
+
+| Linkage | Description | Use Case |
+|---------|-------------|----------|
+| `ANVIL_LINK_INTERNAL` | Symbol is only visible within the module (static) | Private helper functions, module-local globals |
+| `ANVIL_LINK_EXTERNAL` | Symbol is visible to other modules and can be linked | Public API functions, exported globals |
+| `ANVIL_LINK_WEAK` | Symbol can be overridden by another definition | Default implementations, optional hooks |
+| `ANVIL_LINK_COMMON` | Tentative definition (like C uninitialized globals) | Uninitialized global variables |
+
+**Example:**
+```c
+// Internal function (not exported)
+anvil_func_t *helper = anvil_func_create(mod, "helper", type, ANVIL_LINK_INTERNAL);
+
+// Public function (exported)
+anvil_func_t *api_func = anvil_func_create(mod, "my_api", type, ANVIL_LINK_EXTERNAL);
+
+// Weak function (can be overridden)
+anvil_func_t *default_handler = anvil_func_create(mod, "handler", type, ANVIL_LINK_WEAK);
 ```
 
 ### Architecture Types
@@ -473,15 +493,85 @@ typedef enum {
     ANVIL_ARCH_PPC32,       // PowerPC 32-bit (big-endian)
     ANVIL_ARCH_PPC64,       // PowerPC 64-bit (big-endian)
     ANVIL_ARCH_PPC64LE,     // PowerPC 64-bit (little-endian)
+    ANVIL_ARCH_ARM64,       // ARM64/AArch64
     ANVIL_ARCH_COUNT
 } anvil_arch_t;
+```
+
+### Assembly Syntax
+
+```c
+typedef enum {
+    ANVIL_SYNTAX_DEFAULT,   // Default for architecture
+    ANVIL_SYNTAX_HLASM,     // IBM HLASM for mainframes
+    ANVIL_SYNTAX_GAS,       // GNU Assembler syntax
+    ANVIL_SYNTAX_NASM,      // NASM syntax for x86
+    ANVIL_SYNTAX_MASM       // Microsoft MASM syntax
+} anvil_syntax_t;
+```
+
+| Syntax | Architectures | Description |
+|--------|---------------|-------------|
+| `ANVIL_SYNTAX_DEFAULT` | All | Use default syntax for target architecture |
+| `ANVIL_SYNTAX_HLASM` | S/370, S/390, z/Architecture | IBM High Level Assembler |
+| `ANVIL_SYNTAX_GAS` | x86, x86-64, ARM64, PowerPC | GNU Assembler (AT&T style for x86) |
+| `ANVIL_SYNTAX_NASM` | x86, x86-64 | Netwide Assembler (Intel style) |
+| `ANVIL_SYNTAX_MASM` | x86, x86-64 | Microsoft Macro Assembler |
+
+### Endianness
+
+```c
+typedef enum {
+    ANVIL_ENDIAN_LITTLE,    // Little-endian (x86, ARM64, PPC64LE)
+    ANVIL_ENDIAN_BIG        // Big-endian (S/370, S/390, z/Arch, PPC)
+} anvil_endian_t;
+```
+
+### Stack Direction
+
+```c
+typedef enum {
+    ANVIL_STACK_DOWN,       // Stack grows toward lower addresses (x86, ARM64)
+    ANVIL_STACK_UP          // Stack grows toward higher addresses (mainframes)
+} anvil_stack_dir_t;
+```
+
+### OS ABI
+
+```c
+typedef enum {
+    ANVIL_ABI_DEFAULT,      // Default for architecture
+    ANVIL_ABI_SYSV,         // System V ABI (Linux, BSD)
+    ANVIL_ABI_DARWIN,       // Darwin/macOS (Mach-O, underscore prefix)
+    ANVIL_ABI_WIN64,        // Windows x64 ABI
+    ANVIL_ABI_MVS           // IBM MVS/z/OS
+} anvil_abi_t;
+```
+
+| ABI | Architectures | Description |
+|-----|---------------|-------------|
+| `ANVIL_ABI_DEFAULT` | All | Use default ABI for target |
+| `ANVIL_ABI_SYSV` | x86, x86-64, ARM64 | System V ABI (Linux, BSD, most Unix) |
+| `ANVIL_ABI_DARWIN` | x86-64, ARM64 | macOS/iOS (underscore prefix, Mach-O directives) |
+| `ANVIL_ABI_WIN64` | x86-64 | Windows x64 calling convention |
+| `ANVIL_ABI_MVS` | S/370, S/390, z/Architecture | IBM z/OS MVS linkage conventions |
+
+**Example:**
+```c
+// For macOS ARM64
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);
+
+// For Linux x86-64
+anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+anvil_ctx_set_abi(ctx, ANVIL_ABI_SYSV);
 ```
 
 ### Floating-Point Formats
 
 ```c
 typedef enum {
-    ANVIL_FP_IEEE754,       // IEEE 754 (x86, x86-64, PowerPC, z/Architecture)
+    ANVIL_FP_IEEE754,       // IEEE 754 (x86, x86-64, PowerPC, ARM64, z/Architecture)
     ANVIL_FP_HFP,           // IBM Hexadecimal Floating Point (S/370, S/390)
     ANVIL_FP_HFP_IEEE       // HFP with IEEE 754 support (z/Architecture)
 } anvil_fp_format_t;
@@ -491,6 +581,7 @@ typedef enum {
 |--------------|-----------|-------|
 | x86, x86-64 | IEEE 754 | Standard IEEE floating-point |
 | PowerPC | IEEE 754 | Standard IEEE floating-point |
+| ARM64 | IEEE 754 | Standard IEEE floating-point |
 | S/370 | HFP | IBM Hexadecimal FP only |
 | S/370-XA | HFP | IBM Hexadecimal FP only |
 | S/390 | HFP/IEEE | HFP default, IEEE 754 optional |
@@ -813,6 +904,9 @@ Register usage (System V):
 | Stack direction | Up |
 | Calling convention | MVS Linkage |
 | Output syntax | HLASM |
+| GPRs | 16 |
+| FPRs | 4 (F0, F2, F4, F6) |
+| Call instruction | BALR R14,R15 |
 
 Register usage:
 - R0: Work register (volatile)
@@ -851,6 +945,9 @@ Save area format (72 bytes):
 | Stack direction | Up |
 | Calling convention | MVS Linkage |
 | Output syntax | HLASM |
+| GPRs | 16 |
+| FPRs | 4 (F0, F2, F4, F6) |
+| Call instruction | BASR R14,R15 |
 
 Same register conventions as S/370.
 - Uses `BASR` for calls (31-bit safe) instead of `BALR`
@@ -868,11 +965,16 @@ Same register conventions as S/370.
 | Stack direction | Up |
 | Calling convention | MVS Linkage |
 | Output syntax | HLASM |
+| GPRs | 16 |
+| FPRs | 16 (F0-F15) |
+| Call instruction | BASR R14,R15 |
 
 Same register conventions as S/370. Additional instructions:
 - LHI (Load Halfword Immediate)
-- Relative branches (J, JE, JNE, etc.)
+- AHI (Add Halfword Immediate)
+- Relative branches (J, JE, JNE, JH, JL, etc.)
 - MSR (Multiply Single Register)
+- IEEE 754 FP instructions (AEBR, ADBR, etc.) when `ANVIL_FP_IEEE754` is set
 
 **GCCMVS Conventions:** Same as S/370 (CSECT blank, AMODE ANY, RMODE ANY, uppercase names, stack allocation)
 
@@ -886,13 +988,21 @@ Same register conventions as S/370. Additional instructions:
 | Stack direction | Up |
 | Calling convention | z/OS 64-bit Linkage |
 | Output syntax | HLASM |
+| GPRs | 16 |
+| FPRs | 16 (F0-F15) |
+| Call instruction | BRASL R14,target |
 
 Same register conventions. 64-bit instructions:
-- LGR, AGR, SGR, MSGR (64-bit register operations)
+- LGR, AGR, SGR, MSGR, NGR, OGR, XGR (64-bit register operations)
 - LGHI, LGFI (Load immediate)
+- AGHI (Add Halfword Immediate 64-bit)
 - STMG, LMG (Store/Load multiple 64-bit)
+- SLLG, SRLG, SRAG (64-bit shifts)
+- CGR, LTGR (64-bit compare/test)
 - BRASL (Branch relative and save long)
-- LARL (Load address relative long)
+- LARL, LGRL, STGRL (Relative long addressing)
+- DSGR (Divide Single 64-bit)
+- IEEE 754 FP: CEFBR, CDFBR, CFDBR (direct int↔float conversion)
 
 F4SA Save area format (144 bytes):
 ```
@@ -907,6 +1017,56 @@ F4SA Save area format (144 bytes):
 ```
 
 **GCCMVS Conventions:** Same as S/370 (CSECT blank, AMODE ANY, RMODE ANY, uppercase names, stack allocation)
+
+### ARM64/AArch64
+
+| Property | Value |
+|----------|-------|
+| Pointer size | 8 bytes |
+| Endianness | Little |
+| Stack direction | Down |
+| Calling convention | AAPCS64 |
+| Output syntax | GAS |
+
+Register usage (AAPCS64):
+- X0-X7: Arguments and return value (X0 = return)
+- X8: Indirect result location
+- X9-X15: Temporary/scratch registers
+- X16-X17: Intra-procedure call scratch (IP0, IP1)
+- X18: Platform register (reserved)
+- X19-X28: Callee-saved registers
+- X29 (FP): Frame pointer
+- X30 (LR): Link register
+- SP: Stack pointer
+
+**Floating-Point Registers:**
+- D0-D7: FP arguments and return value
+- D8-D15: Callee-saved
+- D16-D31: Temporary
+
+**OS ABI Support:**
+- **Linux (ELF)**: Standard AAPCS64, no symbol prefix
+- **macOS (Darwin)**: Underscore prefix for symbols, Mach-O directives
+
+**Example Prologue (Linux):**
+```asm
+	.globl my_func
+	.type my_func, %function
+my_func:
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+	sub sp, sp, #32          // Allocate locals
+```
+
+**Example Prologue (macOS):**
+```asm
+	.globl _my_func
+	.p2align 2
+_my_func:
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+	sub sp, sp, #32          // Allocate locals
+```
 
 ## Code Generation Examples
 
@@ -1145,6 +1305,45 @@ R0       EQU   0
 ...
 R15      EQU   15
          END   ADD
+```
+
+### ARM64 Output (Linux)
+
+```asm
+// Generated by ANVIL for ARM64 (AArch64) - Linux
+	.arch armv8-a
+	.text
+
+	.globl add
+	.type add, %function
+add:
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+	mov x9, x0                   // Load param 0
+	mov x10, x1                  // Load param 1
+	add x0, x9, x10              // Add registers
+	ldp x29, x30, [sp], #16
+	ret
+	.size add, .-add
+```
+
+### ARM64 Output (macOS)
+
+```asm
+// Generated by ANVIL for ARM64 (AArch64) - macOS
+	.build_version macos, 11, 0
+	.section __TEXT,__text,regular,pure_instructions
+
+	.globl _add
+	.p2align 2
+_add:
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+	mov x9, x0                   // Load param 0
+	mov x10, x1                  // Load param 1
+	add x0, x9, x10              // Add registers
+	ldp x29, x30, [sp], #16
+	ret
 ```
 
 ## IR Optimization
