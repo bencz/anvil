@@ -199,8 +199,11 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx)
     }
     
     /* Cleanup backend */
-    if (ctx->backend && ctx->backend->ops->cleanup) {
-        ctx->backend->ops->cleanup(ctx->backend);
+    if (ctx->backend) {
+        if (ctx->backend->ops && ctx->backend->ops->cleanup) {
+            ctx->backend->ops->cleanup(ctx->backend);
+        }
+        free(ctx->backend);
     }
     
     /* Cleanup pass manager */

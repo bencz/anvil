@@ -91,13 +91,15 @@ void anvil_module_destroy(anvil_module_t *mod)
         }
         
         /* Destroy params */
-        for (size_t i = 0; i < func->num_params; i++) {
-            if (func->params[i]) {
-                free(func->params[i]->name);
-                free(func->params[i]);
+        if (func->params) {
+            for (size_t i = 0; i < func->num_params; i++) {
+                if (func->params[i]) {
+                    free(func->params[i]->name);
+                    free(func->params[i]);
+                }
             }
+            free(func->params);
         }
-        free(func->params);
         
         /* Destroy function value */
         if (func->value) {
