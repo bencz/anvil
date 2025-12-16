@@ -487,6 +487,36 @@ Different architectures pass parameters differently:
 - Link register: X30
 - Stack pointer: SP (16-byte aligned)
 
+**PowerPC 32-bit (System V):**
+- First 8 integer args: R3-R10
+- First 8 float args: F1-F8
+- Return value: R3 (integer), F1 (float)
+- Frame pointer: R31
+- Link register: LR (saved via mflr/mtlr)
+- Stack pointer: R1 (16-byte aligned)
+
+**PowerPC 64-bit BE (ELFv1):**
+- First 8 integer args: R3-R10
+- First 8 float args: F1-F8
+- Return value: R3 (integer), F1 (float)
+- TOC pointer: R2 (must be saved/restored)
+- Frame pointer: R31
+- Link register: LR
+- Stack pointer: R1
+- Minimum frame: 112 bytes
+- Function descriptors in `.opd` section
+
+**PowerPC 64-bit LE (ELFv2):**
+- First 8 integer args: R3-R10
+- First 8 float args: F1-F8
+- Return value: R3 (integer), F1 (float)
+- TOC pointer: R2
+- Frame pointer: R31
+- Link register: LR
+- Stack pointer: R1
+- Minimum frame: 32 bytes
+- No function descriptors (uses `.localentry`)
+
 **IBM Mainframe (MVS/GCCMVS):**
 - R1 points to parameter list
 - Each entry is address of parameter

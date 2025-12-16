@@ -515,8 +515,14 @@ ANVIL supports the following target architectures:
 
 **PowerPC:**
 - Big-endian (PPC32, PPC64) and little-endian (PPC64LE) variants
-- ELFv1 (PPC64) and ELFv2 (PPC64LE) ABIs
-- Full floating-point support
+- ELFv1 ABI (PPC64 BE): Function descriptors in `.opd` section, 112-byte minimum frame
+- ELFv2 ABI (PPC64 LE): Local entry points via `.localentry`, 32-byte minimum frame
+- System V ABI (PPC32): Standard 32-bit calling convention
+- Full IEEE 754 floating-point support
+- GAS syntax output
+- Stack slot allocation for local variables
+- String table management for string literals
+- Global variable emission with proper alignment
 
 **ARM64:**
 - AAPCS64 calling convention

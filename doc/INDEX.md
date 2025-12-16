@@ -145,3 +145,12 @@ anvil_module_codegen(mod, &output, &len);
 - **Direct global access**: L/ST for S/370-S/390, LGRL/STGRL for z/Architecture
 - **Native FP conversion**: CFDBR for IEEE float→int (z/Architecture)
 - **Stack-based code**: Faster than GETMAIN/FREEMAIN
+
+### PowerPC Backend Support
+- **PPC32**: 32-bit big-endian, System V ABI
+- **PPC64 BE**: 64-bit big-endian, ELFv1 ABI with function descriptors
+- **PPC64 LE**: 64-bit little-endian, ELFv2 ABI with local entry points
+- Full IR operation support (arithmetic, memory, control flow, FP)
+- Stack slot allocation for local variables
+- String table management for string literals
+- Global variable emission

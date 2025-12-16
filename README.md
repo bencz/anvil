@@ -205,6 +205,9 @@ int main(void)
 | S/370 | MVS | R1 points to parameter list |
 | S/390 | MVS | R1 points to parameter list |
 | z/Arch | z/OS 64-bit | R1 points to parameter list (64-bit) |
+| PPC32 | System V | r3-r10 for args, r3 for return |
+| PPC64 BE | ELFv1 | r3-r10 for args, function descriptors |
+| PPC64 LE | ELFv2 | r3-r10 for args, local entry points |
 | ARM64 (Linux) | AAPCS64 | x0-x7 for args, x0 for return |
 | ARM64 (macOS) | Apple ARM64 | x0-x7 for args, underscore prefix on symbols |
 
@@ -328,6 +331,19 @@ anvil_register_backend(&anvil_backend_myarch);
 - Support for initialized globals with `DC` (Define Constant)
 - UPPERCASE naming convention (GCCMVS compatible)
 - Example: `examples/global_test.c`
+
+### PowerPC Backend Support
+- **PPC32**: 32-bit big-endian, System V ABI, GAS output
+- **PPC64 BE**: 64-bit big-endian, ELFv1 ABI with function descriptors (`.opd` section)
+- **PPC64 LE**: 64-bit little-endian, ELFv2 ABI with `.localentry` directives
+- Full IR operation support: arithmetic, bitwise, memory, control flow, comparisons
+- Type conversions: truncation, zero/sign extension, bitcast, pointer-int
+- Floating-point operations (IEEE 754): fadd, fsub, fmul, fdiv, fneg, fabs, fcmp
+- FP conversions: sitofp, uitofp, fptosi, fptoui, fpext, fptrunc
+- Stack slot allocation for local variables (`alloca`)
+- String table management for string literals
+- Global variable emission with proper alignment
+- GEP and STRUCT_GEP for array and struct access
 
 ## IR Optimization
 
