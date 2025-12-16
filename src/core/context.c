@@ -798,8 +798,9 @@ anvil_cpu_model_t anvil_arch_default_cpu(anvil_arch_t arch)
         case ANVIL_ARCH_PPC32:
             return ANVIL_CPU_PPC_G3;
         case ANVIL_ARCH_PPC64:
+            return ANVIL_CPU_PPC64_POWER4;
         case ANVIL_ARCH_PPC64LE:
-            return ANVIL_CPU_PPC64_POWER7;
+            return ANVIL_CPU_PPC64_POWER8;
         case ANVIL_ARCH_ARM64:
             return ANVIL_CPU_ARM64_GENERIC;
         default:
