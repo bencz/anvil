@@ -55,6 +55,10 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             anvil_value_t *ptr = codegen_find_local(cg, name);
             
             if (ptr) {
+                /* For arrays, the pointer IS the value (array decays to pointer) */
+                if (sym && sym->type && sym->type->kind == TYPE_ARRAY) {
+                    return ptr;
+                }
                 /* Load from local variable */
                 anvil_type_t *type = sym ? codegen_type(cg, sym->type) 
                                          : anvil_type_i32(cg->anvil_ctx);
