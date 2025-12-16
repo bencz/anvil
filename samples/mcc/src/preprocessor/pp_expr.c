@@ -54,6 +54,37 @@ static int64_t pp_eval_primary(mcc_preprocessor_t *pp)
             if (strcmp(tok->text, "false") == 0) return 0;
         }
         
+        /* Check if it's a macro and expand it */
+        mcc_macro_t *macro = pp_lookup_macro(pp, tok->text);
+        if (macro && !macro->is_function_like) {
+            /* Object-like macro - get its value */
+            if (macro->body && macro->body->type == TOK_INT_LIT) {
+                return (int64_t)macro->body->literal.int_val.value;
+            }
+            /* Macro expands to identifier or complex expression - evaluate recursively */
+            if (macro->body) {
+                /* Save current output */
+                mcc_token_t *saved_head = pp->output_head;
+                mcc_token_t *saved_tail = pp->output_tail;
+                pp->output_head = pp->output_tail = NULL;
+                
+                /* Expand macro */
+                pp_expand_macro(pp, macro);
+                
+                /* If expansion produced a single integer, return it */
+                if (pp->output_head && pp->output_head->type == TOK_INT_LIT && !pp->output_head->next) {
+                    int64_t val = (int64_t)pp->output_head->literal.int_val.value;
+                    pp->output_head = saved_head;
+                    pp->output_tail = saved_tail;
+                    return val;
+                }
+                
+                /* Restore output */
+                pp->output_head = saved_head;
+                pp->output_tail = saved_tail;
+            }
+        }
+        
         /* Unknown identifier evaluates to 0 */
         return 0;
     }

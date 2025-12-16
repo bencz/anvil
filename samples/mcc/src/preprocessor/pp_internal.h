@@ -53,6 +53,9 @@ void pp_emit_token(mcc_preprocessor_t *pp, mcc_token_t *tok);
 /* Process a single token (with macro expansion) */
 void pp_process_token(mcc_preprocessor_t *pp, mcc_token_t *tok);
 
+/* Process a token list (with macro expansion for nested macros) */
+void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens);
+
 /* ---- Expression Evaluation (pp_expr.c) ---- */
 
 /* Evaluate preprocessor constant expression */

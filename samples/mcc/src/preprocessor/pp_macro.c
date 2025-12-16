@@ -141,7 +141,40 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                       macro->name, macro->num_params, num_args);
         }
         
-        /* Substitute arguments in body */
+        /* Pre-expand arguments (C standard requires this) */
+        /* Note: Arguments are expanded BEFORE the macro is pushed to the expansion stack */
+        /* So we need to temporarily pop the current macro to allow recursive expansion */
+        mcc_token_t **expanded_args = NULL;
+        if (num_args > 0) {
+            expanded_args = mcc_alloc(pp->ctx, num_args * sizeof(mcc_token_t*));
+            
+            /* Temporarily pop current macro from expansion stack */
+            pp_pop_expanding(pp);
+            
+            for (int i = 0; i < num_args; i++) {
+                /* Save current output */
+                mcc_token_t *saved_head = pp->output_head;
+                mcc_token_t *saved_tail = pp->output_tail;
+                pp->output_head = pp->output_tail = NULL;
+                
+                /* Expand argument */
+                pp_process_token_list(pp, args[i]);
+                
+                /* Save expanded argument */
+                expanded_args[i] = pp->output_head;
+                
+                /* Restore output */
+                pp->output_head = saved_head;
+                pp->output_tail = saved_tail;
+            }
+            
+            /* Re-push current macro to expansion stack */
+            pp_push_expanding(pp, macro->name);
+        }
+        
+        /* Build expanded token list with argument substitution */
+        mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
+        
         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
             if (body_tok->type == TOK_IDENT) {
                 /* Check if it's a parameter */
@@ -155,9 +188,14 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 }
                 
                 if (param_idx >= 0 && param_idx < num_args) {
-                    /* Substitute argument */
-                    for (mcc_token_t *arg_tok = args[param_idx]; arg_tok; arg_tok = arg_tok->next) {
-                        pp_process_token(pp, arg_tok);
+                    /* Substitute with pre-expanded argument tokens */
+                    mcc_token_t *arg_list = expanded_args ? expanded_args[param_idx] : args[param_idx];
+                    for (mcc_token_t *arg_tok = arg_list; arg_tok; arg_tok = arg_tok->next) {
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, arg_tok);
+                        copy->next = NULL;
+                        if (!expanded_head) expanded_head = copy;
+                        if (expanded_tail) expanded_tail->next = copy;
+                        expanded_tail = copy;
                     }
                     continue;
                 }
@@ -165,17 +203,24 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 /* Check for __VA_ARGS__ (C99+) */
                 if (macro->is_variadic && strcmp(body_tok->text, "__VA_ARGS__") == 0) {
                     if (pp_has_variadic_macros(pp)) {
-                        /* Emit all variadic arguments */
+                        /* Add all variadic arguments */
                         for (int i = macro->num_params; i < num_args; i++) {
                             if (i > macro->num_params) {
-                                /* Emit comma between variadic args */
+                                /* Add comma between variadic args */
                                 mcc_token_t *comma = mcc_token_create(pp->ctx);
                                 comma->type = TOK_COMMA;
                                 comma->text = ",";
-                                pp_emit_token(pp, comma);
+                                comma->next = NULL;
+                                if (!expanded_head) expanded_head = comma;
+                                if (expanded_tail) expanded_tail->next = comma;
+                                expanded_tail = comma;
                             }
                             for (mcc_token_t *arg_tok = args[i]; arg_tok; arg_tok = arg_tok->next) {
-                                pp_process_token(pp, arg_tok);
+                                mcc_token_t *copy = mcc_token_copy(pp->ctx, arg_tok);
+                                copy->next = NULL;
+                                if (!expanded_head) expanded_head = copy;
+                                if (expanded_tail) expanded_tail->next = copy;
+                                expanded_tail = copy;
                             }
                         }
                         continue;
@@ -185,13 +230,33 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 }
             }
             
-            pp_process_token(pp, body_tok);
+            /* Copy token to expanded list */
+            mcc_token_t *copy = mcc_token_copy(pp->ctx, body_tok);
+            copy->next = NULL;
+            if (!expanded_head) expanded_head = copy;
+            if (expanded_tail) expanded_tail->next = copy;
+            expanded_tail = copy;
+        }
+        
+        /* Process expanded tokens (handles nested macros) */
+        if (expanded_head) {
+            pp_process_token_list(pp, expanded_head);
         }
         
     } else {
-        /* Object-like macro */
+        /* Object-like macro - build expanded token list */
+        mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
-            pp_process_token(pp, body_tok);
+            mcc_token_t *copy = mcc_token_copy(pp->ctx, body_tok);
+            copy->next = NULL;
+            if (!expanded_head) expanded_head = copy;
+            if (expanded_tail) expanded_tail->next = copy;
+            expanded_tail = copy;
+        }
+        
+        /* Process expanded tokens (handles nested macros) */
+        if (expanded_head) {
+            pp_process_token_list(pp, expanded_head);
         }
     }
     
