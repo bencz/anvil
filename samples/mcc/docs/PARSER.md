@@ -138,6 +138,12 @@ AST_TYPEDEF_DECL {
     mcc_type_t *type;
 }
 
+/* Note: Multiple typedef names are supported:
+ *   typedef int INT, *PINT, **PPINT;
+ * Each name is registered in the typedef registry.
+ * Only the first name is stored in the AST node.
+ */
+
 /* Variable declaration */
 AST_VAR_DECL {
     const char *name;

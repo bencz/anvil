@@ -143,7 +143,19 @@ The parser builds an Abstract Syntax Tree (AST) using recursive descent:
 - `mcc_generic_assoc_t`: Generic association for `_Generic` (C11)
 - `parse_declarator_result_t`: Result of declarator parsing (type + name)
 
-### 4. Semantic Analysis (`sema.c`)
+### 4. Semantic Analysis (`src/sema/`)
+
+The semantic analyzer is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `sema_internal.h` | Internal header with structures, function declarations, and C standard feature checks |
+| `sema.c` | Main module - public API and entry points |
+| `sema_expr.c` | Expression analysis (type checking, operator validation) |
+| `sema_stmt.c` | Statement analysis (control flow validation, scope management) |
+| `sema_decl.c` | Declaration analysis (function/variable declarations, typedef handling) |
+| `sema_type.c` | Type checking utilities (assignment compatibility, type conversions) |
+| `sema_const.c` | Constant expression evaluation (for array sizes, case labels, etc.) |
 
 Semantic analysis performs type checking and symbol resolution:
 
@@ -151,6 +163,7 @@ Semantic analysis performs type checking and symbol resolution:
 - **Symbol resolution**: Link identifiers to their declarations
 - **Scope management**: Handle nested scopes correctly
 - **Implicit conversions**: Integer promotions, usual arithmetic conversions
+- **C Standard aware**: Features like implicit int (C89), VLA (C99), `_Static_assert` (C11) are checked
 
 **Key data structures:**
 - `mcc_sema_t`: Semantic analyzer state

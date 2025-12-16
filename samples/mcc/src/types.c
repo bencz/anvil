@@ -84,6 +84,18 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     tctx->type_ulong->size = 4;
     tctx->type_ulong->align = 4;
     
+    /* C99 long long types */
+    tctx->type_llong = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_llong->kind = TYPE_LONG;  /* Use TYPE_LONG with size 8 */
+    tctx->type_llong->size = 8;
+    tctx->type_llong->align = 8;
+    
+    tctx->type_ullong = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_ullong->kind = TYPE_LONG;
+    tctx->type_ullong->is_unsigned = true;
+    tctx->type_ullong->size = 8;
+    tctx->type_ullong->align = 8;
+    
     tctx->type_float = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_float->kind = TYPE_FLOAT;
     tctx->type_float->size = 4;
@@ -118,6 +130,8 @@ mcc_type_t *mcc_type_int(mcc_type_context_t *tctx) { return tctx->type_int; }
 mcc_type_t *mcc_type_uint(mcc_type_context_t *tctx) { return tctx->type_uint; }
 mcc_type_t *mcc_type_long(mcc_type_context_t *tctx) { return tctx->type_long; }
 mcc_type_t *mcc_type_ulong(mcc_type_context_t *tctx) { return tctx->type_ulong; }
+mcc_type_t *mcc_type_llong(mcc_type_context_t *tctx) { return tctx->type_llong; }
+mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx) { return tctx->type_ullong; }
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx) { return tctx->type_float; }
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx) { return tctx->type_double; }
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx) { return tctx->type_ldouble; }

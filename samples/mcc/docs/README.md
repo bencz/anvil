@@ -67,8 +67,7 @@ All files share:
 |------|-------|-------------|
 | `c_std.c` | ~500 | C language standards and feature system |
 | `context.c` | ~280 | Compiler context, feature checking |
-| `types.c` | ~570 | Type system |
-| `sema.c` | ~750 | Type checking, symbol resolution |
+| `types.c` | ~590 | Type system (includes C99 long long) |
 | `codegen.c` | ~1100 | ANVIL IR generation |
 
 **Modular Components:**
@@ -78,6 +77,7 @@ All files share:
 | `src/lexer/` | 9 files | Modular lexer with C standard support |
 | `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
 | `src/parser/` | 5 files | Modular parser with C standard support |
+| `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
 
 ### Test Files
 
@@ -177,26 +177,26 @@ When working with MCC code:
 1. Add token type in `include/token.h`
 2. Add lexer recognition in `src/lexer/lex_operator.c`
 3. Add to operator precedence in `src/parser/parse_expr.c`
-4. Add type checking in `src/sema.c`
+4. Add type checking in `src/sema/sema_expr.c`
 5. Add code generation in `src/codegen.c`
 
 **Adding a new statement:**
 1. Add AST node type in `include/ast.h`
 2. Add parsing in `src/parser/parse_stmt.c`
-3. Add semantic analysis in `src/sema.c`
+3. Add semantic analysis in `src/sema/sema_stmt.c`
 4. Add code generation in `src/codegen.c`
 
 **Adding a new expression:**
 1. Add AST node type in `include/ast.h`
 2. Add parsing in `src/parser/parse_expr.c`
-3. Add semantic analysis in `src/sema.c`
+3. Add semantic analysis in `src/sema/sema_expr.c`
 4. Add code generation in `src/codegen.c`
 
 **Adding a new type:**
 1. Add type kind in `include/types.h`
 2. Add parsing in `src/parser/parse_type.c`
 3. Add type creation in `src/types.c`
-4. Add semantic analysis in `src/sema.c`
+4. Add semantic analysis in `src/sema/sema_type.c`
 5. Add code generation in `src/codegen.c`
 
 **Adding a typedef:**
@@ -218,6 +218,9 @@ When working with MCC code:
 
 ### Recent Improvements
 
+- **Modular Semantic Analyzer**: Refactored `sema.c` into `src/sema/` with 6 modular files
+- **C99 long long**: Added `mcc_type_llong()` and `mcc_type_ullong()` for 64-bit integer types
+- **Multiple Typedef Names**: Support for `typedef int INT, *PINT, **PPINT;` syntax
 - **Complex Declarators**: Full support for C declarator syntax including `int (*arr)[10]`, `int (*func)(int, int)`, etc.
 - **Bitfields**: Parsing and storage of bitfield widths in struct fields
 - **Enum Constants**: Proper storage of enum constant names and values

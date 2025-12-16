@@ -250,15 +250,34 @@ mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
     
     /* Handle typedef - register the name */
     if (is_typedef) {
-        /* Register typedef name */
+        /* Register first typedef name */
         mcc_typedef_entry_t *entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
         entry->name = name;
         entry->type = decl_type;
         entry->next = p->typedefs;
         p->typedefs = entry;
         
-        /* Note: Multiple typedef names (typedef int A, *B;) are not yet supported
-         * with complex declarators. For now, only single typedef per declaration. */
+        /* Handle multiple typedef names: typedef int A, *B, **C; */
+        while (parse_match(p, TOK_COMMA)) {
+            /* Parse the next declarator - need to get base type from original */
+            mcc_type_t *base = decl_type;
+            /* Strip pointers/arrays to get base type for next declarator */
+            while (base && base->kind == TYPE_POINTER) {
+                base = base->data.pointer.pointee;
+            }
+            while (base && base->kind == TYPE_ARRAY) {
+                base = base->data.array.element;
+            }
+            
+            parse_declarator_result_t next_decl = parse_declarator(p, base, false);
+            if (next_decl.name) {
+                mcc_typedef_entry_t *next_entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
+                next_entry->name = next_decl.name;
+                next_entry->type = next_decl.type;
+                next_entry->next = p->typedefs;
+                p->typedefs = next_entry;
+            }
+        }
         
         parse_expect(p, TOK_SEMICOLON, ";");
         

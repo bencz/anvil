@@ -10,6 +10,21 @@ Semantic analysis validates the AST and performs:
 - Scope management
 - Implicit type conversions
 - Error detection
+- C Standard feature validation
+
+## Module Structure
+
+The semantic analyzer is organized into modular files in `src/sema/`:
+
+| File | Description |
+|------|-------------|
+| `sema_internal.h` | Internal header with structures, function declarations, and C standard feature checks |
+| `sema.c` | Main module - public API and entry points |
+| `sema_expr.c` | Expression analysis (literals, identifiers, binary/unary ops, calls, member access) |
+| `sema_stmt.c` | Statement analysis (if, while, for, switch, return, break, continue, goto) |
+| `sema_decl.c` | Declaration analysis (functions, variables, typedefs, structs, enums) |
+| `sema_type.c` | Type checking utilities (lvalue checks, assignment compatibility, type conversions) |
+| `sema_const.c` | Constant expression evaluation (for array sizes, case labels, static_assert) |
 
 ## Semantic Analyzer Structure
 
@@ -20,10 +35,38 @@ typedef struct mcc_sema {
     mcc_type_context_t *types;
     
     /* Current function context */
+    mcc_symbol_t *current_func;
     mcc_type_t *current_return_type;
-    bool in_loop;               /* For break/continue validation */
-    bool in_switch;             /* For case/default validation */
+    int loop_depth;             /* For break/continue validation */
+    int switch_depth;           /* For case/default validation */
 } mcc_sema_t;
+```
+
+## C Standard Feature Checks
+
+The semantic analyzer includes helper functions for checking C standard features:
+
+```c
+/* Check if a feature is enabled */
+static inline bool sema_has_feature(mcc_sema_t *sema, mcc_feature_id_t feat);
+
+/* C89: Implicit int return type (deprecated in C99, removed in C11) */
+static inline bool sema_has_implicit_int(mcc_sema_t *sema);
+
+/* C89: Implicit function declarations (removed in C99) */
+static inline bool sema_has_implicit_func_decl(mcc_sema_t *sema);
+
+/* C99: Variable Length Arrays */
+static inline bool sema_has_vla(mcc_sema_t *sema);
+
+/* C11: _Static_assert */
+static inline bool sema_has_static_assert(mcc_sema_t *sema);
+
+/* C11: _Generic selection */
+static inline bool sema_has_generic(mcc_sema_t *sema);
+
+/* C23: nullptr constant */
+static inline bool sema_has_nullptr(mcc_sema_t *sema);
 ```
 
 ## Symbol Table

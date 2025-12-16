@@ -151,6 +151,8 @@ typedef struct mcc_type_context {
     mcc_type_t *type_uint;
     mcc_type_t *type_long;
     mcc_type_t *type_ulong;
+    mcc_type_t *type_llong;     /* C99: long long */
+    mcc_type_t *type_ullong;    /* C99: unsigned long long */
     mcc_type_t *type_float;
     mcc_type_t *type_double;
     mcc_type_t *type_ldouble;
@@ -182,6 +184,8 @@ mcc_type_t *mcc_type_int(mcc_type_context_t *types);
 mcc_type_t *mcc_type_uint(mcc_type_context_t *types);
 mcc_type_t *mcc_type_long(mcc_type_context_t *types);
 mcc_type_t *mcc_type_ulong(mcc_type_context_t *types);
+mcc_type_t *mcc_type_llong(mcc_type_context_t *types);   /* C99: long long */
+mcc_type_t *mcc_type_ullong(mcc_type_context_t *types);  /* C99: unsigned long long */
 mcc_type_t *mcc_type_float(mcc_type_context_t *types);
 mcc_type_t *mcc_type_double(mcc_type_context_t *types);
 ```

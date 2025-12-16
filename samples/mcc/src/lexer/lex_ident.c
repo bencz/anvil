@@ -101,7 +101,22 @@ mcc_token_type_t lex_lookup_keyword(mcc_lexer_t *lex, const char *name, size_t l
                     return keywords[i].type;
                 }
                 /* Other keywords (like 'inline', 'restrict', 'true', 'false', etc.)
-                 * should be treated as identifiers in older standards */
+                 * Emit a warning that this is a keyword in a newer C standard */
+                const char *std_name = "C99";
+                if (feat == MCC_FEAT_TRUE_FALSE || feat == MCC_FEAT_NULLPTR ||
+                    feat == MCC_FEAT_CONSTEXPR || feat == MCC_FEAT_TYPEOF ||
+                    feat == MCC_FEAT_TYPEOF_UNQUAL || feat == MCC_FEAT_BOOL_KEYWORD) {
+                    std_name = "C23";
+                } else if (feat == MCC_FEAT_ALIGNAS || feat == MCC_FEAT_ALIGNOF ||
+                           feat == MCC_FEAT_ATOMIC || feat == MCC_FEAT_GENERIC ||
+                           feat == MCC_FEAT_NORETURN || feat == MCC_FEAT_STATIC_ASSERT ||
+                           feat == MCC_FEAT_THREAD_LOCAL) {
+                    std_name = "C11";
+                }
+                mcc_location_t loc = {lex->filename, lex->line, lex->column};
+                mcc_warning_at(lex->ctx, loc,
+                               "'%s' is a keyword in %s; treating as identifier",
+                               keywords[i].name, std_name);
                 return TOK_IDENT;
             }
             
