@@ -17,6 +17,9 @@ static void print_usage(const char *prog)
     printf("Usage: %s [options] <input.c> [input2.c ...]\n", prog);
     printf("\nOptions:\n");
     printf("  -o <file>         Output file (default: stdout)\n");
+    printf("  -std=<standard>   C language standard:\n");
+    printf("                      c89, c90, c99 (ISO standards)\n");
+    printf("                      gnu89, gnu99 (GNU extensions)\n");
     printf("  -arch=<arch>      Target architecture:\n");
     printf("                      x86, x86_64, s370, s370_xa, s390, zarch\n");
     printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
@@ -438,6 +441,7 @@ int main(int argc, char **argv)
     mcc_options_t opts = {0};
     opts.arch = MCC_ARCH_X86_64;  /* Default */
     opts.opt_level = MCC_OPT_NONE;
+    opts.c_std = MCC_STD_DEFAULT; /* Default to C89 */
     
     /* Dynamic arrays for include paths and defines */
     const char **include_paths = NULL;
@@ -473,6 +477,16 @@ int main(int argc, char **argv)
                 return 1;
             }
             opts.output_file = argv[++i];
+            continue;
+        }
+        
+        if (strncmp(arg, "-std=", 5) == 0) {
+            opts.c_std = mcc_c_std_from_name(arg + 5);
+            if (opts.c_std == MCC_STD_DEFAULT && strcmp(arg + 5, "default") != 0) {
+                fprintf(stderr, "Error: Unknown C standard: %s\n", arg + 5);
+                fprintf(stderr, "Valid standards: c89, c90, c99, gnu89, gnu99\n");
+                return 1;
+            }
             continue;
         }
         
@@ -584,6 +598,19 @@ int main(int argc, char **argv)
     }
     
     mcc_context_set_options(ctx, &opts);
+    
+    /* Print configuration in verbose mode */
+    if (opts.verbose) {
+        const mcc_c_std_info_t *std_info = mcc_c_std_get_info(ctx->effective_std);
+        fprintf(stderr, "MCC version %s\n", MCC_VERSION_STRING);
+        fprintf(stderr, "C standard: %s", std_info ? std_info->name : "unknown");
+        if (std_info && std_info->iso_name) {
+            fprintf(stderr, " (%s)", std_info->iso_name);
+        }
+        fprintf(stderr, "\n");
+        fprintf(stderr, "Target: %s\n", mcc_arch_name(opts.arch));
+        fprintf(stderr, "Optimization: O%d\n", opts.opt_level);
+    }
     
     /* Compile all files */
     int result = compile_files(ctx, input_files, num_input_files);

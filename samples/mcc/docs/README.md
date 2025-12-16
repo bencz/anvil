@@ -7,6 +7,7 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | High-level overview of the compiler architecture |
+| [C_STANDARDS.md](C_STANDARDS.md) | **C language standards (C89, C99, C11, etc.) and feature system** |
 | [LEXER.md](LEXER.md) | Lexer/tokenizer documentation |
 | [PREPROCESSOR.md](PREPROCESSOR.md) | C preprocessor documentation |
 | [PARSER.md](PARSER.md) | Parser and AST documentation |
@@ -46,7 +47,10 @@ All files share:
 
 | Structure | File | Purpose |
 |-----------|------|---------|
-| `mcc_context_t` | context.h | Compiler context, memory management |
+| `mcc_context_t` | mcc.h | Compiler context, memory management, effective features |
+| `mcc_c_std_t` | c_std.h | C language standard enum (C89, C99, etc.) |
+| `mcc_c_features_t` | c_std.h | Scalable feature set (256 features) |
+| `mcc_feature_id_t` | c_std.h | Feature identifier enum |
 | `mcc_token_t` | token.h | Token representation |
 | `mcc_lexer_t` | lexer.h | Lexer state |
 | `mcc_preprocessor_t` | preprocessor.h | Preprocessor state |
@@ -61,6 +65,8 @@ All files share:
 
 | File | Lines | Description |
 |------|-------|-------------|
+| `c_std.c` | ~500 | C language standards and feature system |
+| `context.c` | ~280 | Compiler context, feature checking |
 | `lexer.c` | ~500 | Tokenization |
 | `preprocessor.c` | ~1150 | Macro expansion, conditionals, includes |
 | `parser.c` | ~1350 | Recursive descent parser (with typedef support) |
@@ -80,6 +86,22 @@ All files share:
 | `bitwise.c` | Bitwise operations (`&`, `|`, `^`, `~`, `<<`, `>>`) |
 | `simple_struct.c` | Basic struct with member access |
 | `multi_file/` | Multi-file compilation tests |
+
+### C Language Standards
+
+MCC supports multiple C language standards via the `-std=` flag:
+
+```bash
+./mcc -std=c89 -o output.s input.c   # ANSI C89 (default)
+./mcc -std=c99 -o output.s input.c   # ISO C99
+./mcc -std=gnu99 -o output.s input.c # GNU dialect of C99
+```
+
+See [C_STANDARDS.md](C_STANDARDS.md) for complete documentation of:
+- Supported standards (C89, C90, C99, C11, C17, C23, GNU variants)
+- Feature differences between standards
+- 256-feature scalable feature system
+- Predefined macros per standard
 
 ### Supported C89 Features
 

@@ -9,17 +9,35 @@
 
 /* Architecture names */
 static const char *arch_names[] = {
-    [MCC_ARCH_X86]      = "x86",
-    [MCC_ARCH_X86_64]   = "x86_64",
-    [MCC_ARCH_S370]     = "s370",
-    [MCC_ARCH_S370_XA]  = "s370_xa",
-    [MCC_ARCH_S390]     = "s390",
-    [MCC_ARCH_ZARCH]    = "zarch",
-    [MCC_ARCH_PPC32]    = "ppc32",
-    [MCC_ARCH_PPC64]    = "ppc64",
-    [MCC_ARCH_PPC64LE]  = "ppc64le",
-    [MCC_ARCH_ARM64]    = "arm64",
+    [MCC_ARCH_X86]         = "x86",
+    [MCC_ARCH_X86_64]      = "x86_64",
+    [MCC_ARCH_S370]        = "s370",
+    [MCC_ARCH_S370_XA]     = "s370_xa",
+    [MCC_ARCH_S390]        = "s390",
+    [MCC_ARCH_ZARCH]       = "zarch",
+    [MCC_ARCH_PPC32]       = "ppc32",
+    [MCC_ARCH_PPC64]       = "ppc64",
+    [MCC_ARCH_PPC64LE]     = "ppc64le",
+    [MCC_ARCH_ARM64]       = "arm64",
+    [MCC_ARCH_ARM64_MACOS] = "arm64-macos",
 };
+
+/*
+ * Update effective C standard features based on options
+ * Similar to ANVIL's update_cpu_features()
+ */
+static void update_c_features(mcc_context_t *ctx)
+{
+    /* Resolve the standard (DEFAULT -> C89) */
+    ctx->effective_std = mcc_c_std_resolve(ctx->options.c_std);
+    
+    /* Get base features for the standard */
+    mcc_c_std_get_features(ctx->effective_std, &ctx->effective_features);
+    
+    /* Apply overrides: enable first, then disable */
+    mcc_features_or(&ctx->effective_features, &ctx->features_enabled);
+    mcc_features_remove(&ctx->effective_features, &ctx->features_disabled);
+}
 
 mcc_context_t *mcc_context_create(void)
 {
@@ -38,6 +56,10 @@ mcc_context_t *mcc_context_create(void)
     /* Initialize diagnostics */
     ctx->cap_diagnostics = 64;
     ctx->diagnostics = malloc(ctx->cap_diagnostics * sizeof(mcc_diagnostic_t));
+    
+    /* Initialize C standard to default (C89) */
+    ctx->options.c_std = MCC_STD_DEFAULT;
+    update_c_features(ctx);
     
     return ctx;
 }
@@ -62,6 +84,45 @@ void mcc_context_set_options(mcc_context_t *ctx, const mcc_options_t *opts)
 {
     if (!ctx || !opts) return;
     ctx->options = *opts;
+    
+    /* Update effective C standard features */
+    update_c_features(ctx);
+}
+
+/* C Standard feature checking API */
+bool mcc_ctx_has_feature(mcc_context_t *ctx, mcc_feature_id_t feature)
+{
+    if (!ctx) return false;
+    return MCC_FEATURES_HAS(ctx->effective_features, feature);
+}
+
+mcc_c_std_t mcc_ctx_get_std(mcc_context_t *ctx)
+{
+    if (!ctx) return MCC_STD_DEFAULT;
+    return ctx->effective_std;
+}
+
+const char *mcc_ctx_get_std_name(mcc_context_t *ctx)
+{
+    if (!ctx) return "unknown";
+    return mcc_c_std_get_name(ctx->effective_std);
+}
+
+/* Feature override functions */
+void mcc_ctx_enable_feature(mcc_context_t *ctx, mcc_feature_id_t feature)
+{
+    if (!ctx) return;
+    MCC_FEATURES_SET(ctx->features_enabled, feature);
+    MCC_FEATURES_CLEAR(ctx->features_disabled, feature);
+    update_c_features(ctx);
+}
+
+void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature)
+{
+    if (!ctx) return;
+    MCC_FEATURES_SET(ctx->features_disabled, feature);
+    MCC_FEATURES_CLEAR(ctx->features_enabled, feature);
+    update_c_features(ctx);
 }
 
 /* Memory allocation */

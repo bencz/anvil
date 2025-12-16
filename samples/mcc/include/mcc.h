@@ -17,9 +17,12 @@
 
 /* Version */
 #define MCC_VERSION_MAJOR 0
-#define MCC_VERSION_MINOR 1
+#define MCC_VERSION_MINOR 2
 #define MCC_VERSION_PATCH 0
-#define MCC_VERSION_STRING "0.1.0"
+#define MCC_VERSION_STRING "0.2.0"
+
+/* C Standard support header (must be included before other MCC headers) */
+#include "c_std.h"
 
 /* Limits */
 #define MCC_MAX_IDENT_LEN    256
@@ -60,6 +63,7 @@ typedef enum {
 struct mcc_options {
     mcc_arch_t arch;
     mcc_opt_level_t opt_level;
+    mcc_c_std_t c_std;              /* C language standard (-std=) */
     
     /* Output control */
     const char *output_file;
@@ -117,6 +121,14 @@ typedef struct {
 struct mcc_context {
     mcc_options_t options;
     
+    /* Effective C standard and features (computed from options) */
+    mcc_c_std_t effective_std;
+    mcc_c_features_t effective_features;
+    
+    /* Feature overrides */
+    mcc_c_features_t features_enabled;   /* Features to enable beyond standard */
+    mcc_c_features_t features_disabled;  /* Features to disable from standard */
+    
     /* Diagnostics */
     mcc_diagnostic_t *diagnostics;
     size_t num_diagnostics;
@@ -139,6 +151,15 @@ struct mcc_context {
 mcc_context_t *mcc_context_create(void);
 void mcc_context_destroy(mcc_context_t *ctx);
 void mcc_context_set_options(mcc_context_t *ctx, const mcc_options_t *opts);
+
+/* C Standard feature checking */
+bool mcc_ctx_has_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
+mcc_c_std_t mcc_ctx_get_std(mcc_context_t *ctx);
+const char *mcc_ctx_get_std_name(mcc_context_t *ctx);
+
+/* Feature override functions */
+void mcc_ctx_enable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
+void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 
 /* Diagnostics */
 void mcc_error(mcc_context_t *ctx, const char *fmt, ...);
