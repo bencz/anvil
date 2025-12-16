@@ -71,6 +71,13 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 return anvil_func_get_value(func);
             }
             
+            /* Global variable - create global reference and load */
+            if (sym && sym->kind == SYM_VAR) {
+                anvil_type_t *type = codegen_type(cg, sym->type);
+                anvil_value_t *global = codegen_get_or_add_global(cg, name, type);
+                return anvil_build_load(cg->anvil_ctx, type, global, "gload");
+            }
+            
             return NULL;
         }
         
@@ -452,9 +459,17 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
     switch (expr->kind) {
         case AST_IDENT_EXPR: {
             const char *name = expr->data.ident_expr.name;
+            mcc_symbol_t *sym = expr->data.ident_expr.symbol;
             
             anvil_value_t *ptr = codegen_find_local(cg, name);
             if (ptr) return ptr;
+            
+            /* Global variable - return global reference */
+            if (sym && sym->kind == SYM_VAR) {
+                anvil_type_t *type = codegen_type(cg, sym->type);
+                anvil_value_t *global = codegen_get_or_add_global(cg, name, type);
+                return global;
+            }
             
             return NULL;
         }

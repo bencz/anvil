@@ -71,6 +71,14 @@ struct mcc_codegen {
     
     /* Label counter for unique block names */
     int label_counter;
+    
+    /* Global variable cache (name -> anvil_value_t*) */
+    struct {
+        const char *name;
+        anvil_value_t *value;
+    } *globals;
+    size_t num_globals;
+    size_t cap_globals;
 };
 
 /* Code generator lifecycle */

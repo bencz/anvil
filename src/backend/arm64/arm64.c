@@ -706,8 +706,14 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
                 }
                 /* Check if loading from global */
                 if (instr->operands[0]->kind == ANVIL_VAL_GLOBAL) {
-                    anvil_strbuf_appendf(&be->code, "\tadrp x9, %s\n", instr->operands[0]->name);
-                    anvil_strbuf_appendf(&be->code, "\t%s, [x9, :lo12:%s]\n", ldr_instr, instr->operands[0]->name);
+                    const char *prefix = arm64_symbol_prefix(be);
+                    if (arm64_is_darwin(be)) {
+                        anvil_strbuf_appendf(&be->code, "\tadrp x9, %s%s@PAGE\n", prefix, instr->operands[0]->name);
+                        anvil_strbuf_appendf(&be->code, "\t%s, [x9, %s%s@PAGEOFF]\n", ldr_instr, prefix, instr->operands[0]->name);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tadrp x9, %s\n", instr->operands[0]->name);
+                        anvil_strbuf_appendf(&be->code, "\t%s, [x9, :lo12:%s]\n", ldr_instr, instr->operands[0]->name);
+                    }
                     arm64_save_result(be, instr);
                     break;
                 }
@@ -756,9 +762,15 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
                 }
                 /* Check if storing to global */
                 if (instr->operands[1]->kind == ANVIL_VAL_GLOBAL) {
+                    const char *prefix = arm64_symbol_prefix(be);
                     arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                    anvil_strbuf_appendf(&be->code, "\tadrp x10, %s\n", instr->operands[1]->name);
-                    anvil_strbuf_appendf(&be->code, "\t%s, [x10, :lo12:%s]\n", str_instr, instr->operands[1]->name);
+                    if (arm64_is_darwin(be)) {
+                        anvil_strbuf_appendf(&be->code, "\tadrp x10, %s%s@PAGE\n", prefix, instr->operands[1]->name);
+                        anvil_strbuf_appendf(&be->code, "\t%s, [x10, %s%s@PAGEOFF]\n", str_instr, prefix, instr->operands[1]->name);
+                    } else {
+                        anvil_strbuf_appendf(&be->code, "\tadrp x10, %s\n", instr->operands[1]->name);
+                        anvil_strbuf_appendf(&be->code, "\t%s, [x10, :lo12:%s]\n", str_instr, instr->operands[1]->name);
+                    }
                     break;
                 }
                 /* Generic store to pointer */

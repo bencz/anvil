@@ -29,6 +29,9 @@ anvil_value_t *codegen_find_local(mcc_codegen_t *cg, const char *name);
 /* Add local variable */
 void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value);
 
+/* Get or create global variable reference */
+anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type);
+
 /* ============================================================
  * String Literal Management (codegen.c)
  * ============================================================ */

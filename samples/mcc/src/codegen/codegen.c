@@ -99,6 +99,45 @@ void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value
 }
 
 /* ============================================================
+ * Global Variable Management
+ * ============================================================ */
+
+anvil_value_t *codegen_find_global(mcc_codegen_t *cg, const char *name)
+{
+    if (!name) return NULL;
+    for (size_t i = 0; i < cg->num_globals; i++) {
+        if (cg->globals[i].name && strcmp(cg->globals[i].name, name) == 0) {
+            return cg->globals[i].value;
+        }
+    }
+    return NULL;
+}
+
+anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type)
+{
+    /* Check if already exists */
+    anvil_value_t *existing = codegen_find_global(cg, name);
+    if (existing) return existing;
+    
+    /* Create new global */
+    anvil_value_t *global = anvil_module_add_global(cg->anvil_mod, name, type, ANVIL_LINK_EXTERNAL);
+    
+    /* Add to cache */
+    if (cg->num_globals >= cg->cap_globals) {
+        size_t new_cap = cg->cap_globals ? cg->cap_globals * 2 : 8;
+        cg->globals = mcc_realloc(cg->mcc_ctx, cg->globals,
+                                   cg->cap_globals * sizeof(cg->globals[0]),
+                                   new_cap * sizeof(cg->globals[0]));
+        cg->cap_globals = new_cap;
+    }
+    cg->globals[cg->num_globals].name = name;
+    cg->globals[cg->num_globals].value = global;
+    cg->num_globals++;
+    
+    return global;
+}
+
+/* ============================================================
  * String Literal Management
  * ============================================================ */
 
