@@ -212,6 +212,12 @@ struct anvil_ctx {
     anvil_fp_format_t fp_format;  /* Floating-point format */
     anvil_abi_t abi;              /* OS ABI / platform variant */
     
+    /* CPU model and features */
+    anvil_cpu_model_t cpu_model;       /* Specific CPU model */
+    anvil_cpu_features_t cpu_features; /* Active CPU features (from model + overrides) */
+    anvil_cpu_features_t features_enabled;  /* Manually enabled features */
+    anvil_cpu_features_t features_disabled; /* Manually disabled features */
+    
     anvil_backend_t *backend;
     
     /* Current insertion point */
