@@ -56,7 +56,18 @@ Key aspects:
 
 ## Compilation Pipeline
 
-### 1. Preprocessor (`preprocessor.c`)
+### 1. Preprocessor (`src/preprocessor/`)
+
+The preprocessor is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `pp_internal.h` | Internal header with structures and function declarations |
+| `preprocessor.c` | Main module - public API and preprocessing loop |
+| `pp_macro.c` | Macro definition, lookup, and expansion |
+| `pp_expr.c` | Preprocessor expression evaluation |
+| `pp_directive.c` | Directive processing (#if, #ifdef, etc.) |
+| `pp_include.c` | Include file processing and stack management |
 
 The preprocessor handles all `#` directives before parsing:
 
@@ -64,6 +75,7 @@ The preprocessor handles all `#` directives before parsing:
 - **Conditional compilation**: `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`
 - **File inclusion**: `#include <file>` and `#include "file"`
 - **Other directives**: `#undef`, `#error`, `#warning`, `#line`, `#pragma`
+- **C Standard aware**: Features like `#elifdef` (C23), `#warning` (GNU) are checked
 
 **Key data structures:**
 - `mcc_preprocessor_t`: Main preprocessor state
@@ -71,19 +83,35 @@ The preprocessor handles all `#` directives before parsing:
 - `mcc_cond_stack_t`: Stack for nested conditional compilation
 - `mcc_include_file_t`: Stack for nested includes
 
-### 2. Lexer (`lexer.c`)
+### 2. Lexer (`src/lexer/`)
+
+The lexer is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `lex_internal.h` | Internal header with structures and function declarations |
+| `lexer.c` | Main module - public API and token scanning loop |
+| `lex_token.c` | Token creation, names, and utility functions |
+| `lex_char.c` | Character processing (advance, peek, whitespace) |
+| `lex_comment.c` | Comment processing with C standard checks |
+| `lex_string.c` | String and character literal processing |
+| `lex_number.c` | Number literal processing with C99/C23 features |
+| `lex_ident.c` | Identifier and keyword processing |
+| `lex_operator.c` | Operator and punctuation processing |
 
 The lexer converts source text into tokens:
 
-- **Keywords**: `int`, `if`, `while`, `struct`, etc. (32 C89 keywords)
+- **Keywords**: C89 (32), C99 (5), C11 (7), C23 (12) - standard-aware
 - **Identifiers**: Variable and function names
-- **Literals**: Integer, floating-point, character, string
+- **Literals**: Integer, floating-point, character, string (with C99/C23 features)
 - **Operators**: `+`, `-`, `*`, `/`, `==`, `!=`, `->`, etc.
 - **Punctuation**: `{`, `}`, `(`, `)`, `;`, `,`, etc.
+- **C Standard aware**: `//` comments, binary literals, hex floats, etc.
 
 **Key data structures:**
 - `mcc_lexer_t`: Lexer state (source, position, line/column)
 - `mcc_token_t`: Token with type, text, location, literal value
+- `lex_keyword_entry_t`: Keyword with required C standard feature
 
 ### 3. Parser (`parser.c`)
 

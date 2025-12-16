@@ -10,7 +10,24 @@ The preprocessor handles all `#` directives before the source code is parsed. It
 - File inclusion
 - Line control
 
+The preprocessor is **C standard aware** and enables/disables features based on the selected standard (C89, C99, C11, C23, GNU extensions).
+
+## Source File Organization
+
+The preprocessor is organized into modular source files in `src/preprocessor/`:
+
+| File | Description |
+|------|-------------|
+| `pp_internal.h` | Internal header with structures and function declarations |
+| `preprocessor.c` | Main module - public API and preprocessing loop |
+| `pp_macro.c` | Macro definition, lookup, and expansion |
+| `pp_expr.c` | Preprocessor expression evaluation (#if expressions) |
+| `pp_directive.c` | Directive processing (#if, #ifdef, #elif, #else, #endif, etc.) |
+| `pp_include.c` | Include file processing and include stack management |
+
 ## Supported Directives
+
+### Standard Directives (C89+)
 
 | Directive | Description |
 |-----------|-------------|
@@ -24,9 +41,30 @@ The preprocessor handles all `#` directives before the source code is parsed. It
 | `#else` | Else branch |
 | `#endif` | End conditional |
 | `#error` | Generate error message |
-| `#warning` | Generate warning message |
 | `#line` | Set line number |
 | `#pragma` | Implementation-defined behavior |
+
+### C99+ Directives
+
+| Directive | Description | Standard |
+|-----------|-------------|----------|
+| `_Pragma()` | Pragma operator | C99 |
+| Variadic macros | `__VA_ARGS__` | C99 |
+
+### C23 Directives
+
+| Directive | Description | Standard |
+|-----------|-------------|----------|
+| `#elifdef` | Else if defined | C23 |
+| `#elifndef` | Else if not defined | C23 |
+| `__VA_OPT__` | Optional variadic expansion | C23 |
+
+### GNU Extensions
+
+| Directive | Description |
+|-----------|-------------|
+| `#warning` | Generate warning message |
+| `#include_next` | Include next file in search path |
 
 ## Macro Definition
 
@@ -404,6 +442,69 @@ The preprocessor reports errors for:
 - Macro redefinition (warning)
 - Invalid preprocessor expression
 
+## C Standard Feature Checks
+
+The preprocessor checks C standard features before enabling certain functionality:
+
+```c
+/* In pp_internal.h - helper functions for feature checks */
+static inline bool pp_has_variadic_macros(mcc_preprocessor_t *pp)
+{
+    return pp_has_feature(pp, MCC_FEAT_PP_VARIADIC);
+}
+
+static inline bool pp_has_line_comments(mcc_preprocessor_t *pp)
+{
+    return pp_has_feature(pp, MCC_FEAT_LINE_COMMENT);
+}
+
+static inline bool pp_has_elifdef(mcc_preprocessor_t *pp)
+{
+    return pp_has_feature(pp, MCC_FEAT_PP_ELIFDEF);
+}
+```
+
+### Feature-Dependent Behavior
+
+| Feature | C89 | C99 | C11 | C23 | GNU |
+|---------|-----|-----|-----|-----|-----|
+| `__VA_ARGS__` | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `_Pragma()` | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `#elifdef` | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `#elifndef` | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `__VA_OPT__` | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `#warning` | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `#include_next` | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `//` comments | ❌ | ✅ | ✅ | ✅ | ✅ |
+
+### Standard-Specific Predefined Macros
+
+The preprocessor automatically defines macros based on the selected standard:
+
+```c
+/* C89/C90 */
+__STDC__        /* 1 */
+
+/* C99 */
+__STDC__            /* 1 */
+__STDC_VERSION__    /* 199901L */
+__STDC_HOSTED__     /* 1 */
+
+/* C11 */
+__STDC__            /* 1 */
+__STDC_VERSION__    /* 201112L */
+__STDC_HOSTED__     /* 1 */
+
+/* C23 */
+__STDC__            /* 1 */
+__STDC_VERSION__    /* 202311L */
+__STDC_HOSTED__     /* 1 */
+
+/* GNU modes add */
+__GNUC__            /* 4 */
+__GNUC_MINOR__      /* 0 */
+```
+
 ## Limitations
 
 Current limitations of the MCC preprocessor:
@@ -412,3 +513,4 @@ Current limitations of the MCC preprocessor:
 2. **No token pasting (`##`)**: The `##` operator to concatenate tokens is not implemented
 3. **No `#pragma once`**: Use traditional include guards instead
 4. **Limited `__VA_ARGS__`**: Variadic macros have basic support only
+5. **No `__VA_OPT__`**: C23 `__VA_OPT__` is not yet implemented

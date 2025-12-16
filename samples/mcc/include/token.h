@@ -57,8 +57,38 @@ typedef enum {
     TOK_BREAK,
     TOK_RETURN,
     
-    /* Keywords - Other */
+    /* Keywords - Other (C89) */
     TOK_SIZEOF,
+    
+    /* C99 Keywords */
+    TOK_INLINE,         /* inline */
+    TOK_RESTRICT,       /* restrict */
+    TOK__BOOL,          /* _Bool */
+    TOK__COMPLEX,       /* _Complex */
+    TOK__IMAGINARY,     /* _Imaginary */
+    
+    /* C11 Keywords */
+    TOK__ALIGNAS,       /* _Alignas */
+    TOK__ALIGNOF,       /* _Alignof */
+    TOK__ATOMIC,        /* _Atomic */
+    TOK__GENERIC,       /* _Generic */
+    TOK__NORETURN,      /* _Noreturn */
+    TOK__STATIC_ASSERT, /* _Static_assert */
+    TOK__THREAD_LOCAL,  /* _Thread_local */
+    
+    /* C23 Keywords */
+    TOK_TRUE,           /* true */
+    TOK_FALSE,          /* false */
+    TOK_NULLPTR,        /* nullptr */
+    TOK_CONSTEXPR,      /* constexpr */
+    TOK_TYPEOF,         /* typeof */
+    TOK_TYPEOF_UNQUAL,  /* typeof_unqual */
+    TOK__BITINT,        /* _BitInt */
+    TOK_ALIGNAS,        /* alignas (C23 alternative to _Alignas) */
+    TOK_ALIGNOF,        /* alignof (C23 alternative to _Alignof) */
+    TOK_BOOL,           /* bool (C23 alternative to _Bool) */
+    TOK_STATIC_ASSERT,  /* static_assert (C23 alternative to _Static_assert) */
+    TOK_THREAD_LOCAL,   /* thread_local (C23 alternative to _Thread_local) */
     
     /* Operators - Arithmetic */
     TOK_PLUS,           /* + */

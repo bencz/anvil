@@ -67,12 +67,17 @@ All files share:
 |------|-------|-------------|
 | `c_std.c` | ~500 | C language standards and feature system |
 | `context.c` | ~280 | Compiler context, feature checking |
-| `lexer.c` | ~500 | Tokenization |
-| `preprocessor.c` | ~1150 | Macro expansion, conditionals, includes |
 | `parser.c` | ~1350 | Recursive descent parser (with typedef support) |
 | `types.c` | ~570 | Type system |
 | `sema.c` | ~750 | Type checking, symbol resolution |
 | `codegen.c` | ~1100 | ANVIL IR generation |
+
+**Modular Components:**
+
+| Directory | Files | Description |
+|-----------|-------|-------------|
+| `src/lexer/` | 8 files | Modular lexer with C standard support |
+| `src/preprocessor/` | 5 files | Modular preprocessor with C standard support |
 
 ### Test Files
 
@@ -163,16 +168,17 @@ When working with MCC code:
 ### Common Tasks
 
 **Adding a new keyword:**
-1. Add token type in `token.h`
-2. Add to keyword table in `lexer.c`
-3. Handle in parser as needed
+1. Add token type in `include/token.h`
+2. Add to keyword table in `src/lexer/lex_ident.c` with required feature
+3. Add token name in `src/lexer/lex_token.c`
+4. Handle in parser as needed
 
 **Adding a new operator:**
-1. Add token type in `token.h`
-2. Add lexer recognition in `lexer.c`
-3. Add to operator precedence in `parser.c`
-4. Add type checking in `sema.c`
-5. Add code generation in `codegen.c`
+1. Add token type in `include/token.h`
+2. Add lexer recognition in `src/lexer/lex_operator.c`
+3. Add to operator precedence in `src/parser.c`
+4. Add type checking in `src/sema.c`
+5. Add code generation in `src/codegen.c`
 
 **Adding a new statement:**
 1. Add AST node type in `ast.h`
