@@ -117,6 +117,76 @@ Gets the current insertion block.
 
 **Returns:** Current insertion block, or NULL if none set.
 
+### anvil_ctx_set_abi
+
+```c
+anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi);
+```
+
+Sets the OS ABI for platform-specific code generation.
+
+**Parameters:**
+- `ctx`: Context
+- `abi`: ABI variant (`ANVIL_ABI_SYSV`, `ANVIL_ABI_DARWIN`, `ANVIL_ABI_MVS`)
+
+**Returns:** `ANVIL_OK` on success, error code on failure.
+
+**Example:**
+```c
+// For macOS ARM64 (Apple Silicon)
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);
+```
+
+**Note:** This affects symbol naming (underscore prefix on Darwin), assembly directives, and section names.
+
+### anvil_ctx_get_abi
+
+```c
+anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx);
+```
+
+Gets the current OS ABI.
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Current ABI setting.
+
+### anvil_ctx_set_fp_format
+
+```c
+anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_format);
+```
+
+Sets the floating-point format for architectures that support multiple formats.
+
+**Parameters:**
+- `ctx`: Context
+- `fp_format`: FP format (`ANVIL_FP_IEEE754`, `ANVIL_FP_HFP`, `ANVIL_FP_HFP_IEEE`)
+
+**Returns:** `ANVIL_OK` on success, error code on failure.
+
+**Example:**
+```c
+// Use IEEE 754 on z/Architecture
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
+anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754);
+```
+
+### anvil_ctx_get_fp_format
+
+```c
+anvil_fp_format_t anvil_ctx_get_fp_format(anvil_ctx_t *ctx);
+```
+
+Gets the current floating-point format.
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Current FP format.
+
 ## Module API
 
 Modules represent compilation units.

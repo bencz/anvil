@@ -98,6 +98,9 @@ typedef struct {
     
     /* Current function being generated */
     anvil_func_t *current_func;
+    
+    /* Context reference for ABI detection */
+    anvil_ctx_t *ctx;
 } arm64_backend_t;
 
 static const anvil_arch_info_t arm64_arch_info = {
@@ -116,12 +119,12 @@ static const anvil_arch_info_t arm64_arch_info = {
 
 static anvil_error_t arm64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
-    (void)ctx;
     arm64_backend_t *priv = calloc(1, sizeof(arm64_backend_t));
     if (!priv) return ANVIL_ERR_NOMEM;
     
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
+    priv->ctx = ctx;
     
     be->priv = priv;
     return ANVIL_OK;
@@ -272,9 +275,19 @@ static void arm64_emit_load_fp_value(arm64_backend_t *be, anvil_value_t *val, in
 /* Emit function prologue */
 static void arm64_emit_prologue(arm64_backend_t *be, anvil_func_t *func)
 {
-    anvil_strbuf_appendf(&be->code, "\t.globl %s\n", func->name);
-    anvil_strbuf_appendf(&be->code, "\t.type %s, %%function\n", func->name);
-    anvil_strbuf_appendf(&be->code, "%s:\n", func->name);
+    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+    
+    if (is_darwin) {
+        /* macOS/Darwin: underscore prefix, no .type directive */
+        anvil_strbuf_appendf(&be->code, "\t.globl _%s\n", func->name);
+        anvil_strbuf_appendf(&be->code, "\t.p2align 2\n");
+        anvil_strbuf_appendf(&be->code, "_%s:\n", func->name);
+    } else {
+        /* Linux/ELF: no prefix, .type directive */
+        anvil_strbuf_appendf(&be->code, "\t.globl %s\n", func->name);
+        anvil_strbuf_appendf(&be->code, "\t.type %s, %%function\n", func->name);
+        anvil_strbuf_appendf(&be->code, "%s:\n", func->name);
+    }
     
     /* Save frame pointer and link register */
     anvil_strbuf_append(&be->code, "\tstp x29, x30, [sp, #-16]!\n");
@@ -331,10 +344,18 @@ static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int t
         case ANVIL_VAL_CONST_STRING:
             {
                 const char *label = arm64_add_string(be, val->data.str);
-                anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                    arm64_xreg_names[target_reg], label);
-                anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                    arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], label);
+                bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+                if (is_darwin) {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s@PAGE\n",
+                        arm64_xreg_names[target_reg], label);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s@PAGEOFF\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], label);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
+                        arm64_xreg_names[target_reg], label);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], label);
+                }
             }
             break;
             
@@ -374,18 +395,40 @@ static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int t
             
         case ANVIL_VAL_GLOBAL:
             /* Load address of global using ADRP + ADD */
-            anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                arm64_xreg_names[target_reg], val->name);
-            anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
+            {
+                bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+                const char *prefix = is_darwin ? "_" : "";
+                if (is_darwin) {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s%s@PAGE\n",
+                        arm64_xreg_names[target_reg], prefix, val->name);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s%s@PAGEOFF\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], prefix, val->name);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
+                        arm64_xreg_names[target_reg], val->name);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
+                }
+            }
             break;
             
         case ANVIL_VAL_FUNC:
             /* Load function address */
-            anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                arm64_xreg_names[target_reg], val->name);
-            anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
+            {
+                bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+                const char *prefix = is_darwin ? "_" : "";
+                if (is_darwin) {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s%s@PAGE\n",
+                        arm64_xreg_names[target_reg], prefix, val->name);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s%s@PAGEOFF\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], prefix, val->name);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
+                        arm64_xreg_names[target_reg], val->name);
+                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
+                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
+                }
+            }
             break;
             
         default:
@@ -718,7 +761,9 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
                 
                 /* Call function */
                 if (instr->operands[0]->kind == ANVIL_VAL_FUNC) {
-                    anvil_strbuf_appendf(&be->code, "\tbl %s\n", instr->operands[0]->name);
+                    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+                    const char *prefix = is_darwin ? "_" : "";
+                    anvil_strbuf_appendf(&be->code, "\tbl %s%s\n", prefix, instr->operands[0]->name);
                 } else {
                     arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
                     anvil_strbuf_append(&be->code, "\tblr x9\n");
@@ -992,7 +1037,12 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
         arm64_emit_block(be, block);
     }
     
-    anvil_strbuf_appendf(&be->code, "\t.size %s, .-%s\n\n", func->name, func->name);
+    /* .size directive only for ELF (Linux), not for Mach-O (macOS) */
+    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+    if (!is_darwin) {
+        anvil_strbuf_appendf(&be->code, "\t.size %s, .-%s\n", func->name, func->name);
+    }
+    anvil_strbuf_append(&be->code, "\n");
 }
 
 /* Emit global variables */
@@ -1000,10 +1050,13 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
 {
     if (mod->num_globals == 0) return;
     
+    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+    const char *prefix = is_darwin ? "_" : "";
+    
     anvil_strbuf_append(&be->data, "\t.data\n");
     
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        anvil_strbuf_appendf(&be->data, "\t.globl %s\n", g->value->name);
+        anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix, g->value->name);
         
         /* Determine alignment and size based on type */
         int size = 8;
@@ -1035,8 +1088,12 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
             }
         }
         
-        anvil_strbuf_appendf(&be->data, "\t.align %d\n", align);
-        anvil_strbuf_appendf(&be->data, "%s:\n", g->value->name);
+        if (is_darwin) {
+            anvil_strbuf_appendf(&be->data, "\t.p2align %d\n", align == 1 ? 0 : align == 2 ? 1 : align == 4 ? 2 : 3);
+        } else {
+            anvil_strbuf_appendf(&be->data, "\t.align %d\n", align);
+        }
+        anvil_strbuf_appendf(&be->data, "%s%s:\n", prefix, g->value->name);
         
         /* Check for initializer */
         if (g->value->data.global.init) {
@@ -1067,7 +1124,13 @@ static void arm64_emit_strings(arm64_backend_t *be)
 {
     if (be->num_strings == 0) return;
     
-    anvil_strbuf_append(&be->data, "\t.section .rodata\n");
+    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+    
+    if (is_darwin) {
+        anvil_strbuf_append(&be->data, "\t.section __TEXT,__cstring,cstring_literals\n");
+    } else {
+        anvil_strbuf_append(&be->data, "\t.section .rodata\n");
+    }
     
     for (size_t i = 0; i < be->num_strings; i++) {
         arm64_string_entry_t *entry = &be->strings[i];
@@ -1094,9 +1157,17 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     priv->num_strings = 0;
     
     /* Emit header */
-    anvil_strbuf_append(&priv->code, "// Generated by ANVIL for ARM64 (AArch64)\n");
-    anvil_strbuf_append(&priv->code, "\t.arch armv8-a\n");
-    anvil_strbuf_append(&priv->code, "\t.text\n\n");
+    bool is_darwin = priv->ctx && priv->ctx->abi == ANVIL_ABI_DARWIN;
+    
+    if (is_darwin) {
+        anvil_strbuf_append(&priv->code, "// Generated by ANVIL for ARM64 (AArch64) - macOS\n");
+        anvil_strbuf_append(&priv->code, "\t.build_version macos, 11, 0\n");
+        anvil_strbuf_append(&priv->code, "\t.section __TEXT,__text,regular,pure_instructions\n\n");
+    } else {
+        anvil_strbuf_append(&priv->code, "// Generated by ANVIL for ARM64 (AArch64) - Linux\n");
+        anvil_strbuf_append(&priv->code, "\t.arch armv8-a\n");
+        anvil_strbuf_append(&priv->code, "\t.text\n\n");
+    }
     
     /* Emit functions */
     for (anvil_func_t *func = mod->funcs; func; func = func->next) {

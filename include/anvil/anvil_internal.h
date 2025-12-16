@@ -210,6 +210,7 @@ struct anvil_ctx {
     anvil_output_t output;
     anvil_syntax_t syntax;
     anvil_fp_format_t fp_format;  /* Floating-point format */
+    anvil_abi_t abi;              /* OS ABI / platform variant */
     
     anvil_backend_t *backend;
     

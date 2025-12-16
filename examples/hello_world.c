@@ -9,12 +9,15 @@
  *   }
  * 
  * Usage: hello_world [arch]
- *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64
+ *   arch: x86, x86_64, s370, s370_xa, s390, zarch, ppc32, ppc64, ppc64le, arm64, arm64_macos
+ * 
+ * Output: hello.s (or hello.asm for mainframe targets)
  */
 
 #include <anvil/anvil.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "arch_select.h"
 
 int main(int argc, char **argv)
@@ -63,7 +66,43 @@ int main(int argc, char **argv)
     anvil_error_t err = anvil_module_codegen(mod, &output, &len);
     
     if (err == ANVIL_OK && output) {
-        printf("%s\n", output);
+        /* Build output filename */
+        char filename[64];
+        snprintf(filename, sizeof(filename), "hello%s", get_file_extension(config.arch));
+        
+        /* Write to file */
+        FILE *f = fopen(filename, "w");
+        if (f) {
+            fwrite(output, 1, len, f);
+            fclose(f);
+            printf("Generated %zu bytes of assembly\n", len);
+            printf("Written to: %s\n\n", filename);
+            
+            /* Print preview (first 15 lines) */
+            printf("Preview:\n");
+            printf("--------\n");
+            char *line = output;
+            int line_count = 0;
+            while (*line && line_count < 15) {
+                char *end = strchr(line, '\n');
+                if (end) {
+                    printf("%.*s\n", (int)(end - line), line);
+                    line = end + 1;
+                } else {
+                    printf("%s\n", line);
+                    break;
+                }
+                line_count++;
+            }
+            if (*line) printf("...\n");
+        } else {
+            fprintf(stderr, "Failed to open %s for writing\n", filename);
+            free(output);
+            anvil_module_destroy(mod);
+            anvil_ctx_destroy(ctx);
+            return 1;
+        }
+        
         free(output);
     } else {
         fprintf(stderr, "Code generation failed: %s\n", anvil_ctx_get_error(ctx));

@@ -691,3 +691,75 @@ void test_factorial(void) {
 3. **Align Data**: Misaligned access is slow on most architectures
 4. **Branch Prediction**: Arrange code to help branch predictors
 5. **Instruction Scheduling**: Order instructions to avoid pipeline stalls
+
+## Platform-Specific Code Generation
+
+### OS ABI Support
+
+ANVIL supports multiple OS ABIs through the `anvil_ctx_set_abi()` function. This affects:
+
+- **Symbol naming**: Darwin uses underscore prefix (`_main` vs `main`)
+- **Assembly directives**: `.type` (ELF) vs `.p2align` (Mach-O)
+- **Section names**: `.text` (ELF) vs `__TEXT,__text` (Mach-O)
+- **Relocation syntax**: `:lo12:` (ELF) vs `@PAGE/@PAGEOFF` (Mach-O)
+
+### ARM64 macOS (Apple Silicon) Example
+
+```c
+anvil_ctx_t *ctx = anvil_ctx_create();
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);  // Enable macOS mode
+
+// ... build IR ...
+
+// Generated code will have:
+// - Underscore prefix on symbols (_main, _printf)
+// - Mach-O section directives
+// - @PAGE/@PAGEOFF relocations
+```
+
+**Linux ARM64:**
+```asm
+        .globl main
+        .type main, %function
+main:
+        adrp x0, .LC0
+        add x0, x0, :lo12:.LC0
+        bl printf
+        .size main, .-main
+```
+
+**macOS ARM64:**
+```asm
+        .globl _main
+        .p2align 2
+_main:
+        adrp x0, L_.str@PAGE
+        add x0, x0, L_.str@PAGEOFF
+        bl _printf
+```
+
+### Implementing ABI Support in Backends
+
+When implementing a backend that needs ABI-specific code:
+
+```c
+static void emit_function(my_backend_t *be, anvil_func_t *func)
+{
+    bool is_darwin = be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
+    const char *prefix = is_darwin ? "_" : "";
+    
+    if (is_darwin) {
+        // Mach-O directives
+        emit(".globl %s%s\n", prefix, func->name);
+        emit(".p2align 2\n");
+    } else {
+        // ELF directives
+        emit(".globl %s\n", func->name);
+        emit(".type %s, %%function\n", func->name);
+    }
+    
+    emit("%s%s:\n", prefix, func->name);
+    // ... emit function body ...
+}
+```

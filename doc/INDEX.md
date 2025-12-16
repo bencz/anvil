@@ -45,23 +45,28 @@ anvil_module_codegen(mod, &output, &len);
 
 ### Supported Architectures
 
-| Architecture | Enum Value | Bits | Endian | Stack | FP Format |
-|--------------|------------|------|--------|-------|-----------|
-| x86 | `ANVIL_ARCH_X86` | 32 | Little | Down | IEEE 754 |
-| x86-64 | `ANVIL_ARCH_X86_64` | 64 | Little | Down | IEEE 754 |
-| S/370 | `ANVIL_ARCH_S370` | 24 | Big | Up | HFP |
-| S/370-XA | `ANVIL_ARCH_S370_XA` | 31 | Big | Up | HFP |
-| S/390 | `ANVIL_ARCH_S390` | 31 | Big | Up | HFP |
-| z/Architecture | `ANVIL_ARCH_ZARCH` | 64 | Big | Up | HFP+IEEE |
-| PowerPC 32 | `ANVIL_ARCH_PPC32` | 32 | Big | Down | IEEE 754 |
-| PowerPC 64 | `ANVIL_ARCH_PPC64` | 64 | Big | Down | IEEE 754 |
-| PowerPC 64 LE | `ANVIL_ARCH_PPC64LE` | 64 | Little | Down | IEEE 754 |
-| ARM64 | `ANVIL_ARCH_ARM64` | 64 | Little | Down | IEEE 754 |
+| Architecture | Enum Value | Bits | Endian | Stack | FP Format | ABI |
+|--------------|------------|------|--------|-------|-----------|-----|
+| x86 | `ANVIL_ARCH_X86` | 32 | Little | Down | IEEE 754 | System V |
+| x86-64 | `ANVIL_ARCH_X86_64` | 64 | Little | Down | IEEE 754 | System V |
+| S/370 | `ANVIL_ARCH_S370` | 24 | Big | Up | HFP | MVS |
+| S/370-XA | `ANVIL_ARCH_S370_XA` | 31 | Big | Up | HFP | MVS |
+| S/390 | `ANVIL_ARCH_S390` | 31 | Big | Up | HFP | MVS |
+| z/Architecture | `ANVIL_ARCH_ZARCH` | 64 | Big | Up | HFP+IEEE | MVS |
+| PowerPC 32 | `ANVIL_ARCH_PPC32` | 32 | Big | Down | IEEE 754 | System V |
+| PowerPC 64 | `ANVIL_ARCH_PPC64` | 64 | Big | Down | IEEE 754 | System V |
+| PowerPC 64 LE | `ANVIL_ARCH_PPC64LE` | 64 | Little | Down | IEEE 754 | System V |
+| ARM64 | `ANVIL_ARCH_ARM64` | 64 | Little | Down | IEEE 754 | System V/Darwin |
 
 **FP Format Legend:**
 - **IEEE 754**: Standard IEEE floating-point
 - **HFP**: IBM Hexadecimal Floating Point (base-16 exponent)
 - **HFP+IEEE**: Both HFP and IEEE 754 supported
+
+**ABI Legend:**
+- **System V**: Standard Unix/Linux ABI (ELF)
+- **Darwin**: macOS/Apple ABI (Mach-O, underscore prefix) - use `anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN)`
+- **MVS**: IBM z/OS ABI
 
 ### Type Quick Reference
 

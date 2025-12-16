@@ -5,7 +5,7 @@ A C library for compiler code generation with support for multiple architectures
 ## Features
 
 * Portable IR: Architecture-independent intermediate representation
-* Multiple Backends: Support for x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit
+* Multiple Backends: Support for x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit, ARM64
 * Assembly Output: Generates assembly text (HLASM for mainframes, GAS for x86/PPC)
 * **IR Optimization**: Configurable optimization passes (constant folding, DCE, strength reduction)
 * Extensible: Plugin architecture for adding new backends
@@ -13,23 +13,29 @@ A C library for compiler code generation with support for multiple architectures
 
 ## Supported Architectures
 
-| Architecture | Bits | Endianness | Stack | FP Format | Syntax |
-|--------------|------|------------|-------|-----------|--------|
-| x86 | 32 | Little | Down | IEEE 754 | GAS/NASM |
-| x86-64 | 64 | Little | Down | IEEE 754 | GAS/NASM |
-| S/370 | 24 | Big | Up | HFP | HLASM |
-| S/370-XA | 31 | Big | Up | HFP | HLASM |
-| S/390 | 31 | Big | Up | HFP | HLASM |
-| z/Architecture | 64 | Big | Up | HFP+IEEE | HLASM |
-| PowerPC 32 | 32 | Big | Down | IEEE 754 | GAS |
-| PowerPC 64 | 64 | Big | Down | IEEE 754 | GAS |
-| PowerPC 64 LE | 64 | Little | Down | IEEE 754 | GAS |
-| ARM64 | 64 | Little | Down | IEEE 754 | GAS |
+| Architecture | Bits | Endianness | Stack | FP Format | ABI | Syntax |
+|--------------|------|------------|-------|-----------|-----|--------|
+| x86 | 32 | Little | Down | IEEE 754 | System V | GAS/NASM |
+| x86-64 | 64 | Little | Down | IEEE 754 | System V | GAS/NASM |
+| S/370 | 24 | Big | Up | HFP | MVS | HLASM |
+| S/370-XA | 31 | Big | Up | HFP | MVS | HLASM |
+| S/390 | 31 | Big | Up | HFP | MVS | HLASM |
+| z/Architecture | 64 | Big | Up | HFP+IEEE | MVS | HLASM |
+| PowerPC 32 | 32 | Big | Down | IEEE 754 | System V | GAS |
+| PowerPC 64 | 64 | Big | Down | IEEE 754 | System V | GAS |
+| PowerPC 64 LE | 64 | Little | Down | IEEE 754 | System V | GAS |
+| ARM64 (Linux) | 64 | Little | Down | IEEE 754 | System V | GAS |
+| ARM64 (macOS) | 64 | Little | Down | IEEE 754 | Darwin | GAS |
 
 **Floating-Point Formats:**
 - **IEEE 754**: Standard IEEE floating-point (binary)
 - **HFP**: IBM Hexadecimal Floating Point (base-16 exponent, used in S/370, S/390)
 - **HFP+IEEE**: Both formats supported (z/Architecture)
+
+**OS ABI Variants:**
+- **System V**: Standard Unix/Linux ABI
+- **Darwin**: macOS/Apple ABI (underscore prefix, Mach-O format)
+- **MVS**: IBM z/OS ABI
 
 ## Building
 
@@ -199,7 +205,8 @@ int main(void)
 | S/370 | MVS | R1 points to parameter list |
 | S/390 | MVS | R1 points to parameter list |
 | z/Arch | z/OS 64-bit | R1 points to parameter list (64-bit) |
-| ARM64 | AAPCS64 | x0-x7 for args, x0 for return |
+| ARM64 (Linux) | AAPCS64 | x0-x7 for args, x0 for return |
+| ARM64 (macOS) | Apple ARM64 | x0-x7 for args, underscore prefix on symbols |
 
 ## Mainframe Notes
 
@@ -397,8 +404,6 @@ anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
 * Binary opcode generation
 * ASI/AGSI optimization (Add to Storage Immediate)
 * Register allocation improvements
-* Common subexpression elimination
-* ARM/AArch64 support
 * RISC-V support
 * Debug info (DWARF)
 

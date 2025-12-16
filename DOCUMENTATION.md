@@ -94,6 +94,8 @@ anvil/
 
 The context is the root object that manages all ANVIL resources. It holds:
 - Target architecture configuration
+- OS ABI variant (System V, Darwin, MVS)
+- Floating-point format
 - Type cache
 - Backend instance
 - Memory pools
@@ -103,7 +105,13 @@ The context is the root object that manages all ANVIL resources. It holds:
 anvil_ctx_t *ctx = anvil_ctx_create();
 
 // Set target architecture
-anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+
+// Set OS ABI (optional - for platform-specific code generation)
+anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);  // For macOS ARM64
+
+// Set FP format (optional - for mainframes)
+anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754);
 
 // Destroy context (frees all associated resources)
 anvil_ctx_destroy(ctx);

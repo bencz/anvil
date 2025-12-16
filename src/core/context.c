@@ -21,6 +21,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_LITTLE,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -35,6 +36,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_LITTLE,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -49,6 +51,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_UP,
         .fp_format = ANVIL_FP_HFP,           /* IBM Hexadecimal FP only */
+        .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -63,6 +66,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_UP,
         .fp_format = ANVIL_FP_HFP,           /* IBM Hexadecimal FP only */
+        .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -77,6 +81,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_UP,
         .fp_format = ANVIL_FP_HFP,           /* HFP default, some models have IEEE */
+        .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -91,6 +96,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_UP,
         .fp_format = ANVIL_FP_HFP_IEEE,      /* Both HFP and IEEE 754 supported */
+        .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -105,6 +111,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -119,6 +126,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_BIG,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -133,6 +141,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_LITTLE,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
         .has_delay_slots = false
     },
@@ -147,6 +156,7 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .endian = ANVIL_ENDIAN_LITTLE,
         .stack_dir = ANVIL_STACK_DOWN,
         .fp_format = ANVIL_FP_IEEE754,
+        .abi = ANVIL_ABI_SYSV,               /* Default to Linux, can be changed to DARWIN */
         .has_condition_codes = true,
         .has_delay_slots = false
     }
@@ -211,6 +221,9 @@ anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch)
     /* Set default FP format based on architecture */
     ctx->fp_format = arch_info_table[arch].fp_format;
     
+    /* Set default ABI based on architecture */
+    ctx->abi = arch_info_table[arch].abi;
+    
     /* Update type sizes for new architecture */
     anvil_type_init_sizes(ctx);
     
@@ -241,6 +254,19 @@ anvil_error_t anvil_ctx_set_syntax(anvil_ctx_t *ctx, anvil_syntax_t syntax)
         ctx->backend->syntax = syntax;
     }
     return ANVIL_OK;
+}
+
+anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi)
+{
+    if (!ctx) return ANVIL_ERR_INVALID_ARG;
+    ctx->abi = abi;
+    return ANVIL_OK;
+}
+
+anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx)
+{
+    if (!ctx) return ANVIL_ABI_DEFAULT;
+    return ctx->abi;
 }
 
 anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_format)

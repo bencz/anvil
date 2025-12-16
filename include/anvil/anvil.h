@@ -80,6 +80,15 @@ typedef enum {
     ANVIL_FP_HFP_IEEE        /* HFP with IEEE 754 support (z/Architecture, some S/390) */
 } anvil_fp_format_t;
 
+/* OS ABI / Platform variant */
+typedef enum {
+    ANVIL_ABI_DEFAULT,       /* Default for architecture */
+    ANVIL_ABI_SYSV,          /* System V ABI (Linux, BSD) */
+    ANVIL_ABI_DARWIN,        /* Darwin/macOS (Mach-O, underscore prefix) */
+    ANVIL_ABI_WIN64,         /* Windows x64 ABI */
+    ANVIL_ABI_MVS            /* IBM MVS/z/OS */
+} anvil_abi_t;
+
 /* Data types */
 typedef enum {
     ANVIL_TYPE_VOID,
@@ -211,6 +220,7 @@ typedef struct {
     anvil_endian_t endian;
     anvil_stack_dir_t stack_dir;
     anvil_fp_format_t fp_format; /* Floating-point format */
+    anvil_abi_t abi;         /* OS ABI / platform variant */
     bool has_condition_codes;
     bool has_delay_slots;
 } anvil_arch_info_t;
@@ -245,6 +255,12 @@ anvil_error_t anvil_ctx_set_output(anvil_ctx_t *ctx, anvil_output_t output);
 
 /* Set assembly syntax */
 anvil_error_t anvil_ctx_set_syntax(anvil_ctx_t *ctx, anvil_syntax_t syntax);
+
+/* Set OS ABI / platform variant */
+anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi);
+
+/* Get current OS ABI */
+anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx);
 
 /* Set floating-point format (for architectures that support multiple formats) */
 anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_format);

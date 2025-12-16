@@ -35,7 +35,9 @@ typedef struct {
     anvil_arch_t arch;
     const char *arch_name;
     anvil_fp_format_t fp_format;
+    anvil_abi_t abi;
     bool fp_format_specified;
+    bool abi_specified;
 } arch_config_t;
 
 /* Architecture entry for lookup table */
@@ -48,16 +50,17 @@ typedef struct {
 
 /* Supported architectures table */
 static const arch_entry_t arch_table[] = {
-    { "x86",      ANVIL_ARCH_X86,      "x86 (32-bit)",        ANVIL_FP_IEEE754  },
-    { "x86_64",   ANVIL_ARCH_X86_64,   "x86-64 (64-bit)",     ANVIL_FP_IEEE754  },
-    { "s370",     ANVIL_ARCH_S370,     "IBM S/370 (24-bit)",  ANVIL_FP_HFP      },
-    { "s370_xa",  ANVIL_ARCH_S370_XA,  "IBM S/370-XA (31-bit)", ANVIL_FP_HFP    },
-    { "s390",     ANVIL_ARCH_S390,     "IBM S/390 (31-bit)",  ANVIL_FP_HFP      },
-    { "zarch",    ANVIL_ARCH_ZARCH,    "IBM z/Architecture",  ANVIL_FP_HFP_IEEE },
-    { "ppc32",    ANVIL_ARCH_PPC32,    "PowerPC 32-bit",      ANVIL_FP_IEEE754  },
-    { "ppc64",    ANVIL_ARCH_PPC64,    "PowerPC 64-bit BE",   ANVIL_FP_IEEE754  },
-    { "ppc64le",  ANVIL_ARCH_PPC64LE,  "PowerPC 64-bit LE",   ANVIL_FP_IEEE754  },
-    { "arm64",    ANVIL_ARCH_ARM64,    "ARM64 (AArch64)",     ANVIL_FP_IEEE754  },
+    { "x86",        ANVIL_ARCH_X86,      "x86 (32-bit)",          ANVIL_FP_IEEE754  },
+    { "x86_64",     ANVIL_ARCH_X86_64,   "x86-64 (64-bit)",       ANVIL_FP_IEEE754  },
+    { "s370",       ANVIL_ARCH_S370,     "IBM S/370 (24-bit)",    ANVIL_FP_HFP      },
+    { "s370_xa",    ANVIL_ARCH_S370_XA,  "IBM S/370-XA (31-bit)", ANVIL_FP_HFP      },
+    { "s390",       ANVIL_ARCH_S390,     "IBM S/390 (31-bit)",    ANVIL_FP_HFP      },
+    { "zarch",      ANVIL_ARCH_ZARCH,    "IBM z/Architecture",    ANVIL_FP_HFP_IEEE },
+    { "ppc32",      ANVIL_ARCH_PPC32,    "PowerPC 32-bit",        ANVIL_FP_IEEE754  },
+    { "ppc64",      ANVIL_ARCH_PPC64,    "PowerPC 64-bit BE",     ANVIL_FP_IEEE754  },
+    { "ppc64le",    ANVIL_ARCH_PPC64LE,  "PowerPC 64-bit LE",     ANVIL_FP_IEEE754  },
+    { "arm64",      ANVIL_ARCH_ARM64,    "ARM64 (AArch64/Linux)", ANVIL_FP_IEEE754  },
+    { "arm64_macos", ANVIL_ARCH_ARM64,   "ARM64 (Apple Silicon)", ANVIL_FP_IEEE754  },
     { NULL, 0, NULL, 0 }
 };
 
@@ -93,7 +96,9 @@ static inline bool parse_arch_args(int argc, char **argv, arch_config_t *config)
     config->arch = ANVIL_ARCH_ZARCH;
     config->arch_name = "IBM z/Architecture";
     config->fp_format = ANVIL_FP_HFP_IEEE;
+    config->abi = ANVIL_ABI_DEFAULT;
     config->fp_format_specified = false;
+    config->abi_specified = false;
     
     /* Parse architecture */
     if (argc > 1) {
@@ -106,6 +111,12 @@ static inline bool parse_arch_args(int argc, char **argv, arch_config_t *config)
         config->arch = entry->arch;
         config->arch_name = entry->display_name;
         config->fp_format = entry->default_fp_format;
+        
+        /* Check for macOS ARM64 variant */
+        if (strcmp(argv[1], "arm64_macos") == 0) {
+            config->abi = ANVIL_ABI_DARWIN;
+            config->abi_specified = true;
+        }
     }
     
     /* Parse FP format (optional) */
@@ -137,6 +148,15 @@ static inline bool setup_arch_context(anvil_ctx_t *ctx, const arch_config_t *con
         return false;
     }
     
+    /* Set ABI if specified (e.g., Darwin for macOS ARM64) */
+    if (config->abi_specified) {
+        anvil_error_t err = anvil_ctx_set_abi(ctx, config->abi);
+        if (err != ANVIL_OK) {
+            fprintf(stderr, "Failed to set ABI: %s\n", anvil_ctx_get_error(ctx));
+            return false;
+        }
+    }
+    
     /* Set FP format if specified */
     if (config->fp_format_specified) {
         anvil_error_t err = anvil_ctx_set_fp_format(ctx, config->fp_format);
@@ -147,6 +167,20 @@ static inline bool setup_arch_context(anvil_ctx_t *ctx, const arch_config_t *con
     }
     
     return true;
+}
+
+/* Get appropriate file extension for architecture */
+static inline const char *get_file_extension(anvil_arch_t arch)
+{
+    switch (arch) {
+        case ANVIL_ARCH_S370:
+        case ANVIL_ARCH_S370_XA:
+        case ANVIL_ARCH_S390:
+        case ANVIL_ARCH_ZARCH:
+            return ".hlasm";  /* HLASM */
+        default:
+            return ".s";      /* GAS */
+    }
 }
 
 /* Print FP format information */
