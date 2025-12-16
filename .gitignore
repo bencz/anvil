@@ -19,6 +19,22 @@ lib/
 .DS_Store
 Thumbs.db
 
+# macOS debug symbols
+*.dSYM/
+
 samples/mcc/*.asm
 samples/mcc/obj
 samples/mcc/mcc
+
+# Generated files in examples
+examples/fp_math_lib/generate_math
+examples/fp_math_lib/math_lib.s
+examples/fp_math_lib/math_lib.o
+examples/fp_math_lib/test_math.o
+examples/fp_math_lib/test_math
+
+examples/dynamic_array/generate_dynarray
+examples/dynamic_array/dynarray_lib.s
+examples/dynamic_array/dynarray_lib.o
+examples/dynamic_array/test_dynarray.o
+examples/dynamic_array/test_dynarray

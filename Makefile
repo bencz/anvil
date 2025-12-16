@@ -77,7 +77,7 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/cse_test \
 	$(BUILD_DIR)/examples/global_test
 
-.PHONY: all clean lib examples install
+.PHONY: all clean lib examples install examples-advanced test-examples-advanced clean-examples-advanced
 
 all: lib examples
 
@@ -98,6 +98,23 @@ $(BUILD_DIR)/examples/%: $(EXAMPLES_DIR)/%.c $(LIB_PATH)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
+
+# Advanced examples (in subdirectories with their own Makefiles)
+examples-advanced: lib
+	@echo "Building fp_math_lib example..."
+	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib
+	@echo "Building dynamic_array example..."
+	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array
+
+test-examples-advanced: examples-advanced
+	@echo "Testing fp_math_lib..."
+	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib test
+	@echo "Testing dynamic_array..."
+	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array test
+
+clean-examples-advanced:
+	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib clean
+	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array clean
 
 clean:
 	rm -rf $(BUILD_DIR) $(LIB_DIR)
