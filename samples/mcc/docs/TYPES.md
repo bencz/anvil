@@ -134,11 +134,14 @@ typedef struct mcc_func_param {
 
 ## Type Context
 
-The type context manages type creation and caching:
+The type context manages type creation and caching. It queries ANVIL for architecture-specific type sizes:
 
 ```c
 typedef struct mcc_type_context {
     mcc_context_t *ctx;
+    
+    /* Architecture-specific sizes (from ANVIL) */
+    int ptr_size;               /* Pointer size from anvil_arch_get_info() */
     
     /* Cached basic types */
     mcc_type_t *type_void;
@@ -161,6 +164,8 @@ typedef struct mcc_type_context {
     /* ... */
 } mcc_type_context_t;
 ```
+
+During initialization, `mcc_type_context_create()` uses `mcc_arch_to_anvil()` and `anvil_arch_get_info()` to obtain the target architecture's `ptr_size` and `word_size`, ensuring correct type sizes for cross-compilation.
 
 ## Type API
 
@@ -235,20 +240,32 @@ mcc_type_t *mcc_type_common(mcc_type_context_t *types, mcc_type_t *a, mcc_type_t
 
 ## Type Sizes and Alignment
 
-Default sizes (may vary by target):
+Type sizes are determined by the target architecture using ANVIL's `anvil_arch_get_info()`. MCC supports multiple data models:
 
-| Type | Size | Alignment | Standard |
-|------|------|-----------|----------|
+### Data Models
+
+| Model | `int` | `long` | `pointer` | Architectures |
+|-------|-------|--------|-----------|---------------|
+| **ILP32** | 4 | 4 | 4 | x86, S/370, S/370-XA, S/390, PPC32 |
+| **LP64** | 4 | 8 | 8 | x86_64, z/Architecture, PPC64, PPC64LE, ARM64 |
+| **Darwin LP64** | 4 | 8 | 8 | ARM64-macOS (long double = 8) |
+
+### Default Type Sizes
+
+| Type | ILP32 | LP64 | Standard |
+|------|-------|------|----------|
 | `char` | 1 | 1 | C89 |
 | `short` | 2 | 2 | C89 |
 | `int` | 4 | 4 | C89 |
-| `long` | 4 | 4 | C89 |
+| `long` | 4 | **8** | C89 |
 | `long long` | 8 | 8 | C99 |
 | `_Bool` | 1 | 1 | C99 |
 | `float` | 4 | 4 | C89 |
 | `double` | 8 | 8 | C89 |
-| `long double` | 16 | 16 | C89 |
-| `pointer` | 4/8 | 4/8 | C89 |
+| `long double` | 8 | 16* | C89 |
+| `pointer` | 4 | 8 | C89 |
+
+*Darwin LP64 uses 8 bytes for `long double`.
 
 ## Integer Promotions
 

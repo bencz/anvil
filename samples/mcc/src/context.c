@@ -3,6 +3,7 @@
  * Context management and utilities
  */
 
+#include "anvil/anvil.h"
 #include "mcc.h"
 
 #define ARENA_INITIAL_SIZE (1024 * 1024)  /* 1MB */
@@ -294,4 +295,23 @@ mcc_arch_t mcc_arch_from_name(const char *name)
         }
     }
     return MCC_ARCH_COUNT;
+}
+
+/* Map MCC architecture to ANVIL architecture */
+anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch)
+{
+    switch (arch) {
+        case MCC_ARCH_X86:         return ANVIL_ARCH_X86;
+        case MCC_ARCH_X86_64:      return ANVIL_ARCH_X86_64;
+        case MCC_ARCH_S370:        return ANVIL_ARCH_S370;
+        case MCC_ARCH_S370_XA:     return ANVIL_ARCH_S370_XA;
+        case MCC_ARCH_S390:        return ANVIL_ARCH_S390;
+        case MCC_ARCH_ZARCH:       return ANVIL_ARCH_ZARCH;
+        case MCC_ARCH_PPC32:       return ANVIL_ARCH_PPC32;
+        case MCC_ARCH_PPC64:       return ANVIL_ARCH_PPC64;
+        case MCC_ARCH_PPC64LE:     return ANVIL_ARCH_PPC64LE;
+        case MCC_ARCH_ARM64:       return ANVIL_ARCH_ARM64;
+        case MCC_ARCH_ARM64_MACOS: return ANVIL_ARCH_ARM64;
+        default:                   return ANVIL_ARCH_X86_64;
+    }
 }

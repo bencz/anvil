@@ -327,6 +327,23 @@ Key ANVIL APIs used:
 - `anvil_build_ret()`: Return
 - `anvil_build_struct_gep()`: Struct field access
 
+### Architecture-Specific Type Sizes
+
+MCC queries ANVIL for target architecture properties to ensure correct type sizes during cross-compilation:
+
+```c
+/* In context.c - shared architecture mapping */
+anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch);
+
+/* In types.c - type context initialization */
+anvil_arch_t anvil_arch = mcc_arch_to_anvil(ctx->options.arch);
+const anvil_arch_info_t *arch_info = anvil_arch_get_info(anvil_arch);
+int ptr_size = arch_info->ptr_size;   /* 4 for ILP32, 8 for LP64 */
+int word_size = arch_info->word_size;
+```
+
+This ensures that `sizeof(void*)` returns 4 on 32-bit targets (x86, S/370) and 8 on 64-bit targets (x86_64, ARM64), regardless of the host machine.
+
 ## Extending MCC
 
 ### Adding a new operator

@@ -66,8 +66,8 @@ All files share:
 | File | Lines | Description |
 |------|-------|-------------|
 | `c_std.c` | ~500 | C language standards and feature system |
-| `context.c` | ~280 | Compiler context, feature checking |
-| `types.c` | ~590 | Type system (includes C99 long long) |
+| `context.c` | ~320 | Compiler context, feature checking, `mcc_arch_to_anvil()` |
+| `types.c` | ~600 | Type system with architecture-specific sizes from ANVIL |
 
 **Modular Components:**
 

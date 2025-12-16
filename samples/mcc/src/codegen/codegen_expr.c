@@ -422,9 +422,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         case AST_SIZEOF_EXPR: {
             size_t size;
             if (expr->data.sizeof_expr.type_arg) {
-                size = mcc_type_sizeof(expr->data.sizeof_expr.type_arg);
+                size = codegen_sizeof(cg, expr->data.sizeof_expr.type_arg);
             } else if (expr->data.sizeof_expr.expr_arg) {
-                size = mcc_type_sizeof(expr->data.sizeof_expr.expr_arg->type);
+                size = codegen_sizeof(cg, expr->data.sizeof_expr.expr_arg->type);
             } else {
                 size = 0;
             }

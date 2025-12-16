@@ -68,3 +68,50 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
             return anvil_type_i32(cg->anvil_ctx);
     }
 }
+
+/* Get sizeof for a type using ANVIL arch info for pointer size */
+size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
+{
+    if (!type) return 0;
+    
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
+    int ptr_size = arch ? arch->ptr_size : 8;
+    
+    switch (type->kind) {
+        case TYPE_POINTER:
+            return ptr_size;
+        
+        case TYPE_ARRAY:
+            return codegen_sizeof(cg, type->data.array.element) * type->data.array.length;
+        
+        case TYPE_STRUCT: {
+            /* Recalculate struct size with correct pointer sizes */
+            size_t offset = 0;
+            size_t max_align = 1;
+            
+            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+                size_t field_size = codegen_sizeof(cg, f->type);
+                size_t field_align = field_size < 8 ? field_size : 8;
+                if (f->type->kind == TYPE_POINTER) field_align = ptr_size;
+                
+                if (field_align > max_align) max_align = field_align;
+                offset = (offset + field_align - 1) & ~(field_align - 1);
+                offset += field_size;
+            }
+            return (offset + max_align - 1) & ~(max_align - 1);
+        }
+        
+        case TYPE_UNION: {
+            size_t max_size = 0;
+            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+                size_t field_size = codegen_sizeof(cg, f->type);
+                if (field_size > max_size) max_size = field_size;
+            }
+            return max_size;
+        }
+        
+        default:
+            /* For basic types, use the size from mcc_type */
+            return type->size;
+    }
+}

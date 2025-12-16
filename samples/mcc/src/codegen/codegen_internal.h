@@ -9,14 +9,12 @@
 #ifndef MCC_CODEGEN_INTERNAL_H
 #define MCC_CODEGEN_INTERNAL_H
 
+#include "anvil/anvil.h"
 #include "mcc.h"
 
 /* ============================================================
  * Architecture Mapping (codegen.c)
  * ============================================================ */
-
-/* Map MCC architecture to ANVIL architecture */
-anvil_arch_t codegen_mcc_to_anvil_arch(mcc_arch_t arch);
 
 /* Check if architecture uses Darwin ABI */
 bool codegen_arch_is_darwin(mcc_arch_t arch);
@@ -74,6 +72,9 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym);
 
 /* Convert MCC type to ANVIL type */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type);
+
+/* Get sizeof for a type using ANVIL arch info for pointer size */
+size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type);
 
 /* ============================================================
  * Expression Code Generation (codegen_expr.c)

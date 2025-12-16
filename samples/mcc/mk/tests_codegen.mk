@@ -140,7 +140,7 @@ test-codegen-arm64: $(TARGET) | $(TEST_OUTPUT_DIR)
 
 # Test ARM64 macOS code generation
 test-codegen-arm64-macos: $(TARGET) | $(TEST_OUTPUT_DIR)
-	$(call run_arch_codegen_tests,arm64-macos,ARM64-macOS)
+	$(call run_arch_codegen_tests,arm64_macos,ARM64-macOS)
 
 # Test S/370 code generation
 test-codegen-s370: $(TARGET) | $(TEST_OUTPUT_DIR)

@@ -3,6 +3,7 @@
  * Type system implementation
  */
 
+#include "anvil/anvil.h"
 #include "mcc.h"
 
 static const char *type_kind_names[] = {
@@ -27,6 +28,24 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
 {
     mcc_type_context_t *tctx = mcc_alloc(ctx, sizeof(mcc_type_context_t));
     tctx->ctx = ctx;
+    
+    /* Get architecture info from ANVIL using shared function */
+    anvil_arch_t anvil_arch = mcc_arch_to_anvil(ctx->options.arch);
+    const anvil_arch_info_t *arch_info = anvil_arch_get_info(anvil_arch);
+    
+    /* Get pointer and word size from architecture */
+    int ptr_size = arch_info ? arch_info->ptr_size : 4;
+    int word_size = arch_info ? arch_info->word_size : 4;
+    
+    /* Determine long size based on data model:
+     * - ILP32 (32-bit): long = 4 bytes (x86, S/370, S/370-XA, S/390, PPC32)
+     * - LP64 (64-bit Unix): long = 8 bytes (x86_64, z/Architecture, PPC64, ARM64)
+     * - LLP64 (64-bit Windows): long = 4 bytes (would need ANVIL_ABI_WIN64 check)
+     * 
+     * Note: IBM mainframes (S/370, S/390) use ILP32 even with 24/31-bit addressing.
+     * z/Architecture uses LP64 with 64-bit addressing.
+     */
+    int long_size = (ptr_size == 8) ? 8 : 4;
     
     /* Create primitive types */
     tctx->type_void = mcc_alloc(ctx, sizeof(mcc_type_t));
@@ -73,28 +92,29 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     tctx->type_uint->size = 4;
     tctx->type_uint->align = 4;
     
+    /* long size depends on architecture */
     tctx->type_long = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_long->kind = TYPE_LONG;
-    tctx->type_long->size = 4; /* 32-bit long for C89 compatibility */
-    tctx->type_long->align = 4;
+    tctx->type_long->size = long_size;
+    tctx->type_long->align = long_size;
     
     tctx->type_ulong = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ulong->kind = TYPE_LONG;
     tctx->type_ulong->is_unsigned = true;
-    tctx->type_ulong->size = 4;
-    tctx->type_ulong->align = 4;
+    tctx->type_ulong->size = long_size;
+    tctx->type_ulong->align = long_size;
     
-    /* C99 long long types */
+    /* C99 long long types - always 8 bytes */
     tctx->type_llong = mcc_alloc(ctx, sizeof(mcc_type_t));
-    tctx->type_llong->kind = TYPE_LONG;  /* Use TYPE_LONG with size 8 */
+    tctx->type_llong->kind = TYPE_LONG_LONG;
     tctx->type_llong->size = 8;
-    tctx->type_llong->align = 8;
+    tctx->type_llong->align = (word_size >= 8) ? 8 : word_size;
     
     tctx->type_ullong = mcc_alloc(ctx, sizeof(mcc_type_t));
-    tctx->type_ullong->kind = TYPE_LONG;
+    tctx->type_ullong->kind = TYPE_LONG_LONG;
     tctx->type_ullong->is_unsigned = true;
     tctx->type_ullong->size = 8;
-    tctx->type_ullong->align = 8;
+    tctx->type_ullong->align = (word_size >= 8) ? 8 : word_size;
     
     tctx->type_float = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_float->kind = TYPE_FLOAT;
@@ -104,12 +124,15 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     tctx->type_double = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_double->kind = TYPE_DOUBLE;
     tctx->type_double->size = 8;
-    tctx->type_double->align = 8;
+    tctx->type_double->align = (word_size >= 8) ? 8 : word_size;
     
     tctx->type_ldouble = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ldouble->kind = TYPE_LONG_DOUBLE;
-    tctx->type_ldouble->size = 8; /* Platform dependent */
-    tctx->type_ldouble->align = 8;
+    tctx->type_ldouble->size = 8;
+    tctx->type_ldouble->align = (word_size >= 8) ? 8 : word_size;
+    
+    /* Store pointer size for use in mcc_type_pointer */
+    tctx->ptr_size = ptr_size;
     
     return tctx;
 }
@@ -142,8 +165,8 @@ mcc_type_t *mcc_type_pointer(mcc_type_context_t *tctx, mcc_type_t *pointee)
     mcc_type_t *type = mcc_alloc(tctx->ctx, sizeof(mcc_type_t));
     type->kind = TYPE_POINTER;
     type->data.pointer.pointee = pointee;
-    type->size = sizeof(void*); /* Platform dependent */
-    type->align = sizeof(void*);
+    type->size = tctx->ptr_size;  /* Use architecture-specific pointer size */
+    type->align = tctx->ptr_size;
     return type;
 }
 

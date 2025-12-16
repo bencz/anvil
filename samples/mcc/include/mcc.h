@@ -15,6 +15,8 @@
 #include <ctype.h>
 #include <assert.h>
 
+#include <anvil/anvil.h>
+
 /* Version */
 #define MCC_VERSION_MAJOR 0
 #define MCC_VERSION_MINOR 2
@@ -178,6 +180,7 @@ char *mcc_strdup(mcc_context_t *ctx, const char *str);
 /* Utility */
 const char *mcc_arch_name(mcc_arch_t arch);
 mcc_arch_t mcc_arch_from_name(const char *name);
+anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch);
 
 /* Include component headers */
 #include "token.h"

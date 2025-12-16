@@ -23,7 +23,6 @@ The code generator is organized into modular files in `src/codegen/`:
 
 **codegen.c** (Main Module)
 - Public API: `mcc_codegen_create()`, `mcc_codegen_destroy()`, `mcc_codegen_generate()`
-- Architecture mapping: `codegen_mcc_to_anvil_arch()`
 - Local variable management: `codegen_find_local()`, `codegen_add_local()`
 - String literal pool: `codegen_get_string_literal()`
 - Label management: `codegen_get_label_block()`
@@ -32,6 +31,7 @@ The code generator is organized into modular files in `src/codegen/`:
 
 **codegen_type.c** (Type Conversion)
 - `codegen_type()`: Convert MCC type to ANVIL type
+- `codegen_sizeof()`: Calculate sizeof using ANVIL arch info for correct pointer sizes
 - Handles all type kinds: void, char, short, int, long, float, double, pointer, array, struct, union, function
 
 **codegen_expr.c** (Expression Generation)
@@ -626,3 +626,31 @@ The `current_func_name` is set when generating a function:
 /* In codegen_decl.c - codegen_func() */
 cg->current_func_name = func->data.func_decl.name;
 ```
+
+### Architecture-Specific sizeof
+
+The `sizeof` operator now uses `codegen_sizeof()` which queries ANVIL for the target architecture's pointer size:
+
+```c
+/* In codegen_type.c */
+size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
+{
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
+    int ptr_size = arch ? arch->ptr_size : 8;
+    
+    switch (type->kind) {
+        case TYPE_POINTER:
+            return ptr_size;  /* Use target architecture's pointer size */
+        case TYPE_ARRAY:
+            return codegen_sizeof(cg, type->data.array.element) * type->data.array.length;
+        case TYPE_STRUCT:
+        case TYPE_UNION:
+            /* Recalculate with correct pointer sizes */
+            /* ... */
+        default:
+            return type->size;
+    }
+}
+```
+
+This ensures correct `sizeof` results when cross-compiling (e.g., compiling for 32-bit S/370 on a 64-bit host).

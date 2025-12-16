@@ -12,23 +12,7 @@
  * Architecture Mapping
  * ============================================================ */
 
-anvil_arch_t codegen_mcc_to_anvil_arch(mcc_arch_t arch)
-{
-    switch (arch) {
-        case MCC_ARCH_X86:         return ANVIL_ARCH_X86;
-        case MCC_ARCH_X86_64:      return ANVIL_ARCH_X86_64;
-        case MCC_ARCH_S370:        return ANVIL_ARCH_S370;
-        case MCC_ARCH_S370_XA:     return ANVIL_ARCH_S370_XA;
-        case MCC_ARCH_S390:        return ANVIL_ARCH_S390;
-        case MCC_ARCH_ZARCH:       return ANVIL_ARCH_ZARCH;
-        case MCC_ARCH_PPC32:       return ANVIL_ARCH_PPC32;
-        case MCC_ARCH_PPC64:       return ANVIL_ARCH_PPC64;
-        case MCC_ARCH_PPC64LE:     return ANVIL_ARCH_PPC64LE;
-        case MCC_ARCH_ARM64:       return ANVIL_ARCH_ARM64;
-        case MCC_ARCH_ARM64_MACOS: return ANVIL_ARCH_ARM64;  /* Same arch, different ABI */
-        default:                   return ANVIL_ARCH_X86_64;
-    }
-}
+/* Use mcc_arch_to_anvil from context.c */
 
 bool codegen_arch_is_darwin(mcc_arch_t arch)
 {
@@ -70,7 +54,7 @@ void mcc_codegen_destroy(mcc_codegen_t *cg)
 
 void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
 {
-    anvil_ctx_set_target(cg->anvil_ctx, codegen_mcc_to_anvil_arch(arch));
+    anvil_ctx_set_target(cg->anvil_ctx, mcc_arch_to_anvil(arch));
     
     /* Set Darwin ABI for macOS ARM64 */
     if (codegen_arch_is_darwin(arch)) {

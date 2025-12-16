@@ -274,6 +274,9 @@ anvil_fp_format_t anvil_ctx_get_fp_format(anvil_ctx_t *ctx);
 /* Get architecture info */
 const anvil_arch_info_t *anvil_ctx_get_arch_info(anvil_ctx_t *ctx);
 
+/* Get architecture info without context (for early initialization) */
+const anvil_arch_info_t *anvil_arch_get_info(anvil_arch_t arch);
+
 /* Get last error message */
 const char *anvil_ctx_get_error(anvil_ctx_t *ctx);
 

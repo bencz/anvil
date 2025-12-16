@@ -143,6 +143,9 @@ struct mcc_type {
 typedef struct mcc_type_context {
     mcc_context_t *ctx;
     
+    /* Architecture-specific sizes */
+    int ptr_size;               /* Pointer size from ANVIL arch info */
+    
     /* Cached primitive types */
     mcc_type_t *type_void;
     mcc_type_t *type_char;

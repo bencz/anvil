@@ -684,6 +684,12 @@ const anvil_arch_info_t *anvil_ctx_get_arch_info(anvil_ctx_t *ctx)
     return &arch_info_table[ctx->arch];
 }
 
+const anvil_arch_info_t *anvil_arch_get_info(anvil_arch_t arch)
+{
+    if (arch >= ANVIL_ARCH_COUNT) return NULL;
+    return &arch_info_table[arch];
+}
+
 const char *anvil_ctx_get_error(anvil_ctx_t *ctx)
 {
     if (!ctx) return "Invalid context";
