@@ -269,8 +269,8 @@ When working with MCC code:
 
 ### Current Limitations
 
-- Stringification (`#`) and token pasting (`##`) in macros
-- Line continuation (`\`) in preprocessor
+- Token pasting (`##`) in macros
+- Computed includes (`#include` with macro-expanded filename)
 
 ### Recent Improvements
 
@@ -302,3 +302,8 @@ When working with MCC code:
 - **Organized Test Suite**: Tests organized by C standard (C89, C99, C11, C23, GNU) with cross-standard tests
 - **Modular Code Generator**: Refactored `codegen.c` into `src/codegen/` with 5 modular files
 - **Modular Build System**: Makefile split into `mk/` with separate config, rules, and test files
+- **Stringification Operator (`#`)**: Full support for converting macro arguments to string literals
+- **Variadic Macros (`__VA_ARGS__`)**: Correct expansion in nested macros with pre-expanded arguments
+- **`__VA_OPT__` (C23)**: Conditional expansion based on presence of variadic arguments
+- **String Literal Concatenation**: Adjacent string literals are concatenated by the parser
+- **Token `raw_text` Field**: Tokens store original source text with quotes for preprocessor output

@@ -468,6 +468,7 @@ static inline bool pp_has_elifdef(mcc_preprocessor_t *pp)
 
 | Feature | C89 | C99 | C11 | C23 | GNU |
 |---------|-----|-----|-----|-----|-----|
+| `#` (stringification) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `__VA_ARGS__` | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `_Pragma()` | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `#elifdef` | ❌ | ❌ | ❌ | ✅ | ❌ |
@@ -505,12 +506,74 @@ __GNUC__            /* 4 */
 __GNUC_MINOR__      /* 0 */
 ```
 
+## Stringification Operator (`#`)
+
+The `#` operator converts a macro argument to a string literal (C89+):
+
+```c
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define VERSION 100
+
+const char *s1 = STRINGIFY(hello);      /* "hello" */
+const char *s2 = TOSTRING(VERSION);     /* "100" */
+
+/* With __VA_ARGS__ (C99+) */
+#define DEBUG_VAR(var) printf(#var " = %d\n", var)
+DEBUG_VAR(count);  /* printf("count" " = %d\n", count); */
+```
+
+### Stringification Rules
+
+1. Leading and trailing whitespace is removed
+2. Internal whitespace is preserved as single spaces
+3. String literals and character constants are escaped
+4. The result is always a valid string literal
+
+## Variadic Macros (C99+)
+
+### Basic `__VA_ARGS__`
+
+```c
+#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)
+#define DEBUG(...) fprintf(stderr, __VA_ARGS__)
+
+LOG("Value: %d\n", 42);     /* printf("Value: %d\n", 42) */
+DEBUG("Error: %s\n", msg);  /* fprintf(stderr, "Error: %s\n", msg) */
+```
+
+### Nested Variadic Macros
+
+```c
+#define INNER(level, fmt, ...) printf("[%s] " fmt "\n", level, __VA_ARGS__)
+#define DEBUG(fmt, ...) INNER("DEBUG", fmt, __VA_ARGS__)
+#define INFO(fmt, ...)  INNER("INFO", fmt, __VA_ARGS__)
+
+DEBUG("x = %d", 42);  /* printf("[DEBUG] " "x = %d" "\n", "DEBUG", 42) */
+```
+
+### `__VA_OPT__` (C23)
+
+The `__VA_OPT__` operator conditionally expands content only when variadic arguments are present:
+
+```c
+#define LOG(fmt, ...) printf(fmt __VA_OPT__(,) __VA_ARGS__)
+#define CALL(f, ...) f(__VA_OPT__(__VA_ARGS__))
+
+LOG("no args");           /* printf("no args") */
+LOG("x = %d", 42);        /* printf("x = %d", 42) */
+
+CALL(func);               /* func() */
+CALL(func, 1, 2);         /* func(1, 2) */
+```
+
+**Note:** `__VA_OPT__` requires `-std=c23` or later.
+
 ## Limitations
 
 Current limitations of the MCC preprocessor:
 
-1. **No stringification (`#`)**: The `#` operator to convert macro arguments to strings is not implemented
-2. **No token pasting (`##`)**: The `##` operator to concatenate tokens is not implemented
-3. **No `#pragma once`**: Use traditional include guards instead
-4. **Limited `__VA_ARGS__`**: Variadic macros have basic support only
-5. **No `__VA_OPT__`**: C23 `__VA_OPT__` is not yet implemented
+1. **No token pasting (`##`)**: The `##` operator to concatenate tokens is not implemented
+2. **No `#pragma once`**: Use traditional include guards instead
+3. **No computed includes**: `#include` with macro-expanded filename is not supported

@@ -323,7 +323,10 @@ Features are organized into 4 words (256 total features):
 - [x] Control flow (if, while, for, switch, goto)
 - [x] All operators
 - [x] Preprocessor (#define, #include, #if, etc.)
+- [x] Stringification operator (`#`)
+- [x] String literal concatenation
 - [ ] Bitfields (not yet implemented)
+- [ ] Token pasting (`##`) (not yet implemented)
 
 ### C99 - In Progress
 - [ ] `long long` type
@@ -337,8 +340,17 @@ Features are organized into 4 words (256 total features):
 - [ ] Compound literals
 - [ ] `//` line comments
 - [ ] `__func__`
-- [ ] Variadic macros
+- [x] Variadic macros (`__VA_ARGS__`)
 - [ ] Hexadecimal float literals
+
+### C23 - Partial
+- [x] `#elifdef` / `#elifndef` directives
+- [x] `__VA_OPT__` for variadic macros
+- [ ] `nullptr` constant
+- [ ] `constexpr` specifier
+- [ ] `typeof` / `typeof_unqual`
+- [ ] Binary literals (`0b`)
+- [ ] Digit separators (`'`)
 
 ### GNU Extensions - Planned
 - [ ] `__attribute__`
