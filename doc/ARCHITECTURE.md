@@ -82,6 +82,12 @@ struct anvil_ctx {
     anvil_block_t *insert_block;   // Current insertion point
     anvil_type_t *type_cache[...]; // Cached primitive types
     anvil_pool_t *pool;            // Memory pool for allocations
+    
+    // CPU Model System
+    anvil_cpu_model_t cpu_model;       // Selected CPU model
+    anvil_cpu_features_t cpu_features; // Active CPU features
+    anvil_cpu_features_t features_enabled;  // Manually enabled features
+    anvil_cpu_features_t features_disabled; // Manually disabled features
 };
 ```
 
@@ -91,6 +97,7 @@ struct anvil_ctx {
 - Tracks the current insertion point for IR building
 - Caches primitive types to avoid duplication
 - Provides memory pool for efficient allocation
+- **CPU Model System**: Tracks selected CPU model and feature flags for target-specific code generation
 
 ### Module (anvil_module_t)
 

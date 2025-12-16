@@ -53,7 +53,15 @@ anvil/
 │       ├── s370/s370.c
 │       ├── s370_xa/s370_xa.c
 │       ├── s390/s390.c
-│       └── zarch/zarch.c
+│       ├── zarch/zarch.c
+│       ├── ppc32/ppc32.c
+│       ├── ppc64/              # Modular backend example
+│       │   ├── ppc64.c         # Main backend
+│       │   ├── ppc64_internal.h # Shared types
+│       │   ├── ppc64_emit.c    # Instruction emission
+│       │   └── ppc64_cpu.c     # CPU-specific optimizations
+│       ├── ppc64le/ppc64le.c
+│       └── arm64/arm64.c
 ├── examples/                # Example programs
 ├── doc/                     # Documentation
 ├── Makefile

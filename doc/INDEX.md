@@ -96,6 +96,38 @@ anvil_module_codegen(mod, &output, &len);
 
 ## Recent Features
 
+### CPU Model System
+ANVIL now supports CPU model-specific code generation for optimized output:
+
+```c
+// Set CPU model for target-specific code generation
+anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
+
+// Check available features
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
+    // VSX vector instructions available
+}
+
+// Override features manually
+anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
+```
+
+**Supported CPU Models:**
+- **PowerPC**: G3, G4, 970 (G5), POWER4-POWER10
+- **z/Architecture**: z900, z9, z10, z196, zEC12, z13-z16
+- **ARM64**: Generic, Cortex-A53/A72/A76, Neoverse N1/V1, Apple M1/M2/M3
+- **x86-64**: Generic, Core2, Nehalem, Sandy Bridge, Haswell, Skylake, Ice Lake, Zen/Zen3/Zen4
+
+**CPU-Specific Optimizations (PPC64):**
+- `popcntd`: Native on POWER5+, emulated on older CPUs
+- `isel`: Conditional select on POWER7+, branch-based fallback
+- `ldbrx/stdbrx`: Byte reversal on POWER7+
+- `cmpb`: Byte comparison on POWER6+
+- `fcpsgn`: FP copy sign on POWER7+
+
+Example: `examples/cpu_model_test.c`
+
 ### Struct Support (STRUCT_GEP)
 - Struct field access via `anvil_build_struct_gep()` for all backends
 - Automatic field offset calculation at compile time

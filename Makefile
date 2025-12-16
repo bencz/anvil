@@ -40,6 +40,8 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/zarch/zarch.c \
 	$(SRC_DIR)/backend/ppc32/ppc32.c \
 	$(SRC_DIR)/backend/ppc64/ppc64.c \
+	$(SRC_DIR)/backend/ppc64/ppc64_emit.c \
+	$(SRC_DIR)/backend/ppc64/ppc64_cpu.c \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c
 
@@ -75,7 +77,8 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/loop_unroll_test \
 	$(BUILD_DIR)/examples/memory_opt_test \
 	$(BUILD_DIR)/examples/cse_test \
-	$(BUILD_DIR)/examples/global_test
+	$(BUILD_DIR)/examples/global_test \
+	$(BUILD_DIR)/examples/cpu_model_test
 
 .PHONY: all clean lib examples install examples-advanced test-examples-advanced clean-examples-advanced
 

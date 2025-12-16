@@ -5,17 +5,18 @@ Complete API reference for the ANVIL library.
 ## Table of Contents
 
 1. [Context API](#context-api)
-2. [Module API](#module-api)
-3. [Function API](#function-api)
-4. [Block API](#block-api)
-5. [Type API](#type-api)
-6. [Value API](#value-api)
-7. [IR Builder API](#ir-builder-api)
-8. [Constants API](#constants-api)
-9. [Global Variables API](#global-variables-api)
-10. [Optimization API](#optimization-api)
-11. [Enumerations](#enumerations)
-12. [Structures](#structures)
+2. [CPU Model API](#cpu-model-api)
+3. [Module API](#module-api)
+4. [Function API](#function-api)
+5. [Block API](#block-api)
+6. [Type API](#type-api)
+7. [Value API](#value-api)
+8. [IR Builder API](#ir-builder-api)
+9. [Constants API](#constants-api)
+10. [Global Variables API](#global-variables-api)
+11. [Optimization API](#optimization-api)
+12. [Enumerations](#enumerations)
+13. [Structures](#structures)
 
 ## Context API
 
@@ -186,6 +187,256 @@ Gets the current floating-point format.
 - `ctx`: Context
 
 **Returns:** Current FP format.
+
+## CPU Model API
+
+The CPU model system allows target-specific code generation by specifying the exact processor model. Each CPU model has a set of features (instruction set extensions) that can be queried and used to generate optimized code.
+
+### anvil_ctx_set_cpu
+
+```c
+anvil_error_t anvil_ctx_set_cpu(anvil_ctx_t *ctx, anvil_cpu_model_t cpu);
+```
+
+Sets the CPU model for target-specific code generation.
+
+**Parameters:**
+- `ctx`: Context
+- `cpu`: CPU model enum value
+
+**Returns:** `ANVIL_OK` on success, error code on failure.
+
+**Example:**
+```c
+// Generate code optimized for IBM POWER9
+anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
+
+// Generate code for Apple M1
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_ARM64_APPLE_M1);
+
+// Generate code for IBM z15 mainframe
+anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_ZARCH_Z15);
+```
+
+### anvil_ctx_get_cpu
+
+```c
+anvil_cpu_model_t anvil_ctx_get_cpu(anvil_ctx_t *ctx);
+```
+
+Gets the current CPU model.
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Current CPU model.
+
+### anvil_ctx_get_cpu_features
+
+```c
+anvil_cpu_features_t anvil_ctx_get_cpu_features(anvil_ctx_t *ctx);
+```
+
+Gets the CPU features for the current CPU model (including any manual overrides).
+
+**Parameters:**
+- `ctx`: Context
+
+**Returns:** Bitfield of active CPU features.
+
+### anvil_ctx_has_feature
+
+```c
+bool anvil_ctx_has_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+```
+
+Checks if a specific feature is available for the current CPU model.
+
+**Parameters:**
+- `ctx`: Context
+- `feature`: Feature flag to check
+
+**Returns:** `true` if feature is available, `false` otherwise.
+
+**Example:**
+```c
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER8);
+
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
+    // Can use VSX vector instructions
+}
+
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_HTM)) {
+    // Can use Hardware Transactional Memory
+}
+```
+
+### anvil_ctx_enable_feature
+
+```c
+anvil_error_t anvil_ctx_enable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+```
+
+Manually enables a specific feature (overrides CPU model defaults).
+
+**Parameters:**
+- `ctx`: Context
+- `feature`: Feature flag to enable
+
+**Returns:** `ANVIL_OK` on success.
+
+**Example:**
+```c
+// Force enable HTM even if CPU model doesn't have it
+anvil_ctx_enable_feature(ctx, ANVIL_FEATURE_PPC_HTM);
+```
+
+### anvil_ctx_disable_feature
+
+```c
+anvil_error_t anvil_ctx_disable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+```
+
+Manually disables a specific feature (overrides CPU model defaults).
+
+**Parameters:**
+- `ctx`: Context
+- `feature`: Feature flag to disable
+
+**Returns:** `ANVIL_OK` on success.
+
+**Example:**
+```c
+// Disable VSX to generate more compatible code
+anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
+```
+
+### anvil_cpu_model_name
+
+```c
+const char *anvil_cpu_model_name(anvil_cpu_model_t cpu);
+```
+
+Gets the name of a CPU model as a string.
+
+**Parameters:**
+- `cpu`: CPU model enum value
+
+**Returns:** CPU model name string.
+
+### anvil_arch_default_cpu
+
+```c
+anvil_cpu_model_t anvil_arch_default_cpu(anvil_arch_t arch);
+```
+
+Gets the default CPU model for an architecture.
+
+**Parameters:**
+- `arch`: Architecture enum value
+
+**Returns:** Default CPU model for the architecture.
+
+### anvil_cpu_model_features
+
+```c
+anvil_cpu_features_t anvil_cpu_model_features(anvil_cpu_model_t cpu);
+```
+
+Gets the features for a specific CPU model (without context overrides).
+
+**Parameters:**
+- `cpu`: CPU model enum value
+
+**Returns:** Bitfield of CPU features.
+
+### Supported CPU Models
+
+#### PowerPC 32-bit
+- `ANVIL_CPU_PPC_G3` - PowerPC 750 (G3)
+- `ANVIL_CPU_PPC_G4` - PowerPC 7400/7450 (G4) with AltiVec
+- `ANVIL_CPU_PPC_G4E` - PowerPC 7450 (G4e) with AltiVec
+
+#### PowerPC 64-bit
+- `ANVIL_CPU_PPC64_970` - PowerPC 970 (G5)
+- `ANVIL_CPU_PPC64_POWER4` - IBM POWER4
+- `ANVIL_CPU_PPC64_POWER5` - IBM POWER5
+- `ANVIL_CPU_PPC64_POWER6` - IBM POWER6
+- `ANVIL_CPU_PPC64_POWER7` - IBM POWER7
+- `ANVIL_CPU_PPC64_POWER8` - IBM POWER8
+- `ANVIL_CPU_PPC64_POWER9` - IBM POWER9
+- `ANVIL_CPU_PPC64_POWER10` - IBM POWER10
+
+#### IBM Mainframe (z/Architecture)
+- `ANVIL_CPU_ZARCH_Z900` - z900
+- `ANVIL_CPU_ZARCH_Z9` - z9 EC/BC
+- `ANVIL_CPU_ZARCH_Z10` - z10 EC/BC
+- `ANVIL_CPU_ZARCH_Z196` - z196
+- `ANVIL_CPU_ZARCH_ZEC12` - zEC12
+- `ANVIL_CPU_ZARCH_Z13` - z13
+- `ANVIL_CPU_ZARCH_Z14` - z14
+- `ANVIL_CPU_ZARCH_Z15` - z15
+- `ANVIL_CPU_ZARCH_Z16` - z16
+
+#### ARM64
+- `ANVIL_CPU_ARM64_GENERIC` - Generic ARMv8-A
+- `ANVIL_CPU_ARM64_CORTEX_A53` - Cortex-A53
+- `ANVIL_CPU_ARM64_CORTEX_A72` - Cortex-A72
+- `ANVIL_CPU_ARM64_CORTEX_A76` - Cortex-A76
+- `ANVIL_CPU_ARM64_NEOVERSE_N1` - Neoverse N1
+- `ANVIL_CPU_ARM64_NEOVERSE_V1` - Neoverse V1
+- `ANVIL_CPU_ARM64_APPLE_M1` - Apple M1
+- `ANVIL_CPU_ARM64_APPLE_M2` - Apple M2
+- `ANVIL_CPU_ARM64_APPLE_M3` - Apple M3
+
+#### x86-64
+- `ANVIL_CPU_X86_64_GENERIC` - Generic x86-64
+- `ANVIL_CPU_X86_64_CORE2` - Intel Core 2
+- `ANVIL_CPU_X86_64_NEHALEM` - Intel Nehalem
+- `ANVIL_CPU_X86_64_SANDYBRIDGE` - Intel Sandy Bridge
+- `ANVIL_CPU_X86_64_HASWELL` - Intel Haswell
+- `ANVIL_CPU_X86_64_SKYLAKE` - Intel Skylake
+- `ANVIL_CPU_X86_64_ICELAKE` - Intel Ice Lake
+- `ANVIL_CPU_X86_64_ZEN` - AMD Zen
+- `ANVIL_CPU_X86_64_ZEN3` - AMD Zen 3
+- `ANVIL_CPU_X86_64_ZEN4` - AMD Zen 4
+
+### CPU Feature Flags
+
+#### PowerPC Features
+- `ANVIL_FEATURE_PPC_ALTIVEC` - AltiVec/VMX SIMD
+- `ANVIL_FEATURE_PPC_VSX` - VSX (Vector-Scalar)
+- `ANVIL_FEATURE_PPC_DFP` - Decimal Floating Point
+- `ANVIL_FEATURE_PPC_POPCNTD` - popcntd instruction
+- `ANVIL_FEATURE_PPC_HTM` - Hardware Transactional Memory
+- `ANVIL_FEATURE_PPC_MMA` - Matrix-Multiply Assist (POWER10)
+- `ANVIL_FEATURE_PPC_PCREL` - PC-relative addressing (POWER10)
+
+#### z/Architecture Features
+- `ANVIL_FEATURE_ZARCH_DFP` - Decimal Floating Point
+- `ANVIL_FEATURE_ZARCH_VECTOR` - Vector facility
+- `ANVIL_FEATURE_ZARCH_VECTOR_ENH1` - Vector enhancements 1
+- `ANVIL_FEATURE_ZARCH_VECTOR_ENH2` - Vector enhancements 2
+- `ANVIL_FEATURE_ZARCH_NNPA` - Neural Network Processing Assist
+
+#### ARM64 Features
+- `ANVIL_FEATURE_ARM64_NEON` - NEON SIMD
+- `ANVIL_FEATURE_ARM64_SVE` - Scalable Vector Extension
+- `ANVIL_FEATURE_ARM64_SVE2` - SVE2
+- `ANVIL_FEATURE_ARM64_ATOMICS` - LSE atomics
+- `ANVIL_FEATURE_ARM64_DOTPROD` - Dot product instructions
+- `ANVIL_FEATURE_ARM64_BF16` - BFloat16
+
+#### x86/x86-64 Features
+- `ANVIL_FEATURE_X86_SSE` - SSE
+- `ANVIL_FEATURE_X86_SSE2` - SSE2
+- `ANVIL_FEATURE_X86_AVX` - AVX
+- `ANVIL_FEATURE_X86_AVX2` - AVX2
+- `ANVIL_FEATURE_X86_AVX512F` - AVX-512 Foundation
+- `ANVIL_FEATURE_X86_FMA` - FMA3
 
 ## Module API
 

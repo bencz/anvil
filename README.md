@@ -8,6 +8,7 @@ A C library for compiler code generation with support for multiple architectures
 * Multiple Backends: Support for x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit, ARM64
 * Assembly Output: Generates assembly text (HLASM for mainframes, GAS for x86/PPC)
 * **IR Optimization**: Configurable optimization passes (constant folding, DCE, strength reduction)
+* **CPU Model System**: Target-specific code generation with CPU model selection and feature flags
 * Extensible: Plugin architecture for adding new backends
 * Opcode Ready: Design prepared for future binary code generation
 
@@ -353,6 +354,39 @@ anvil_register_backend(&anvil_backend_myarch);
 - String table management for string literals
 - Global variable emission with proper alignment
 - GEP and STRUCT_GEP for array and struct access
+- **CPU Model System**: Target-specific code generation based on CPU model (POWER5-POWER10)
+
+### CPU Model System
+ANVIL supports CPU model-specific code generation, allowing optimized code for specific processor generations.
+
+**Supported CPU Models:**
+- **PowerPC**: G3, G4, 970 (G5), POWER4-POWER10
+- **z/Architecture**: z900, z9, z10, z196, zEC12, z13-z16
+- **ARM64**: Generic, Cortex-A53/A72/A76, Neoverse N1/V1, Apple M1/M2/M3
+- **x86-64**: Generic, Core2, Nehalem, Sandy Bridge, Haswell, Skylake, Ice Lake, Zen/Zen3/Zen4
+
+**Usage:**
+```c
+// Set target architecture and CPU model
+anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
+
+// Check available features
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
+    // VSX vector instructions available
+}
+
+// Enable/disable specific features
+anvil_ctx_enable_feature(ctx, ANVIL_FEATURE_PPC_HTM);
+anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
+```
+
+**CPU-Specific Optimizations (PPC64):**
+- `popcntd`: Native on POWER5+, emulated on older CPUs
+- `isel`: Conditional select on POWER7+, branch-based fallback
+- `ldbrx/stdbrx`: Byte reversal on POWER7+
+- `cmpb`: Byte comparison on POWER6+
+- `fcpsgn`: FP copy sign on POWER7+
 
 ### ARM64 Backend Improvements
 Recent fixes to the ARM64 backend for robust code generation:
@@ -460,6 +494,7 @@ anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
 * Register allocation improvements
 * RISC-V support
 * Debug info (DWARF)
+* Extend CPU model system to more backends (ARM64, z/Architecture, x86-64)
 
 ## Documentation
 

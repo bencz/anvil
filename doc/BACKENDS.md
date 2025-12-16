@@ -8,6 +8,49 @@ This document explains how backends work and how to implement new ones.
 
 A backend translates ANVIL IR to target-specific assembly code. Each backend is a self-contained module that implements the `anvil_backend_ops_t` interface.
 
+### CPU Model System
+
+Backends can access CPU model information to generate optimized code for specific processors. The context provides:
+
+```c
+// Check if a CPU feature is available
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
+    // Emit VSX instructions
+} else {
+    // Emit fallback code
+}
+
+// Get current CPU model
+anvil_cpu_model_t cpu = anvil_ctx_get_cpu(ctx);
+```
+
+**Example: PPC64 Backend Organization**
+
+The PPC64 backend demonstrates a modular approach with CPU-specific code:
+
+```
+src/backend/ppc64/
+├── ppc64.c           # Main backend (init, cleanup, codegen)
+├── ppc64_internal.h  # Shared types and declarations
+├── ppc64_emit.c      # Instruction emission
+└── ppc64_cpu.c       # CPU-specific optimizations
+```
+
+**CPU-Specific Code Generation (ppc64_cpu.c):**
+```c
+void ppc64_emit_popcnt(ppc64_backend_t *be, int dest_reg, int src_reg)
+{
+    if (ppc64_has_feature(be, ANVIL_FEATURE_PPC_POPCNTD)) {
+        // Use native popcntd instruction (POWER5+)
+        anvil_strbuf_appendf(&be->code, "\tpopcntd %s, %s\n",
+            ppc64_gpr_names[dest_reg], ppc64_gpr_names[src_reg]);
+    } else {
+        // Emulation for older CPUs
+        // ... bit manipulation sequence ...
+    }
+}
+```
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                          ANVIL IR                                │

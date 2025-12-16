@@ -633,6 +633,74 @@ anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
 anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754);
 ```
 
+### CPU Model API
+
+The CPU model system allows target-specific code generation by specifying the exact processor model. Each CPU model has a set of features (instruction set extensions) that can be queried and used to generate optimized code.
+
+```c
+/* Set CPU model for target-specific code generation */
+anvil_error_t anvil_ctx_set_cpu(anvil_ctx_t *ctx, anvil_cpu_model_t cpu);
+
+/* Get current CPU model */
+anvil_cpu_model_t anvil_ctx_get_cpu(anvil_ctx_t *ctx);
+
+/* Get CPU features for current model (including overrides) */
+anvil_cpu_features_t anvil_ctx_get_cpu_features(anvil_ctx_t *ctx);
+
+/* Check if a specific feature is available */
+bool anvil_ctx_has_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+
+/* Manually enable/disable features (override model defaults) */
+anvil_error_t anvil_ctx_enable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+anvil_error_t anvil_ctx_disable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t feature);
+
+/* Get CPU model name as string */
+const char *anvil_cpu_model_name(anvil_cpu_model_t cpu);
+
+/* Get default CPU model for an architecture */
+anvil_cpu_model_t anvil_arch_default_cpu(anvil_arch_t arch);
+
+/* Get features for a specific CPU model (without context overrides) */
+anvil_cpu_features_t anvil_cpu_model_features(anvil_cpu_model_t cpu);
+```
+
+**Usage Example:**
+```c
+/* Generate code optimized for IBM POWER9 */
+anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
+
+/* Check for VSX support */
+if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
+    // Can use VSX vector instructions
+}
+
+/* Force disable a feature for compatibility */
+anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
+
+/* Force enable a feature (even if not in model defaults) */
+anvil_ctx_enable_feature(ctx, ANVIL_FEATURE_PPC_HTM);
+```
+
+**Supported CPU Models:**
+
+| Architecture | CPU Models |
+|--------------|------------|
+| PowerPC 32 | G3, G4, G4e |
+| PowerPC 64 | 970, POWER4-POWER10 |
+| z/Architecture | z900, z9, z10, z196, zEC12, z13-z16 |
+| ARM64 | Generic, Cortex-A53/A72/A76, Neoverse N1/V1, Apple M1/M2/M3 |
+| x86-64 | Generic, Core2, Nehalem, Sandy Bridge, Haswell, Skylake, Ice Lake, Zen/Zen3/Zen4 |
+
+**CPU Feature Flags (PowerPC):**
+- `ANVIL_FEATURE_PPC_ALTIVEC` - AltiVec/VMX SIMD
+- `ANVIL_FEATURE_PPC_VSX` - VSX (Vector-Scalar Extension)
+- `ANVIL_FEATURE_PPC_DFP` - Decimal Floating Point
+- `ANVIL_FEATURE_PPC_POPCNTD` - Population count instruction
+- `ANVIL_FEATURE_PPC_HTM` - Hardware Transactional Memory
+- `ANVIL_FEATURE_PPC_MMA` - Matrix-Multiply Assist (POWER10)
+- `ANVIL_FEATURE_PPC_PCREL` - PC-relative addressing (POWER10)
+
 ### Floating-Point Operations
 
 ```c
