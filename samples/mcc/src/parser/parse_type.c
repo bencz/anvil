@@ -867,10 +867,41 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             
             /* Parse parameter type */
             mcc_type_t *param_base = parse_type_specifier(p);
-            mcc_type_t *param_type = parse_abstract_declarator(p, param_base);
+            
+            /* Parse declarator to get both type and optional name */
+            const char *param_name = NULL;
+            mcc_type_t *param_type = param_base;
+            
+            /* Check for parameter name (identifier) */
+            if (parse_check(p, TOK_IDENT)) {
+                param_name = mcc_strdup(p->ctx, p->peek->text);
+                parse_advance(p);
+                
+                /* Parse array brackets (decay to pointer) */
+                while (parse_match(p, TOK_LBRACKET)) {
+                    /* Skip array size expression if present */
+                    if (!parse_check(p, TOK_RBRACKET)) {
+                        if (parse_check(p, TOK_STAR)) {
+                            parse_advance(p);  /* VLA [*] */
+                        } else {
+                            parse_expression(p);
+                        }
+                    }
+                    parse_expect(p, TOK_RBRACKET, "]");
+                    
+                    /* Array decays to pointer in parameter */
+                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                    ptr->kind = TYPE_POINTER;
+                    ptr->data.pointer.pointee = param_type;
+                    param_type = ptr;
+                }
+            } else if (parse_check(p, TOK_STAR)) {
+                /* Pointer without name - use abstract declarator */
+                param_type = parse_abstract_declarator(p, param_base);
+            }
             
             mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
-            param->name = NULL;
+            param->name = param_name;
             param->type = param_type;
             param->next = NULL;
             
