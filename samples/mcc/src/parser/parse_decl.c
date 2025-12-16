@@ -402,8 +402,9 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         return node;
     }
     
-    /* C11: _Alignas - give clear error if not available */
-    if (parse_check(p, TOK__ALIGNAS)) {
+    /* C11: _Alignas - parse alignment specifier */
+    int alignment = 0;
+    while (parse_check(p, TOK__ALIGNAS) || parse_check(p, TOK_ALIGNAS)) {
         if (!parse_has_alignas(p)) {
             mcc_error_at(p->ctx, loc,
                 "'_Alignas' requires C11 or later");
@@ -414,6 +415,22 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
             if (parse_check(p, TOK_SEMICOLON)) parse_advance(p);
             return NULL;
         }
+        parse_advance(p);
+        parse_expect(p, TOK_LPAREN, "(");
+        
+        /* _Alignas can take a type or a constant expression */
+        if (parse_is_type_start(p)) {
+            mcc_type_t *type = parse_type_specifier(p);
+            if (type) {
+                alignment = (int)mcc_type_alignof(type);
+            }
+        } else {
+            mcc_ast_node_t *expr = parse_constant_expr(p);
+            if (expr && expr->kind == AST_INT_LIT) {
+                alignment = (int)expr->data.int_lit.value;
+            }
+        }
+        parse_expect(p, TOK_RPAREN, ")");
     }
     
     /* C11: _Noreturn - give clear error if not available */

@@ -60,6 +60,11 @@ bool parse_is_type_start(mcc_parser_t *p)
         case TOK_BOOL:
             return parse_has_bool_keyword(p);
         
+        /* C23: typeof, typeof_unqual */
+        case TOK_TYPEOF:
+        case TOK_TYPEOF_UNQUAL:
+            return parse_has_feature(p, MCC_FEAT_TYPEOF);
+        
         /* Typedef name */
         case TOK_IDENT:
             if (p->symtab) {
@@ -474,6 +479,20 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 parse_advance(p);
                 is_noreturn = true;
                 continue;
+            case TOK__ATOMIC:
+                if (!parse_has_atomic(p)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "'_Atomic' is a C11 extension");
+                }
+                parse_advance(p);
+                /* _Atomic can be used as type qualifier or type specifier */
+                /* For now, treat as qualifier - skip the type if in parens */
+                if (parse_match(p, TOK_LPAREN)) {
+                    /* _Atomic(type) form - parse and skip the type */
+                    (void)parse_type_specifier(p);
+                    parse_expect(p, TOK_RPAREN, ")");
+                }
+                continue;
             case TOK_UNSIGNED:
                 parse_advance(p);
                 is_unsigned = true;
@@ -540,6 +559,43 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 parse_advance(p);
                 type_spec = 9; /* bool */
                 break;
+            case TOK_TYPEOF:
+            case TOK_TYPEOF_UNQUAL: {
+                bool is_unqual = (p->peek->type == TOK_TYPEOF_UNQUAL);
+                if (!parse_has_feature(p, MCC_FEAT_TYPEOF)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "'typeof' is a C23 extension");
+                }
+                parse_advance(p);
+                parse_expect(p, TOK_LPAREN, "(");
+                
+                mcc_type_t *result_type;
+                if (parse_is_type_start(p)) {
+                    result_type = parse_type_specifier(p);
+                } else {
+                    /* typeof(expression) - get type from expression */
+                    mcc_ast_node_t *expr = parse_expression(p);
+                    /* For now, return int as placeholder - proper implementation
+                     * would need semantic analysis to determine expression type */
+                    result_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                    result_type->kind = TYPE_INT;
+                    result_type->size = 4;
+                    result_type->align = 4;
+                    (void)expr;
+                }
+                parse_expect(p, TOK_RPAREN, ")");
+                
+                /* typeof_unqual removes qualifiers */
+                if (is_unqual && result_type) {
+                    result_type->qualifiers = 0;
+                }
+                
+                /* Handle additional qualifiers */
+                if (is_const && result_type) result_type->qualifiers |= QUAL_CONST;
+                if (is_volatile && result_type) result_type->qualifiers |= QUAL_VOLATILE;
+                
+                return result_type;
+            }
             case TOK_STRUCT:
             case TOK_UNION: {
                 bool is_union = (p->peek->type == TOK_UNION);

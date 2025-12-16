@@ -428,6 +428,7 @@ struct mcc_ast_node {
         /* C11: _Alignof expression */
         struct {
             struct mcc_type *type_arg;
+            mcc_ast_node_t *expr_arg;   /* GNU extension: alignof(expr) */
         } alignof_expr;
         
         /* C11: _Static_assert */

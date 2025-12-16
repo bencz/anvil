@@ -161,7 +161,14 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             parse_advance(p);
             parse_expect(p, TOK_LPAREN, "(");
             node = mcc_ast_create(p->ctx, AST_ALIGNOF_EXPR, tok->location);
-            node->data.alignof_expr.type_arg = parse_type_specifier(p);
+            /* _Alignof can take a type or expression (GNU extension) */
+            if (parse_is_type_start(p)) {
+                node->data.alignof_expr.type_arg = parse_type_specifier(p);
+                node->data.alignof_expr.expr_arg = NULL;
+            } else {
+                node->data.alignof_expr.type_arg = NULL;
+                node->data.alignof_expr.expr_arg = parse_expression(p);
+            }
             parse_expect(p, TOK_RPAREN, ")");
             return node;
         
@@ -174,7 +181,14 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             parse_advance(p);
             parse_expect(p, TOK_LPAREN, "(");
             node = mcc_ast_create(p->ctx, AST_ALIGNOF_EXPR, tok->location);
-            node->data.alignof_expr.type_arg = parse_type_specifier(p);
+            /* alignof can take a type or expression (GNU extension) */
+            if (parse_is_type_start(p)) {
+                node->data.alignof_expr.type_arg = parse_type_specifier(p);
+                node->data.alignof_expr.expr_arg = NULL;
+            } else {
+                node->data.alignof_expr.type_arg = NULL;
+                node->data.alignof_expr.expr_arg = parse_expression(p);
+            }
             parse_expect(p, TOK_RPAREN, ")");
             return node;
         

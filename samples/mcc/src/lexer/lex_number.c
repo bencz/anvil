@@ -34,8 +34,20 @@ mcc_token_t *lex_number(mcc_lexer_t *lex)
         }
     }
     
-    /* Read digits */
+    /* Read digits (with optional C23 digit separators) */
     while (1) {
+        /* C23: Digit separator */
+        if (lex->current == '\'') {
+            int next = lex_peek_next(lex);
+            if ((base == 16 && isxdigit(next)) ||
+                (base == 2 && (next == '0' || next == '1')) ||
+                (base == 10 && isdigit(next)) ||
+                (base == 8 && next >= '0' && next <= '7')) {
+                lex_advance(lex);  /* Skip the separator */
+                continue;
+            }
+            break;
+        }
         if (base == 16 && isxdigit(lex->current)) {
             lex_advance(lex);
         } else if (base == 2 && (lex->current == '0' || lex->current == '1')) {
@@ -52,8 +64,17 @@ mcc_token_t *lex_number(mcc_lexer_t *lex)
         if (base == 10) {
             is_float = true;
             lex_advance(lex);
-            while (isdigit(lex->current)) {
-                lex_advance(lex);
+            /* Read fractional digits with optional digit separators */
+            while (1) {
+                if (lex->current == '\'' && isdigit(lex_peek_next(lex))) {
+                    lex_advance(lex);  /* Skip separator */
+                    continue;
+                }
+                if (isdigit(lex->current)) {
+                    lex_advance(lex);
+                } else {
+                    break;
+                }
             }
         } else if (base == 16) {
             /* Hex float (C99) */

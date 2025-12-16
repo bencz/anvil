@@ -136,6 +136,30 @@ mcc_token_t *lex_identifier(mcc_lexer_t *lex)
     }
     
     size_t len = lex->pos - start;
+    
+    /* Check for string/char literal prefixes (C11/C23) */
+    if (lex->current == '\'' || lex->current == '"') {
+        const char *prefix = lex->source + start;
+        bool is_char = (lex->current == '\'');
+        
+        /* u8 prefix (C11 for strings, C23 for chars) */
+        if (len == 2 && prefix[0] == 'u' && prefix[1] == '8') {
+            if (is_char) {
+                return lex_char_literal(lex);
+            } else {
+                return lex_string_literal(lex);
+            }
+        }
+        /* u, U, L prefixes (C11) */
+        if (len == 1 && (prefix[0] == 'u' || prefix[0] == 'U' || prefix[0] == 'L')) {
+            if (is_char) {
+                return lex_char_literal(lex);
+            } else {
+                return lex_string_literal(lex);
+            }
+        }
+    }
+    
     mcc_token_type_t type = lex_lookup_keyword(lex, lex->source + start, len);
     
     mcc_token_t *tok = lex_make_token(lex, type);
