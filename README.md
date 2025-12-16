@@ -49,8 +49,17 @@ make lib
 # Examples only
 make examples
 
+# Advanced examples (fp_math_lib, dynamic_array)
+make examples-advanced
+
+# Test advanced examples
+make test-examples-advanced
+
 # Clean
 make clean
+
+# Clean advanced examples
+make clean-examples-advanced
 
 # Install (requires root)
 sudo make install
@@ -344,6 +353,20 @@ anvil_register_backend(&anvil_backend_myarch);
 - String table management for string literals
 - Global variable emission with proper alignment
 - GEP and STRUCT_GEP for array and struct access
+
+### Advanced Examples
+Two advanced examples demonstrate ANVIL's capabilities for generating linkable libraries:
+
+- **`examples/fp_math_lib/`**: Floating-point math library
+  - Generates exportable FP functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
+  - Demonstrates ANVIL IR for floating-point operations
+  - Includes C test program that links with generated assembly
+
+- **`examples/dynamic_array/`**: Dynamic array library with C library calls
+  - Demonstrates calling external C functions: `malloc`, `free`, `memcpy`
+  - Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
+  - Shows pointer arithmetic, loops, conditionals, and memory management
+  - Includes comprehensive test suite (41 tests)
 
 ## IR Optimization
 

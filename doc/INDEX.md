@@ -154,3 +154,17 @@ anvil_module_codegen(mod, &output, &len);
 - Stack slot allocation for local variables
 - String table management for string literals
 - Global variable emission
+
+### Advanced Examples
+Two advanced examples demonstrate generating linkable libraries:
+
+- **`examples/fp_math_lib/`**: FP math library with exportable functions
+  - Functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
+  - Build: `make -C examples/fp_math_lib test`
+
+- **`examples/dynamic_array/`**: Dynamic array library calling C functions
+  - Demonstrates: `malloc`, `free`, `memcpy` calls from ANVIL code
+  - Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
+  - Build: `make -C examples/dynamic_array test`
+
+Or from root: `make test-examples-advanced`
