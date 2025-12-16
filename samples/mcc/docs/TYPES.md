@@ -4,7 +4,7 @@ This document describes the type system component of MCC.
 
 ## Overview
 
-The type system represents all C89 types and provides operations for type checking, conversions, and size/alignment calculations.
+The type system represents all C types and provides operations for type checking, conversions, and size/alignment calculations. The type system supports C89 through C23 features.
 
 **Note:** `typedef` is not a type kind - it creates an alias to an existing type. Typedef names are tracked by the parser in a separate registry (`mcc_typedef_entry_t`) and resolved during parsing.
 
@@ -12,28 +12,40 @@ The type system represents all C89 types and provides operations for type checki
 
 ```c
 typedef enum {
-    TYPE_VOID,      /* void */
-    TYPE_CHAR,      /* char */
-    TYPE_SHORT,     /* short */
-    TYPE_INT,       /* int */
-    TYPE_LONG,      /* long */
-    TYPE_FLOAT,     /* float */
-    TYPE_DOUBLE,    /* double */
-    TYPE_POINTER,   /* T* */
-    TYPE_ARRAY,     /* T[N] */
-    TYPE_FUNCTION,  /* T(params) */
-    TYPE_STRUCT,    /* struct { ... } */
-    TYPE_UNION,     /* union { ... } */
-    TYPE_ENUM       /* enum { ... } */
+    /* C89 types */
+    TYPE_VOID,        /* void */
+    TYPE_CHAR,        /* char */
+    TYPE_SHORT,       /* short */
+    TYPE_INT,         /* int */
+    TYPE_LONG,        /* long */
+    TYPE_FLOAT,       /* float */
+    TYPE_DOUBLE,      /* double */
+    TYPE_LONG_DOUBLE, /* long double */
+    
+    /* C99 types */
+    TYPE_LONG_LONG,   /* long long */
+    TYPE_BOOL,        /* _Bool */
+    
+    /* Derived types */
+    TYPE_POINTER,     /* T* */
+    TYPE_ARRAY,       /* T[N] */
+    TYPE_FUNCTION,    /* T(params) */
+    TYPE_STRUCT,      /* struct { ... } */
+    TYPE_UNION,       /* union { ... } */
+    TYPE_ENUM         /* enum { ... } */
 } mcc_type_kind_t;
 ```
 
 ## Type Qualifiers
 
 ```c
-#define QUAL_NONE     0
-#define QUAL_CONST    1
-#define QUAL_VOLATILE 2
+typedef enum {
+    QUAL_NONE     = 0,
+    QUAL_CONST    = 1 << 0,   /* C89: const */
+    QUAL_VOLATILE = 1 << 1,   /* C89: volatile */
+    QUAL_RESTRICT = 1 << 2,   /* C99: restrict */
+    QUAL_ATOMIC   = 1 << 3    /* C11: _Atomic */
+} mcc_type_qual_t;
 ```
 
 ## Type Structure
@@ -41,10 +53,12 @@ typedef enum {
 ```c
 typedef struct mcc_type {
     mcc_type_kind_t kind;
-    int qualifiers;          /* QUAL_CONST | QUAL_VOLATILE */
-    bool is_unsigned;        /* For integer types */
-    int size;                /* Size in bytes */
-    int align;               /* Alignment in bytes */
+    mcc_type_qual_t qualifiers;  /* QUAL_CONST | QUAL_VOLATILE | QUAL_RESTRICT | QUAL_ATOMIC */
+    bool is_unsigned;            /* For integer types */
+    bool is_inline;              /* C99: inline function specifier */
+    bool is_noreturn;            /* C11: _Noreturn function specifier */
+    size_t size;                 /* Size in bytes */
+    size_t align;                /* Alignment in bytes */
     
     union {
         /* Pointer type */
@@ -55,7 +69,9 @@ typedef struct mcc_type {
         /* Array type */
         struct {
             struct mcc_type *element;
-            size_t size;     /* Number of elements, 0 for [] */
+            size_t length;       /* Number of elements, 0 for [] */
+            bool is_vla;         /* C99: Variable Length Array */
+            bool is_flexible;    /* C99: Flexible array member */
         } array;
         
         /* Function type */
@@ -198,15 +214,18 @@ mcc_type_t *mcc_type_common(mcc_type_context_t *types, mcc_type_t *a, mcc_type_t
 
 Default sizes (may vary by target):
 
-| Type | Size | Alignment |
-|------|------|-----------|
-| `char` | 1 | 1 |
-| `short` | 2 | 2 |
-| `int` | 4 | 4 |
-| `long` | 4 | 4 |
-| `float` | 4 | 4 |
-| `double` | 8 | 8 |
-| `pointer` | 4 | 4 |
+| Type | Size | Alignment | Standard |
+|------|------|-----------|----------|
+| `char` | 1 | 1 | C89 |
+| `short` | 2 | 2 | C89 |
+| `int` | 4 | 4 | C89 |
+| `long` | 4 | 4 | C89 |
+| `long long` | 8 | 8 | C99 |
+| `_Bool` | 1 | 1 | C99 |
+| `float` | 4 | 4 | C89 |
+| `double` | 8 | 8 | C89 |
+| `long double` | 16 | 16 | C89 |
+| `pointer` | 4/8 | 4/8 | C89 |
 
 ## Integer Promotions
 

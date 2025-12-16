@@ -13,9 +13,11 @@ typedef enum {
     TYPE_SHORT,
     TYPE_INT,
     TYPE_LONG,
+    TYPE_LONG_LONG,     /* C99 long long */
     TYPE_FLOAT,
     TYPE_DOUBLE,
     TYPE_LONG_DOUBLE,
+    TYPE_BOOL,          /* C99 _Bool */
     TYPE_POINTER,
     TYPE_ARRAY,
     TYPE_FUNCTION,
@@ -31,7 +33,9 @@ typedef enum {
 typedef enum {
     QUAL_NONE     = 0,
     QUAL_CONST    = 1 << 0,
-    QUAL_VOLATILE = 1 << 1
+    QUAL_VOLATILE = 1 << 1,
+    QUAL_RESTRICT = 1 << 2,     /* C99 restrict */
+    QUAL_ATOMIC   = 1 << 3      /* C11 _Atomic */
 } mcc_type_qual_t;
 
 /* Storage class */
@@ -58,6 +62,13 @@ struct mcc_struct_field {
     mcc_struct_field_t *next;
 };
 
+/* Enum constant */
+typedef struct mcc_enum_const {
+    const char *name;
+    int64_t value;
+    struct mcc_enum_const *next;
+} mcc_enum_const_t;
+
 /* Function parameter */
 struct mcc_func_param {
     const char *name;           /* Can be NULL */
@@ -70,6 +81,8 @@ struct mcc_type {
     mcc_type_kind_t kind;
     mcc_type_qual_t qualifiers;
     bool is_unsigned;           /* For integer types */
+    bool is_inline;             /* C99 inline function specifier */
+    bool is_noreturn;           /* C11 _Noreturn function specifier */
     
     /* Size and alignment (computed) */
     size_t size;
@@ -86,6 +99,7 @@ struct mcc_type {
             mcc_type_t *element;
             size_t length;      /* 0 for incomplete array */
             bool is_vla;        /* Variable length array (C99) */
+            bool is_flexible;   /* Flexible array member (C99) */
         } array;
         
         /* Function type */
@@ -108,6 +122,8 @@ struct mcc_type {
         /* Enum type */
         struct {
             const char *tag;
+            mcc_enum_const_t *constants;
+            int num_constants;
             bool is_complete;
         } enumeration;
         

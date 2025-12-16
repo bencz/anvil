@@ -2,7 +2,7 @@
 # Makefile
 
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -g -I../../include -Iinclude -Isrc/preprocessor -Isrc/lexer
+CFLAGS = -Wall -Wextra -std=c99 -g -I../../include -Iinclude -Isrc/preprocessor -Isrc/lexer -Isrc/parser
 LDFLAGS = -L../../lib -lanvil
 
 # Directories
@@ -12,17 +12,20 @@ OBJDIR = obj
 BINDIR = .
 PP_SRCDIR = src/preprocessor
 LEX_SRCDIR = src/lexer
+PARSE_SRCDIR = src/parser
 
-# Source files (excluding old preprocessor.c and lexer.c, using new modular versions)
-SRCS = $(filter-out $(SRCDIR)/preprocessor.c $(SRCDIR)/lexer.c, $(wildcard $(SRCDIR)/*.c))
+# Source files (excluding old preprocessor.c, lexer.c, parser.c - using new modular versions)
+SRCS = $(filter-out $(SRCDIR)/preprocessor.c $(SRCDIR)/lexer.c $(SRCDIR)/parser.c, $(wildcard $(SRCDIR)/*.c))
 PP_SRCS = $(wildcard $(PP_SRCDIR)/*.c)
 LEX_SRCS = $(wildcard $(LEX_SRCDIR)/*.c)
+PARSE_SRCS = $(wildcard $(PARSE_SRCDIR)/*.c)
 
 # Object files
 OBJS = $(SRCS:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 PP_OBJS = $(PP_SRCS:$(PP_SRCDIR)/%.c=$(OBJDIR)/pp_%.o)
 LEX_OBJS = $(LEX_SRCS:$(LEX_SRCDIR)/%.c=$(OBJDIR)/lex_%.o)
-ALL_OBJS = $(OBJS) $(PP_OBJS) $(LEX_OBJS)
+PARSE_OBJS = $(PARSE_SRCS:$(PARSE_SRCDIR)/%.c=$(OBJDIR)/parse_%.o)
+ALL_OBJS = $(OBJS) $(PP_OBJS) $(LEX_OBJS) $(PARSE_OBJS)
 
 # Target
 TARGET = $(BINDIR)/mcc
@@ -48,6 +51,10 @@ $(OBJDIR)/pp_%.o: $(PP_SRCDIR)/%.c | $(OBJDIR)
 
 # Compile lexer source files
 $(OBJDIR)/lex_%.o: $(LEX_SRCDIR)/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile parser source files
+$(OBJDIR)/parse_%.o: $(PARSE_SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Dependencies - Main source files
@@ -80,6 +87,14 @@ $(OBJDIR)/lex_string.o: $(LEX_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/lex_number.o: $(LEX_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/lex_ident.o: $(LEX_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/lex_operator.o: $(LEX_INTERNAL_H) $(INCDIR)/mcc.h
+
+# Dependencies - Parser source files
+PARSE_INTERNAL_H = $(PARSE_SRCDIR)/parse_internal.h
+$(OBJDIR)/parse_parser.o: $(PARSE_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/parse_expr.o: $(PARSE_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/parse_stmt.o: $(PARSE_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/parse_type.o: $(PARSE_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/parse_decl.o: $(PARSE_INTERNAL_H) $(INCDIR)/mcc.h
 
 # Clean
 clean:

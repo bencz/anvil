@@ -67,7 +67,6 @@ All files share:
 |------|-------|-------------|
 | `c_std.c` | ~500 | C language standards and feature system |
 | `context.c` | ~280 | Compiler context, feature checking |
-| `parser.c` | ~1350 | Recursive descent parser (with typedef support) |
 | `types.c` | ~570 | Type system |
 | `sema.c` | ~750 | Type checking, symbol resolution |
 | `codegen.c` | ~1100 | ANVIL IR generation |
@@ -76,8 +75,9 @@ All files share:
 
 | Directory | Files | Description |
 |-----------|-------|-------------|
-| `src/lexer/` | 8 files | Modular lexer with C standard support |
-| `src/preprocessor/` | 5 files | Modular preprocessor with C standard support |
+| `src/lexer/` | 9 files | Modular lexer with C standard support |
+| `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
+| `src/parser/` | 5 files | Modular parser with C standard support |
 
 ### Test Files
 
@@ -176,21 +176,34 @@ When working with MCC code:
 **Adding a new operator:**
 1. Add token type in `include/token.h`
 2. Add lexer recognition in `src/lexer/lex_operator.c`
-3. Add to operator precedence in `src/parser.c`
+3. Add to operator precedence in `src/parser/parse_expr.c`
 4. Add type checking in `src/sema.c`
 5. Add code generation in `src/codegen.c`
 
 **Adding a new statement:**
-1. Add AST node type in `ast.h`
-2. Add parsing in `parser.c`
-3. Add semantic analysis in `sema.c`
-4. Add code generation in `codegen.c`
+1. Add AST node type in `include/ast.h`
+2. Add parsing in `src/parser/parse_stmt.c`
+3. Add semantic analysis in `src/sema.c`
+4. Add code generation in `src/codegen.c`
+
+**Adding a new expression:**
+1. Add AST node type in `include/ast.h`
+2. Add parsing in `src/parser/parse_expr.c`
+3. Add semantic analysis in `src/sema.c`
+4. Add code generation in `src/codegen.c`
+
+**Adding a new type:**
+1. Add type kind in `include/types.h`
+2. Add parsing in `src/parser/parse_type.c`
+3. Add type creation in `src/types.c`
+4. Add semantic analysis in `src/sema.c`
+5. Add code generation in `src/codegen.c`
 
 **Adding a typedef:**
 - Typedefs are handled in the parser
-- `parse_declaration()` registers typedef names in `parser->typedefs`
-- `parse_type_specifier()` checks for typedef names via `is_typedef_name()`
-- `parse_statement()` checks if identifier is typedef before parsing expression
+- `parse_declaration()` in `src/parser/parse_decl.c` registers typedef names
+- `parse_type_specifier()` in `src/parser/parse_type.c` checks for typedef names
+- `parse_statement()` in `src/parser/parse_stmt.c` checks if identifier is typedef
 
 **Debugging tips:**
 - Use `-dump-ast` to see the parsed AST

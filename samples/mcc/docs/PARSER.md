@@ -6,6 +6,19 @@ This document describes the parser component of MCC.
 
 The parser converts a stream of tokens into an Abstract Syntax Tree (AST). MCC uses a recursive descent parser, which is straightforward to implement and debug.
 
+## File Organization
+
+The parser is organized into modular files in `src/parser/`:
+
+| File | Description |
+|------|-------------|
+| `parse_internal.h` | Internal header with structures, function declarations, and C standard feature checks |
+| `parser.c` | Main module - public API, token operations, entry points |
+| `parse_expr.c` | Expression parsing (primary, postfix, unary, binary, ternary, assignment) |
+| `parse_stmt.c` | Statement parsing (if, while, for, switch, return, goto, labels) |
+| `parse_type.c` | Type parsing (specifiers, qualifiers, struct/union/enum) |
+| `parse_decl.c` | Declaration parsing (variables, functions, typedef, initializers) |
+
 ## Parsing Strategy
 
 ### Recursive Descent
@@ -13,9 +26,17 @@ The parser converts a stream of tokens into an Abstract Syntax Tree (AST). MCC u
 Each grammar rule corresponds to a parsing function:
 
 ```c
-static mcc_ast_node_t *parse_declaration(mcc_parser_t *p);
-static mcc_ast_node_t *parse_statement(mcc_parser_t *p);
-static mcc_ast_node_t *parse_expression(mcc_parser_t *p);
+/* In parse_decl.c */
+mcc_ast_node_t *parse_declaration(mcc_parser_t *p);
+
+/* In parse_stmt.c */
+mcc_ast_node_t *parse_statement(mcc_parser_t *p);
+
+/* In parse_expr.c */
+mcc_ast_node_t *parse_expression(mcc_parser_t *p);
+
+/* In parse_type.c */
+mcc_type_t *parse_type_specifier(mcc_parser_t *p);
 ```
 
 ### Operator Precedence
@@ -302,17 +323,38 @@ typedef enum {
 } mcc_unop_t;
 ```
 
-## Type Parsing
+## Type Parsing (`parse_type.c`)
 
 Types are parsed by `parse_type_specifier()`:
 
 ```c
-static mcc_type_t *parse_type_specifier(mcc_parser_t *p)
+mcc_type_t *parse_type_specifier(mcc_parser_t *p)
 {
-    /* Parse qualifiers: const, volatile */
-    /* Parse type specifiers: int, char, struct, etc. */
+    /* Parse qualifiers: const, volatile, restrict (C99) */
+    /* Parse type specifiers: int, char, struct, _Bool (C99), etc. */
     /* Parse pointers: * */
     /* Return complete type */
+}
+```
+
+### C Standard Feature Checks
+
+The type parser checks for C standard features:
+
+```c
+/* C99: restrict qualifier */
+if (!parse_has_restrict(p)) {
+    mcc_warning_at(p->ctx, loc, "'restrict' is a C99 extension");
+}
+
+/* C99: _Bool type */
+if (!parse_has_bool(p)) {
+    mcc_warning_at(p->ctx, loc, "'_Bool' is a C99 extension");
+}
+
+/* C99: long long */
+if (!parse_has_long_long(p)) {
+    mcc_warning_at(p->ctx, loc, "'long long' is a C99 extension");
 }
 ```
 
@@ -327,6 +369,15 @@ Structs are handled specially to support forward references:
 ```c
 /* Definition: struct point { int x; int y; }; */
 /* Reference: struct point *p; */
+```
+
+### C11: Anonymous Struct/Union Members
+
+```c
+struct outer {
+    int a;
+    struct { int x, y; };  /* C11 anonymous struct member */
+};
 ```
 
 ## Error Recovery
@@ -378,21 +429,95 @@ mcc_preprocessor_destroy(pp);
 mcc_context_destroy(ctx);
 ```
 
+## C Standard Feature Checks
+
+The parser uses feature checks from `parse_internal.h` to validate C standard compliance:
+
+### Feature Check Functions
+
+```c
+/* C99 features */
+parse_has_mixed_decl(p)      /* Declarations mixed with statements */
+parse_has_for_decl(p)        /* Declarations in for-loop init */
+parse_has_vla(p)             /* Variable Length Arrays */
+parse_has_designated_init(p) /* Designated initializers */
+parse_has_compound_lit(p)    /* Compound literals (type){ ... } */
+parse_has_long_long(p)       /* long long type */
+parse_has_restrict(p)        /* restrict qualifier */
+parse_has_inline(p)          /* inline function specifier */
+parse_has_bool(p)            /* _Bool type */
+
+/* C11 features */
+parse_has_alignof(p)         /* _Alignof operator */
+parse_has_static_assert(p)   /* _Static_assert */
+parse_has_generic(p)         /* _Generic selection */
+parse_has_noreturn(p)        /* _Noreturn specifier */
+parse_has_atomic(p)          /* _Atomic qualifier */
+parse_has_anonymous_struct(p)/* Anonymous struct/union members */
+
+/* C23 features */
+parse_has_nullptr(p)         /* nullptr constant */
+parse_has_true_false(p)      /* true/false as keywords */
+parse_has_bool_keyword(p)    /* bool as keyword (not _Bool) */
+parse_has_constexpr(p)       /* constexpr specifier */
+parse_has_typeof(p)          /* typeof operator */
+
+/* GNU extensions */
+parse_has_stmt_expr(p)       /* Statement expressions ({ ... }) */
+parse_has_label_addr(p)      /* Labels as values (&&label) */
+parse_has_case_range(p)      /* Case ranges (case 1 ... 5:) */
+```
+
+### Usage Example
+
+```c
+/* In parse_stmt.c - for loop with declaration */
+if (parse_is_declaration_start(p)) {
+    if (!parse_has_for_decl(p)) {
+        mcc_warning_at(p->ctx, p->peek->location,
+            "declaration in for loop initializer is a C99 extension");
+    }
+    init_decl = parse_declaration(p);
+}
+```
+
+## New AST Node Types (C99+)
+
+| Node Type | Standard | Description |
+|-----------|----------|-------------|
+| `AST_COMPOUND_LIT` | C99 | Compound literal `(type){ init }` |
+| `AST_DESIGNATED_INIT` | C99 | Designated initializer `.field = value` |
+| `AST_FIELD_DESIGNATOR` | C99 | Field designator in initializer |
+| `AST_INDEX_DESIGNATOR` | C99 | Index designator in initializer |
+| `AST_ALIGNOF_EXPR` | C11 | `_Alignof(type)` expression |
+| `AST_STATIC_ASSERT` | C11 | `_Static_assert(expr, msg)` |
+| `AST_GENERIC_EXPR` | C11 | `_Generic(expr, ...)` selection |
+| `AST_NULL_PTR` | C23 | `nullptr` constant |
+| `AST_STMT_EXPR` | GNU | Statement expression `({ ... })` |
+| `AST_LABEL_ADDR` | GNU | Label address `&&label` |
+| `AST_GOTO_EXPR` | GNU | Computed goto `goto *expr` |
+
 ## Grammar Summary
 
 ```
 translation_unit = { declaration }
 
 declaration = function_decl | var_decl | struct_decl | typedef_decl
+            | static_assert_decl  /* C11 */
 
 function_decl = type_spec IDENT '(' params ')' ( compound_stmt | ';' )
 
-var_decl = type_spec IDENT [ '=' expr ] ';'
+var_decl = type_spec IDENT [ '=' initializer ] ';'
+
+initializer = assignment_expr | '{' initializer_list '}'
+            | designator_list '=' initializer  /* C99 */
 
 statement = compound_stmt | if_stmt | while_stmt | for_stmt | 
             return_stmt | expr_stmt | ...
 
-compound_stmt = '{' { statement | declaration } '}'
+compound_stmt = '{' { statement | declaration } '}'  /* C99: mixed decls */
+
+for_stmt = 'for' '(' ( expr | declaration ) ';' expr ';' expr ')' stmt  /* C99: decl */
 
 expression = assignment_expr { ',' assignment_expr }
 
@@ -403,4 +528,7 @@ conditional_expr = logical_or_expr [ '?' expr ':' conditional_expr ]
 /* ... and so on for each precedence level */
 
 primary_expr = IDENT | INT_LIT | FLOAT_LIT | STRING_LIT | '(' expr ')'
+             | '(' type ')' '{' init_list '}'  /* C99: compound literal */
+             | 'nullptr'                        /* C23 */
+             | 'true' | 'false'                 /* C23 */
 ```

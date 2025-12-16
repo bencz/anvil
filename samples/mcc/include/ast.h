@@ -61,6 +61,23 @@ typedef enum {
     AST_COMMA_EXPR,         /* expr1, expr2 */
     AST_INIT_LIST,          /* { expr1, expr2, ... } */
     
+    /* C99+ features */
+    AST_COMPOUND_LIT,       /* (type){ init } - C99 compound literal */
+    AST_DESIGNATED_INIT,    /* .field = value or [index] = value */
+    AST_FIELD_DESIGNATOR,   /* .field in designated initializer */
+    AST_INDEX_DESIGNATOR,   /* [index] in designated initializer */
+    AST_ALIGNOF_EXPR,       /* _Alignof(type) - C11 */
+    AST_STATIC_ASSERT,      /* _Static_assert(expr, msg) - C11 */
+    AST_GENERIC_EXPR,       /* _Generic(expr, ...) - C11 */
+    
+    /* C23 features */
+    AST_NULL_PTR,           /* nullptr - C23 */
+    
+    /* GNU extensions */
+    AST_STMT_EXPR,          /* ({ ... }) - GNU statement expression */
+    AST_LABEL_ADDR,         /* &&label - GNU labels as values */
+    AST_GOTO_EXPR,          /* goto *expr - GNU computed goto */
+    
     AST_NODE_COUNT
 } mcc_ast_kind_t;
 
@@ -146,6 +163,9 @@ struct mcc_ast_node {
             mcc_ast_node_t *body;   /* NULL for prototype */
             bool is_definition;
             bool is_static;
+            bool is_variadic;       /* Has ... parameter */
+            bool is_inline;         /* C99 inline */
+            bool is_noreturn;       /* C11 _Noreturn */
         } func_decl;
         
         /* Variable declaration */
@@ -228,6 +248,7 @@ struct mcc_ast_node {
         /* Case statement */
         struct {
             mcc_ast_node_t *expr;
+            mcc_ast_node_t *end_expr;   /* For GNU case ranges (case 1 ... 5:) */
             mcc_ast_node_t *stmt;
         } case_stmt;
         
@@ -250,7 +271,8 @@ struct mcc_ast_node {
         
         /* For statement */
         struct {
-            mcc_ast_node_t *init;   /* Can be decl or expr */
+            mcc_ast_node_t *init;       /* Expression init (C89) */
+            mcc_ast_node_t *init_decl;  /* Declaration init (C99) */
             mcc_ast_node_t *cond;
             mcc_ast_node_t *incr;
             mcc_ast_node_t *body;
@@ -364,6 +386,56 @@ struct mcc_ast_node {
             mcc_ast_node_t **exprs;
             size_t num_exprs;
         } init_list;
+        
+        /* C99: Compound literal (type){ init } */
+        struct {
+            struct mcc_type *type;
+            mcc_ast_node_t *init;
+        } compound_lit;
+        
+        /* C99: Designated initializer */
+        struct {
+            mcc_ast_node_t *designator;
+            mcc_ast_node_t *value;
+        } designated_init;
+        
+        /* C99: Field designator .field */
+        struct {
+            const char *name;
+            mcc_ast_node_t *next;   /* Next designator in chain */
+        } field_designator;
+        
+        /* C99: Index designator [index] */
+        struct {
+            mcc_ast_node_t *index;
+            mcc_ast_node_t *next;   /* Next designator in chain */
+        } index_designator;
+        
+        /* C11: _Alignof expression */
+        struct {
+            struct mcc_type *type_arg;
+        } alignof_expr;
+        
+        /* C11: _Static_assert */
+        struct {
+            mcc_ast_node_t *expr;
+            const char *message;
+        } static_assert;
+        
+        /* GNU: Statement expression ({ ... }) */
+        struct {
+            mcc_ast_node_t *stmt;
+        } stmt_expr;
+        
+        /* GNU: Label address &&label */
+        struct {
+            const char *label;
+        } label_addr;
+        
+        /* GNU: Computed goto (goto *expr) */
+        struct {
+            mcc_ast_node_t *expr;
+        } goto_expr;
     } data;
 };
 

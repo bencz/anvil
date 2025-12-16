@@ -113,18 +113,30 @@ The lexer converts source text into tokens:
 - `mcc_token_t`: Token with type, text, location, literal value
 - `lex_keyword_entry_t`: Keyword with required C standard feature
 
-### 3. Parser (`parser.c`)
+### 3. Parser (`src/parser/`)
+
+The parser is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `parse_internal.h` | Internal header with structures, function declarations, and C standard feature checks |
+| `parser.c` | Main module - public API, token operations, entry points |
+| `parse_expr.c` | Expression parsing (primary, postfix, unary, binary, ternary, assignment) |
+| `parse_stmt.c` | Statement parsing (if, while, for, switch, return, goto, labels) |
+| `parse_type.c` | Type parsing (specifiers, qualifiers, struct/union/enum) |
+| `parse_decl.c` | Declaration parsing (variables, functions, typedef, initializers) |
 
 The parser builds an Abstract Syntax Tree (AST) using recursive descent:
 
 - **Declarations**: Variables, functions, structs, unions, enums, typedefs
 - **Statements**: if, while, for, do-while, switch, return, goto, labels
-- **Expressions**: All C89 operators with correct precedence
+- **Expressions**: All C operators with correct precedence
 - **Typedef handling**: Registers typedef names and recognizes them as types
+- **C Standard aware**: Features like `for`-declarations (C99), compound literals (C99), `_Static_assert` (C11) are checked
 
 **Key data structures:**
 - `mcc_parser_t`: Parser state
-- `mcc_ast_node_t`: AST node (40+ node types)
+- `mcc_ast_node_t`: AST node (50+ node types)
 - `mcc_struct_entry_t`: Struct type registry for forward references
 - `mcc_typedef_entry_t`: Typedef registry for type aliases
 
@@ -291,22 +303,30 @@ Key ANVIL APIs used:
 
 ### Adding a new operator
 
-1. Add token type in `token.h`
-2. Add lexer recognition in `lexer.c`
-3. Add parser handling in `parser.c`
-4. Add type checking in `sema.c`
-5. Add code generation in `codegen.c`
+1. Add token type in `include/token.h`
+2. Add lexer recognition in `src/lexer/lex_operator.c`
+3. Add parser handling in `src/parser/parse_expr.c`
+4. Add type checking in `src/sema.c`
+5. Add code generation in `src/codegen.c`
 
 ### Adding a new statement
 
-1. Add AST node type in `ast.h`
-2. Add parser function in `parser.c`
-3. Add semantic analysis in `sema.c`
-4. Add code generation in `codegen.c`
+1. Add AST node type in `include/ast.h`
+2. Add parser function in `src/parser/parse_stmt.c`
+3. Add semantic analysis in `src/sema.c`
+4. Add code generation in `src/codegen.c`
+
+### Adding a new expression
+
+1. Add AST node type in `include/ast.h`
+2. Add parser function in `src/parser/parse_expr.c`
+3. Add semantic analysis in `src/sema.c`
+4. Add code generation in `src/codegen.c`
 
 ### Adding a new type
 
-1. Add type kind in `types.h`
-2. Add type creation function in `types.c`
-3. Add type checking rules in `sema.c`
-4. Add code generation support in `codegen.c`
+1. Add type kind in `include/types.h`
+2. Add type parsing in `src/parser/parse_type.c`
+3. Add type creation function in `src/types.c`
+4. Add type checking rules in `src/sema.c`
+5. Add code generation support in `src/codegen.c`
