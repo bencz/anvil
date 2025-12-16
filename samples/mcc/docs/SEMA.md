@@ -548,3 +548,32 @@ case TYPE_LONG_LONG:
 case TYPE_BOOL:
     return true;
 ```
+
+### C99 `__func__` Support
+
+The predefined identifier `__func__` is recognized and returns `const char*`:
+
+```c
+/* In sema_expr.c - analyze_ident_expr() */
+if (strcmp(name, "__func__") == 0) {
+    mcc_type_t *char_type = mcc_type_char(sema->types);
+    char_type->qualifiers |= QUAL_CONST;
+    expr->type = mcc_type_pointer(sema->types, char_type);
+    expr->data.ident_expr.is_func_name = true;
+    return expr->type;
+}
+```
+
+### C99 VLA Support
+
+Variable Length Arrays are recognized as complete types in C99:
+
+```c
+/* In sema_type.c - sema_check_complete_type() */
+if (mcc_type_is_array(type) && type->data.array.length == 0) {
+    if (type->data.array.is_vla && sema_has_vla(sema)) {
+        return true;  /* VLA is complete in C99 */
+    }
+    return false;
+}
+```

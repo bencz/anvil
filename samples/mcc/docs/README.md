@@ -282,6 +282,8 @@ When working with MCC code:
 - **Long Long Literals**: Code generator uses `anvil_const_i64` for `LL` and `ULL` suffixed literals
 - **Integer Type Checking**: `TYPE_LONG_LONG` and `TYPE_BOOL` added to `mcc_type_is_integer()`
 - **AST_DECL_LIST Support**: Multiple declarations (`int a, b, c;`) properly analyzed by sema
+- **C99 `__func__`**: Predefined identifier returns current function name as string literal
+- **C99 VLAs**: Variable Length Arrays recognized as complete types in C99 mode
 - **Modular Semantic Analyzer**: Refactored `sema.c` into `src/sema/` with 6 modular files
 - **C99 long long**: Added `mcc_type_llong()` and `mcc_type_ullong()` for 64-bit integer types
 - **Multiple Typedef Names**: Support for `typedef int INT, *PINT, **PPINT;` syntax

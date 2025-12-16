@@ -607,3 +607,22 @@ if (stmt->data.for_stmt.init_decl) {
     codegen_expr(cg, stmt->data.for_stmt.init);
 }
 ```
+
+### C99 `__func__` Support
+
+The `__func__` predefined identifier generates a string literal with the function name:
+
+```c
+/* In codegen_expr.c - codegen_expr() */
+if (expr->data.ident_expr.is_func_name) {
+    const char *func_name = cg->current_func_name ? cg->current_func_name : "";
+    return codegen_get_string_literal(cg, func_name);
+}
+```
+
+The `current_func_name` is set when generating a function:
+
+```c
+/* In codegen_decl.c - codegen_func() */
+cg->current_func_name = func->data.func_decl.name;
+```
