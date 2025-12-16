@@ -274,6 +274,9 @@ static void ast_dump_node(mcc_ast_node_t *node, FILE *out, int indent)
             break;
             
         case AST_FOR_STMT:
+            if (node->data.for_stmt.init_decl) {
+                ast_dump_node(node->data.for_stmt.init_decl, out, indent + 1);
+            }
             if (node->data.for_stmt.init) {
                 ast_dump_node(node->data.for_stmt.init, out, indent + 1);
             }

@@ -96,7 +96,14 @@ bool sema_analyze_for_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
     mcc_symtab_push_scope(sema->symtab);
     
     /* C99: for loop can have declaration in init */
-    if (stmt->data.for_stmt.init) {
+    if (stmt->data.for_stmt.init_decl) {
+        /* C99 feature: declaration in for loop */
+        if (!sema_has_feature(sema, MCC_FEAT_FOR_DECL)) {
+            mcc_warning_at(sema->ctx, stmt->location,
+                           "declaration in for loop is a C99 extension");
+        }
+        sema_analyze_decl(sema, stmt->data.for_stmt.init_decl);
+    } else if (stmt->data.for_stmt.init) {
         if (stmt->data.for_stmt.init->kind == AST_VAR_DECL) {
             /* C99 feature: declaration in for loop */
             if (!sema_has_feature(sema, MCC_FEAT_FOR_DECL)) {

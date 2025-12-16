@@ -230,7 +230,9 @@ void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     cg->continue_target = incr_block;
     
     /* Init */
-    if (stmt->data.for_stmt.init) {
+    if (stmt->data.for_stmt.init_decl) {
+        codegen_stmt(cg, stmt->data.for_stmt.init_decl);
+    } else if (stmt->data.for_stmt.init) {
         codegen_expr(cg, stmt->data.for_stmt.init);
     }
     anvil_build_br(cg->anvil_ctx, cond_block);
