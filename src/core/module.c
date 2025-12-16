@@ -44,18 +44,15 @@ void anvil_module_destroy(anvil_module_t *mod)
     while (func) {
         anvil_func_t *next = func->next;
         
-        /* Destroy blocks */
+        /* Destroy blocks - three passes to avoid use-after-free:
+         * Pass 1: Free constant operands (before results are freed)
+         * Pass 2: Free instruction results 
+         * Pass 3: Free instructions and blocks */
         anvil_block_t *block = func->blocks;
-        while (block) {
-            anvil_block_t *bnext = block->next;
-            
-            /* Destroy instructions */
-            anvil_instr_t *instr = block->first;
-            while (instr) {
-                anvil_instr_t *inext = instr->next;
-                
-                /* Free operands that are constants (owned by instruction) 
-                 * Note: ANVIL_VAL_FUNC values are owned by the function, not the instruction */
+        
+        /* Pass 1: Free constant operands first (while we can still check kind) */
+        for (anvil_block_t *b = block; b; b = b->next) {
+            for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 for (size_t i = 0; i < instr->num_operands; i++) {
                     anvil_value_t *op = instr->operands[i];
                     if (op && (op->kind == ANVIL_VAL_CONST_INT || 
@@ -64,21 +61,35 @@ void anvil_module_destroy(anvil_module_t *mod)
                                op->kind == ANVIL_VAL_CONST_STRING)) {
                         if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
                             free((void*)op->data.str);
-                            op->data.str = NULL;  /* Prevent double-free */
                         }
                         free(op->name);
-                        op->name = NULL;  /* Prevent double-free */
                         free(op);
-                        instr->operands[i] = NULL;  /* Mark as freed */
+                        instr->operands[i] = NULL;
                     }
-                    /* ANVIL_VAL_FUNC values are freed with their function, not here */
                 }
-                free(instr->operands);
-                free(instr->phi_blocks);
+            }
+        }
+        
+        /* Pass 2: Free all instruction results */
+        for (anvil_block_t *b = block; b; b = b->next) {
+            for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 if (instr->result) {
                     free(instr->result->name);
                     free(instr->result);
+                    instr->result = NULL;
                 }
+            }
+        }
+        
+        /* Pass 3: Free instructions and blocks */
+        while (block) {
+            anvil_block_t *bnext = block->next;
+            
+            anvil_instr_t *instr = block->first;
+            while (instr) {
+                anvil_instr_t *inext = instr->next;
+                free(instr->operands);
+                free(instr->phi_blocks);
                 free(instr);
                 instr = inext;
             }
