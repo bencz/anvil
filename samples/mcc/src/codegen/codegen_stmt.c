@@ -122,10 +122,16 @@ void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
     anvil_value_t *cond = codegen_expr(cg, stmt->data.if_stmt.cond);
     
-    anvil_block_t *then_block = anvil_block_create(cg->current_func, "if.then");
+    int id = cg->label_counter++;
+    char then_name[32], else_name[32], end_name[32];
+    snprintf(then_name, sizeof(then_name), "if%d.then", id);
+    snprintf(else_name, sizeof(else_name), "if%d.else", id);
+    snprintf(end_name, sizeof(end_name), "if%d.end", id);
+    
+    anvil_block_t *then_block = anvil_block_create(cg->current_func, then_name);
     anvil_block_t *else_block = stmt->data.if_stmt.else_stmt ?
-        anvil_block_create(cg->current_func, "if.else") : NULL;
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, "if.end");
+        anvil_block_create(cg->current_func, else_name) : NULL;
+    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
     /* Compare to zero */
     anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
@@ -155,9 +161,15 @@ void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 
 void codegen_while_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
-    anvil_block_t *cond_block = anvil_block_create(cg->current_func, "while.cond");
-    anvil_block_t *body_block = anvil_block_create(cg->current_func, "while.body");
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, "while.end");
+    int id = cg->label_counter++;
+    char cond_name[32], body_name[32], end_name[32];
+    snprintf(cond_name, sizeof(cond_name), "while%d.cond", id);
+    snprintf(body_name, sizeof(body_name), "while%d.body", id);
+    snprintf(end_name, sizeof(end_name), "while%d.end", id);
+    
+    anvil_block_t *cond_block = anvil_block_create(cg->current_func, cond_name);
+    anvil_block_t *body_block = anvil_block_create(cg->current_func, body_name);
+    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
     anvil_block_t *old_break = cg->break_target;
     anvil_block_t *old_continue = cg->continue_target;
@@ -187,9 +199,15 @@ void codegen_while_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 
 void codegen_do_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
-    anvil_block_t *body_block = anvil_block_create(cg->current_func, "do.body");
-    anvil_block_t *cond_block = anvil_block_create(cg->current_func, "do.cond");
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, "do.end");
+    int id = cg->label_counter++;
+    char body_name[32], cond_name[32], end_name[32];
+    snprintf(body_name, sizeof(body_name), "do%d.body", id);
+    snprintf(cond_name, sizeof(cond_name), "do%d.cond", id);
+    snprintf(end_name, sizeof(end_name), "do%d.end", id);
+    
+    anvil_block_t *body_block = anvil_block_create(cg->current_func, body_name);
+    anvil_block_t *cond_block = anvil_block_create(cg->current_func, cond_name);
+    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
     anvil_block_t *old_break = cg->break_target;
     anvil_block_t *old_continue = cg->continue_target;
@@ -219,10 +237,17 @@ void codegen_do_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 
 void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
-    anvil_block_t *cond_block = anvil_block_create(cg->current_func, "for.cond");
-    anvil_block_t *body_block = anvil_block_create(cg->current_func, "for.body");
-    anvil_block_t *incr_block = anvil_block_create(cg->current_func, "for.incr");
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, "for.end");
+    int id = cg->label_counter++;
+    char cond_name[32], body_name[32], incr_name[32], end_name[32];
+    snprintf(cond_name, sizeof(cond_name), "for%d.cond", id);
+    snprintf(body_name, sizeof(body_name), "for%d.body", id);
+    snprintf(incr_name, sizeof(incr_name), "for%d.incr", id);
+    snprintf(end_name, sizeof(end_name), "for%d.end", id);
+    
+    anvil_block_t *cond_block = anvil_block_create(cg->current_func, cond_name);
+    anvil_block_t *body_block = anvil_block_create(cg->current_func, body_name);
+    anvil_block_t *incr_block = anvil_block_create(cg->current_func, incr_name);
+    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
     anvil_block_t *old_break = cg->break_target;
     anvil_block_t *old_continue = cg->continue_target;

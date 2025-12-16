@@ -68,6 +68,9 @@ struct mcc_codegen {
     } *funcs;
     size_t num_funcs;
     size_t cap_funcs;
+    
+    /* Label counter for unique block names */
+    int label_counter;
 };
 
 /* Code generator lifecycle */

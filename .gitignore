@@ -26,6 +26,7 @@ samples/mcc/*.asm
 samples/mcc/obj
 samples/mcc/mcc
 samples/mcc/tests/output
+samples/mcc/tests/exec/output
 
 # Generated files in examples
 examples/fp_math_lib/generate_math
