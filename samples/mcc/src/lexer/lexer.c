@@ -63,12 +63,51 @@ void mcc_lexer_init_file(mcc_lexer_t *lex, const char *filename)
  * Token scanning - main loop without goto
  * ============================================================ */
 
+/* Skip line continuation (backslash-newline) sequences */
+static void lex_skip_line_continuation(mcc_lexer_t *lex)
+{
+    while (lex->current == '\\') {
+        /* Check if next char is newline */
+        if (lex->pos + 1 < lex->source_len) {
+            char next = lex->source[lex->pos + 1];
+            if (next == '\n') {
+                /* Skip backslash */
+                lex->pos++;
+                /* Skip newline */
+                lex->pos++;
+                lex->line++;
+                lex->column = 1;
+                /* Don't set at_bol - we're continuing a logical line */
+                lex->current = lex_peek(lex);
+            } else if (next == '\r' && lex->pos + 2 < lex->source_len &&
+                       lex->source[lex->pos + 2] == '\n') {
+                /* Handle \r\n (Windows line endings) */
+                lex->pos += 3;
+                lex->line++;
+                lex->column = 1;
+                lex->current = lex_peek(lex);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 static mcc_token_t *lex_scan_token(mcc_lexer_t *lex)
 {
     /* Loop to handle whitespace and comments without goto */
     while (1) {
         lex->has_space = false;
+        
+        /* Handle line continuation at start of scan */
+        lex_skip_line_continuation(lex);
+        
         lex_skip_whitespace(lex);
+        
+        /* Handle line continuation after whitespace */
+        lex_skip_line_continuation(lex);
         
         /* Handle newlines (for preprocessor) */
         if (lex->current == '\n') {

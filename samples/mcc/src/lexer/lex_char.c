@@ -29,6 +29,31 @@ int lex_advance(mcc_lexer_t *lex)
             lex->at_bol = true;
         }
         lex->current = lex_peek(lex);
+        
+        /* Handle line continuation: backslash followed by newline */
+        while (lex->current == '\\' && lex->pos + 1 < lex->source_len) {
+            char next = lex->source[lex->pos + 1];
+            if (next == '\n') {
+                /* Skip backslash */
+                lex->pos++;
+                lex->column++;
+                /* Skip newline */
+                lex->pos++;
+                lex->line++;
+                lex->column = 1;
+                /* Don't set at_bol - we're continuing a logical line */
+                lex->current = lex_peek(lex);
+            } else if (next == '\r' && lex->pos + 2 < lex->source_len && 
+                       lex->source[lex->pos + 2] == '\n') {
+                /* Handle \r\n (Windows line endings) */
+                lex->pos += 3;
+                lex->line++;
+                lex->column = 1;
+                lex->current = lex_peek(lex);
+            } else {
+                break;
+            }
+        }
     }
     return c;
 }
