@@ -18,6 +18,7 @@ static const char *arch_names[] = {
     [MCC_ARCH_PPC32]    = "ppc32",
     [MCC_ARCH_PPC64]    = "ppc64",
     [MCC_ARCH_PPC64LE]  = "ppc64le",
+    [MCC_ARCH_ARM64]    = "arm64",
 };
 
 mcc_context_t *mcc_context_create(void)

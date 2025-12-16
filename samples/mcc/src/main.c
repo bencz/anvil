@@ -19,7 +19,7 @@ static void print_usage(const char *prog)
     printf("  -o <file>         Output file (default: stdout)\n");
     printf("  -arch=<arch>      Target architecture:\n");
     printf("                      x86, x86_64, s370, s370_xa, s390, zarch\n");
-    printf("                      ppc32, ppc64, ppc64le\n");
+    printf("                      ppc32, ppc64, ppc64le, arm64\n");
     printf("  -O<level>         Optimization level (0-3)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
@@ -45,6 +45,7 @@ static mcc_arch_t parse_arch(const char *name)
     if (strcmp(name, "ppc32") == 0 || strcmp(name, "ppc") == 0) return MCC_ARCH_PPC32;
     if (strcmp(name, "ppc64") == 0) return MCC_ARCH_PPC64;
     if (strcmp(name, "ppc64le") == 0) return MCC_ARCH_PPC64LE;
+    if (strcmp(name, "arm64") == 0) return MCC_ARCH_ARM64;
     return MCC_ARCH_COUNT; /* Invalid */
 }
 

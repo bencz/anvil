@@ -43,6 +43,7 @@ typedef enum {
     MCC_ARCH_PPC32,
     MCC_ARCH_PPC64,
     MCC_ARCH_PPC64LE,
+    MCC_ARCH_ARM64,
     MCC_ARCH_COUNT
 } mcc_arch_t;
 

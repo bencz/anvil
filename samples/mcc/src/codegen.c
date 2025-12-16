@@ -18,6 +18,7 @@ static anvil_arch_t mcc_to_anvil_arch(mcc_arch_t arch)
         case MCC_ARCH_PPC32:    return ANVIL_ARCH_PPC32;
         case MCC_ARCH_PPC64:    return ANVIL_ARCH_PPC64;
         case MCC_ARCH_PPC64LE:  return ANVIL_ARCH_PPC64LE;
+        case MCC_ARCH_ARM64:    return ANVIL_ARCH_ARM64;
         default:                return ANVIL_ARCH_X86_64;
     }
 }
