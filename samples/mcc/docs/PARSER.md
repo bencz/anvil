@@ -497,6 +497,61 @@ if (parse_is_declaration_start(p)) {
 | `AST_LABEL_ADDR` | GNU | Label address `&&label` |
 | `AST_GOTO_EXPR` | GNU | Computed goto `goto *expr` |
 
+## Complex Declarators
+
+The parser supports full C declarator syntax including complex types:
+
+```c
+/* Pointer to array of 10 ints */
+int (*arr)[10];
+
+/* Pointer to function returning int */
+int (*func)(int, int);
+
+/* Pointer to array of 5 pointers to int */
+int *(*parr)[5];
+
+/* Function pointer as parameter */
+void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *));
+```
+
+The `parse_declarator()` function handles the "inside-out" nature of C declarators:
+
+```c
+typedef struct {
+    mcc_type_t *type;       /* Complete type including declarator */
+    const char *name;       /* Identifier name (NULL for abstract) */
+} parse_declarator_result_t;
+
+parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract);
+```
+
+## _Generic Selection (C11)
+
+The parser fully supports `_Generic` with proper AST storage:
+
+```c
+/* AST structure for _Generic */
+struct {
+    mcc_ast_node_t *controlling_expr;
+    mcc_generic_assoc_t *associations;
+    int num_associations;
+    mcc_ast_node_t *default_expr;
+} generic_expr;
+
+/* Generic association */
+typedef struct mcc_generic_assoc {
+    mcc_type_t *type;          /* NULL for default */
+    mcc_ast_node_t *expr;
+    struct mcc_generic_assoc *next;
+} mcc_generic_assoc_t;
+```
+
+Example usage:
+```c
+const char *name = _Generic(x, int: "int", float: "float", default: "other");
+```
+
 ## Grammar Summary
 
 ```
@@ -505,9 +560,12 @@ translation_unit = { declaration }
 declaration = function_decl | var_decl | struct_decl | typedef_decl
             | static_assert_decl  /* C11 */
 
-function_decl = type_spec IDENT '(' params ')' ( compound_stmt | ';' )
+function_decl = type_spec declarator ( compound_stmt | ';' )
 
-var_decl = type_spec IDENT [ '=' initializer ] ';'
+var_decl = type_spec declarator [ '=' initializer ] ';'
+
+declarator = pointer? direct_declarator
+direct_declarator = IDENT | '(' declarator ')' | direct_declarator '[' expr? ']' | direct_declarator '(' params ')'
 
 initializer = assignment_expr | '{' initializer_list '}'
             | designator_list '=' initializer  /* C99 */

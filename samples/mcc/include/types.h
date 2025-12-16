@@ -45,7 +45,8 @@ typedef enum {
     STORAGE_REGISTER,
     STORAGE_STATIC,
     STORAGE_EXTERN,
-    STORAGE_TYPEDEF
+    STORAGE_TYPEDEF,
+    STORAGE_THREAD_LOCAL    /* C11 _Thread_local */
 } mcc_storage_class_t;
 
 /* Forward declarations */

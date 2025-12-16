@@ -95,8 +95,8 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             
             /* Check for cast expression or compound literal */
             if (parse_is_type_start(p)) {
-                mcc_type_t *type = parse_type_specifier(p);
-                /* TODO: Parse abstract declarator */
+                mcc_type_t *base_type = parse_type_specifier(p);
+                mcc_type_t *type = parse_abstract_declarator(p, base_type);
                 parse_expect(p, TOK_RPAREN, ")");
                 
                 /* Check for compound literal (C99) */
@@ -141,8 +141,8 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             
             if (parse_match(p, TOK_LPAREN)) {
                 if (parse_is_type_start(p)) {
-                    node->data.sizeof_expr.type_arg = parse_type_specifier(p);
-                    /* TODO: Parse abstract declarator */
+                    mcc_type_t *base_type = parse_type_specifier(p);
+                    node->data.sizeof_expr.type_arg = parse_abstract_declarator(p, base_type);
                 } else {
                     node->data.sizeof_expr.expr_arg = parse_expression(p);
                 }
@@ -179,15 +179,67 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             return node;
         
         /* C11: _Generic selection */
-        case TOK__GENERIC:
+        case TOK__GENERIC: {
             if (!parse_has_generic(p)) {
                 mcc_error_at(p->ctx, tok->location,
                     "'_Generic' requires C11 or later");
                 return NULL;
             }
-            /* TODO: Implement _Generic parsing */
-            mcc_error_at(p->ctx, tok->location, "_Generic not yet implemented");
-            return NULL;
+            parse_advance(p);
+            parse_expect(p, TOK_LPAREN, "(");
+            
+            /* Parse controlling expression */
+            mcc_ast_node_t *ctrl_expr = parse_assignment_expr(p);
+            parse_expect(p, TOK_COMMA, ",");
+            
+            /* Parse association list */
+            mcc_generic_assoc_t *assocs = NULL;
+            mcc_generic_assoc_t *assoc_tail = NULL;
+            int num_assocs = 0;
+            mcc_ast_node_t *default_assoc_expr = NULL;
+            
+            while (!parse_check(p, TOK_RPAREN) && !parse_check(p, TOK_EOF)) {
+                if (parse_match(p, TOK_DEFAULT)) {
+                    parse_expect(p, TOK_COLON, ":");
+                    if (default_assoc_expr) {
+                        mcc_error_at(p->ctx, p->peek->location,
+                            "duplicate default association in _Generic");
+                    }
+                    default_assoc_expr = parse_assignment_expr(p);
+                } else {
+                    /* type-name : assignment-expression */
+                    mcc_type_t *assoc_type = parse_type_specifier(p);
+                    assoc_type = parse_abstract_declarator(p, assoc_type);
+                    parse_expect(p, TOK_COLON, ":");
+                    mcc_ast_node_t *assoc_expr = parse_assignment_expr(p);
+                    
+                    /* Create association entry */
+                    mcc_generic_assoc_t *assoc = mcc_alloc(p->ctx, sizeof(mcc_generic_assoc_t));
+                    assoc->type = assoc_type;
+                    assoc->expr = assoc_expr;
+                    assoc->next = NULL;
+                    
+                    if (!assocs) assocs = assoc;
+                    if (assoc_tail) assoc_tail->next = assoc;
+                    assoc_tail = assoc;
+                    num_assocs++;
+                }
+                
+                if (!parse_match(p, TOK_COMMA)) {
+                    break;
+                }
+            }
+            
+            parse_expect(p, TOK_RPAREN, ")");
+            
+            /* Create _Generic AST node with all associations */
+            node = mcc_ast_create(p->ctx, AST_GENERIC_EXPR, tok->location);
+            node->data.generic_expr.controlling_expr = ctrl_expr;
+            node->data.generic_expr.associations = assocs;
+            node->data.generic_expr.num_associations = num_assocs;
+            node->data.generic_expr.default_expr = default_assoc_expr;
+            return node;
+        }
         
         /* GNU: Labels as values */
         case TOK_AND:

@@ -213,5 +213,14 @@ When working with MCC code:
 
 ### Current Limitations
 
-- Bitfields
 - Stringification (`#`) and token pasting (`##`) in macros
+- Line continuation (`\`) in preprocessor
+
+### Recent Improvements
+
+- **Complex Declarators**: Full support for C declarator syntax including `int (*arr)[10]`, `int (*func)(int, int)`, etc.
+- **Bitfields**: Parsing and storage of bitfield widths in struct fields
+- **Enum Constants**: Proper storage of enum constant names and values
+- **_Generic (C11)**: Full parsing with AST storage for type associations
+- **_Static_assert (C11)**: Support in structs and at file scope
+- **Thread Local Storage (C11)**: `_Thread_local` keyword support

@@ -10,6 +10,13 @@
 typedef struct mcc_ast_node mcc_ast_node_t;
 struct mcc_type;
 
+/* Generic association for _Generic (C11) */
+typedef struct mcc_generic_assoc {
+    struct mcc_type *type;          /* NULL for default association */
+    mcc_ast_node_t *expr;
+    struct mcc_generic_assoc *next;
+} mcc_generic_assoc_t;
+
 /* AST node kinds */
 typedef enum {
     /* Translation unit */
@@ -421,6 +428,14 @@ struct mcc_ast_node {
             mcc_ast_node_t *expr;
             const char *message;
         } static_assert;
+        
+        /* C11: _Generic selection */
+        struct {
+            mcc_ast_node_t *controlling_expr;
+            struct mcc_generic_assoc *associations;
+            int num_associations;
+            mcc_ast_node_t *default_expr;
+        } generic_expr;
         
         /* GNU: Statement expression ({ ... }) */
         struct {

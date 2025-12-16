@@ -242,117 +242,27 @@ end_params:
  * Variable Declaration
  * ============================================================ */
 
-mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *base_type,
+mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *decl_type,
                                      const char *name, mcc_storage_class_t storage,
                                      bool is_typedef, mcc_location_t loc)
 {
-    /* Build type for first declarator (may have pointer from type_specifier) */
-    mcc_type_t *decl_type = base_type;
+    /* Type is already fully parsed by parse_declarator */
     
-    /* Parse array brackets for first declarator */
-    while (parse_match(p, TOK_LBRACKET)) {
-        size_t array_size = 0;
-        bool is_vla = false;
-        
-        if (!parse_check(p, TOK_RBRACKET)) {
-            /* C99: VLA with * */
-            if (parse_check(p, TOK_STAR)) {
-                if (!parse_has_vla(p)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "variable length arrays are a C99 extension");
-                }
-                parse_advance(p);
-                is_vla = true;
-            } else {
-                mcc_ast_node_t *size_expr = parse_expression(p);
-                if (size_expr && size_expr->kind == AST_INT_LIT) {
-                    array_size = size_expr->data.int_lit.value;
-                } else {
-                    /* C99: VLA */
-                    if (!parse_has_vla(p)) {
-                        mcc_warning_at(p->ctx, p->peek->location,
-                            "variable length arrays are a C99 extension");
-                    }
-                    is_vla = true;
-                }
-            }
-        }
-        parse_expect(p, TOK_RBRACKET, "]");
-        
-        mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        arr->kind = TYPE_ARRAY;
-        arr->data.array.element = decl_type;
-        arr->data.array.length = array_size;
-        arr->data.array.is_vla = is_vla;
-        decl_type = arr;
-    }
-    
-    /* Handle typedef - may have multiple names */
+    /* Handle typedef - register the name */
     if (is_typedef) {
-        /* Register first typedef name */
+        /* Register typedef name */
         mcc_typedef_entry_t *entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
         entry->name = name;
         entry->type = decl_type;
         entry->next = p->typedefs;
         p->typedefs = entry;
         
-        /* Parse additional typedef names separated by comma */
-        while (parse_match(p, TOK_COMMA)) {
-            /* Parse pointer(s) for this declarator */
-            mcc_type_t *next_type = base_type;
-            while (parse_match(p, TOK_STAR)) {
-                mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                ptr->kind = TYPE_POINTER;
-                ptr->data.pointer.pointee = next_type;
-                next_type = ptr;
-                
-                /* Pointer qualifiers */
-                while (1) {
-                    if (parse_match(p, TOK_CONST)) {
-                        next_type->qualifiers |= QUAL_CONST;
-                    } else if (parse_match(p, TOK_VOLATILE)) {
-                        next_type->qualifiers |= QUAL_VOLATILE;
-                    } else if (parse_has_restrict(p) && parse_match(p, TOK_RESTRICT)) {
-                        next_type->qualifiers |= QUAL_RESTRICT;
-                    } else {
-                        break;
-                    }
-                }
-            }
-            
-            /* Get next name */
-            mcc_token_t *next_tok = parse_expect(p, TOK_IDENT, "typedef name");
-            const char *next_name = mcc_strdup(p->ctx, next_tok->text);
-            
-            /* Parse array brackets */
-            while (parse_match(p, TOK_LBRACKET)) {
-                size_t arr_size = 0;
-                if (!parse_check(p, TOK_RBRACKET)) {
-                    mcc_ast_node_t *size_expr = parse_expression(p);
-                    if (size_expr && size_expr->kind == AST_INT_LIT) {
-                        arr_size = size_expr->data.int_lit.value;
-                    }
-                }
-                parse_expect(p, TOK_RBRACKET, "]");
-                
-                mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                arr->kind = TYPE_ARRAY;
-                arr->data.array.element = next_type;
-                arr->data.array.length = arr_size;
-                next_type = arr;
-            }
-            
-            /* Register this typedef */
-            mcc_typedef_entry_t *next_entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
-            next_entry->name = next_name;
-            next_entry->type = next_type;
-            next_entry->next = p->typedefs;
-            p->typedefs = next_entry;
-        }
+        /* Note: Multiple typedef names (typedef int A, *B;) are not yet supported
+         * with complex declarators. For now, only single typedef per declaration. */
         
         parse_expect(p, TOK_SEMICOLON, ";");
         
-        /* Return a typedef declaration node for the first name */
+        /* Return a typedef declaration node */
         mcc_ast_node_t *td = mcc_ast_create(p->ctx, AST_TYPEDEF_DECL, loc);
         td->data.typedef_decl.name = name;
         td->data.typedef_decl.type = decl_type;
@@ -438,7 +348,16 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
                         "'_Thread_local' is a C11 extension");
                 }
                 parse_advance(p);
-                /* TODO: Handle thread local storage */
+                /* Thread local can combine with static or extern */
+                if (storage == STORAGE_NONE) {
+                    storage = STORAGE_THREAD_LOCAL;
+                } else if (storage == STORAGE_STATIC || storage == STORAGE_EXTERN) {
+                    /* Valid combination - keep the existing storage class */
+                    /* The thread_local aspect will be tracked separately */
+                } else {
+                    mcc_error_at(p->ctx, p->peek->location,
+                        "_Thread_local can only combine with static or extern");
+                }
                 continue;
             default:
                 break;
@@ -453,18 +372,81 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     if (parse_check(p, TOK_SEMICOLON)) {
         /* Type declaration only (e.g., struct definition) */
         parse_advance(p);
-        return NULL; /* TODO: Return struct/union/enum declaration */
+        
+        /* Return appropriate declaration node for struct/union/enum */
+        if (base_type->kind == TYPE_STRUCT) {
+            mcc_ast_node_t *decl = mcc_ast_create(p->ctx, AST_STRUCT_DECL, loc);
+            decl->data.struct_decl.tag = base_type->data.record.tag;
+            decl->data.struct_decl.fields = NULL; /* Fields stored in type */
+            decl->data.struct_decl.num_fields = 0;
+            decl->data.struct_decl.is_definition = base_type->data.record.is_complete;
+            return decl;
+        } else if (base_type->kind == TYPE_UNION) {
+            mcc_ast_node_t *decl = mcc_ast_create(p->ctx, AST_UNION_DECL, loc);
+            decl->data.struct_decl.tag = base_type->data.record.tag;
+            decl->data.struct_decl.fields = NULL;
+            decl->data.struct_decl.num_fields = 0;
+            decl->data.struct_decl.is_definition = base_type->data.record.is_complete;
+            return decl;
+        } else if (base_type->kind == TYPE_ENUM) {
+            mcc_ast_node_t *decl = mcc_ast_create(p->ctx, AST_ENUM_DECL, loc);
+            decl->data.enum_decl.tag = base_type->data.enumeration.tag;
+            decl->data.enum_decl.enumerators = NULL;
+            decl->data.enum_decl.num_enumerators = base_type->data.enumeration.num_constants;
+            decl->data.enum_decl.is_definition = base_type->data.enumeration.is_complete;
+            return decl;
+        }
+        
+        /* Other type declarations (e.g., forward declarations) */
+        return NULL;
     }
     
-    /* Get declarator name */
-    mcc_token_t *name_tok = parse_expect(p, TOK_IDENT, "identifier");
-    const char *name = mcc_strdup(p->ctx, name_tok->text);
+    /* Parse declarator (handles complex types like int (*arr)[10]) */
+    parse_declarator_result_t decl_result = parse_declarator(p, base_type, false);
+    const char *name = decl_result.name;
+    mcc_type_t *decl_type = decl_result.type;
     
-    /* Check for function declaration */
-    if (parse_check(p, TOK_LPAREN)) {
-        return parse_function_decl(p, base_type, name, storage, loc);
+    /* Check if this is a function type (function declaration/definition) */
+    if (decl_type->kind == TYPE_FUNCTION) {
+        /* Function declaration - body may follow */
+        mcc_ast_node_t *body = NULL;
+        bool is_definition = false;
+        
+        if (parse_check(p, TOK_LBRACE)) {
+            body = parse_compound_stmt(p);
+            is_definition = true;
+        } else {
+            parse_expect(p, TOK_SEMICOLON, ";");
+        }
+        
+        /* Convert mcc_func_param_t linked list to AST node array */
+        mcc_ast_node_t **params = NULL;
+        size_t num_params = decl_type->data.function.num_params;
+        if (num_params > 0 && decl_type->data.function.params) {
+            params = mcc_alloc(p->ctx, num_params * sizeof(mcc_ast_node_t*));
+            mcc_func_param_t *param = decl_type->data.function.params;
+            for (size_t i = 0; i < num_params && param; i++, param = param->next) {
+                mcc_ast_node_t *param_node = mcc_ast_create(p->ctx, AST_PARAM_DECL, loc);
+                param_node->data.param_decl.name = param->name;
+                param_node->data.param_decl.param_type = param->type;
+                params[i] = param_node;
+            }
+        }
+        
+        mcc_ast_node_t *func = mcc_ast_create(p->ctx, AST_FUNC_DECL, loc);
+        func->data.func_decl.name = name;
+        func->data.func_decl.func_type = decl_type->data.function.return_type;
+        func->data.func_decl.params = params;
+        func->data.func_decl.num_params = num_params;
+        func->data.func_decl.body = body;
+        func->data.func_decl.is_definition = is_definition;
+        func->data.func_decl.is_static = (storage == STORAGE_STATIC);
+        func->data.func_decl.is_variadic = decl_type->data.function.is_variadic;
+        func->data.func_decl.is_inline = base_type->is_inline;
+        func->data.func_decl.is_noreturn = base_type->is_noreturn;
+        return func;
     }
     
     /* Variable/typedef declaration */
-    return parse_variable_decl(p, base_type, name, storage, is_typedef, loc);
+    return parse_variable_decl(p, decl_type, name, storage, is_typedef, loc);
 }

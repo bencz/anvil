@@ -131,14 +131,17 @@ The parser builds an Abstract Syntax Tree (AST) using recursive descent:
 - **Declarations**: Variables, functions, structs, unions, enums, typedefs
 - **Statements**: if, while, for, do-while, switch, return, goto, labels
 - **Expressions**: All C operators with correct precedence
+- **Complex Declarators**: Full support for `int (*arr)[10]`, `int (*func)(int, int)`, etc.
 - **Typedef handling**: Registers typedef names and recognizes them as types
-- **C Standard aware**: Features like `for`-declarations (C99), compound literals (C99), `_Static_assert` (C11) are checked
+- **C Standard aware**: Features like `for`-declarations (C99), compound literals (C99), `_Generic` (C11), `_Static_assert` (C11) are checked
 
 **Key data structures:**
 - `mcc_parser_t`: Parser state
 - `mcc_ast_node_t`: AST node (50+ node types)
 - `mcc_struct_entry_t`: Struct type registry for forward references
 - `mcc_typedef_entry_t`: Typedef registry for type aliases
+- `mcc_generic_assoc_t`: Generic association for `_Generic` (C11)
+- `parse_declarator_result_t`: Result of declarator parsing (type + name)
 
 ### 4. Semantic Analysis (`sema.c`)
 

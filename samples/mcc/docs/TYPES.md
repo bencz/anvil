@@ -107,10 +107,29 @@ typedef struct mcc_struct_field {
     const char *name;
     mcc_type_t *type;
     int offset;              /* Byte offset in struct */
-    int bit_offset;          /* For bit fields */
-    int bit_width;           /* For bit fields, 0 otherwise */
+    int bitfield_width;      /* 0 if not a bitfield */
     struct mcc_struct_field *next;
 } mcc_struct_field_t;
+```
+
+## Enum Constants
+
+```c
+typedef struct mcc_enum_const {
+    const char *name;
+    int64_t value;
+    struct mcc_enum_const *next;
+} mcc_enum_const_t;
+```
+
+## Function Parameters
+
+```c
+typedef struct mcc_func_param {
+    const char *name;           /* Can be NULL for abstract declarators */
+    mcc_type_t *type;
+    struct mcc_func_param *next;
+} mcc_func_param_t;
 ```
 
 ## Type Context

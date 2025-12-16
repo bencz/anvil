@@ -373,10 +373,16 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
     mcc_type_t *etype = mcc_alloc(p->ctx, sizeof(mcc_type_t));
     etype->kind = TYPE_ENUM;
     etype->data.enumeration.tag = tag;
+    etype->data.enumeration.constants = NULL;
+    etype->data.enumeration.num_constants = 0;
+    etype->data.enumeration.is_complete = false;
     
     if (parse_match(p, TOK_LBRACE)) {
         /* Parse enumerators */
         int64_t next_value = 0;
+        mcc_enum_const_t *constants = NULL;
+        mcc_enum_const_t *const_tail = NULL;
+        int num_constants = 0;
         
         while (!parse_check(p, TOK_RBRACE) && !parse_check(p, TOK_EOF)) {
             mcc_token_t *name_tok = parse_expect(p, TOK_IDENT, "enumerator name");
@@ -389,9 +395,16 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
                 }
             }
             
-            /* Register enum constant in symbol table */
-            /* TODO: Proper enum constant handling */
-            (void)name_tok;
+            /* Create enum constant */
+            mcc_enum_const_t *econst = mcc_alloc(p->ctx, sizeof(mcc_enum_const_t));
+            econst->name = mcc_strdup(p->ctx, name_tok->text);
+            econst->value = value;
+            econst->next = NULL;
+            
+            if (!constants) constants = econst;
+            if (const_tail) const_tail->next = econst;
+            const_tail = econst;
+            num_constants++;
             
             next_value = value + 1;
             
@@ -406,6 +419,10 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
         }
         
         parse_expect(p, TOK_RBRACE, "}");
+        
+        etype->data.enumeration.constants = constants;
+        etype->data.enumeration.num_constants = num_constants;
+        etype->data.enumeration.is_complete = true;
     } else if (!tag) {
         mcc_error_at(p->ctx, loc, "anonymous enum must have a definition");
     }
@@ -671,34 +688,342 @@ done:
 
 /* ============================================================
  * Abstract Declarator (for casts and sizeof)
+ * 
+ * C declarator syntax is "inside-out":
+ *   int *p         -> pointer to int
+ *   int a[10]      -> array of 10 ints
+ *   int (*p)[10]   -> pointer to array of 10 ints
+ *   int (*f)(int)  -> pointer to function returning int
  * ============================================================ */
 
-mcc_type_t *parse_abstract_declarator(mcc_parser_t *p, mcc_type_t *base_type)
+/* Parse pointer qualifiers after * */
+static mcc_type_qual_t parse_pointer_qualifiers(mcc_parser_t *p)
 {
-    mcc_type_t *type = base_type;
+    mcc_type_qual_t quals = QUAL_NONE;
+    while (1) {
+        if (parse_match(p, TOK_CONST)) {
+            quals |= QUAL_CONST;
+        } else if (parse_match(p, TOK_VOLATILE)) {
+            quals |= QUAL_VOLATILE;
+        } else if (parse_has_restrict(p) && parse_match(p, TOK_RESTRICT)) {
+            quals |= QUAL_RESTRICT;
+        } else {
+            break;
+        }
+    }
+    return quals;
+}
+
+/* Parse array suffix: [N] or [] or [*] */
+static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
+{
+    size_t arr_size = 0;
+    bool is_vla = false;
     
-    /* Parse pointers */
-    while (parse_match(p, TOK_STAR)) {
-        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        ptr->kind = TYPE_POINTER;
-        ptr->data.pointer.pointee = type;
-        type = ptr;
-        
-        /* Pointer qualifiers */
-        while (1) {
-            if (parse_match(p, TOK_CONST)) {
-                type->qualifiers |= QUAL_CONST;
-            } else if (parse_match(p, TOK_VOLATILE)) {
-                type->qualifiers |= QUAL_VOLATILE;
-            } else if (parse_has_restrict(p) && parse_match(p, TOK_RESTRICT)) {
-                type->qualifiers |= QUAL_RESTRICT;
+    if (!parse_check(p, TOK_RBRACKET)) {
+        /* C99: VLA with * */
+        if (parse_check(p, TOK_STAR)) {
+            if (!parse_has_vla(p)) {
+                mcc_warning_at(p->ctx, p->peek->location,
+                    "variable length arrays are a C99 extension");
+            }
+            parse_advance(p);
+            is_vla = true;
+        } else {
+            mcc_ast_node_t *size_expr = parse_constant_expr(p);
+            if (size_expr && size_expr->kind == AST_INT_LIT) {
+                arr_size = size_expr->data.int_lit.value;
             } else {
-                break;
+                /* C99: VLA */
+                if (!parse_has_vla(p)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "variable length arrays are a C99 extension");
+                }
+                is_vla = true;
             }
         }
     }
+    parse_expect(p, TOK_RBRACKET, "]");
     
-    /* TODO: Parse array and function declarators */
+    mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+    arr->kind = TYPE_ARRAY;
+    arr->data.array.element = element_type;
+    arr->data.array.length = arr_size;
+    arr->data.array.is_vla = is_vla;
+    return arr;
+}
+
+/* Parse function parameter list for abstract declarator */
+static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_type)
+{
+    mcc_func_param_t *params = NULL;
+    mcc_func_param_t *param_tail = NULL;
+    int num_params = 0;
+    bool is_variadic = false;
     
-    return type;
+    if (!parse_check(p, TOK_RPAREN)) {
+        /* Check for (void) - no parameters */
+        if (parse_check(p, TOK_VOID)) {
+            mcc_token_t *void_tok = p->peek;
+            parse_advance(p);
+            if (parse_check(p, TOK_RPAREN)) {
+                /* (void) means no parameters */
+                goto end_params;
+            }
+            /* void* or similar - parse as parameter type */
+            mcc_type_t *param_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+            param_type->kind = TYPE_VOID;
+            param_type = parse_abstract_declarator(p, param_type);
+            
+            mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            param->name = NULL;
+            param->type = param_type;
+            param->next = NULL;
+            params = param;
+            param_tail = param;
+            num_params++;
+            
+            if (!parse_match(p, TOK_COMMA)) {
+                goto end_params;
+            }
+            (void)void_tok;
+        }
+        
+        do {
+            /* Check for ellipsis */
+            if (parse_match(p, TOK_ELLIPSIS)) {
+                is_variadic = true;
+                break;
+            }
+            
+            /* Parse parameter type */
+            mcc_type_t *param_base = parse_type_specifier(p);
+            mcc_type_t *param_type = parse_abstract_declarator(p, param_base);
+            
+            mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            param->name = NULL;
+            param->type = param_type;
+            param->next = NULL;
+            
+            if (!params) params = param;
+            if (param_tail) param_tail->next = param;
+            param_tail = param;
+            num_params++;
+            
+        } while (parse_match(p, TOK_COMMA) && !parse_check(p, TOK_ELLIPSIS));
+        
+        /* Check for trailing ellipsis */
+        if (parse_match(p, TOK_ELLIPSIS)) {
+            is_variadic = true;
+        }
+    }
+    
+end_params:
+    parse_expect(p, TOK_RPAREN, ")");
+    
+    mcc_type_t *func = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+    func->kind = TYPE_FUNCTION;
+    func->data.function.return_type = return_type;
+    func->data.function.params = params;
+    func->data.function.num_params = num_params;
+    func->data.function.is_variadic = is_variadic;
+    func->data.function.is_oldstyle = false;
+    return func;
+}
+
+/*
+ * Parse abstract-declarator:
+ *   pointer
+ *   pointer? direct-abstract-declarator
+ * 
+ * This handles complex types like:
+ *   int *           -> pointer to int
+ *   int **          -> pointer to pointer to int
+ *   int (*)[10]     -> pointer to array of 10 ints
+ *   int (*)(int)    -> pointer to function(int) returning int
+ *   int *(*)[10]    -> pointer to array of 10 pointers to int
+ */
+/*
+ * Parse a complete declarator (named or abstract)
+ * 
+ * This is the main entry point for parsing C declarators.
+ * It handles the full complexity of C declarator syntax:
+ *   int *p           -> pointer to int
+ *   int a[10]        -> array of 10 ints
+ *   int (*p)[10]     -> pointer to array of 10 ints
+ *   int (*f)(int)    -> pointer to function(int) returning int
+ *   int *(*arr)[5]   -> pointer to array of 5 pointers to int
+ */
+
+/* Forward declaration for recursive parsing */
+static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract);
+
+parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract)
+{
+    parse_declarator_result_t result = { base_type, NULL };
+    
+    /* Collect pointer prefixes with their qualifiers */
+    typedef struct {
+        mcc_type_qual_t quals;
+    } ptr_info_t;
+    
+    ptr_info_t ptr_stack[32];
+    int ptr_count = 0;
+    
+    while (parse_match(p, TOK_STAR)) {
+        if (ptr_count < 32) {
+            ptr_stack[ptr_count].quals = parse_pointer_qualifiers(p);
+            ptr_count++;
+        }
+    }
+    
+    /* Parse direct declarator */
+    result = parse_direct_declarator(p, base_type, allow_abstract);
+    
+    /* Apply pointer prefixes in reverse order (innermost first) */
+    for (int i = ptr_count - 1; i >= 0; i--) {
+        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+        ptr->kind = TYPE_POINTER;
+        ptr->data.pointer.pointee = result.type;
+        ptr->qualifiers = ptr_stack[i].quals;
+        result.type = ptr;
+    }
+    
+    return result;
+}
+
+/*
+ * Parse direct-declarator:
+ *   identifier
+ *   ( declarator )
+ *   direct-declarator [ constant-expression? ]
+ *   direct-declarator ( parameter-type-list )
+ */
+static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract)
+{
+    parse_declarator_result_t result = { base_type, NULL };
+    
+    /* Check for grouped declarator: ( declarator ) */
+    if (parse_check(p, TOK_LPAREN)) {
+        /* Need to distinguish between:
+         * - Grouped declarator: (*p), (*arr)[10], (*f)(int)
+         * - Function parameters: (int, int), (void)
+         * 
+         * It's a grouped declarator if after '(' we see:
+         * - '*' (pointer)
+         * - identifier followed by ')' or '[' or '('
+         * - '(' (nested grouping)
+         */
+        parse_advance(p); /* consume '(' */
+        
+        bool is_grouped = false;
+        if (parse_check(p, TOK_STAR)) {
+            is_grouped = true;
+        } else if (parse_check(p, TOK_LPAREN)) {
+            is_grouped = true;
+        } else if (parse_check(p, TOK_IDENT)) {
+            /* Could be grouped declarator with name, or function param */
+            /* For now, treat identifier as grouped declarator name */
+            is_grouped = true;
+        } else if (parse_check(p, TOK_RPAREN) && allow_abstract) {
+            /* Empty parens in abstract declarator - function type */
+            is_grouped = false;
+        }
+        
+        if (is_grouped) {
+            /* Parse inner declarator with placeholder type */
+            mcc_type_t *placeholder = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+            placeholder->kind = TYPE_VOID;
+            
+            parse_declarator_result_t inner = parse_declarator(p, placeholder, allow_abstract);
+            parse_expect(p, TOK_RPAREN, ")");
+            
+            /* Parse suffixes that apply to the outer type */
+            mcc_type_t *outer_type = base_type;
+            
+            /* Parse array suffixes */
+            while (parse_match(p, TOK_LBRACKET)) {
+                outer_type = parse_array_suffix(p, outer_type);
+            }
+            
+            /* Parse function suffix */
+            if (parse_match(p, TOK_LPAREN)) {
+                outer_type = parse_function_suffix(p, outer_type);
+            }
+            
+            /* Patch the placeholder in the inner type */
+            mcc_type_t *curr = inner.type;
+            mcc_type_t *prev = NULL;
+            while (curr && curr->kind != TYPE_VOID) {
+                prev = curr;
+                switch (curr->kind) {
+                    case TYPE_POINTER:
+                        curr = curr->data.pointer.pointee;
+                        break;
+                    case TYPE_ARRAY:
+                        curr = curr->data.array.element;
+                        break;
+                    case TYPE_FUNCTION:
+                        curr = curr->data.function.return_type;
+                        break;
+                    default:
+                        curr = NULL;
+                        break;
+                }
+            }
+            
+            if (prev) {
+                switch (prev->kind) {
+                    case TYPE_POINTER:
+                        prev->data.pointer.pointee = outer_type;
+                        break;
+                    case TYPE_ARRAY:
+                        prev->data.array.element = outer_type;
+                        break;
+                    case TYPE_FUNCTION:
+                        prev->data.function.return_type = outer_type;
+                        break;
+                    default:
+                        break;
+                }
+                result.type = inner.type;
+            } else {
+                result.type = outer_type;
+            }
+            result.name = inner.name;
+            return result;
+        } else {
+            /* Function parameters */
+            result.type = parse_function_suffix(p, base_type);
+            return result;
+        }
+    }
+    
+    /* Parse identifier (if present and not abstract) */
+    if (parse_check(p, TOK_IDENT)) {
+        result.name = mcc_strdup(p->ctx, p->peek->text);
+        parse_advance(p);
+    } else if (!allow_abstract) {
+        mcc_error_at(p->ctx, p->peek->location, "expected identifier");
+    }
+    
+    /* Parse array and function suffixes */
+    while (1) {
+        if (parse_match(p, TOK_LBRACKET)) {
+            result.type = parse_array_suffix(p, result.type);
+        } else if (parse_match(p, TOK_LPAREN)) {
+            result.type = parse_function_suffix(p, result.type);
+        } else {
+            break;
+        }
+    }
+    
+    return result;
+}
+
+/* Wrapper for backward compatibility */
+mcc_type_t *parse_abstract_declarator(mcc_parser_t *p, mcc_type_t *base_type)
+{
+    parse_declarator_result_t result = parse_declarator(p, base_type, true);
+    return result.type;
 }

@@ -137,6 +137,25 @@ mcc_type_t *parse_enum(mcc_parser_t *p);
 mcc_ast_node_t *parse_initializer(mcc_parser_t *p);
 
 /* ============================================================
+ * Declarator Parsing (parse_type.c)
+ * 
+ * C declarators are "inside-out":
+ *   int *p         -> pointer to int
+ *   int a[10]      -> array of 10 ints  
+ *   int (*p)[10]   -> pointer to array of 10 ints
+ *   int (*f)(int)  -> pointer to function returning int
+ * ============================================================ */
+
+/* Result of parsing a declarator */
+typedef struct {
+    mcc_type_t *type;       /* Complete type including declarator */
+    const char *name;       /* Identifier name (NULL for abstract) */
+} parse_declarator_result_t;
+
+/* Parse a declarator (named or abstract) */
+parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract);
+
+/* ============================================================
  * C Standard Feature Checks for Parser
  * ============================================================ */
 

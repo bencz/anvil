@@ -487,6 +487,33 @@ void mcc_ctx_enable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 ```
 
+### Implementation Status
+
+| Feature | Standard | Status |
+|---------|----------|--------|
+| `long long` | C99 | ✅ Implemented |
+| `_Bool` | C99 | ✅ Implemented |
+| `restrict` | C99 | ✅ Implemented |
+| `inline` | C99 | ✅ Implemented |
+| Mixed declarations | C99 | ✅ Implemented |
+| `for` loop declarations | C99 | ✅ Implemented |
+| Compound literals | C99 | ✅ Implemented |
+| Designated initializers | C99 | ✅ Implemented |
+| Flexible array members | C99 | ✅ Implemented |
+| VLA (Variable Length Arrays) | C99 | ⚠️ Parsing only |
+| `_Alignof` | C11 | ✅ Implemented |
+| `_Static_assert` | C11 | ✅ Implemented |
+| `_Generic` | C11 | ✅ Implemented |
+| `_Noreturn` | C11 | ✅ Implemented |
+| `_Thread_local` | C11 | ✅ Implemented |
+| `_Atomic` | C11 | ⚠️ Parsing only |
+| Anonymous structs/unions | C11 | ✅ Implemented |
+| `nullptr` | C23 | ✅ Implemented |
+| `true`/`false` keywords | C23 | ✅ Implemented |
+| Statement expressions | GNU | ✅ Implemented |
+| Labels as values | GNU | ✅ Implemented |
+| Case ranges | GNU | ⚠️ Parsing only |
+
 ### Extending the Feature System
 
 To add more features (beyond 256):
