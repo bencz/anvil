@@ -2,46 +2,100 @@
 # Test Rules - Code Generation Tests
 #
 # This file contains targets for running code generation tests.
-# These tests compile C code to assembly and optionally run it.
+# Tests are organized to run through ALL test directories.
 
 # Output directory for generated assembly
 TEST_OUTPUT_DIR = tests/output
 
 # ============================================================
-# Code Generation Tests
+# Helper function to run codegen tests on a directory
+# Usage: $(call run_codegen_tests,directory,standard,label)
 # ============================================================
 
-# Create output directory
-$(TEST_OUTPUT_DIR):
-	mkdir -p $(TEST_OUTPUT_DIR)
-
-# Run all codegen tests
-test-codegen: test-codegen-basic test-codegen-multifile
-	@echo ""
-	@echo "Code generation tests complete."
-
-# Basic code generation tests - compile to assembly
-test-codegen-basic: $(TARGET) | $(TEST_OUTPUT_DIR)
-	@echo "=== Basic Code Generation Tests ==="
+define run_codegen_tests
+	@echo "=== $(3) Code Generation Tests ($(1)) ==="
 	@passed=0; failed=0; \
-	for f in $(TESTDIR)/c89/*.c; do \
+	for f in $(1)/*.c; do \
 		if [ -f "$$f" ]; then \
 			base=$$(basename "$$f" .c); \
-			printf "  %-45s " "$$f"; \
-			if ./$(TARGET) -std=c89 -I includes -o $(TEST_OUTPUT_DIR)/$$base.s "$$f" 2>/dev/null; then \
+			printf "  %-50s " "$$f"; \
+			if ./$(TARGET) -std=$(2) -I includes -o $(TEST_OUTPUT_DIR)/$$base.s "$$f" 2>/dev/null; then \
 				echo "OK"; passed=$$((passed+1)); \
 			else \
 				echo "FAILED"; failed=$$((failed+1)); \
 			fi; \
 		fi; \
 	done; \
-	echo "  Basic codegen: $$passed passed, $$failed failed"; \
+	echo "  $(3): $$passed passed, $$failed failed"; \
 	echo ""
+endef
 
-# Multi-file compilation tests
+# ============================================================
+# Setup
+# ============================================================
+
+# Create output directory
+$(TEST_OUTPUT_DIR):
+	mkdir -p $(TEST_OUTPUT_DIR)
+
+# ============================================================
+# Individual Code Generation Test Targets
+# ============================================================
+
+# C89 codegen tests
+test-codegen-c89: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR)/c89,c89,C89)
+
+# C99 codegen tests
+test-codegen-c99: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR)/c99,c99,C99)
+
+# C11 codegen tests
+test-codegen-c11: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR)/c11,c11,C11)
+
+# C23 codegen tests
+test-codegen-c23: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR)/c23,c23,C23)
+
+# GNU extension codegen tests
+test-codegen-gnu: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR)/gnu,gnu99,GNU)
+
+# Legacy codegen tests (tests/*.c)
+test-codegen-legacy: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_codegen_tests,$(TESTDIR),c99,Legacy)
+
+# ============================================================
+# Combined Code Generation Test Targets
+# ============================================================
+
+# Run all codegen tests (all directories)
+test-codegen: $(TARGET) | $(TEST_OUTPUT_DIR)
+	@echo "=========================================="
+	@echo "Running ALL Code Generation Tests"
+	@echo "=========================================="
+	@echo ""
+	$(call run_codegen_tests,$(TESTDIR)/c89,c89,C89)
+	$(call run_codegen_tests,$(TESTDIR)/c99,c99,C99)
+	$(call run_codegen_tests,$(TESTDIR)/c11,c11,C11)
+	$(call run_codegen_tests,$(TESTDIR)/c23,c23,C23)
+	$(call run_codegen_tests,$(TESTDIR)/gnu,gnu99,GNU)
+	$(call run_codegen_tests,$(TESTDIR),c99,Legacy)
+	@echo "=========================================="
+	@echo "Code generation tests complete."
+	@echo "=========================================="
+
+# Basic codegen tests (alias for backward compatibility)
+test-codegen-basic: test-codegen-c89
+
+# ============================================================
+# Multi-File Compilation Tests
+# ============================================================
+
 test-codegen-multifile: $(TARGET) | $(TEST_OUTPUT_DIR)
 	@echo "=== Multi-File Compilation Tests ==="
-	@printf "  %-45s " "tests/multi_file/"
+	@printf "  %-50s " "tests/multi_file/"
 	@if ./$(TARGET) -std=c99 -I includes -o $(TEST_OUTPUT_DIR)/multi_file.s \
 		$(TESTDIR)/multi_file/main_test.c \
 		$(TESTDIR)/multi_file/math_funcs.c \
@@ -56,77 +110,41 @@ test-codegen-multifile: $(TARGET) | $(TEST_OUTPUT_DIR)
 # Architecture-Specific Code Generation Tests
 # ============================================================
 
-# Test x86_64 code generation
-test-codegen-x86_64: $(TARGET) | $(TEST_OUTPUT_DIR)
-	@echo "=== x86_64 Code Generation Tests ==="
+# Helper for architecture-specific tests
+define run_arch_codegen_tests
+	@echo "=== $(2) Code Generation Tests ==="
 	@passed=0; failed=0; \
-	for f in $(TESTDIR)/c89/*.c; do \
+	for f in $(TESTDIR)/c89/*.c $(TESTDIR)/c99/*.c $(TESTDIR)/*.c; do \
 		if [ -f "$$f" ]; then \
 			base=$$(basename "$$f" .c); \
-			printf "  %-45s " "$$f"; \
-			if ./$(TARGET) -arch=x86_64 -std=c89 -I includes -o $(TEST_OUTPUT_DIR)/$$base.x86_64.s "$$f" 2>/dev/null; then \
+			dir=$$(dirname "$$f" | sed 's|.*/||'); \
+			printf "  %-50s " "$$f"; \
+			if ./$(TARGET) -arch=$(1) -std=c99 -I includes -o $(TEST_OUTPUT_DIR)/$$base.$(1).s "$$f" 2>/dev/null; then \
 				echo "OK"; passed=$$((passed+1)); \
 			else \
 				echo "FAILED"; failed=$$((failed+1)); \
 			fi; \
 		fi; \
 	done; \
-	echo "  x86_64: $$passed passed, $$failed failed"; \
+	echo "  $(2): $$passed passed, $$failed failed"; \
 	echo ""
+endef
+
+# Test x86_64 code generation
+test-codegen-x86_64: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_arch_codegen_tests,x86_64,x86_64)
 
 # Test ARM64 code generation
 test-codegen-arm64: $(TARGET) | $(TEST_OUTPUT_DIR)
-	@echo "=== ARM64 Code Generation Tests ==="
-	@passed=0; failed=0; \
-	for f in $(TESTDIR)/c89/*.c; do \
-		if [ -f "$$f" ]; then \
-			base=$$(basename "$$f" .c); \
-			printf "  %-45s " "$$f"; \
-			if ./$(TARGET) -arch=arm64 -std=c89 -I includes -o $(TEST_OUTPUT_DIR)/$$base.arm64.s "$$f" 2>/dev/null; then \
-				echo "OK"; passed=$$((passed+1)); \
-			else \
-				echo "FAILED"; failed=$$((failed+1)); \
-			fi; \
-		fi; \
-	done; \
-	echo "  ARM64: $$passed passed, $$failed failed"; \
-	echo ""
+	$(call run_arch_codegen_tests,arm64,ARM64)
 
 # Test ARM64 macOS code generation
 test-codegen-arm64-macos: $(TARGET) | $(TEST_OUTPUT_DIR)
-	@echo "=== ARM64 macOS Code Generation Tests ==="
-	@passed=0; failed=0; \
-	for f in $(TESTDIR)/c89/*.c; do \
-		if [ -f "$$f" ]; then \
-			base=$$(basename "$$f" .c); \
-			printf "  %-45s " "$$f"; \
-			if ./$(TARGET) -arch=arm64-macos -std=c89 -I includes -o $(TEST_OUTPUT_DIR)/$$base.arm64-macos.s "$$f" 2>/dev/null; then \
-				echo "OK"; passed=$$((passed+1)); \
-			else \
-				echo "FAILED"; failed=$$((failed+1)); \
-			fi; \
-		fi; \
-	done; \
-	echo "  ARM64-macOS: $$passed passed, $$failed failed"; \
-	echo ""
+	$(call run_arch_codegen_tests,arm64-macos,ARM64-macOS)
 
 # Test S/370 code generation
 test-codegen-s370: $(TARGET) | $(TEST_OUTPUT_DIR)
-	@echo "=== S/370 Code Generation Tests ==="
-	@passed=0; failed=0; \
-	for f in $(TESTDIR)/c89/*.c; do \
-		if [ -f "$$f" ]; then \
-			base=$$(basename "$$f" .c); \
-			printf "  %-45s " "$$f"; \
-			if ./$(TARGET) -arch=s370 -std=c89 -I includes -o $(TEST_OUTPUT_DIR)/$$base.s370.asm "$$f" 2>/dev/null; then \
-				echo "OK"; passed=$$((passed+1)); \
-			else \
-				echo "FAILED"; failed=$$((failed+1)); \
-			fi; \
-		fi; \
-	done; \
-	echo "  S/370: $$passed passed, $$failed failed"; \
-	echo ""
+	$(call run_arch_codegen_tests,s370,S/370)
 
 # Test all architectures
 test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos test-codegen-s370
@@ -137,16 +155,13 @@ test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64
 # Execution Tests (compile and run)
 # ============================================================
 
-# These tests require a working assembler and linker for the target platform.
-# Currently only supported on the host architecture.
-
 test-run: $(TARGET) | $(TEST_OUTPUT_DIR)
 	@echo "=== Execution Tests ==="
 	@echo "Note: These tests compile and run code on the host system."
 	@echo "Requires: assembler (as/gas) and linker (ld/gcc)"
 	@echo ""
 	@if [ -f $(TESTDIR)/hello.c ]; then \
-		printf "  %-45s " "tests/hello.c"; \
+		printf "  %-50s " "tests/hello.c"; \
 		if ./$(TARGET) -std=c99 -I includes -o $(TEST_OUTPUT_DIR)/hello.s $(TESTDIR)/hello.c 2>/dev/null && \
 		   gcc -c $(TEST_OUTPUT_DIR)/hello.s -o $(TEST_OUTPUT_DIR)/hello.o 2>/dev/null && \
 		   gcc $(TEST_OUTPUT_DIR)/hello.o -o $(TEST_OUTPUT_DIR)/hello 2>/dev/null; then \
@@ -162,6 +177,9 @@ test-run: $(TARGET) | $(TEST_OUTPUT_DIR)
 	fi
 	@echo ""
 
-# Clean test outputs
+# ============================================================
+# Cleanup
+# ============================================================
+
 clean-tests:
 	rm -rf $(TEST_OUTPUT_DIR)

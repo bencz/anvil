@@ -25,6 +25,7 @@ Thumbs.db
 samples/mcc/*.asm
 samples/mcc/obj
 samples/mcc/mcc
+samples/mcc/tests/output
 
 # Generated files in examples
 examples/fp_math_lib/generate_math
@@ -44,3 +45,4 @@ examples/base64_lib/base64_lib.s
 examples/base64_lib/base64_lib.o
 examples/base64_lib/test_base64.o
 examples/base64_lib/test_base64
+

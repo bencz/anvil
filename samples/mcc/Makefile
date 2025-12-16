@@ -8,6 +8,9 @@
 #   mk/tests.mk        - Syntax test targets
 #   mk/tests_codegen.mk - Code generation test targets
 
+# Default target (must be first!)
+.DEFAULT_GOAL := all
+
 # Include configuration
 include mk/config.mk
 
