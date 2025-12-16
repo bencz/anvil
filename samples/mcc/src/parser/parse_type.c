@@ -310,6 +310,7 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
         
         stype->data.record.fields = fields;
         stype->data.record.num_fields = num_fields;
+        stype->data.record.is_complete = true;
         
         /* Register in struct table if tagged */
         if (tag) {
