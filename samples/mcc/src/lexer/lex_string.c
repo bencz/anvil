@@ -89,6 +89,8 @@ int lex_escape_char(mcc_lexer_t *lex)
 mcc_token_t *lex_char_literal(mcc_lexer_t *lex)
 {
     int start_col = lex->column;
+    size_t start_pos = lex->pos; /* Position of opening quote */
+    
     lex_advance(lex); /* Skip opening quote */
     
     int value;
@@ -108,12 +110,22 @@ mcc_token_t *lex_char_literal(mcc_lexer_t *lex)
     mcc_token_t *tok = lex_make_token(lex, TOK_CHAR_LIT);
     tok->location.column = start_col;
     tok->literal.char_val.value = value;
+    
+    /* Store raw text with quotes for preprocessor output */
+    size_t raw_len = lex->pos - start_pos;
+    char *raw = mcc_alloc(lex->ctx, raw_len + 1);
+    memcpy(raw, lex->source + start_pos, raw_len);
+    raw[raw_len] = '\0';
+    tok->raw_text = raw;
+    
     return tok;
 }
 
 mcc_token_t *lex_string_literal(mcc_lexer_t *lex)
 {
     int start_col = lex->column;
+    size_t start_pos = lex->pos; /* Position of opening quote */
+    
     lex_advance(lex); /* Skip opening quote */
     
     char buf[LEX_MAX_STRING_LEN];
@@ -145,5 +157,13 @@ mcc_token_t *lex_string_literal(mcc_lexer_t *lex)
     tok->literal.string_val.length = len;
     tok->text = tok->literal.string_val.value;
     tok->text_len = len;
+    
+    /* Store raw text with quotes for preprocessor output */
+    size_t raw_len = lex->pos - start_pos;
+    char *raw = mcc_alloc(lex->ctx, raw_len + 1);
+    memcpy(raw, lex->source + start_pos, raw_len);
+    raw[raw_len] = '\0';
+    tok->raw_text = raw;
+    
     return tok;
 }

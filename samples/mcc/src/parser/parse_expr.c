@@ -44,12 +44,31 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             node->data.char_lit.value = tok->literal.char_val.value;
             return node;
             
-        case TOK_STRING_LIT:
+        case TOK_STRING_LIT: {
             parse_advance(p);
+            /* Handle string literal concatenation (C89 feature) */
+            /* Adjacent string literals are concatenated */
+            const char *value = tok->literal.string_val.value;
+            size_t length = tok->literal.string_val.length;
+            
+            while (parse_check(p, TOK_STRING_LIT)) {
+                mcc_token_t *next = p->peek;
+                parse_advance(p);
+                /* Concatenate strings */
+                size_t new_len = length + next->literal.string_val.length;
+                char *new_val = mcc_alloc(p->ctx, new_len + 1);
+                memcpy(new_val, value, length);
+                memcpy(new_val + length, next->literal.string_val.value, next->literal.string_val.length);
+                new_val[new_len] = '\0';
+                value = new_val;
+                length = new_len;
+            }
+            
             node = mcc_ast_create(p->ctx, AST_STRING_LIT, tok->location);
-            node->data.string_lit.value = tok->literal.string_val.value;
-            node->data.string_lit.length = tok->literal.string_val.length;
+            node->data.string_lit.value = value;
+            node->data.string_lit.length = length;
             return node;
+        }
             
         case TOK_IDENT:
             parse_advance(p);

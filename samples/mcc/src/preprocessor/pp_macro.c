@@ -67,6 +67,75 @@ void pp_pop_expanding(mcc_preprocessor_t *pp)
 }
 
 /* ============================================================
+ * Helper Functions
+ * ============================================================ */
+
+/* Stringify a token list (for # operator) */
+static mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
+{
+    /* Calculate required buffer size */
+    size_t len = 2; /* For quotes */
+    for (mcc_token_t *t = tokens; t; t = t->next) {
+        if (t != tokens && t->has_space) len++; /* Space between tokens */
+        const char *text = t->raw_text ? t->raw_text : t->text;
+        if (text) {
+            if (t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT) {
+                /* Need to escape quotes and backslashes in the content */
+                for (const char *p = text; *p; p++) {
+                    if (*p == '"' || *p == '\\') len++;
+                    len++;
+                }
+            } else {
+                len += strlen(text);
+            }
+        }
+    }
+    len++; /* Null terminator */
+    
+    char *buf = mcc_alloc(pp->ctx, len);
+    char *p = buf;
+    *p++ = '"';
+    
+    for (mcc_token_t *t = tokens; t; t = t->next) {
+        if (t != tokens && t->has_space) *p++ = ' ';
+        const char *text = t->raw_text ? t->raw_text : t->text;
+        if (text) {
+            if (t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT) {
+                for (const char *s = text; *s; s++) {
+                    if (*s == '"' || *s == '\\') *p++ = '\\';
+                    *p++ = *s;
+                }
+            } else {
+                while (*text) *p++ = *text++;
+            }
+        }
+    }
+    *p++ = '"';
+    *p = '\0';
+    
+    mcc_token_t *result = mcc_token_create(pp->ctx);
+    result->type = TOK_STRING_LIT;
+    result->text = buf + 1; /* Skip opening quote for value */
+    result->text_len = p - buf - 2;
+    result->raw_text = buf; /* Full string with quotes */
+    result->literal.string_val.value = buf + 1;
+    result->literal.string_val.length = p - buf - 2;
+    return result;
+}
+
+/* Find parameter index by name */
+static int pp_find_param_index(mcc_macro_t *macro, const char *name)
+{
+    int idx = 0;
+    for (mcc_macro_param_t *param = macro->params; param; param = param->next, idx++) {
+        if (strcmp(param->name, name) == 0) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
+/* ============================================================
  * Macro Expansion
  * ============================================================ */
 
@@ -176,6 +245,57 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
         mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
         
         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
+            /* Check for # (stringification) operator */
+            if (body_tok->type == TOK_HASH && body_tok->next && 
+                body_tok->next->type == TOK_IDENT && pp_has_stringify(pp)) {
+                mcc_token_t *param_tok = body_tok->next;
+                int param_idx = pp_find_param_index(macro, param_tok->text);
+                
+                /* Also check for __VA_ARGS__ */
+                bool is_va_args = macro->is_variadic && 
+                                  strcmp(param_tok->text, "__VA_ARGS__") == 0;
+                
+                if (param_idx >= 0 && param_idx < num_args) {
+                    /* Stringify the unexpanded argument */
+                    mcc_token_t *str_tok = pp_stringify_tokens(pp, args[param_idx]);
+                    str_tok->next = NULL;
+                    if (!expanded_head) expanded_head = str_tok;
+                    if (expanded_tail) expanded_tail->next = str_tok;
+                    expanded_tail = str_tok;
+                    body_tok = param_tok; /* Skip the parameter token */
+                    continue;
+                } else if (is_va_args && pp_has_variadic_macros(pp)) {
+                    /* Stringify all variadic arguments */
+                    mcc_token_t *va_head = NULL, *va_tail = NULL;
+                    for (int i = macro->num_params; i < num_args; i++) {
+                        if (i > macro->num_params) {
+                            mcc_token_t *comma = mcc_token_create(pp->ctx);
+                            comma->type = TOK_COMMA;
+                            comma->text = ",";
+                            comma->has_space = false;
+                            comma->next = NULL;
+                            if (!va_head) va_head = comma;
+                            if (va_tail) va_tail->next = comma;
+                            va_tail = comma;
+                        }
+                        for (mcc_token_t *t = args[i]; t; t = t->next) {
+                            mcc_token_t *copy = mcc_token_copy(pp->ctx, t);
+                            copy->next = NULL;
+                            if (!va_head) va_head = copy;
+                            if (va_tail) va_tail->next = copy;
+                            va_tail = copy;
+                        }
+                    }
+                    mcc_token_t *str_tok = pp_stringify_tokens(pp, va_head);
+                    str_tok->next = NULL;
+                    if (!expanded_head) expanded_head = str_tok;
+                    if (expanded_tail) expanded_tail->next = str_tok;
+                    expanded_tail = str_tok;
+                    body_tok = param_tok;
+                    continue;
+                }
+            }
+            
             if (body_tok->type == TOK_IDENT) {
                 /* Check if it's a parameter */
                 int param_idx = -1;
@@ -226,6 +346,75 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                         continue;
                     } else {
                         mcc_error(pp->ctx, "__VA_ARGS__ requires C99 or later (-std=c99)");
+                    }
+                }
+                
+                /* Check for __VA_OPT__ (C23) */
+                if (macro->is_variadic && strcmp(body_tok->text, "__VA_OPT__") == 0) {
+                    if (pp_has_va_opt(pp)) {
+                        /* __VA_OPT__(content) - include content only if variadic args present */
+                        mcc_token_t *next_tok = body_tok->next;
+                        if (next_tok && next_tok->type == TOK_LPAREN) {
+                            body_tok = next_tok; /* Skip __VA_OPT__ */
+                            int depth = 1;
+                            mcc_token_t *content_head = NULL, *content_tail = NULL;
+                            
+                            /* Collect content inside __VA_OPT__(...) */
+                            while (body_tok->next && depth > 0) {
+                                body_tok = body_tok->next;
+                                if (body_tok->type == TOK_LPAREN) depth++;
+                                else if (body_tok->type == TOK_RPAREN) {
+                                    depth--;
+                                    if (depth == 0) break;
+                                }
+                                if (depth > 0) {
+                                    mcc_token_t *copy = mcc_token_copy(pp->ctx, body_tok);
+                                    copy->next = NULL;
+                                    if (!content_head) content_head = copy;
+                                    if (content_tail) content_tail->next = copy;
+                                    content_tail = copy;
+                                }
+                            }
+                            
+                            /* Only include content if there are variadic arguments */
+                            bool has_va_args = (num_args > macro->num_params);
+                            if (has_va_args && content_head) {
+                                /* Process content, substituting __VA_ARGS__ */
+                                for (mcc_token_t *ct = content_head; ct; ct = ct->next) {
+                                    if (ct->type == TOK_IDENT && strcmp(ct->text, "__VA_ARGS__") == 0) {
+                                        /* Replace with variadic args */
+                                        for (int i = macro->num_params; i < num_args; i++) {
+                                            if (i > macro->num_params) {
+                                                mcc_token_t *comma = mcc_token_create(pp->ctx);
+                                                comma->type = TOK_COMMA;
+                                                comma->text = ",";
+                                                comma->next = NULL;
+                                                if (!expanded_head) expanded_head = comma;
+                                                if (expanded_tail) expanded_tail->next = comma;
+                                                expanded_tail = comma;
+                                            }
+                                            mcc_token_t *arg_list = expanded_args ? expanded_args[i] : args[i];
+                                            for (mcc_token_t *at = arg_list; at; at = at->next) {
+                                                mcc_token_t *copy = mcc_token_copy(pp->ctx, at);
+                                                copy->next = NULL;
+                                                if (!expanded_head) expanded_head = copy;
+                                                if (expanded_tail) expanded_tail->next = copy;
+                                                expanded_tail = copy;
+                                            }
+                                        }
+                                    } else {
+                                        mcc_token_t *copy = mcc_token_copy(pp->ctx, ct);
+                                        copy->next = NULL;
+                                        if (!expanded_head) expanded_head = copy;
+                                        if (expanded_tail) expanded_tail->next = copy;
+                                        expanded_tail = copy;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    } else {
+                        mcc_error(pp->ctx, "__VA_OPT__ requires C23 or later (-std=c23)");
                     }
                 }
             }

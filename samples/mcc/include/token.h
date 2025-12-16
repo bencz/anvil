@@ -192,6 +192,9 @@ typedef struct mcc_token {
     const char *text;
     size_t text_len;
     
+    /* Raw text from source (with quotes for strings/chars, for preprocessor output) */
+    const char *raw_text;
+    
     /* Literal values */
     union {
         struct {

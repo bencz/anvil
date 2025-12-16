@@ -138,6 +138,8 @@ const char *mcc_token_type_name(mcc_token_type_t type)
 const char *mcc_token_to_string(mcc_token_t *tok)
 {
     if (!tok) return "";
+    /* Use raw_text for strings/chars (includes quotes) */
+    if (tok->raw_text) return tok->raw_text;
     if (tok->text) return tok->text;
     return mcc_token_type_name(tok->type);
 }
@@ -300,6 +302,9 @@ mcc_token_t *mcc_token_copy(mcc_context_t *ctx, mcc_token_t *tok)
     copy->next = NULL;
     if (tok->text) {
         copy->text = mcc_strdup(ctx, tok->text);
+    }
+    if (tok->raw_text) {
+        copy->raw_text = mcc_strdup(ctx, tok->raw_text);
     }
     return copy;
 }

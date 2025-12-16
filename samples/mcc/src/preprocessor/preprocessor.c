@@ -176,6 +176,12 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                         /* Build expanded body with argument substitution */
                         mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
                         
+                        #define APPEND_EXP(t) do { \
+                            if (!expanded_head) expanded_head = (t); \
+                            if (expanded_tail) expanded_tail->next = (t); \
+                            expanded_tail = (t); \
+                        } while(0)
+                        
                         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
                             if (body_tok->type == TOK_IDENT) {
                                 /* Check if it's a parameter */
@@ -194,9 +200,28 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                                     for (mcc_token_t *a = arg_list; a; a = a->next) {
                                         mcc_token_t *copy = mcc_token_copy(pp->ctx, a);
                                         copy->next = NULL;
-                                        if (!expanded_head) expanded_head = copy;
-                                        if (expanded_tail) expanded_tail->next = copy;
-                                        expanded_tail = copy;
+                                        APPEND_EXP(copy);
+                                    }
+                                    continue;
+                                }
+                                
+                                /* Check for __VA_ARGS__ */
+                                if (macro->is_variadic && strcmp(body_tok->text, "__VA_ARGS__") == 0) {
+                                    /* Add all variadic arguments */
+                                    for (int i = macro->num_params; i < num_args; i++) {
+                                        if (i > macro->num_params) {
+                                            mcc_token_t *comma = mcc_token_create(pp->ctx);
+                                            comma->type = TOK_COMMA;
+                                            comma->text = ",";
+                                            comma->next = NULL;
+                                            APPEND_EXP(comma);
+                                        }
+                                        mcc_token_t *arg_list = expanded_args ? expanded_args[i] : args[i];
+                                        for (mcc_token_t *a = arg_list; a; a = a->next) {
+                                            mcc_token_t *copy = mcc_token_copy(pp->ctx, a);
+                                            copy->next = NULL;
+                                            APPEND_EXP(copy);
+                                        }
                                     }
                                     continue;
                                 }
@@ -205,10 +230,10 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                             /* Copy token as-is */
                             mcc_token_t *copy = mcc_token_copy(pp->ctx, body_tok);
                             copy->next = NULL;
-                            if (!expanded_head) expanded_head = copy;
-                            if (expanded_tail) expanded_tail->next = copy;
-                            expanded_tail = copy;
+                            APPEND_EXP(copy);
                         }
+                        
+                        #undef APPEND_EXP
                         
                         /* Recursively process expanded tokens */
                         if (expanded_head) {
