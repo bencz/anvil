@@ -17,7 +17,7 @@ bool sema_analyze_compound_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
     
     for (size_t i = 0; i < stmt->data.compound_stmt.num_stmts; i++) {
         mcc_ast_node_t *s = stmt->data.compound_stmt.stmts[i];
-        if (s->kind == AST_VAR_DECL || s->kind == AST_FUNC_DECL) {
+        if (s->kind == AST_VAR_DECL || s->kind == AST_FUNC_DECL || s->kind == AST_DECL_LIST) {
             sema_analyze_decl(sema, s);
         } else {
             sema_analyze_stmt(sema, s);

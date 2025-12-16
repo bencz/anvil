@@ -47,6 +47,7 @@ static const char *ast_kind_names[] = {
     [AST_SIZEOF_EXPR]      = "SizeofExpr",
     [AST_COMMA_EXPR]       = "CommaExpr",
     [AST_INIT_LIST]        = "InitList",
+    [AST_DECL_LIST]        = "DeclList",
 };
 
 static const char *binop_names[] = {
@@ -240,6 +241,12 @@ static void ast_dump_node(mcc_ast_node_t *node, FILE *out, int indent)
         case AST_VAR_DECL:
             if (node->data.var_decl.init) {
                 ast_dump_node(node->data.var_decl.init, out, indent + 1);
+            }
+            break;
+            
+        case AST_DECL_LIST:
+            for (size_t i = 0; i < node->data.decl_list.num_decls; i++) {
+                ast_dump_node(node->data.decl_list.decls[i], out, indent + 1);
             }
             break;
             

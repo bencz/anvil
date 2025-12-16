@@ -295,6 +295,8 @@ bool mcc_type_is_integer(mcc_type_t *type)
         case TYPE_SHORT:
         case TYPE_INT:
         case TYPE_LONG:
+        case TYPE_LONG_LONG:
+        case TYPE_BOOL:
         case TYPE_ENUM:
             return true;
         default:

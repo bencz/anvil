@@ -13,8 +13,20 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
     if (!expr) return NULL;
     
     switch (expr->kind) {
-        case AST_INT_LIT:
-            return anvil_const_i32(cg->anvil_ctx, (int32_t)expr->data.int_lit.value);
+        case AST_INT_LIT: {
+            /* Use appropriate type based on suffix */
+            switch (expr->data.int_lit.suffix) {
+                case INT_SUFFIX_LL:
+                case INT_SUFFIX_ULL:
+                    return anvil_const_i64(cg->anvil_ctx, (int64_t)expr->data.int_lit.value);
+                case INT_SUFFIX_L:
+                case INT_SUFFIX_UL:
+                    /* On 64-bit systems, long is 64-bit */
+                    return anvil_const_i64(cg->anvil_ctx, (int64_t)expr->data.int_lit.value);
+                default:
+                    return anvil_const_i32(cg->anvil_ctx, (int32_t)expr->data.int_lit.value);
+            }
+        }
             
         case AST_FLOAT_LIT:
             if (expr->data.float_lit.suffix == FLOAT_SUFFIX_F) {
