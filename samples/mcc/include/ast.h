@@ -249,6 +249,7 @@ struct mcc_ast_node {
             mcc_ast_node_t **enumerators;
             size_t num_enumerators;
             bool is_definition;
+            struct mcc_type *enum_type;  /* For accessing enum constants */
         } enum_decl;
         
         /* Enumerator */

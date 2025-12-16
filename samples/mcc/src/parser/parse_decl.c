@@ -632,6 +632,7 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
             decl->data.enum_decl.enumerators = NULL;
             decl->data.enum_decl.num_enumerators = base_type->data.enumeration.num_constants;
             decl->data.enum_decl.is_definition = base_type->data.enumeration.is_complete;
+            decl->data.enum_decl.enum_type = base_type;
             return decl;
         }
         

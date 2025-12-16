@@ -142,10 +142,27 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 
 static bool analyze_typedef_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
+    mcc_type_t *type = decl->data.typedef_decl.type;
+    
+    /* If the typedef is for an enum, register the enum constants */
+    if (type && type->kind == TYPE_ENUM && type->data.enumeration.is_complete) {
+        mcc_type_t *int_type = mcc_type_int(sema->types);
+        for (mcc_enum_const_t *c = type->data.enumeration.constants; c; c = c->next) {
+            mcc_symbol_t *sym = mcc_symtab_define(sema->symtab,
+                c->name,
+                SYM_ENUM_CONST,
+                int_type,
+                decl->location);
+            if (sym) {
+                sym->data.enum_value = (int)c->value;
+            }
+        }
+    }
+    
     mcc_symtab_define(sema->symtab,
         decl->data.typedef_decl.name,
         SYM_TYPEDEF,
-        decl->data.typedef_decl.type,
+        type,
         decl->location);
     return true;
 }
@@ -169,10 +186,23 @@ static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 
 static bool analyze_enum_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
-    /* Enum type is already created by parser */
-    /* Enum constants are already defined */
-    (void)sema;
-    (void)decl;
+    /* Get the enum type from the declaration */
+    mcc_type_t *enum_type = decl->data.enum_decl.enum_type;
+    if (!enum_type) return true;
+    
+    /* Register each enum constant in the symbol table */
+    mcc_type_t *int_type = mcc_type_int(sema->types);
+    for (mcc_enum_const_t *c = enum_type->data.enumeration.constants; c; c = c->next) {
+        mcc_symbol_t *sym = mcc_symtab_define(sema->symtab,
+            c->name,
+            SYM_ENUM_CONST,
+            int_type,
+            decl->location);
+        if (sym) {
+            sym->data.enum_value = (int)c->value;
+        }
+    }
+    
     return true;
 }
 
