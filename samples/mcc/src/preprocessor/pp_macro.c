@@ -135,6 +135,42 @@ static int pp_find_param_index(mcc_macro_t *macro, const char *name)
     return -1;
 }
 
+/* Paste two tokens together (for ## operator) */
+static mcc_token_t *pp_paste_tokens(mcc_preprocessor_t *pp, mcc_token_t *left, mcc_token_t *right)
+{
+    /* Get text from both tokens */
+    const char *left_text = left->text ? left->text : "";
+    const char *right_text = right->text ? right->text : "";
+    
+    /* Concatenate the text */
+    size_t left_len = strlen(left_text);
+    size_t right_len = strlen(right_text);
+    size_t total_len = left_len + right_len;
+    
+    char *pasted = mcc_alloc(pp->ctx, total_len + 1);
+    memcpy(pasted, left_text, left_len);
+    memcpy(pasted + left_len, right_text, right_len);
+    pasted[total_len] = '\0';
+    
+    /* Re-lex the pasted text to get the correct token type */
+    mcc_lexer_t *lex = mcc_lexer_create(pp->ctx);
+    mcc_lexer_init_string(lex, pasted, "<paste>");
+    mcc_token_t *result = mcc_lexer_next(lex);
+    
+    /* Check if we got a valid single token */
+    mcc_token_t *next = mcc_lexer_next(lex);
+    if (next->type != TOK_EOF) {
+        mcc_warning(pp->ctx, "Token pasting '%s' ## '%s' does not produce a valid token",
+                    left_text, right_text);
+    }
+    
+    /* Copy the result token and preserve has_space from left token */
+    result = mcc_token_copy(pp->ctx, result);
+    result->has_space = left->has_space;
+    result->next = NULL;
+    return result;
+}
+
 /* ============================================================
  * Macro Expansion
  * ============================================================ */
@@ -245,6 +281,77 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
         mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
         
         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
+            /* Check for ## (token pasting) operator - C89 feature */
+            if (body_tok->type == TOK_HASH_HASH) {
+                if (!pp_has_concat(pp)) {
+                    mcc_error(pp->ctx, "Token pasting operator '##' not supported in current mode");
+                    continue;
+                }
+                
+                /* ## requires a token before and after */
+                if (!expanded_tail || !body_tok->next) {
+                    mcc_error(pp->ctx, "'##' cannot appear at beginning or end of macro expansion");
+                    continue;
+                }
+                
+                /* Get the right operand - may need to substitute parameter */
+                mcc_token_t *right_tok = body_tok->next;
+                mcc_token_t *right_tokens = NULL;
+                
+                if (right_tok->type == TOK_IDENT) {
+                    int param_idx = pp_find_param_index(macro, right_tok->text);
+                    if (param_idx >= 0 && param_idx < num_args) {
+                        /* Use unexpanded argument for ## */
+                        right_tokens = args[param_idx];
+                    } else if (macro->is_variadic && strcmp(right_tok->text, "__VA_ARGS__") == 0) {
+                        /* Use first variadic argument */
+                        if (num_args > macro->num_params) {
+                            right_tokens = args[macro->num_params];
+                        }
+                    }
+                }
+                
+                if (!right_tokens) {
+                    /* Use the token itself */
+                    right_tokens = right_tok;
+                }
+                
+                /* Get the first token from right side */
+                mcc_token_t *right_first = right_tokens;
+                
+                /* Paste the last token with the first right token */
+                mcc_token_t *pasted = pp_paste_tokens(pp, expanded_tail, right_first);
+                
+                /* Replace the last token with the pasted result */
+                if (expanded_head == expanded_tail) {
+                    expanded_head = pasted;
+                } else {
+                    /* Find the token before expanded_tail */
+                    mcc_token_t *prev = expanded_head;
+                    while (prev && prev->next != expanded_tail) {
+                        prev = prev->next;
+                    }
+                    if (prev) {
+                        prev->next = pasted;
+                    }
+                }
+                expanded_tail = pasted;
+                
+                /* Add remaining tokens from right side if it was a parameter */
+                if (right_tokens != right_tok && right_first->next) {
+                    for (mcc_token_t *t = right_first->next; t; t = t->next) {
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, t);
+                        copy->next = NULL;
+                        expanded_tail->next = copy;
+                        expanded_tail = copy;
+                    }
+                }
+                
+                /* Skip the right operand token */
+                body_tok = right_tok;
+                continue;
+            }
+            
             /* Check for # (stringification) operator - C89 feature */
             if (body_tok->type == TOK_HASH && body_tok->next && 
                 body_tok->next->type == TOK_IDENT) {

@@ -269,7 +269,6 @@ When working with MCC code:
 
 ### Current Limitations
 
-- Token pasting (`##`) in macros
 - Computed includes (`#include` with macro-expanded filename)
 
 ### Recent Improvements

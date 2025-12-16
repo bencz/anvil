@@ -79,6 +79,10 @@ struct mcc_preprocessor {
     bool in_macro_expansion;
     const char **expanding_macros;  /* Stack of macros being expanded */
     size_t num_expanding;
+    
+    /* Space tracking for macro expansion */
+    bool next_has_space;            /* has_space for next emitted token */
+    bool use_next_has_space;        /* Whether to use next_has_space */
 };
 
 /* Preprocessor lifecycle */

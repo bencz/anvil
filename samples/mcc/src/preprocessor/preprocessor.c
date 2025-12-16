@@ -39,6 +39,12 @@ void pp_emit_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
     tok = mcc_token_copy(pp->ctx, tok);
     tok->next = NULL;
     
+    /* Apply saved has_space if set */
+    if (pp->use_next_has_space) {
+        tok->has_space = pp->next_has_space;
+        pp->use_next_has_space = false;
+    }
+    
     if (!pp->output_head) {
         pp->output_head = tok;
     }
@@ -84,6 +90,9 @@ void pp_process_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
         
         mcc_macro_t *macro = pp_lookup_macro(pp, tok->text);
         if (macro && !pp_is_expanding(pp, tok->text)) {
+            /* Save has_space for first emitted token */
+            pp->next_has_space = tok->has_space;
+            pp->use_next_has_space = true;
             pp_expand_macro(pp, macro);
             return;
         }
