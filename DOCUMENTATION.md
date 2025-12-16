@@ -1726,6 +1726,46 @@ anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
 anvil_pass_manager_register(pm, &my_pass);
 ```
 
+## Advanced Examples
+
+ANVIL includes three advanced examples that demonstrate generating linkable libraries:
+
+### Floating-Point Math Library (`examples/fp_math_lib/`)
+
+Generates exportable FP functions that can be linked with C programs:
+
+```bash
+make -C examples/fp_math_lib test
+```
+
+Functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
+
+### Dynamic Array Library (`examples/dynamic_array/`)
+
+Demonstrates calling external C functions (`malloc`, `free`, `memcpy`):
+
+```bash
+make -C examples/dynamic_array test
+```
+
+Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
+
+### Base64 Encoding Library (`examples/base64_lib/`)
+
+Demonstrates complex bitwise operations and `select` for conditional values:
+
+```bash
+make -C examples/base64_lib test
+```
+
+Functions: `base64_encode`, `base64_encoded_len`
+
+### Running All Advanced Examples
+
+```bash
+make test-examples-advanced
+```
+
 ## Building and Linking
 
 ### Compilation
@@ -1739,6 +1779,9 @@ make DEBUG=1
 
 # Clean build
 make clean && make
+
+# Build advanced examples
+make examples-advanced
 ```
 
 ### Linking

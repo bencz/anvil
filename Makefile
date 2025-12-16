@@ -105,16 +105,21 @@ examples-advanced: lib
 	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib
 	@echo "Building dynamic_array example..."
 	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array
+	@echo "Building base64_lib example..."
+	$(MAKE) -C $(EXAMPLES_DIR)/base64_lib
 
 test-examples-advanced: examples-advanced
 	@echo "Testing fp_math_lib..."
 	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib test
 	@echo "Testing dynamic_array..."
 	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array test
+	@echo "Testing base64_lib..."
+	$(MAKE) -C $(EXAMPLES_DIR)/base64_lib test
 
 clean-examples-advanced:
 	$(MAKE) -C $(EXAMPLES_DIR)/fp_math_lib clean
 	$(MAKE) -C $(EXAMPLES_DIR)/dynamic_array clean
+	$(MAKE) -C $(EXAMPLES_DIR)/base64_lib clean
 
 clean:
 	rm -rf $(BUILD_DIR) $(LIB_DIR)

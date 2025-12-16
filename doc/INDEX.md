@@ -155,16 +155,28 @@ anvil_module_codegen(mod, &output, &len);
 - String table management for string literals
 - Global variable emission
 
+### ARM64 Backend Improvements
+- **External function calls**: Direct `bl` for C library functions (`malloc`, `free`, `memcpy`)
+- **SSA value preservation**: Results saved to stack slots via `arm64_save_result()`
+- **Large stack frames**: `arm64_emit_stack_load/store/addr()` for offsets >255 bytes
+- **Type-aware memory ops**: `ldr w0`/`str w9` for 32-bit, `ldrb`/`strb` for 8-bit
+- **Parameter spilling**: Parameters saved at function entry for loop safety
+
 ### Advanced Examples
-Two advanced examples demonstrate generating linkable libraries:
+Three advanced examples demonstrate generating linkable libraries:
 
 - **`examples/fp_math_lib/`**: FP math library with exportable functions
   - Functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
-  - Build: `make -C examples/fp_math_lib test`
+  - Build: `make -C examples/fp_math_lib test` (24 tests)
 
 - **`examples/dynamic_array/`**: Dynamic array library calling C functions
   - Demonstrates: `malloc`, `free`, `memcpy` calls from ANVIL code
   - Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
-  - Build: `make -C examples/dynamic_array test`
+  - Build: `make -C examples/dynamic_array test` (41 tests)
+
+- **`examples/base64_lib/`**: Base64 encoding library
+  - Demonstrates: bitwise ops, byte manipulation, `select` for conditionals
+  - Functions: `base64_encode`, `base64_encoded_len`
+  - Build: `make -C examples/base64_lib test` (28 tests)
 
 Or from root: `make test-examples-advanced`

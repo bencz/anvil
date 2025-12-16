@@ -63,6 +63,7 @@ static const char *arm64_wreg_names[] = {
 #define ARM64_FP  29  /* Frame pointer (x29) */
 #define ARM64_LR  30  /* Link register (x30) */
 #define ARM64_SP  31  /* Stack pointer */
+#define ARM64_XZR 32  /* Zero register (special) */
 
 /* String table entry */
 typedef struct {
@@ -204,13 +205,58 @@ static int arm64_get_or_create_slot(arm64_backend_t *be, anvil_value_t *val)
 /* Forward declarations */
 static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int target_reg);
 
+/* Emit load from stack slot with large offset support */
+static void arm64_emit_stack_load(arm64_backend_t *be, int offset, int target_reg)
+{
+    if (offset <= 255) {
+        /* Small offset - use direct addressing */
+        anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #-%d]\n",
+            arm64_xreg_names[target_reg], offset);
+    } else {
+        /* Large offset - compute address first */
+        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tldr %s, [x16]\n",
+            arm64_xreg_names[target_reg]);
+    }
+}
+
+/* Emit store to stack slot with large offset support */
+static void arm64_emit_stack_store(arm64_backend_t *be, int offset, int src_reg)
+{
+    const char *reg_name = (src_reg == ARM64_XZR) ? "xzr" : arm64_xreg_names[src_reg];
+    
+    if (offset <= 255) {
+        /* Small offset - use direct addressing */
+        anvil_strbuf_appendf(&be->code, "\tstr %s, [x29, #-%d]\n", reg_name, offset);
+    } else {
+        /* Large offset - compute address first */
+        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tstr %s, [x16]\n", reg_name);
+    }
+}
+
+/* Emit sub for stack address with large offset support */
+static void arm64_emit_stack_addr(arm64_backend_t *be, int offset, int target_reg)
+{
+    if (offset <= 4095) {
+        /* Small offset - single sub instruction */
+        anvil_strbuf_appendf(&be->code, "\tsub %s, x29, #%d\n",
+            arm64_xreg_names[target_reg], offset);
+    } else {
+        /* Large offset - use mov + sub */
+        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tsub %s, x29, x16\n",
+            arm64_xreg_names[target_reg]);
+    }
+}
+
 /* Save instruction result to stack slot (for SSA value preservation) */
 static void arm64_save_result(arm64_backend_t *be, anvil_instr_t *instr)
 {
     if (instr->result) {
         int offset = arm64_get_or_create_slot(be, instr->result);
         if (offset >= 0) {
-            anvil_strbuf_appendf(&be->code, "\tstr x0, [x29, #-%d]\n", offset);
+            arm64_emit_stack_store(be, offset, ARM64_X0);
         }
     }
 }
@@ -385,8 +431,7 @@ static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int t
                 /* Parameters are saved to stack slots at function entry */
                 int offset = arm64_get_stack_slot(be, val);
                 if (offset >= 0) {
-                    anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #-%d]\n",
-                        arm64_xreg_names[target_reg], offset);
+                    arm64_emit_stack_load(be, offset, target_reg);
                 } else {
                     /* Fallback: load from register (only valid at function entry) */
                     size_t idx = val->data.param.index;
@@ -410,15 +455,13 @@ static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int t
                 /* Load address of stack slot */
                 int offset = arm64_get_stack_slot(be, val);
                 if (offset >= 0) {
-                    anvil_strbuf_appendf(&be->code, "\tsub %s, x29, #%d\n",
-                        arm64_xreg_names[target_reg], offset);
+                    arm64_emit_stack_addr(be, offset, target_reg);
                 }
             } else {
                 /* Load result from stack slot where it was saved */
                 int offset = arm64_get_stack_slot(be, val);
                 if (offset >= 0) {
-                    anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #-%d]\n",
-                        arm64_xreg_names[target_reg], offset);
+                    arm64_emit_stack_load(be, offset, target_reg);
                 } else {
                     /* Fallback: result should be in x0 by convention */
                     if (target_reg != ARM64_X0) {
@@ -487,7 +530,7 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
             {
                 int offset = arm64_add_stack_slot(be, instr->result);
                 /* Zero-initialize the slot */
-                anvil_strbuf_appendf(&be->code, "\tstr xzr, [x29, #-%d]\n", offset);
+                arm64_emit_stack_store(be, offset, ARM64_XZR);
             }
             break;
             
@@ -627,7 +670,7 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
                     instr->operands[0]->data.instr->op == ANVIL_OP_ALLOCA) {
                     int offset = arm64_get_stack_slot(be, instr->operands[0]);
                     if (offset >= 0) {
-                        anvil_strbuf_appendf(&be->code, "\tldr x0, [x29, #-%d]\n", offset);
+                        arm64_emit_stack_load(be, offset, ARM64_X0);
                         arm64_save_result(be, instr);
                         break;
                     }
@@ -678,7 +721,7 @@ static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
                     int offset = arm64_get_stack_slot(be, instr->operands[1]);
                     if (offset >= 0) {
                         arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                        anvil_strbuf_appendf(&be->code, "\tstr x9, [x29, #-%d]\n", offset);
+                        arm64_emit_stack_store(be, offset, ARM64_X9);
                         break;
                     }
                 }
@@ -1191,7 +1234,13 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
         if (param) {
             int offset = arm64_get_stack_slot(be, param);
             if (offset >= 0) {
-                anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x29, #-%d]\n", i, offset);
+                /* Use helper for large offsets */
+                if (offset <= 255) {
+                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x29, #-%d]\n", i, offset);
+                } else {
+                    anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x16]\n", i);
+                }
             }
         }
     }

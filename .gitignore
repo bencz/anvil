@@ -38,3 +38,9 @@ examples/dynamic_array/dynarray_lib.s
 examples/dynamic_array/dynarray_lib.o
 examples/dynamic_array/test_dynarray.o
 examples/dynamic_array/test_dynarray
+
+examples/base64_lib/generate_base64
+examples/base64_lib/base64_lib.s
+examples/base64_lib/base64_lib.o
+examples/base64_lib/test_base64.o
+examples/base64_lib/test_base64

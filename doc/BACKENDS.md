@@ -706,6 +706,77 @@ void test_factorial(void) {
 }
 ```
 
+## ARM64 Backend Implementation Notes
+
+The ARM64 backend has several important implementation details:
+
+### SSA Value Preservation
+
+ARM64 uses `x0` as the primary result register, but this causes issues when multiple instructions produce results that are used later. The solution is to save all instruction results to stack slots:
+
+```c
+static void arm64_save_result(arm64_backend_t *be, anvil_instr_t *instr)
+{
+    if (instr->result) {
+        int offset = arm64_get_or_create_slot(be, instr->result);
+        arm64_emit_stack_store(be, offset, ARM64_X0);
+    }
+}
+```
+
+### Large Stack Frame Support
+
+ARM64's `ldr`/`str` instructions with negative offset from frame pointer only support ±256 bytes. For larger offsets, use helper functions:
+
+```c
+static void arm64_emit_stack_load(arm64_backend_t *be, int offset, int target_reg)
+{
+    if (offset <= 255) {
+        // Direct addressing
+        emit("\tldr %s, [x29, #-%d]\n", reg_name, offset);
+    } else {
+        // Use x16 as scratch register
+        emit("\tsub x16, x29, #%d\n", offset);
+        emit("\tldr %s, [x16]\n", reg_name);
+    }
+}
+```
+
+### External Function Calls
+
+External functions declared via `anvil_module_add_extern()` are stored as `ANVIL_VAL_GLOBAL` with function type. The backend must recognize these and emit direct `bl` calls:
+
+```c
+case ANVIL_OP_CALL:
+    if (callee->kind == ANVIL_VAL_GLOBAL && 
+        callee->type->kind == ANVIL_TYPE_FUNC) {
+        // Direct call to external function
+        emit("\tbl %s%s\n", prefix, callee->name);
+    }
+```
+
+### Type-Aware Load/Store
+
+Use correct instruction variants based on type size:
+
+| Type | Load | Store |
+|------|------|-------|
+| i8/u8 | `ldrb w0` | `strb w9` |
+| i16/u16 | `ldrh w0` | `strh w9` |
+| i32/u32/f32 | `ldr w0` | `str w9` |
+| i64/u64/f64/ptr | `ldr x0` | `str x9` |
+
+### Parameter Spilling
+
+Function parameters must be saved to stack slots at entry to survive across function calls and loops:
+
+```c
+for (size_t i = 0; i < func->num_params; i++) {
+    int offset = arm64_get_stack_slot(be, func->params[i]);
+    arm64_emit_stack_store(be, offset, i);  // Save xi to stack
+}
+```
+
 ## Debugging Tips
 
 1. **Print IR**: Add debug output to see what IR you're processing

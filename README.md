@@ -354,19 +354,34 @@ anvil_register_backend(&anvil_backend_myarch);
 - Global variable emission with proper alignment
 - GEP and STRUCT_GEP for array and struct access
 
+### ARM64 Backend Improvements
+Recent fixes to the ARM64 backend for robust code generation:
+
+- **External function calls**: Proper handling of `malloc`, `free`, `memcpy` and other C library functions
+- **SSA value preservation**: All instruction results saved to stack slots to prevent register clobbering
+- **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
+- **Type-aware load/store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit)
+- **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
+
 ### Advanced Examples
-Two advanced examples demonstrate ANVIL's capabilities for generating linkable libraries:
+Three advanced examples demonstrate ANVIL's capabilities for generating linkable libraries:
 
 - **`examples/fp_math_lib/`**: Floating-point math library
   - Generates exportable FP functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
   - Demonstrates ANVIL IR for floating-point operations
-  - Includes C test program that links with generated assembly
+  - Includes C test program that links with generated assembly (24 tests)
 
 - **`examples/dynamic_array/`**: Dynamic array library with C library calls
   - Demonstrates calling external C functions: `malloc`, `free`, `memcpy`
   - Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
   - Shows pointer arithmetic, loops, conditionals, and memory management
   - Includes comprehensive test suite (41 tests)
+
+- **`examples/base64_lib/`**: Base64 encoding library
+  - Demonstrates complex bitwise operations, byte manipulation, and lookup table logic
+  - Functions: `base64_encode`, `base64_encoded_len`
+  - Shows `select` operations for conditional value computation
+  - Includes test suite with RFC 4648 test vectors (28 tests)
 
 ## IR Optimization
 
