@@ -103,10 +103,13 @@ run_test() {
     fi
     rm -f "$native_bin"
 
-    # Step 2: Compile with MCC
-    if ! "$MCC" -arch="$MCC_ARCH" -std=c99 -o "$mcc_asm" "$src" 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC} (MCC compile failed/crash)"
-        return 0
+    # Step 2: Compile with MCC (may crash with trace trap but still generate output)
+    "$MCC" -arch="$MCC_ARCH" -std=c99 -o "$mcc_asm" "$src" 2>/dev/null
+    
+    # Check if assembly was generated (even if MCC crashed after generating it)
+    if [ ! -f "$mcc_asm" ] || [ ! -s "$mcc_asm" ]; then
+        echo -e "${RED}FAIL${NC} (MCC produced no output)"
+        return 1
     fi
 
     # Step 3: Assemble and link MCC output
