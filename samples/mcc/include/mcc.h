@@ -55,10 +55,11 @@ typedef enum {
 
 /* Optimization level */
 typedef enum {
-    MCC_OPT_NONE = 0,
-    MCC_OPT_BASIC = 1,
-    MCC_OPT_STANDARD = 2,
-    MCC_OPT_AGGRESSIVE = 3
+    MCC_OPT_NONE = 0,       /* -O0: No optimization */
+    MCC_OPT_DEBUG = 1,      /* -Og: Debug-friendly (minimal IR cleanup) */
+    MCC_OPT_BASIC = 2,      /* -O1: Basic optimizations */
+    MCC_OPT_STANDARD = 3,   /* -O2: Standard optimizations */
+    MCC_OPT_AGGRESSIVE = 4  /* -O3: Aggressive optimizations */
 } mcc_opt_level_t;
 
 /* Compiler options */

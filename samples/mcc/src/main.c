@@ -23,7 +23,7 @@ static void print_usage(const char *prog)
     printf("  -arch=<arch>      Target architecture:\n");
     printf("                      x86, x86_64, s370, s370_xa, s390, zarch\n");
     printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
-    printf("  -O<level>         Optimization level (0-3)\n");
+    printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
     printf("  -ast-dump         Print AST\n");
@@ -542,12 +542,20 @@ int main(int argc, char **argv)
         }
         
         if (strncmp(arg, "-O", 2) == 0) {
-            int level = arg[2] - '0';
-            if (level < 0 || level > 3) {
+            char c = arg[2];
+            if (c == 'g') {
+                opts.opt_level = MCC_OPT_DEBUG;
+            } else if (c >= '0' && c <= '3') {
+                /* Map 0->NONE, 1->BASIC, 2->STANDARD, 3->AGGRESSIVE */
+                static const mcc_opt_level_t levels[] = {
+                    MCC_OPT_NONE, MCC_OPT_BASIC, MCC_OPT_STANDARD, MCC_OPT_AGGRESSIVE
+                };
+                opts.opt_level = levels[c - '0'];
+            } else {
                 fprintf(stderr, "Error: Invalid optimization level: %s\n", arg);
+                fprintf(stderr, "Valid levels: -O0, -Og, -O1, -O2, -O3\n");
                 return 1;
             }
-            opts.opt_level = (mcc_opt_level_t)level;
             continue;
         }
         
@@ -656,7 +664,14 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "\n");
         fprintf(stderr, "Target: %s\n", mcc_arch_name(opts.arch));
-        fprintf(stderr, "Optimization: O%d\n", opts.opt_level);
+        if (opts.opt_level == MCC_OPT_DEBUG) {
+            fprintf(stderr, "Optimization: Og (debug)\n");
+        } else {
+            /* Map back: NONE=0, BASIC=1, STANDARD=2, AGGRESSIVE=3 */
+            static const int level_nums[] = {0, -1, 1, 2, 3}; /* -1 for DEBUG placeholder */
+            int lvl = (opts.opt_level <= MCC_OPT_AGGRESSIVE) ? level_nums[opts.opt_level] : 0;
+            fprintf(stderr, "Optimization: O%d\n", lvl);
+        }
     }
     
     /* Compile all files */

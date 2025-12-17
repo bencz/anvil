@@ -38,7 +38,8 @@ ANVIL includes a configurable optimization pass infrastructure that operates on 
 | Level | Constant | Description |
 |-------|----------|-------------|
 | O0 | `ANVIL_OPT_NONE` | No optimization (default) |
-| O1 | `ANVIL_OPT_BASIC` | Constant folding, DCE, copy propagation |
+| Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
+| O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
 | O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
 | O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop unrolling (experimental) |
 
@@ -132,7 +133,7 @@ Replaces expensive operations with cheaper equivalents.
 
 **Note:** Signed division/modulo by power of 2 is not optimized due to rounding differences for negative numbers.
 
-### Copy Propagation (`ANVIL_PASS_COPY_PROP`)
+### Copy Propagation (`ANVIL_PASS_COPY_PROP`) - Og+
 
 Replaces uses of copied values with the original value, enabling further optimizations.
 
@@ -151,6 +152,31 @@ Replaces uses of copied values with the original value, enabling further optimiz
 - `x << 0`, `x >> 0` → copy of x
 
 The dead copy instructions can then be removed by DCE.
+
+### Store-Load Propagation (`ANVIL_PASS_STORE_LOAD_PROP`) - Og+
+
+Replaces loads that immediately follow stores to the same address with the stored value.
+
+**Example:**
+
+```c
+// Before
+*p = x;
+y = *p;  // Load from same address
+z = y + 1;
+
+// After
+*p = x;
+z = x + 1;  // Load eliminated, y replaced with x
+```
+
+**Benefits:**
+- Eliminates redundant memory accesses
+- Enables further optimizations (constant propagation, CSE)
+
+**Limitations:**
+- Only analyzes within a single basic block
+- Requires store and load to be adjacent (no intervening instructions)
 
 ### Dead Store Elimination (`ANVIL_PASS_DEAD_STORE`)
 
@@ -502,6 +528,7 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/simplify_cfg.c` | CFG simplification pass |
 | `src/opt/strength_reduce.c` | Strength reduction |
 | `src/opt/copy_prop.c` | Copy propagation |
+| `src/opt/store_load_prop.c` | Store-load propagation |
 | `src/opt/dead_store.c` | Dead store elimination |
 | `src/opt/load_elim.c` | Redundant load elimination |
 | `src/opt/loop_unroll.c` | Loop unrolling |

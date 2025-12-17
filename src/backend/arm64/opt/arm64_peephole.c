@@ -74,66 +74,10 @@ static bool opt_load_store_same(anvil_instr_t *instr, anvil_instr_t *next)
     return false;
 }
 
-/*
- * Check if a value is used after a given instruction
- */
-static bool value_used_after(anvil_value_t *val, anvil_instr_t *after)
-{
-    if (!val || !after) return false;
-    
-    /* Check remaining instructions in this block */
-    for (anvil_instr_t *i = after->next; i; i = i->next) {
-        if (i->op == ANVIL_OP_NOP) continue;
-        for (size_t j = 0; j < i->num_operands; j++) {
-            if (i->operands[j] == val) return true;
-        }
-    }
-    
-    /* For simplicity, assume value might be used in other blocks */
-    /* A more complete analysis would check all blocks */
-    return true;
-}
-
-/*
- * Pattern: STORE followed by LOAD from same address
- * STORE %val -> %addr
- * LOAD %addr -> %result
- * If %result is only used once immediately after, we can propagate %val
- */
-static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
-{
-    if (!store || !load) return false;
-    
-    if (store->op != ANVIL_OP_STORE || load->op != ANVIL_OP_LOAD) return false;
-    if (store->num_operands < 2 || load->num_operands < 1) return false;
-    
-    /* Check if loading from same address we just stored to */
-    if (!values_equal(store->operands[1], load->operands[0])) return false;
-    
-    /* Check if load result is only used in the next instruction */
-    anvil_instr_t *use = load->next;
-    while (use && use->op == ANVIL_OP_NOP) use = use->next;
-    
-    if (!use) return false;
-    
-    /* Check if load result is used in the next instruction */
-    bool found_use = false;
-    for (size_t i = 0; i < use->num_operands; i++) {
-        if (use->operands[i] == load->result) {
-            /* Replace with the original stored value */
-            use->operands[i] = store->operands[0];
-            found_use = true;
-        }
-    }
-    
-    if (found_use && !value_used_after(load->result, use)) {
-        /* Can eliminate the load */
-        load->op = ANVIL_OP_NOP;
-        return true;
-    }
-    
-    return false;
-}
+/* NOTE: Generic IR optimizations like load elimination, store-load propagation,
+ * and copy propagation belong in src/opt/, not here. This file should only
+ * contain ARM64-specific peephole optimizations that prepare IR for efficient
+ * ARM64 code generation. */
 
 /* ============================================================================
  * Main Peephole Pass
@@ -162,17 +106,14 @@ void arm64_opt_peephole(arm64_backend_t *be, anvil_func_t *func)
                 while (next && next->op == ANVIL_OP_NOP) next = next->next;
                 
                 if (next) {
+                    /* ARM64-specific: consecutive stores to same address */
                     if (opt_redundant_store(instr, next)) {
                         changed = true;
                         continue;
                     }
                     
+                    /* ARM64-specific: load then store back to same address (no-op) */
                     if (opt_load_store_same(instr, next)) {
-                        changed = true;
-                        continue;
-                    }
-                    
-                    if (opt_store_load_propagate(instr, next)) {
                         changed = true;
                         continue;
                     }

@@ -797,18 +797,19 @@ void arm64_emit_store(arm64_backend_t *be, anvil_instr_t *instr)
 
 void arm64_emit_gep(arm64_backend_t *be, anvil_instr_t *instr)
 {
+    int elem_size = 8;
+    if (instr->result && instr->result->type &&
+        instr->result->type->kind == ANVIL_TYPE_PTR &&
+        instr->result->type->data.pointee) {
+        elem_size = arm64_type_size(instr->result->type->data.pointee);
+    }
+    
     arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
     
     if (instr->num_operands > 1) {
         arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
         
-        int elem_size = 8;
-        if (instr->result && instr->result->type &&
-            instr->result->type->kind == ANVIL_TYPE_PTR &&
-            instr->result->type->data.pointee) {
-            elem_size = arm64_type_size(instr->result->type->data.pointee);
-        }
-        
+        /* Use shifted add for efficient array indexing */
         switch (elem_size) {
             case 1: anvil_strbuf_append(&be->code, "\tadd x0, x9, x10\n"); break;
             case 2: anvil_strbuf_append(&be->code, "\tadd x0, x9, x10, lsl #1\n"); break;

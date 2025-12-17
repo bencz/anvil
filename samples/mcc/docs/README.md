@@ -264,6 +264,7 @@ When working with MCC code:
 **Debugging tips:**
 - Use `-ast-dump` to see the parsed AST
 - Use `-dump-ir` to see the ANVIL IR before code generation
+- Use `-Og` for debug-friendly optimization (minimal IR cleanup)
 - Check `ctx->error_count` after each phase
 - Add debug prints in specific functions
 - Test with minimal C programs first
@@ -322,3 +323,4 @@ When working with MCC code:
 - **Constant Memory Management**: Fixed double-free by collecting constants from all functions before cleanup
 - **Block Terminator Detection**: `codegen_block_has_terminator()` now correctly detects if a block has a terminator instruction using `anvil_block_has_terminator()`, eliminating dead code after `return` statements
 - **IR Dump Support**: `-dump-ir` flag generates ANVIL IR dump file (`.ir`) for debugging code generation
+- **Debug-Friendly Optimization (-Og)**: New optimization level for minimal IR cleanup while preserving debuggability

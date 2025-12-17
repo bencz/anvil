@@ -532,21 +532,25 @@ ANVIL includes a configurable optimization pass infrastructure that can be enabl
 | Level | Name | Description |
 |-------|------|-------------|
 | O0 | `ANVIL_OPT_NONE` | No optimization (default) |
-| O1 | `ANVIL_OPT_BASIC` | Constant folding, DCE, copy propagation |
+| Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
+| O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
 | O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
 | O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop unrolling |
 
 ### Available Passes
 
-* **Constant Folding**: Evaluates constant expressions at compile time (`3 + 5` → `8`)
-* **Dead Code Elimination (DCE)**: Removes unused instructions
-* **Strength Reduction**: Replaces expensive ops with cheaper ones (`x * 8` → `x << 3`)
-* **CFG Simplification**: Merges blocks, removes unreachable code
-* **Copy Propagation**: Replaces uses of copied values with originals
-* **Dead Store Elimination**: Removes stores overwritten before read
-* **Redundant Load Elimination**: Reuses loaded values from same address
-* **Common Subexpression Elimination (CSE)**: Reuses computed values
-* **Loop Unrolling**: Unrolls small loops with known trip counts (O3, experimental)
+| Pass | Level | Description |
+|------|-------|-------------|
+| **Constant Folding** | O1+ | Evaluates constant expressions at compile time (`3 + 5` → `8`) |
+| **Dead Code Elimination (DCE)** | O1+ | Removes unused instructions |
+| **Copy Propagation** | Og+ | Replaces uses of copied values with originals |
+| **Store-Load Propagation** | Og+ | Replaces load after store with stored value |
+| **Strength Reduction** | O2+ | Replaces expensive ops with cheaper ones (`x * 8` → `x << 3`) |
+| **CFG Simplification** | O2+ | Merges blocks, removes unreachable code |
+| **Dead Store Elimination** | O2+ | Removes stores overwritten before read |
+| **Redundant Load Elimination** | O2+ | Reuses loaded values from same address |
+| **Common Subexpression Elimination (CSE)** | O2+ | Reuses computed values |
+| **Loop Unrolling** | O3+ | Unrolls small loops with known trip counts (experimental) |
 
 ### Usage
 

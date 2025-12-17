@@ -166,6 +166,23 @@ The cache is invalidated at:
 - Branch instructions (values may not be valid in target block)
 - Function calls (caller-saved registers are clobbered)
 
+### ARM64-Specific Peephole Optimizations
+The `arm64_opt_peephole.c` pass performs ARM64-specific IR optimizations:
+
+**1. Redundant Store Elimination:**
+```
+STORE %val -> %addr
+STORE %val2 -> %addr   ; first store is dead
+```
+
+**2. Load-Store Same Address:**
+```
+LOAD %addr -> %tmp
+STORE %tmp -> %addr    ; no-op, both eliminated
+```
+
+> **Note:** Generic IR optimizations like store-load propagation and redundant load elimination are now in `src/opt/` and apply to all backends.
+
 ### IR Preparation Phase
 New `prepare_ir` callback in backend interface:
 - Called automatically by `anvil_module_codegen()` before code generation

@@ -72,6 +72,9 @@ struct mcc_codegen {
     /* Label counter for unique block names */
     int label_counter;
     
+    /* Optimization level */
+    mcc_opt_level_t opt_level;
+    
     /* Global variable cache (name -> anvil_value_t*) */
     struct {
         const char *name;

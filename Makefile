@@ -65,7 +65,8 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/load_elim.c \
 	$(SRC_DIR)/opt/cse.c \
 	$(SRC_DIR)/opt/loop_unroll.c \
-	$(SRC_DIR)/opt/ctx_opt.c
+	$(SRC_DIR)/opt/ctx_opt.c \
+	$(SRC_DIR)/opt/store_load_prop.c
 
 ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS)
 

@@ -17,22 +17,24 @@ extern "C" {
 /* Optimization levels */
 typedef enum {
     ANVIL_OPT_NONE = 0,      /* No optimization (O0) */
-    ANVIL_OPT_BASIC = 1,     /* Basic optimizations (O1) */
-    ANVIL_OPT_STANDARD = 2,  /* Standard optimizations (O2) */
-    ANVIL_OPT_AGGRESSIVE = 3 /* Aggressive optimizations (O3) */
+    ANVIL_OPT_DEBUG = 1,     /* Debug-friendly optimizations (Og) - minimal IR cleanup */
+    ANVIL_OPT_BASIC = 2,     /* Basic optimizations (O1) */
+    ANVIL_OPT_STANDARD = 3,  /* Standard optimizations (O2) */
+    ANVIL_OPT_AGGRESSIVE = 4 /* Aggressive optimizations (O3) */
 } anvil_opt_level_t;
 
 /* Individual optimization pass IDs */
 typedef enum {
-    ANVIL_PASS_CONST_FOLD,       /* Constant folding */
-    ANVIL_PASS_DCE,              /* Dead code elimination */
-    ANVIL_PASS_SIMPLIFY_CFG,     /* Simplify control flow graph */
-    ANVIL_PASS_STRENGTH_REDUCE,  /* Strength reduction */
-    ANVIL_PASS_COPY_PROP,        /* Copy propagation */
-    ANVIL_PASS_DEAD_STORE,       /* Dead store elimination */
-    ANVIL_PASS_LOAD_ELIM,        /* Redundant load elimination */
-    ANVIL_PASS_LOOP_UNROLL,      /* Loop unrolling */
-    ANVIL_PASS_COMMON_SUBEXPR,   /* Common subexpression elimination */
+    ANVIL_PASS_CONST_FOLD,       /* Constant folding (O1+) */
+    ANVIL_PASS_DCE,              /* Dead code elimination (O1+) */
+    ANVIL_PASS_SIMPLIFY_CFG,     /* Simplify control flow graph (O2+) */
+    ANVIL_PASS_STRENGTH_REDUCE,  /* Strength reduction (O2+) */
+    ANVIL_PASS_COPY_PROP,        /* Copy propagation (Og+) */
+    ANVIL_PASS_DEAD_STORE,       /* Dead store elimination (O2+) */
+    ANVIL_PASS_LOAD_ELIM,        /* Redundant load elimination (O2+) */
+    ANVIL_PASS_STORE_LOAD_PROP,  /* Store-load propagation (Og+) */
+    ANVIL_PASS_LOOP_UNROLL,      /* Loop unrolling (O3+) */
+    ANVIL_PASS_COMMON_SUBEXPR,   /* Common subexpression elimination (O2+) */
     ANVIL_PASS_COUNT
 } anvil_pass_id_t;
 
@@ -132,6 +134,9 @@ bool anvil_pass_load_elim(anvil_func_t *func);
 
 /* Common subexpression elimination: reuse computed values */
 bool anvil_pass_cse(anvil_func_t *func);
+
+/* Store-load propagation: replace load after store with stored value */
+bool anvil_pass_store_load_prop(anvil_func_t *func);
 
 #ifdef __cplusplus
 }

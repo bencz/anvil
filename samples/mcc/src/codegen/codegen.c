@@ -64,9 +64,19 @@ void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
 
 void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level)
 {
-    /* Optimization level - stored for later use */
-    (void)cg;
-    (void)level;
+    /* Map MCC optimization level to ANVIL optimization level */
+    anvil_opt_level_t anvil_level;
+    switch (level) {
+        case MCC_OPT_NONE:       anvil_level = ANVIL_OPT_NONE; break;
+        case MCC_OPT_DEBUG:      anvil_level = ANVIL_OPT_DEBUG; break;
+        case MCC_OPT_BASIC:      anvil_level = ANVIL_OPT_BASIC; break;
+        case MCC_OPT_STANDARD:   anvil_level = ANVIL_OPT_STANDARD; break;
+        case MCC_OPT_AGGRESSIVE: anvil_level = ANVIL_OPT_AGGRESSIVE; break;
+        default:                 anvil_level = ANVIL_OPT_NONE; break;
+    }
+    
+    anvil_ctx_set_opt_level(cg->anvil_ctx, anvil_level);
+    cg->opt_level = level;
 }
 
 /* ============================================================

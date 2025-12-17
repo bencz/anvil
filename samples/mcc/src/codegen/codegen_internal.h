@@ -10,6 +10,7 @@
 #define MCC_CODEGEN_INTERNAL_H
 
 #include "anvil/anvil.h"
+#include "anvil/anvil_opt.h"
 #include "mcc.h"
 
 /* ============================================================

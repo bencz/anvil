@@ -1828,9 +1828,10 @@ anvil_error_t anvil_module_optimize(anvil_module_t *mod);
 
 | Pass ID | Name | Description | Min Level |
 |---------|------|-------------|-----------|
+| `ANVIL_PASS_COPY_PROP` | Copy Propagation | Replace uses of copied values | Og |
+| `ANVIL_PASS_STORE_LOAD_PROP` | Store-Load Propagation | Replace load after store with stored value | Og |
 | `ANVIL_PASS_CONST_FOLD` | Constant Folding | Evaluate constant expressions | O1 |
 | `ANVIL_PASS_DCE` | Dead Code Elimination | Remove unused instructions | O1 |
-| `ANVIL_PASS_COPY_PROP` | Copy Propagation | Replace uses of copied values | O1 |
 | `ANVIL_PASS_SIMPLIFY_CFG` | CFG Simplification | Merge blocks, remove unreachable | O2 |
 | `ANVIL_PASS_STRENGTH_REDUCE` | Strength Reduction | Replace expensive ops | O2 |
 | `ANVIL_PASS_DEAD_STORE` | Dead Store Elimination | Remove overwritten stores | O2 |
@@ -1847,6 +1848,7 @@ bool anvil_pass_dce(anvil_func_t *func);
 bool anvil_pass_simplify_cfg(anvil_func_t *func);
 bool anvil_pass_strength_reduce(anvil_func_t *func);
 bool anvil_pass_copy_prop(anvil_func_t *func);
+bool anvil_pass_store_load_prop(anvil_func_t *func);
 bool anvil_pass_dead_store(anvil_func_t *func);
 bool anvil_pass_load_elim(anvil_func_t *func);
 bool anvil_pass_loop_unroll(anvil_func_t *func);   // Experimental

@@ -567,12 +567,27 @@ int main(void) {
 
 MCC supports optimization levels:
 
-- **-O0**: No optimization (default)
-- **-O1**: Basic optimizations
-- **-O2**: Standard optimizations
-- **-O3**: Aggressive optimizations
+| Flag | Level | Description |
+|------|-------|-------------|
+| `-O0` | None | No optimization (default) |
+| `-Og` | Debug | Debug-friendly: copy propagation, store-load propagation |
+| `-O1` | Basic | Og + constant folding, dead code elimination |
+| `-O2` | Standard | O1 + CFG simplification, strength reduction, memory opts, CSE |
+| `-O3` | Aggressive | O2 + loop unrolling |
 
 Optimizations are performed by ANVIL on the IR before code generation.
+
+### Debug-Friendly Optimization (-Og)
+
+The `-Og` level provides minimal IR cleanup without aggressive transformations:
+- **Copy Propagation**: Replaces uses of copied values with originals
+- **Store-Load Propagation**: Eliminates redundant loads after stores to same address
+
+This level is ideal for debugging because it:
+- Removes obvious redundancies that make assembly hard to read
+- Preserves the original program structure
+- Does not eliminate "unused" variables (useful for debugging)
+- Does not fold constants (expressions remain as written)
 
 ## IR Dump
 

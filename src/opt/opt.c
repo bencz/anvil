@@ -19,7 +19,15 @@ struct anvil_pass_manager {
     size_t cap_custom;
 };
 
-/* Built-in pass definitions */
+/* Built-in pass definitions
+ * 
+ * Optimization levels:
+ *   O0 (NONE)       - No optimizations
+ *   Og (DEBUG)      - Debug-friendly: copy_prop, store_load_prop (minimal IR cleanup)
+ *   O1 (BASIC)      - Basic: const_fold, dce, copy_prop, store_load_prop
+ *   O2 (STANDARD)   - Standard: O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse
+ *   O3 (AGGRESSIVE) - Aggressive: O2 + loop_unroll
+ */
 static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
         .id = ANVIL_PASS_CONST_FOLD,
@@ -54,7 +62,7 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "copy-prop",
         .description = "Copy propagation",
         .run = anvil_pass_copy_prop,
-        .min_level = ANVIL_OPT_BASIC
+        .min_level = ANVIL_OPT_DEBUG  /* Og+ */
     },
     {
         .id = ANVIL_PASS_DEAD_STORE,
@@ -69,6 +77,13 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .description = "Redundant load elimination",
         .run = anvil_pass_load_elim,
         .min_level = ANVIL_OPT_STANDARD
+    },
+    {
+        .id = ANVIL_PASS_STORE_LOAD_PROP,
+        .name = "store-load-prop",
+        .description = "Store-load propagation",
+        .run = anvil_pass_store_load_prop,
+        .min_level = ANVIL_OPT_DEBUG  /* Og+ */
     },
     {
         .id = ANVIL_PASS_LOOP_UNROLL,
