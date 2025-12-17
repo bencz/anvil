@@ -91,9 +91,33 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
             
             /* Initialize if needed */
             if (stmt->data.var_decl.init) {
-                anvil_value_t *init = codegen_expr(cg, stmt->data.var_decl.init);
-                if (init) {
-                    anvil_build_store(cg->anvil_ctx, init, alloca_val);
+                mcc_ast_node_t *init_node = stmt->data.var_decl.init;
+                
+                /* Handle array initializer lists specially */
+                if (init_node->kind == AST_INIT_LIST && 
+                    stmt->data.var_decl.var_type->kind == TYPE_ARRAY) {
+                    /* Initialize each element of the array */
+                    mcc_type_t *elem_type = stmt->data.var_decl.var_type->data.array.element;
+                    anvil_type_t *anvil_elem_type = codegen_type(cg, elem_type);
+                    
+                    for (size_t i = 0; i < init_node->data.init_list.num_exprs; i++) {
+                        /* Get pointer to element */
+                        anvil_value_t *indices[1];
+                        indices[0] = anvil_const_i64(cg->anvil_ctx, (int64_t)i);
+                        anvil_value_t *elem_ptr = anvil_build_gep(cg->anvil_ctx, 
+                            anvil_elem_type, alloca_val, indices, 1, "elem");
+                        
+                        /* Generate element value */
+                        anvil_value_t *elem_val = codegen_expr(cg, init_node->data.init_list.exprs[i]);
+                        if (elem_val) {
+                            anvil_build_store(cg->anvil_ctx, elem_val, elem_ptr);
+                        }
+                    }
+                } else {
+                    anvil_value_t *init = codegen_expr(cg, init_node);
+                    if (init) {
+                        anvil_build_store(cg->anvil_ctx, init, alloca_val);
+                    }
                 }
             }
             break;

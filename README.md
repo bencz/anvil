@@ -396,11 +396,13 @@ Recent fixes to the ARM64 backend for robust code generation:
 - **External function calls**: Proper handling of `malloc`, `free`, `memcpy` and other C library functions
 - **SSA value preservation**: All instruction results saved to stack slots to prevent register clobbering
 - **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
+- **Very large stack frames (>4095 bytes)**: Support for stack allocation/deallocation using `mov x16, #offset` + `sub/add sp, sp, x16` sequence
 - **Type-aware load/store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit)
 - **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
 - **macOS global variable syntax**: Proper `@PAGE`/`@PAGEOFF` relocations for Darwin ABI (instead of `:lo12:`)
 - **Array stack allocation**: Correct stack frame sizing for arrays based on element type and count
 - **Type size calculation**: New `arm64_type_size()` function for accurate allocation of arrays, structs, and primitives
+- **String pointer arrays**: Proper emission of string constant pointers in global array initializers (`.quad .LCn` directives)
 
 ### Memory Management Improvements
 Improved cleanup flow to prevent dangling pointers and use-after-free issues:

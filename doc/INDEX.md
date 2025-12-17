@@ -192,8 +192,10 @@ Example: `examples/cpu_model_test.c`
 - **External function calls**: Direct `bl` for C library functions (`malloc`, `free`, `memcpy`)
 - **SSA value preservation**: Results saved to stack slots via `arm64_save_result()`
 - **Large stack frames**: `arm64_emit_stack_load/store/addr()` for offsets >255 bytes
+- **Very large stack frames (>4095 bytes)**: Uses `mov x16, #offset` + `sub/add sp, sp, x16` sequence
 - **Type-aware memory ops**: `ldr w0`/`str w9` for 32-bit, `ldrb`/`strb` for 8-bit
 - **Parameter spilling**: Parameters saved at function entry for loop safety
+- **String pointer arrays**: Proper `.quad .LCn` emission for global arrays of string pointers
 
 ### Advanced Examples
 Three advanced examples demonstrate generating linkable libraries:

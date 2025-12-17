@@ -545,6 +545,31 @@ Different architectures pass parameters differently:
 - Frame pointer: X29
 - Link register: X30
 - Stack pointer: SP (16-byte aligned)
+- Scratch register: X16 (used for large offsets)
+
+**ARM64 Backend Implementation Details:**
+
+The ARM64 backend includes several important features for robust code generation:
+
+1. **SSA Value Preservation**: All instruction results are saved to stack slots via `arm64_save_result()` to prevent register clobbering when X0 is overwritten by function calls.
+
+2. **Parameter Spilling**: Function parameters (X0-X7) are saved to stack slots at function entry for safe access in loops and after function calls.
+
+3. **Large Stack Offsets (>255 bytes)**: Uses X16 as scratch register:
+   ```asm
+   sub x16, x29, #512
+   ldr x0, [x16]
+   ```
+
+4. **Very Large Stack Frames (>4095 bytes)**: Uses two-instruction sequence:
+   ```asm
+   mov x16, #5920          ; Load large offset
+   sub sp, sp, x16         ; Allocate stack space
+   ```
+
+5. **String Pointer Arrays**: Global arrays of string pointers emit `.quad .LCn` directives referencing string constants.
+
+6. **Type-Aware Load/Store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit).
 
 **PowerPC 32-bit (System V):**
 - First 8 integer args: R3-R10

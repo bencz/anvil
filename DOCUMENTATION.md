@@ -1884,6 +1884,54 @@ sub x16, x29, #512
 ldr x0, [x16]
 ```
 
+### Very Large Stack Frames (>4095 bytes)
+
+For stack frames exceeding 4095 bytes (ARM64 immediate limit), the backend uses a two-instruction sequence:
+
+**Prologue:**
+```asm
+mov x16, #5920          ; Load large offset
+sub sp, sp, x16         ; Allocate stack space
+```
+
+**Epilogue:**
+```asm
+mov x16, #5920          ; Load large offset
+add sp, sp, x16         ; Deallocate stack space
+```
+
+**Stack access with large offsets:**
+```asm
+mov x16, #5000          ; Load offset
+sub x16, x29, x16       ; Compute address
+ldr x0, [x16]           ; Load from computed address
+```
+
+### String Pointer Arrays
+
+Global arrays of string pointers are properly initialized with references to string constants:
+
+```c
+// C code
+static const char *names[] = { "Red", "Green", "Blue" };
+```
+
+**Generated assembly:**
+```asm
+_names:
+        .quad .LC0      ; Pointer to "Red"
+        .quad .LC1      ; Pointer to "Green"
+        .quad .LC2      ; Pointer to "Blue"
+
+        .section __TEXT,__cstring,cstring_literals
+.LC0:
+        .asciz "Red"
+.LC1:
+        .asciz "Green"
+.LC2:
+        .asciz "Blue"
+```
+
 ## Advanced Examples
 
 ANVIL includes three advanced examples that demonstrate generating linkable libraries:
