@@ -142,8 +142,13 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (op == BINOP_AND || op == BINOP_OR) {
                 anvil_value_t *lhs = codegen_expr(cg, expr->data.binary_expr.lhs);
                 
-                anvil_block_t *rhs_block = anvil_block_create(cg->current_func, "land.rhs");
-                anvil_block_t *end_block = anvil_block_create(cg->current_func, "land.end");
+                int id = cg->label_counter++;
+                char rhs_name[32], end_name[32];
+                snprintf(rhs_name, sizeof(rhs_name), "land%d.rhs", id);
+                snprintf(end_name, sizeof(end_name), "land%d.end", id);
+                
+                anvil_block_t *rhs_block = anvil_block_create(cg->current_func, rhs_name);
+                anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
                 
                 /* Compare LHS to zero */
                 anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
@@ -320,9 +325,15 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         case AST_TERNARY_EXPR: {
             anvil_value_t *cond = codegen_expr(cg, expr->data.ternary_expr.cond);
             
-            anvil_block_t *then_block = anvil_block_create(cg->current_func, "ternary.then");
-            anvil_block_t *else_block = anvil_block_create(cg->current_func, "ternary.else");
-            anvil_block_t *end_block = anvil_block_create(cg->current_func, "ternary.end");
+            int id = cg->label_counter++;
+            char then_name[32], else_name[32], end_name[32];
+            snprintf(then_name, sizeof(then_name), "ternary%d.then", id);
+            snprintf(else_name, sizeof(else_name), "ternary%d.else", id);
+            snprintf(end_name, sizeof(end_name), "ternary%d.end", id);
+            
+            anvil_block_t *then_block = anvil_block_create(cg->current_func, then_name);
+            anvil_block_t *else_block = anvil_block_create(cg->current_func, else_name);
+            anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
             
             /* Compare to zero */
             anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);

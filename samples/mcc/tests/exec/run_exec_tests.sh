@@ -103,8 +103,18 @@ run_test() {
     fi
     rm -f "$native_bin"
 
+    # Detect C standard from filename or default to c99
+    local std="c99"
+    if [[ "$name" == *"_c89"* ]]; then
+        std="c89"
+    elif [[ "$name" == *"_c99"* ]]; then
+        std="c99"
+    elif [[ "$name" == *"_c11"* ]]; then
+        std="c11"
+    fi
+
     # Step 2: Compile with MCC (may crash with trace trap but still generate output)
-    "$MCC" -arch="$MCC_ARCH" -std=c99 -o "$mcc_asm" "$src" 2>/dev/null
+    "$MCC" -arch="$MCC_ARCH" -std="$std" -I"$MCC_DIR/includes" -o "$mcc_asm" "$src" 2>/dev/null
     
     # Check if assembly was generated (even if MCC crashed after generating it)
     if [ ! -f "$mcc_asm" ] || [ ! -s "$mcc_asm" ]; then
