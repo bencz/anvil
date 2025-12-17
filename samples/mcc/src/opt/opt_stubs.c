@@ -12,65 +12,17 @@
  * O2 Passes - Standard optimizations (stubs)
  * ============================================================ */
 
-int opt_pass_cse(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement common subexpression elimination */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_licm(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement loop-invariant code motion */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_loop_simp(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement loop simplification */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_tail_call(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement tail call optimization */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_inline_small(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement small function inlining */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
+/* opt_pass_cse is implemented in opt_cse.c */
+/* opt_pass_licm is implemented in opt_loop.c */
+/* opt_pass_loop_simp is implemented in opt_loop.c */
+/* opt_pass_loop_unroll is implemented in opt_loop.c */
+/* opt_pass_tail_call is implemented in opt_inline.c */
+/* opt_pass_inline_small is implemented in opt_inline.c */
+/* opt_pass_inline_aggr is implemented in opt_inline.c */
 
 /* ============================================================
  * O3 Passes - Aggressive optimizations (stubs)
  * ============================================================ */
-
-int opt_pass_loop_unroll(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement loop unrolling */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_inline_aggr(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement aggressive inlining */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
 
 int opt_pass_vectorize(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
 {

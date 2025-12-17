@@ -101,8 +101,34 @@ typedef struct {
     int changes;
 } strength_red_data_t;
 
+/* Get the type of an expression, using symbol info if available */
+static mcc_type_t *get_expr_type(mcc_ast_node_t *expr)
+{
+    if (!expr) return NULL;
+    
+    /* First check if the node has a type directly */
+    if (expr->type) return expr->type;
+    
+    /* For identifiers, get type from symbol */
+    if (expr->kind == AST_IDENT_EXPR && expr->data.ident_expr.symbol) {
+        mcc_symbol_t *sym = (mcc_symbol_t *)expr->data.ident_expr.symbol;
+        return sym->type;
+    }
+    
+    return NULL;
+}
+
+/* Check if expression has unsigned type */
+static bool is_unsigned_expr(mcc_ast_node_t *expr)
+{
+    mcc_type_t *type = get_expr_type(expr);
+    if (!type) return false;
+    return type->is_unsigned;
+}
+
 static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void *data)
 {
+    (void)opt;
     strength_red_data_t *srd = (strength_red_data_t *)data;
     
     if (node->kind != AST_BINARY_EXPR) return true;
@@ -141,16 +167,19 @@ static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void 
             break;
             
         case BINOP_DIV:
-            /* x / 2^n -> x >> n (only for unsigned or known positive) */
-            /* TODO: Check if type is unsigned */
+            /* x / 2^n -> x >> n (only for unsigned) */
             if (rhs->kind == AST_INT_LIT) {
                 const_val = rhs->data.int_lit.value;
                 if (is_power_of_2(const_val, &exponent)) {
-                    /* For now, only do this if we know it's safe */
-                    /* This requires type information from sema */
-                    if (opt->sema && node->type) {
-                        /* Check if unsigned */
-                        /* TODO: Implement proper type checking */
+                    /* Check if LHS is unsigned - use symbol type if available */
+                    bool is_unsigned = is_unsigned_expr(lhs);
+                    if (!is_unsigned && node->type) {
+                        is_unsigned = node->type->is_unsigned;
+                    }
+                    if (is_unsigned) {
+                        node->data.binary_expr.op = BINOP_RSHIFT;
+                        rhs->data.int_lit.value = exponent;
+                        srd->changes++;
                     }
                 }
             }
@@ -161,10 +190,15 @@ static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void 
             if (rhs->kind == AST_INT_LIT) {
                 const_val = rhs->data.int_lit.value;
                 if (is_power_of_2(const_val, &exponent)) {
-                    /* For now, only do this if we know it's safe */
-                    if (opt->sema && node->type) {
-                        /* Check if unsigned */
-                        /* TODO: Implement proper type checking */
+                    /* Check if LHS is unsigned - use symbol type if available */
+                    bool is_unsigned = is_unsigned_expr(lhs);
+                    if (!is_unsigned && node->type) {
+                        is_unsigned = node->type->is_unsigned;
+                    }
+                    if (is_unsigned) {
+                        node->data.binary_expr.op = BINOP_BIT_AND;
+                        rhs->data.int_lit.value = const_val - 1;
+                        srd->changes++;
                     }
                 }
             }
