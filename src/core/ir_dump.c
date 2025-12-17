@@ -367,15 +367,17 @@ void anvil_dump_func(FILE *out, anvil_func_t *func)
     /* Function name and parameters */
     fprintf(out, " @%s(", func->name ? func->name : "?");
     
-    for (size_t i = 0; i < func->num_params; i++) {
-        if (i > 0) fprintf(out, ", ");
-        anvil_value_t *param = func->params[i];
-        if (param && param->type) {
-            anvil_dump_type(out, param->type);
-            fprintf(out, " ");
-        }
-        if (param) {
-            anvil_dump_value(out, param);
+    if (func->params) {
+        for (size_t i = 0; i < func->num_params; i++) {
+            if (i > 0) fprintf(out, ", ");
+            anvil_value_t *param = func->params[i];
+            if (param && param->type) {
+                anvil_dump_type(out, param->type);
+                fprintf(out, " ");
+            }
+            if (param) {
+                anvil_dump_value(out, param);
+            }
         }
     }
     fprintf(out, ")");

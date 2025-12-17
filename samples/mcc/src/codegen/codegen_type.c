@@ -16,14 +16,23 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_VOID:
             return anvil_type_void(cg->anvil_ctx);
         case TYPE_CHAR:
-            return anvil_type_i8(cg->anvil_ctx);
+            /* char signedness depends on is_unsigned flag */
+            return type->is_unsigned ? anvil_type_u8(cg->anvil_ctx) 
+                                     : anvil_type_i8(cg->anvil_ctx);
         case TYPE_SHORT:
-            return anvil_type_i16(cg->anvil_ctx);
+            return type->is_unsigned ? anvil_type_u16(cg->anvil_ctx)
+                                     : anvil_type_i16(cg->anvil_ctx);
         case TYPE_INT:
         case TYPE_ENUM:
-            return anvil_type_i32(cg->anvil_ctx);
+            return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
+                                     : anvil_type_i32(cg->anvil_ctx);
         case TYPE_LONG:
-            return anvil_type_i32(cg->anvil_ctx); /* 32-bit long for C89 */
+            /* 32-bit long for C89/ILP32, use is_unsigned */
+            return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
+                                     : anvil_type_i32(cg->anvil_ctx);
+        case TYPE_LONG_LONG:
+            return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
+                                     : anvil_type_i64(cg->anvil_ctx);
         case TYPE_FLOAT:
             return anvil_type_f32(cg->anvil_ctx);
         case TYPE_DOUBLE:

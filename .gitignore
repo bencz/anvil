@@ -10,6 +10,9 @@ lib/
 *.asm
 *.hlasm
 
+# IR dump files
+*.ir
+
 # Static libraries
 *.a
 

@@ -224,6 +224,57 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
                     case 4: anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)init->data.i); break;
                     default: anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)init->data.i); break;
                 }
+            } else if (init->kind == ANVIL_VAL_CONST_FLOAT) {
+                /* Emit floating-point initializer using bit representation */
+                if (size == 4) {
+                    /* float - use single precision bit pattern */
+                    float fval = (float)init->data.f;
+                    uint32_t bits;
+                    memcpy(&bits, &fval, sizeof(bits));
+                    anvil_strbuf_appendf(&be->data, "\t.long 0x%x\n", bits);
+                } else {
+                    /* double - use double precision bit pattern */
+                    double dval = init->data.f;
+                    uint64_t bits;
+                    memcpy(&bits, &dval, sizeof(bits));
+                    anvil_strbuf_appendf(&be->data, "\t.quad 0x%llx\n", (unsigned long long)bits);
+                }
+            } else if (init->kind == ANVIL_VAL_CONST_ARRAY) {
+                /* Emit array initializer */
+                int elem_size = 8;
+                bool is_float_array = false;
+                if (g->value->type && g->value->type->kind == ANVIL_TYPE_ARRAY &&
+                    g->value->type->data.array.elem) {
+                    elem_size = arm64_type_size(g->value->type->data.array.elem);
+                    is_float_array = arm64_type_is_float(g->value->type->data.array.elem);
+                }
+                for (size_t i = 0; i < init->data.array.num_elements; i++) {
+                    anvil_value_t *elem = init->data.array.elements[i];
+                    if (is_float_array && elem && elem->kind == ANVIL_VAL_CONST_FLOAT) {
+                        if (elem_size == 4) {
+                            float fval = (float)elem->data.f;
+                            uint32_t bits;
+                            memcpy(&bits, &fval, sizeof(bits));
+                            anvil_strbuf_appendf(&be->data, "\t.long 0x%x\n", bits);
+                        } else {
+                            double dval = elem->data.f;
+                            uint64_t bits;
+                            memcpy(&bits, &dval, sizeof(bits));
+                            anvil_strbuf_appendf(&be->data, "\t.quad 0x%llx\n", (unsigned long long)bits);
+                        }
+                    } else {
+                        int64_t val = 0;
+                        if (elem && elem->kind == ANVIL_VAL_CONST_INT) {
+                            val = elem->data.i;
+                        }
+                        switch (elem_size) {
+                            case 1: anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)val); break;
+                            case 2: anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)val); break;
+                            case 4: anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)val); break;
+                            default: anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)val); break;
+                        }
+                    }
+                }
             } else {
                 anvil_strbuf_appendf(&be->data, "\t.zero %d\n", size);
             }

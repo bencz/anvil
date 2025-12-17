@@ -231,6 +231,7 @@ const char *arm64_reg_name(int reg, int size, int reg_class);
 int arm64_type_size(anvil_type_t *type);
 int arm64_type_align(anvil_type_t *type);
 bool arm64_type_is_float(anvil_type_t *type);
+bool arm64_type_is_signed(anvil_type_t *type);
 
 /* Stack slot management */
 int arm64_alloc_stack_slot(arm64_backend_t *be, anvil_value_t *val, int size);
@@ -249,6 +250,7 @@ int arm64_alloc_callee_saved(arm64_backend_t *be);
 /* Code emission helpers */
 void arm64_emit_mov_imm(arm64_backend_t *be, int reg, int64_t imm);
 void arm64_emit_load_from_stack(arm64_backend_t *be, int reg, int offset, int size);
+void arm64_emit_load_from_stack_signed(arm64_backend_t *be, int reg, int offset, int size, bool is_signed);
 void arm64_emit_store_to_stack(arm64_backend_t *be, int reg, int offset, int size);
 void arm64_emit_load_global(arm64_backend_t *be, int reg, const char *name);
 

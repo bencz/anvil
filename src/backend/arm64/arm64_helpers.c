@@ -113,6 +113,21 @@ int arm64_type_size(anvil_type_t *type)
     }
 }
 
+bool arm64_type_is_signed(anvil_type_t *type)
+{
+    if (!type) return false;
+    
+    switch (type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_I64:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int arm64_type_align(anvil_type_t *type)
 {
     if (!type) return 8;
@@ -286,23 +301,38 @@ void arm64_emit_mov_imm(arm64_backend_t *be, int reg, int64_t imm)
     }
 }
 
-void arm64_emit_load_from_stack(arm64_backend_t *be, int reg, int offset, int size)
+void arm64_emit_load_from_stack_signed(arm64_backend_t *be, int reg, int offset, int size, bool is_signed)
 {
     const char *instr;
     const char *reg_name;
     
     switch (size) {
         case 1:
-            instr = "ldrb";
-            reg_name = arm64_wreg_names[reg];
+            if (is_signed) {
+                instr = "ldrsb";
+                reg_name = arm64_xreg_names[reg];
+            } else {
+                instr = "ldrb";
+                reg_name = arm64_wreg_names[reg];
+            }
             break;
         case 2:
-            instr = "ldrh";
-            reg_name = arm64_wreg_names[reg];
+            if (is_signed) {
+                instr = "ldrsh";
+                reg_name = arm64_xreg_names[reg];
+            } else {
+                instr = "ldrh";
+                reg_name = arm64_wreg_names[reg];
+            }
             break;
         case 4:
-            instr = "ldr";
-            reg_name = arm64_wreg_names[reg];
+            if (is_signed) {
+                instr = "ldrsw";
+                reg_name = arm64_xreg_names[reg];
+            } else {
+                instr = "ldr";
+                reg_name = arm64_wreg_names[reg];
+            }
             break;
         default:
             instr = "ldr";
@@ -323,6 +353,12 @@ void arm64_emit_load_from_stack(arm64_backend_t *be, int reg, int offset, int si
         anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
         anvil_strbuf_appendf(&be->code, "\t%s %s, [x16]\n", instr, reg_name);
     }
+}
+
+void arm64_emit_load_from_stack(arm64_backend_t *be, int reg, int offset, int size)
+{
+    /* Default to unsigned load for backward compatibility */
+    arm64_emit_load_from_stack_signed(be, reg, offset, size, false);
 }
 
 void arm64_emit_store_to_stack(arm64_backend_t *be, int reg, int offset, int size)
