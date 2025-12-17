@@ -125,6 +125,32 @@ make test-all          # Run all tests (syntax + codegen + cross)
 make help              # Show all available targets
 ```
 
+**Execution Tests (`tests/exec/run_exec_tests.sh`):**
+
+```bash
+# Run all execution tests (compares MCC output with native compiler)
+./run_exec_tests.sh
+
+# With specific optimization level
+./run_exec_tests.sh -O0          # No optimization
+./run_exec_tests.sh -Og          # Debug-friendly optimization
+./run_exec_tests.sh -O1          # Basic optimization
+./run_exec_tests.sh -O2          # Standard optimization
+./run_exec_tests.sh -O3          # Aggressive optimization
+
+# Run with all optimization levels
+./run_exec_tests.sh --all-opts
+
+# Compare assembly size with Clang
+./run_exec_tests.sh --compare-clang arithmetic.c
+
+# Run single test with optimization
+./run_exec_tests.sh -O2 loops.c
+
+# Show help
+./run_exec_tests.sh --help
+```
+
 **Cross-Standard Tests:**
 
 | Test | Description |
