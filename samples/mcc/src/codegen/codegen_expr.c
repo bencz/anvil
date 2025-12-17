@@ -140,6 +140,10 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             /* Handle short-circuit logical operators */
             if (op == BINOP_AND || op == BINOP_OR) {
+                /* Use a temporary variable instead of PHI (simpler codegen) */
+                anvil_type_t *i32_type = anvil_type_i32(cg->anvil_ctx);
+                anvil_value_t *result_ptr = anvil_build_alloca(cg->anvil_ctx, i32_type, "land.result");
+                
                 anvil_value_t *lhs = codegen_expr(cg, expr->data.binary_expr.lhs);
                 
                 int id = cg->label_counter++;
@@ -152,11 +156,16 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 
                 /* Compare LHS to zero */
                 anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
+                anvil_value_t *one = anvil_const_i32(cg->anvil_ctx, 1);
                 anvil_value_t *lhs_bool = anvil_build_cmp_ne(cg->anvil_ctx, lhs, zero, "cmp");
                 
                 if (op == BINOP_AND) {
+                    /* AND: if LHS is false, result is 0; else evaluate RHS */
+                    anvil_build_store(cg->anvil_ctx, zero, result_ptr);
                     anvil_build_br_cond(cg->anvil_ctx, lhs_bool, rhs_block, end_block);
                 } else {
+                    /* OR: if LHS is true, result is 1; else evaluate RHS */
+                    anvil_build_store(cg->anvil_ctx, one, result_ptr);
                     anvil_build_br_cond(cg->anvil_ctx, lhs_bool, end_block, rhs_block);
                 }
                 
@@ -164,22 +173,12 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 codegen_set_current_block(cg, rhs_block);
                 anvil_value_t *rhs = codegen_expr(cg, expr->data.binary_expr.rhs);
                 anvil_value_t *rhs_bool = anvil_build_cmp_ne(cg->anvil_ctx, rhs, zero, "cmp");
+                anvil_build_store(cg->anvil_ctx, rhs_bool, result_ptr);
                 anvil_build_br(cg->anvil_ctx, end_block);
-                anvil_block_t *rhs_end = cg->current_block;
                 
-                /* End block with PHI */
+                /* End block - load result */
                 codegen_set_current_block(cg, end_block);
-                anvil_value_t *phi = anvil_build_phi(cg->anvil_ctx, anvil_type_i32(cg->anvil_ctx), "phi");
-                
-                if (op == BINOP_AND) {
-                    anvil_phi_add_incoming(phi, zero, rhs_block);
-                } else {
-                    anvil_value_t *one = anvil_const_i32(cg->anvil_ctx, 1);
-                    anvil_phi_add_incoming(phi, one, rhs_block);
-                }
-                anvil_phi_add_incoming(phi, rhs_bool, rhs_end);
-                
-                return phi;
+                return anvil_build_load(cg->anvil_ctx, i32_type, result_ptr, "land.val");
             }
             
             /* Regular binary operators */
@@ -323,6 +322,11 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         }
         
         case AST_TERNARY_EXPR: {
+            /* Use a temporary variable instead of PHI (simpler codegen) */
+            anvil_type_t *type = codegen_type(cg, expr->type);
+            if (!type) type = anvil_type_i32(cg->anvil_ctx);
+            anvil_value_t *result_ptr = anvil_build_alloca(cg->anvil_ctx, type, "ternary.result");
+            
             anvil_value_t *cond = codegen_expr(cg, expr->data.ternary_expr.cond);
             
             int id = cg->label_counter++;
@@ -343,23 +347,18 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             /* Then block */
             codegen_set_current_block(cg, then_block);
             anvil_value_t *then_val = codegen_expr(cg, expr->data.ternary_expr.then_expr);
+            anvil_build_store(cg->anvil_ctx, then_val, result_ptr);
             anvil_build_br(cg->anvil_ctx, end_block);
-            anvil_block_t *then_end = cg->current_block;
             
             /* Else block */
             codegen_set_current_block(cg, else_block);
             anvil_value_t *else_val = codegen_expr(cg, expr->data.ternary_expr.else_expr);
+            anvil_build_store(cg->anvil_ctx, else_val, result_ptr);
             anvil_build_br(cg->anvil_ctx, end_block);
-            anvil_block_t *else_end = cg->current_block;
             
-            /* End block with PHI */
+            /* End block - load result */
             codegen_set_current_block(cg, end_block);
-            anvil_type_t *type = codegen_type(cg, expr->type);
-            anvil_value_t *phi = anvil_build_phi(cg->anvil_ctx, type, "ternary");
-            anvil_phi_add_incoming(phi, then_val, then_end);
-            anvil_phi_add_incoming(phi, else_val, else_end);
-            
-            return phi;
+            return anvil_build_load(cg->anvil_ctx, type, result_ptr, "ternary.val");
         }
         
         case AST_CALL_EXPR: {

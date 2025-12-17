@@ -292,26 +292,118 @@ void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     cg->continue_target = old_continue;
 }
 
+/* Helper to collect case statements from switch body */
+static void collect_cases(mcc_ast_node_t *node, mcc_ast_node_t ***cases, size_t *num_cases,
+                          mcc_ast_node_t **default_case)
+{
+    if (!node) return;
+    
+    if (node->kind == AST_CASE_STMT) {
+        size_t n = *num_cases;
+        *cases = realloc(*cases, (n + 1) * sizeof(mcc_ast_node_t*));
+        (*cases)[n] = node;
+        (*num_cases)++;
+    } else if (node->kind == AST_DEFAULT_STMT) {
+        *default_case = node;
+    } else if (node->kind == AST_COMPOUND_STMT) {
+        for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
+            collect_cases(node->data.compound_stmt.stmts[i], cases, num_cases, default_case);
+        }
+    }
+}
+
 void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
-    anvil_value_t *val = codegen_expr(cg, stmt->data.switch_stmt.expr);
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, "switch.end");
+    int id = cg->label_counter++;
+    char end_name[32];
+    snprintf(end_name, sizeof(end_name), "switch%d.end", id);
+    
+    anvil_value_t *switch_val = codegen_expr(cg, stmt->data.switch_stmt.expr);
+    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
     anvil_block_t *old_break = cg->break_target;
     cg->break_target = end_block;
     
-    /* For now, generate as if-else chain */
-    /* A proper implementation would use a switch instruction or jump table */
+    /* Collect all case and default statements */
+    mcc_ast_node_t **cases = NULL;
+    size_t num_cases = 0;
+    mcc_ast_node_t *default_case = NULL;
+    collect_cases(stmt->data.switch_stmt.body, &cases, &num_cases, &default_case);
     
-    codegen_stmt(cg, stmt->data.switch_stmt.body);
+    /* Create blocks for each case */
+    anvil_block_t **case_blocks = NULL;
+    if (num_cases > 0) {
+        case_blocks = malloc(num_cases * sizeof(anvil_block_t*));
+        for (size_t i = 0; i < num_cases; i++) {
+            char case_name[32];
+            snprintf(case_name, sizeof(case_name), "switch%d.case%zu", id, i);
+            case_blocks[i] = anvil_block_create(cg->current_func, case_name);
+        }
+    }
     
-    if (!codegen_block_has_terminator(cg)) {
-        anvil_build_br(cg->anvil_ctx, end_block);
+    anvil_block_t *default_block = NULL;
+    if (default_case) {
+        char def_name[32];
+        snprintf(def_name, sizeof(def_name), "switch%d.default", id);
+        default_block = anvil_block_create(cg->current_func, def_name);
+    }
+    
+    /* Generate comparison chain */
+    for (size_t i = 0; i < num_cases; i++) {
+        mcc_ast_node_t *case_node = cases[i];
+        anvil_value_t *case_val = codegen_expr(cg, case_node->data.case_stmt.expr);
+        anvil_value_t *cmp = anvil_build_cmp_eq(cg->anvil_ctx, switch_val, case_val, "cmp");
+        
+        anvil_block_t *next_block;
+        if (i + 1 < num_cases) {
+            char next_name[32];
+            snprintf(next_name, sizeof(next_name), "switch%d.cmp%zu", id, i + 1);
+            next_block = anvil_block_create(cg->current_func, next_name);
+        } else if (default_block) {
+            next_block = default_block;
+        } else {
+            next_block = end_block;
+        }
+        
+        anvil_build_br_cond(cg->anvil_ctx, cmp, case_blocks[i], next_block);
+        codegen_set_current_block(cg, next_block);
+    }
+    
+    /* Generate code for each case (with fall-through) */
+    for (size_t i = 0; i < num_cases; i++) {
+        codegen_set_current_block(cg, case_blocks[i]);
+        mcc_ast_node_t *case_stmt = cases[i]->data.case_stmt.stmt;
+        if (case_stmt) {
+            codegen_stmt(cg, case_stmt);
+        }
+        /* Fall through to next case or end */
+        if (!codegen_block_has_terminator(cg)) {
+            if (i + 1 < num_cases) {
+                anvil_build_br(cg->anvil_ctx, case_blocks[i + 1]);
+            } else if (default_block) {
+                anvil_build_br(cg->anvil_ctx, default_block);
+            } else {
+                anvil_build_br(cg->anvil_ctx, end_block);
+            }
+        }
+    }
+    
+    /* Generate default case */
+    if (default_block) {
+        codegen_set_current_block(cg, default_block);
+        if (default_case->data.default_stmt.stmt) {
+            codegen_stmt(cg, default_case->data.default_stmt.stmt);
+        }
+        if (!codegen_block_has_terminator(cg)) {
+            anvil_build_br(cg->anvil_ctx, end_block);
+        }
     }
     
     codegen_set_current_block(cg, end_block);
     cg->break_target = old_break;
-    (void)val;
+    
+    free(cases);
+    free(case_blocks);
 }
 
 void codegen_return_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
