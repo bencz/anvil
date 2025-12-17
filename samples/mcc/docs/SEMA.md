@@ -641,3 +641,137 @@ mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
     return NULL;
 }
 ```
+
+### Struct/Union/Enum Tag Registration
+
+The semantic analyzer now properly registers struct, union, and enum tags in the symbol table:
+
+```c
+/* In sema_decl.c - analyze_struct_decl() */
+static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl, bool is_union)
+{
+    if (decl->data.struct_decl.tag && decl->data.struct_decl.struct_type) {
+        mcc_symtab_define_tag(sema->symtab,
+            decl->data.struct_decl.tag,
+            is_union ? SYM_UNION : SYM_STRUCT,
+            decl->data.struct_decl.struct_type,
+            decl->location);
+    }
+    return true;
+}
+```
+
+## Semantic Dump Functions
+
+The semantic analyzer provides several dump functions for debugging:
+
+### Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `-dump-sema` | Standard dump with organized information |
+| `-dump-sema-verbose` | Complete detailed dump with all information |
+
+### Dump Functions API
+
+```c
+/* Standard dump - symbol table and AST declarations */
+void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
+
+/* Full dump with AST traversal for local variables */
+void mcc_sema_dump_full(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
+
+/* Verbose dump - everything in detailed format */
+void mcc_sema_dump_verbose(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
+
+/* Symbol table only */
+void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
+```
+
+### Information Dumped
+
+The dump includes:
+
+1. **Type Context**
+   - Pointer size for target architecture
+   - Primitive type sizes and alignments
+
+2. **Symbol Table (Global Scope)**
+   - Functions (with definition/used flags)
+   - Global variables
+   - Typedefs
+   - Enum constants (with values)
+   - Tags (struct/union/enum with fields/constants)
+
+3. **Complete Symbol Information** (verbose mode)
+   - Location (file:line:column)
+   - Storage class (auto, static, extern, register, typedef)
+   - Flags (defined, used, parameter)
+   - Stack offset (for local variables)
+   - Global name (for functions/globals)
+
+4. **Complete Type Information** (verbose mode)
+   - Qualifiers (const, volatile, restrict, _Atomic)
+   - Size and alignment
+   - Unsigned flag
+   - Function specifiers (inline, _Noreturn)
+   - Type-specific details:
+     - Pointer: pointee type
+     - Array: element type, length, VLA/flexible flags
+     - Function: return type, parameters, variadic/K&R flags
+     - Struct/Union: tag, completeness, fields with offsets
+     - Enum: tag, completeness, constants with values
+
+5. **AST Declarations**
+   - All declarations with full details
+   - Local variables in function bodies
+   - Parameters
+   - Nested scopes (for loops, if blocks, etc.)
+
+6. **C23 Attributes**
+   - `[[deprecated]]` with optional message
+   - `[[nodiscard]]` with optional message
+   - `[[maybe_unused]]`
+   - `[[noreturn]]`
+   - `[[fallthrough]]`
+   - GNU attributes (`packed`, `aligned`, `pure`, `const`, `unused`)
+
+### Example Output
+
+```
+=== Full Semantic Analysis Dump ===
+
+C Standard: c23 (ISO/IEC 9899:2024)
+
+=== Type Context ===
+
+Pointer size: 8 bytes
+
+Primitive Types:
+  char:        size=1, align=1
+  int:         size=4, align=4
+  long:        size=8, align=8
+
+=== Global Scope ===
+
+Functions:
+  Function 'main' 'int ()' defined </file.c:10:1>
+
+Tags (struct/union/enum):
+  Struct 'Point' 'struct Point' </file.c:1:1>
+    Fields:
+      'x' 'int' [offset: 0, size: 4]
+      'y' 'int' [offset: 4, size: 4]
+
+=== Declarations (from AST) ===
+
+Function 'compute' 'int' definition </file.c:5:1>
+  Attributes:
+    [[nodiscard]]
+  Parameters: (2)
+    Parameter [0] 'a' 'int' </file.c:5:1>
+    Parameter [1] 'b' 'int' </file.c:5:1>
+  Body:
+    Block:
+      Variable 'result' 'int' </file.c:6:5> initialized
+```

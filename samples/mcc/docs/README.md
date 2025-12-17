@@ -227,6 +227,32 @@ See [C_STANDARDS.md](C_STANDARDS.md) for complete documentation of:
 - `defined()` operator
 - Arithmetic and logical expressions
 
+### Debug and Dump Options
+
+MCC provides several options for debugging and inspecting compiler internals:
+
+```bash
+# Dump AST (Abstract Syntax Tree)
+./mcc -dump-ast input.c
+
+# Dump semantic analysis info (symbol table, types, declarations)
+./mcc -dump-sema input.c
+
+# Verbose semantic dump (complete detailed information)
+./mcc -dump-sema-verbose input.c
+
+# Dump ANVIL IR (intermediate representation)
+./mcc -dump-ir input.c
+```
+
+The `-dump-sema-verbose` option shows:
+- Type context (pointer size, primitive type sizes)
+- Complete symbol table with all flags and attributes
+- All declarations from AST with local variables
+- C23 attributes (`[[nodiscard]]`, `[[deprecated]]`, etc.)
+
+See [SEMA.md](SEMA.md) for detailed documentation of dump output.
+
 ### Target Architectures
 
 | Architecture | Output | Calling Convention |

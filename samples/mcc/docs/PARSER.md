@@ -717,3 +717,90 @@ case AST_DECL_LIST:
     }
     break;
 ```
+
+### Struct Type in AST
+
+`AST_STRUCT_DECL` and `AST_UNION_DECL` now include the struct/union type for accessing fields:
+
+```c
+/* In ast.h */
+struct {
+    const char *tag;
+    mcc_ast_node_t **fields;
+    size_t num_fields;
+    bool is_definition;
+    struct mcc_type *struct_type;  /* Added for accessing struct fields */
+} struct_decl;
+```
+
+### C23 Attribute Recognition in Declarations
+
+`parse_is_declaration_start` now recognizes C23 attribute syntax `[[...]]` as the start of a declaration:
+
+```c
+/* In parse_type.c - parse_is_declaration_start() */
+bool parse_is_declaration_start(mcc_parser_t *p)
+{
+    switch (p->peek->type) {
+        /* ... storage class specifiers ... */
+        
+        /* C23: Attribute syntax [[...]] - could be start of declaration */
+        case TOK_LBRACKET2:
+            return true;
+            
+        default:
+            return parse_is_type_start(p);
+    }
+}
+```
+
+This allows local variables with attributes to be parsed correctly:
+
+```c
+int main(void) {
+    [[maybe_unused]] int unused_var = 10;  /* Now parsed correctly */
+    return 0;
+}
+```
+
+### C23 Attributes Parsing
+
+The parser supports C23 standard attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `[[deprecated]]` | Mark as deprecated with optional message |
+| `[[deprecated("msg")]]` | Deprecated with custom message |
+| `[[nodiscard]]` | Warn if return value is discarded |
+| `[[nodiscard("msg")]]` | Nodiscard with custom message |
+| `[[maybe_unused]]` | Suppress unused warnings |
+| `[[noreturn]]` | Function does not return |
+| `[[fallthrough]]` | Intentional fallthrough in switch |
+| `[[unsequenced]]` | C23 function attribute |
+| `[[reproducible]]` | C23 function attribute |
+
+GNU-style attributes are also supported:
+
+| Attribute | Description |
+|-----------|-------------|
+| `__attribute__((packed))` | Packed struct/union |
+| `__attribute__((aligned(n)))` | Custom alignment |
+| `__attribute__((pure))` | Pure function |
+| `__attribute__((const))` | Const function |
+| `__attribute__((unused))` | Suppress unused warnings |
+
+Attributes are stored in the AST node:
+
+```c
+/* In func_decl and var_decl */
+mcc_attribute_t *attrs;  /* Linked list of attributes */
+
+/* Attribute structure */
+typedef struct mcc_attribute {
+    mcc_attr_kind_t kind;
+    const char *name;
+    const char *message;    /* For deprecated/nodiscard */
+    int alignment;          /* For aligned */
+    struct mcc_attribute *next;
+} mcc_attribute_t;
+```
