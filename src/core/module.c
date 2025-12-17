@@ -39,51 +39,55 @@ void anvil_module_destroy(anvil_module_t *mod)
         }
     }
     
-    /* Destroy functions */
-    anvil_func_t *func = mod->funcs;
-    while (func) {
-        anvil_func_t *next = func->next;
-        
-        /* Destroy blocks - collect unique constants first, then free everything */
-        anvil_block_t *block = func->blocks;
-        
-        /* Collect unique constant pointers to avoid double-free */
-        #define MAX_CONSTS 1024
-        anvil_value_t *consts[MAX_CONSTS];
-        size_t num_consts = 0;
-        
-        for (anvil_block_t *b = block; b; b = b->next) {
+    /* First pass: collect ALL unique constants from ALL functions */
+    #define MAX_CONSTS 4096
+    anvil_value_t *all_consts[MAX_CONSTS];
+    size_t num_all_consts = 0;
+    
+    for (anvil_func_t *f = mod->funcs; f; f = f->next) {
+        for (anvil_block_t *b = f->blocks; b; b = b->next) {
             for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 for (size_t i = 0; i < instr->num_operands; i++) {
                     anvil_value_t *op = instr->operands[i];
                     if (op && (op->kind == ANVIL_VAL_CONST_INT || 
                                op->kind == ANVIL_VAL_CONST_FLOAT ||
                                op->kind == ANVIL_VAL_CONST_NULL ||
-                               op->kind == ANVIL_VAL_CONST_STRING)) {
+                               op->kind == ANVIL_VAL_CONST_STRING ||
+                               op->kind == ANVIL_VAL_CONST_ARRAY)) {
                         /* Check if already in list */
                         bool found = false;
-                        for (size_t j = 0; j < num_consts; j++) {
-                            if (consts[j] == op) { found = true; break; }
+                        for (size_t j = 0; j < num_all_consts; j++) {
+                            if (all_consts[j] == op) { found = true; break; }
                         }
-                        if (!found && num_consts < MAX_CONSTS) {
-                            consts[num_consts++] = op;
+                        if (!found && num_all_consts < MAX_CONSTS) {
+                            all_consts[num_all_consts++] = op;
                         }
                     }
                     instr->operands[i] = NULL;
                 }
             }
         }
-        
-        /* Free collected constants */
-        for (size_t i = 0; i < num_consts; i++) {
-            anvil_value_t *op = consts[i];
-            if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
-                free((void*)op->data.str);
-            }
-            free(op->name);
-            free(op);
+    }
+    
+    /* Free all collected constants */
+    for (size_t i = 0; i < num_all_consts; i++) {
+        anvil_value_t *op = all_consts[i];
+        if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
+            free((void*)op->data.str);
+        } else if (op->kind == ANVIL_VAL_CONST_ARRAY && op->data.array.elements) {
+            free(op->data.array.elements);
         }
-        #undef MAX_CONSTS
+        free(op->name);
+        free(op);
+    }
+    #undef MAX_CONSTS
+    
+    /* Destroy functions */
+    anvil_func_t *func = mod->funcs;
+    while (func) {
+        anvil_func_t *next = func->next;
+        
+        anvil_block_t *block = func->blocks;
         
         /* Free all instruction results */
         for (anvil_block_t *b = block; b; b = b->next) {

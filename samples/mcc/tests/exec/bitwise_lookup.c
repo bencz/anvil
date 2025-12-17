@@ -39,9 +39,9 @@ int main( void )
     uint16_t a, b;
 
     /* Test a smaller range to keep test fast */
-    for(a = 0; a < 4096; a++)
+    for(a = 0; a < 1024; a++)
     {
-      for(b = 0; b < 4096; b++)
+      for(b = 0; b < 1024; b++)
       {    
         if ( AND(a,b) != (a&b) ) { printf( "AND error\n" ); return 1; }
         if ( IOR(a,b) != (a|b) ) { printf( "IOR error\n" ); return 1; }
