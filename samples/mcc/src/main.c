@@ -191,6 +191,14 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         return 1;
     }
     
+    /* AST Optimization */
+    mcc_ast_opt_t *ast_opt = mcc_ast_opt_create(ctx);
+    mcc_ast_opt_set_level(ast_opt, ctx->options.opt_level);
+    mcc_ast_opt_set_sema(ast_opt, sema);
+    mcc_ast_opt_set_verbose(ast_opt, ctx->options.verbose);
+    mcc_ast_opt_run(ast_opt, ast);
+    mcc_ast_opt_destroy(ast_opt);
+    
     /* Code generation - use symtab and types from sema */
     mcc_codegen_t *cg = mcc_codegen_create(ctx, sema->symtab, sema->types);
     mcc_codegen_set_target(cg, ctx->options.arch);
@@ -374,6 +382,20 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
             return 1;
         }
     }
+    
+    /* AST Optimization - optimize all ASTs */
+    mcc_ast_opt_t *ast_opt = mcc_ast_opt_create(ctx);
+    mcc_ast_opt_set_level(ast_opt, ctx->options.opt_level);
+    mcc_ast_opt_set_sema(ast_opt, sema);
+    mcc_ast_opt_set_verbose(ast_opt, ctx->options.verbose);
+    
+    for (size_t i = 0; i < num_files; i++) {
+        if (ctx->options.verbose) {
+            fprintf(stderr, "Optimizing: %s\n", files[i]);
+        }
+        mcc_ast_opt_run(ast_opt, asts[i]);
+    }
+    mcc_ast_opt_destroy(ast_opt);
     
     /* Code generation - use shared symtab and types from sema */
     mcc_codegen_t *cg = mcc_codegen_create(ctx, sema->symtab, sema->types);

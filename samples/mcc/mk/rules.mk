@@ -35,6 +35,10 @@ $(OBJDIR)/sema_%.o: $(SEMA_SRCDIR)/%.c | $(OBJDIR)
 $(OBJDIR)/cg_%.o: $(CODEGEN_SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Compile optimization source files
+$(OBJDIR)/opt_%.o: $(OPT_SRCDIR)/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # ============================================================
 # Dependencies - Main source files
 # ============================================================
@@ -96,3 +100,13 @@ $(OBJDIR)/cg_codegen_expr.o: $(CODEGEN_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/cg_codegen_stmt.o: $(CODEGEN_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/cg_codegen_decl.o: $(CODEGEN_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/cg_codegen_type.o: $(CODEGEN_INTERNAL_H) $(INCDIR)/mcc.h
+
+# ============================================================
+# Dependencies - Optimization source files
+# ============================================================
+$(OBJDIR)/opt_ast_opt.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h $(INCDIR)/ast_opt.h
+$(OBJDIR)/opt_opt_helpers.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/opt_opt_const.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/opt_opt_simplify.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/opt_opt_dead.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/opt_opt_stubs.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
