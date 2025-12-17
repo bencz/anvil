@@ -253,6 +253,23 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                                 continue;
                             }
                             
+                            /* Handle # (stringification) operator */
+                            if (body_tok->type == TOK_HASH && body_tok->next &&
+                                body_tok->next->type == TOK_IDENT) {
+                                mcc_token_t *param_tok = body_tok->next;
+                                int pidx;
+                                FIND_PARAM_IDX(param_tok->text, pidx);
+                                
+                                if (pidx >= 0 && pidx < num_args) {
+                                    /* Stringify the unexpanded argument */
+                                    mcc_token_t *str_tok = pp_stringify_tokens(pp, args[pidx]);
+                                    str_tok->next = NULL;
+                                    APPEND_EXP(str_tok);
+                                    body_tok = param_tok; /* Skip the parameter token */
+                                    continue;
+                                }
+                            }
+                            
                             if (body_tok->type == TOK_IDENT) {
                                 /* Check if it's a parameter */
                                 int param_idx;

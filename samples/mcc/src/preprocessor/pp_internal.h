@@ -45,6 +45,9 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro);
 /* Process #define directive */
 void pp_process_define(mcc_preprocessor_t *pp);
 
+/* Stringify a token list (for # operator) */
+mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens);
+
 /* ---- Token Output (pp_token.c or preprocessor.c) ---- */
 
 /* Emit a token to output */

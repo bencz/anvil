@@ -71,7 +71,7 @@ void pp_pop_expanding(mcc_preprocessor_t *pp)
  * ============================================================ */
 
 /* Stringify a token list (for # operator) */
-static mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
+mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
 {
     /* Calculate required buffer size */
     size_t len = 2; /* For quotes */
