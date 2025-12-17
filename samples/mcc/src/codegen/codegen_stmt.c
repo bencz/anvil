@@ -157,9 +157,8 @@ void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         anvil_block_create(cg->current_func, else_name) : NULL;
     anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
     
-    /* Compare to zero */
-    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
-    anvil_value_t *cond_bool = anvil_build_cmp_ne(cg->anvil_ctx, cond, zero, "cond");
+    /* Convert to boolean if not already */
+    anvil_value_t *cond_bool = codegen_to_bool(cg, cond);
     
     anvil_build_br_cond(cg->anvil_ctx, cond_bool, then_block,
                         else_block ? else_block : end_block);
@@ -205,8 +204,8 @@ void codegen_while_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     /* Condition */
     codegen_set_current_block(cg, cond_block);
     anvil_value_t *cond = codegen_expr(cg, stmt->data.while_stmt.cond);
-    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
-    anvil_value_t *cond_bool = anvil_build_cmp_ne(cg->anvil_ctx, cond, zero, "cond");
+    /* Convert to boolean if not already (comparison results are already boolean) */
+    anvil_value_t *cond_bool = codegen_to_bool(cg, cond);
     anvil_build_br_cond(cg->anvil_ctx, cond_bool, body_block, end_block);
     
     /* Body */
@@ -250,8 +249,7 @@ void codegen_do_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     /* Condition */
     codegen_set_current_block(cg, cond_block);
     anvil_value_t *cond = codegen_expr(cg, stmt->data.do_stmt.cond);
-    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
-    anvil_value_t *cond_bool = anvil_build_cmp_ne(cg->anvil_ctx, cond, zero, "cond");
+    anvil_value_t *cond_bool = codegen_to_bool(cg, cond);
     anvil_build_br_cond(cg->anvil_ctx, cond_bool, body_block, end_block);
     
     codegen_set_current_block(cg, end_block);
@@ -290,8 +288,7 @@ void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     codegen_set_current_block(cg, cond_block);
     if (stmt->data.for_stmt.cond) {
         anvil_value_t *cond = codegen_expr(cg, stmt->data.for_stmt.cond);
-        anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
-        anvil_value_t *cond_bool = anvil_build_cmp_ne(cg->anvil_ctx, cond, zero, "cond");
+        anvil_value_t *cond_bool = codegen_to_bool(cg, cond);
         anvil_build_br_cond(cg->anvil_ctx, cond_bool, body_block, end_block);
     } else {
         anvil_build_br(cg->anvil_ctx, body_block);

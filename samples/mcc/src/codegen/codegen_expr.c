@@ -594,3 +594,20 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             return NULL;
     }
 }
+
+/* Convert value to boolean for conditional branch.
+ * Avoids redundant CMP_NE when value is already boolean (comparison result).
+ */
+anvil_value_t *codegen_to_bool(mcc_codegen_t *cg, anvil_value_t *val)
+{
+    if (!val) return NULL;
+    
+    /* Check if value is already boolean (comparison result) */
+    if (anvil_value_is_bool(val)) {
+        return val;
+    }
+    
+    /* Not a boolean, need to compare with zero */
+    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
+    return anvil_build_cmp_ne(cg->anvil_ctx, val, zero, "tobool");
+}

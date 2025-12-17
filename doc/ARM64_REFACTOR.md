@@ -13,6 +13,26 @@ New optimization pass infrastructure in `src/backend/arm64/opt/`:
 - **Branch Optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
 - **Immediate Optimization**: Use immediate forms of instructions when possible
 
+### Conditional Branch Optimization
+The `arm64_emit_br_cond()` function now detects when the condition is a comparison result and emits `cmp` + `b.cond` directly instead of loading the boolean result:
+
+**Before:**
+```asm
+cmp x9, x10
+cset x0, le
+strb w0, [stack]
+ldrsb x9, [stack]
+cbnz x9, .body
+```
+
+**After:**
+```asm
+cmp x9, x10
+b.le .body
+```
+
+Supported condition codes: `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `lo`, `ls`, `hi`, `hs` (unsigned).
+
 ### IR Preparation Phase
 New `prepare_ir` callback in backend interface:
 - Called automatically by `anvil_module_codegen()` before code generation

@@ -663,15 +663,67 @@ void arm64_emit_br(arm64_backend_t *be, anvil_instr_t *instr)
     }
 }
 
+/* Get ARM64 condition code for comparison opcode */
+static const char *arm64_cond_for_cmp(anvil_op_t op)
+{
+    switch (op) {
+        case ANVIL_OP_CMP_EQ:  return "eq";
+        case ANVIL_OP_CMP_NE:  return "ne";
+        case ANVIL_OP_CMP_LT:  return "lt";
+        case ANVIL_OP_CMP_LE:  return "le";
+        case ANVIL_OP_CMP_GT:  return "gt";
+        case ANVIL_OP_CMP_GE:  return "ge";
+        case ANVIL_OP_CMP_ULT: return "lo";  /* unsigned lower */
+        case ANVIL_OP_CMP_ULE: return "ls";  /* unsigned lower or same */
+        case ANVIL_OP_CMP_UGT: return "hi";  /* unsigned higher */
+        case ANVIL_OP_CMP_UGE: return "hs";  /* unsigned higher or same */
+        default: return NULL;
+    }
+}
+
+/* Check if value is a comparison instruction result */
+static anvil_instr_t *get_cmp_instr(anvil_value_t *val)
+{
+    if (!val) return NULL;
+    if (val->kind != ANVIL_VAL_INSTR) return NULL;
+    if (!val->data.instr) return NULL;
+    
+    anvil_op_t op = val->data.instr->op;
+    if (op >= ANVIL_OP_CMP_EQ && op <= ANVIL_OP_CMP_UGE) {
+        return val->data.instr;
+    }
+    return NULL;
+}
+
 void arm64_emit_br_cond(arm64_backend_t *be, anvil_instr_t *instr)
 {
-    arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+    anvil_value_t *cond = instr->operands[0];
+    anvil_instr_t *cmp_instr = get_cmp_instr(cond);
     
     if (instr->true_block && instr->false_block) {
         bool true_has_phi = instr->true_block->first && 
                             instr->true_block->first->op == ANVIL_OP_PHI;
         bool false_has_phi = instr->false_block->first && 
                              instr->false_block->first->op == ANVIL_OP_PHI;
+        
+        /* Optimization: if condition is a comparison, use b.cond directly */
+        if (cmp_instr && !true_has_phi && !false_has_phi) {
+            const char *cond_code = arm64_cond_for_cmp(cmp_instr->op);
+            if (cond_code) {
+                /* Load comparison operands and emit cmp + b.cond */
+                arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
+                arm64_emit_load_value(be, cmp_instr->operands[1], ARM64_X10);
+                anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
+                anvil_strbuf_appendf(&be->code, "\tb.%s .L%s_%s\n",
+                    cond_code, be->current_func->name, instr->true_block->name);
+                anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
+                    be->current_func->name, instr->false_block->name);
+                return;
+            }
+        }
+        
+        /* Fallback: load condition value and use cbnz */
+        arm64_emit_load_value(be, cond, ARM64_X9);
         
         if (!true_has_phi && !false_has_phi) {
             anvil_strbuf_appendf(&be->code, "\tcbnz x9, .L%s_%s\n",

@@ -188,3 +188,36 @@ void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init)
     if (!global || global->kind != ANVIL_VAL_GLOBAL) return;
     global->data.global.init = init;
 }
+
+anvil_type_t *anvil_value_get_type(anvil_value_t *val)
+{
+    return val ? val->type : NULL;
+}
+
+bool anvil_value_is_bool(anvil_value_t *val)
+{
+    if (!val) return false;
+    
+    /* Check if value is result of a comparison instruction */
+    if (val->kind == ANVIL_VAL_INSTR && val->data.instr) {
+        anvil_op_t op = val->data.instr->op;
+        switch (op) {
+            case ANVIL_OP_CMP_EQ:
+            case ANVIL_OP_CMP_NE:
+            case ANVIL_OP_CMP_LT:
+            case ANVIL_OP_CMP_LE:
+            case ANVIL_OP_CMP_GT:
+            case ANVIL_OP_CMP_GE:
+            case ANVIL_OP_CMP_ULT:
+            case ANVIL_OP_CMP_ULE:
+            case ANVIL_OP_CMP_UGT:
+            case ANVIL_OP_CMP_UGE:
+            case ANVIL_OP_FCMP:
+                return true;
+            default:
+                break;
+        }
+    }
+    
+    return false;
+}

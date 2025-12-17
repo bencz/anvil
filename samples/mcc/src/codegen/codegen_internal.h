@@ -89,6 +89,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr);
 /* Generate code for lvalue (returns pointer) */
 anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr);
 
+/* Convert value to boolean (avoids redundant CMP_NE if already boolean) */
+anvil_value_t *codegen_to_bool(mcc_codegen_t *cg, anvil_value_t *val);
+
 /* ============================================================
  * Statement Code Generation (codegen_stmt.c)
  * ============================================================ */

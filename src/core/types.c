@@ -276,3 +276,12 @@ size_t anvil_type_align(anvil_type_t *type)
 {
     return type ? type->align : 1;
 }
+
+bool anvil_type_is_bool(anvil_type_t *type)
+{
+    /* ANVIL doesn't have a dedicated i1/bool type.
+     * Comparison results use i8 but are semantically boolean.
+     * This function returns false; use anvil_value_is_bool() instead. */
+    (void)type;
+    return false;
+}

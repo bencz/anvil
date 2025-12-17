@@ -416,6 +416,7 @@ Recent fixes and refactoring of the ARM64 backend for robust code generation:
 - **Redundant load elimination**: Reuse values already loaded from same address
 - **Branch optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
 - **Immediate optimization**: Use immediate forms of instructions when possible
+- **Conditional branch fusion**: `arm64_emit_br_cond()` detects comparison results and emits `cmp` + `b.cond` directly
 
 **Code Generation Improvements:**
 - **PHI node handling**: Correct SSA resolution with copies before branches
@@ -462,6 +463,17 @@ free(ir_str);
 if (!anvil_block_has_terminator(block)) {
     anvil_build_ret_void(ctx);  // Add implicit return
 }
+
+// Check if value is boolean (comparison result)
+if (anvil_value_is_bool(cond)) {
+    // Already boolean, use directly in br_cond
+} else {
+    // Need to compare with zero first
+    cond = anvil_build_cmp_ne(ctx, cond, zero, "tobool");
+}
+
+// Get type of a value
+anvil_type_t *type = anvil_value_get_type(val);
 ```
 
 **String escaping**: String constants in IR dumps are properly escaped (`\n`, `\t`, `\0`, `\xHH` for non-printable characters).

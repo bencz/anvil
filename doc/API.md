@@ -439,6 +439,47 @@ Gets the features for a specific CPU model (without context overrides).
 - `ANVIL_FEATURE_X86_AVX512F` - AVX-512 Foundation
 - `ANVIL_FEATURE_X86_FMA` - FMA3
 
+## Value API
+
+Functions for inspecting and querying values.
+
+### anvil_value_get_type
+
+```c
+anvil_type_t *anvil_value_get_type(anvil_value_t *val);
+```
+
+Gets the type of a value.
+
+**Parameters:**
+- `val`: Value to query
+
+**Returns:** Pointer to the value's type, or NULL if val is NULL.
+
+### anvil_value_is_bool
+
+```c
+bool anvil_value_is_bool(anvil_value_t *val);
+```
+
+Checks if a value is a boolean (result of a comparison instruction).
+
+**Parameters:**
+- `val`: Value to check
+
+**Returns:** `true` if the value is a comparison result (CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE, CMP_ULT, CMP_ULE, CMP_UGT, CMP_UGE, FCMP), `false` otherwise.
+
+**Example:**
+```c
+anvil_value_t *cond = anvil_build_cmp_le(ctx, i, n, "cmp");
+if (anvil_value_is_bool(cond)) {
+    // Use directly in br_cond - no need to compare with zero
+    anvil_build_br_cond(ctx, cond, body_block, end_block);
+}
+```
+
+**Use case:** Avoid generating redundant `cmp x, 0` + `cset` sequences when the value is already a boolean from a comparison.
+
 ## Module API
 
 Modules represent compilation units.

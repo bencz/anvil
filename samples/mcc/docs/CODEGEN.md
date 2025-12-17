@@ -37,6 +37,7 @@ The code generator is organized into modular files in `src/codegen/`:
 **codegen_expr.c** (Expression Generation)
 - `codegen_expr()`: Generate code for any expression, returns `anvil_value_t*`
 - `codegen_lvalue()`: Generate code for lvalue (returns pointer)
+- `codegen_to_bool()`: Convert value to boolean, avoiding redundant comparisons
 - Handles: literals, identifiers, binary/unary operators, ternary, calls, subscript, member access, casts, sizeof, comma
 
 **codegen_stmt.c** (Statement Generation)
@@ -757,6 +758,49 @@ if (body && body->kind == AST_COMPOUND_STMT) {
     }
 }
 ```
+
+### Boolean Conversion Optimization
+
+The `codegen_to_bool()` function avoids generating redundant comparisons when a value is already boolean (result of a comparison instruction):
+
+```c
+/* In codegen_expr.c */
+anvil_value_t *codegen_to_bool(mcc_codegen_t *cg, anvil_value_t *val)
+{
+    if (!val) return NULL;
+    
+    /* Check if value is already boolean (comparison result) */
+    if (anvil_value_is_bool(val)) {
+        return val;  /* No conversion needed */
+    }
+    
+    /* Not a boolean, need to compare with zero */
+    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
+    return anvil_build_cmp_ne(cg->anvil_ctx, val, zero, "tobool");
+}
+```
+
+This optimization is used in control flow statements (`if`, `while`, `do`, `for`) to avoid generating:
+```asm
+cmp x9, x10       ; Original comparison (i <= n)
+cset x0, le       ; Set boolean result
+strb w0, [stack]
+ldrsb x9, [stack]
+cmp x9, #0        ; REDUNDANT - comparing boolean with 0
+cset x0, ne       ; REDUNDANT - setting boolean again
+cbnz x9, .body
+```
+
+With the optimization, we get:
+```asm
+cmp x9, x10       ; Original comparison (i <= n)
+cset x0, le       ; Set boolean result
+strb w0, [stack]
+ldrsb x9, [stack]
+cbnz x9, .body    ; Direct branch on boolean
+```
+
+**Savings:** 2 instructions per loop iteration.
 
 ### Anonymous Bitfield Handling in Structs
 

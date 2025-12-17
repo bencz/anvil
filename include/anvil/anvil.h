@@ -364,6 +364,19 @@ size_t anvil_type_size(anvil_type_t *type);
 /* Get type alignment */
 size_t anvil_type_align(anvil_type_t *type);
 
+/* Check if type is boolean (i1) */
+bool anvil_type_is_bool(anvil_type_t *type);
+
+/* ============================================================================
+ * Value API
+ * ============================================================================ */
+
+/* Get the type of a value */
+anvil_type_t *anvil_value_get_type(anvil_value_t *val);
+
+/* Check if value is a comparison result (boolean) */
+bool anvil_value_is_bool(anvil_value_t *val);
+
 /* ============================================================================
  * Function API
  * ============================================================================ */
