@@ -209,9 +209,8 @@ void codegen_set_current_block(mcc_codegen_t *cg, anvil_block_t *block)
 
 bool codegen_block_has_terminator(mcc_codegen_t *cg)
 {
-    /* Simple heuristic - in a real implementation we'd track this */
-    (void)cg;
-    return false;
+    if (!cg || !cg->current_block) return false;
+    return anvil_block_has_terminator(cg->current_block);
 }
 
 /* ============================================================

@@ -398,6 +398,9 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name);
 /* Get block name */
 const char *anvil_block_get_name(anvil_block_t *block);
 
+/* Check if block has a terminator instruction (ret, br, br_cond) */
+bool anvil_block_has_terminator(anvil_block_t *block);
+
 /* ============================================================================
  * IR Builder API
  * ============================================================================ */

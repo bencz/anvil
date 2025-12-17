@@ -162,3 +162,11 @@ const char *anvil_block_get_name(anvil_block_t *block)
 {
     return block ? block->name : NULL;
 }
+
+bool anvil_block_has_terminator(anvil_block_t *block)
+{
+    if (!block || !block->last) return false;
+    
+    anvil_op_t op = block->last->op;
+    return op == ANVIL_OP_RET || op == ANVIL_OP_BR || op == ANVIL_OP_BR_COND;
+}
