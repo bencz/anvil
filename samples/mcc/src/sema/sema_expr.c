@@ -440,7 +440,19 @@ mcc_type_t *sema_analyze_comma_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 static mcc_type_t *analyze_init_list(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
     for (size_t i = 0; i < expr->data.init_list.num_exprs; i++) {
-        sema_analyze_expr(sema, expr->data.init_list.exprs[i]);
+        mcc_ast_node_t *elem = expr->data.init_list.exprs[i];
+        sema_analyze_expr(sema, elem);
+        
+        /* Try to fold constant expressions to integer literals */
+        if (elem && elem->kind != AST_INT_LIT && elem->kind != AST_CHAR_LIT) {
+            int64_t val;
+            if (sema_eval_const_expr(sema, elem, &val)) {
+                /* Replace with integer literal */
+                elem->kind = AST_INT_LIT;
+                elem->data.int_lit.value = (uint64_t)val;
+                elem->data.int_lit.suffix = INT_SUFFIX_NONE;
+            }
+        }
     }
     return NULL; /* Init list type depends on context */
 }

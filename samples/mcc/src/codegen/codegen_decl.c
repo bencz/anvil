@@ -89,7 +89,32 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
     anvil_type_t *type = codegen_type(cg, var->data.var_decl.var_type);
     
     /* Use cache to avoid duplicate global definitions */
-    codegen_get_or_add_global(cg, var->data.var_decl.name, type);
+    anvil_value_t *global = codegen_get_or_add_global(cg, var->data.var_decl.name, type);
+    
+    /* Handle initializer for arrays */
+    mcc_ast_node_t *init = var->data.var_decl.init;
+    if (init && init->kind == AST_INIT_LIST && var->data.var_decl.var_type->kind == TYPE_ARRAY) {
+        mcc_type_t *elem_type = var->data.var_decl.var_type->data.array.element;
+        anvil_type_t *anvil_elem_type = codegen_type(cg, elem_type);
+        
+        size_t num_elements = init->data.init_list.num_exprs;
+        anvil_value_t **elements = mcc_alloc(cg->mcc_ctx, num_elements * sizeof(anvil_value_t*));
+        
+        for (size_t i = 0; i < num_elements; i++) {
+            mcc_ast_node_t *elem_expr = init->data.init_list.exprs[i];
+            /* Sema already folded constant expressions to AST_INT_LIT */
+            int64_t val = 0;
+            if (elem_expr->kind == AST_INT_LIT) {
+                val = (int64_t)elem_expr->data.int_lit.value;
+            } else if (elem_expr->kind == AST_CHAR_LIT) {
+                val = (int64_t)elem_expr->data.char_lit.value;
+            }
+            elements[i] = anvil_const_i64(cg->anvil_ctx, val);
+        }
+        
+        anvil_value_t *arr_init = anvil_const_array(cg->anvil_ctx, anvil_elem_type, elements, num_elements);
+        anvil_global_set_initializer(global, arr_init);
+    }
 }
 
 /* Generate code for any declaration */

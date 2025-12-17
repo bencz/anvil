@@ -418,6 +418,11 @@ anvil_value_t *anvil_const_f32(anvil_ctx_t *ctx, float val);
 anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val);
 anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
+anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
+                                  anvil_value_t **elements, size_t num_elements);
+
+/* Set global variable initializer */
+void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 
 /* Arithmetic operations */
 anvil_value_t *anvil_build_add(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);

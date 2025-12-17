@@ -34,6 +34,7 @@ typedef enum {
     ANVIL_VAL_CONST_FLOAT,
     ANVIL_VAL_CONST_NULL,
     ANVIL_VAL_CONST_STRING,
+    ANVIL_VAL_CONST_ARRAY,
     ANVIL_VAL_GLOBAL,
     ANVIL_VAL_FUNC,
     ANVIL_VAL_PARAM,
@@ -85,6 +86,10 @@ struct anvil_value {
             size_t index;
             anvil_func_t *func;
         } param;
+        struct {
+            anvil_value_t **elements;
+            size_t num_elements;
+        } array;
     } data;
 };
 

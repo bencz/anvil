@@ -158,3 +158,33 @@ anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str)
     if (v) v->data.str = str ? strdup(str) : NULL;
     return v;
 }
+
+anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
+                                  anvil_value_t **elements, size_t num_elements)
+{
+    if (!ctx || !elem_type) return NULL;
+    
+    anvil_type_t *arr_type = anvil_type_array(ctx, elem_type, num_elements);
+    anvil_value_t *v = anvil_value_create(ctx, ANVIL_VAL_CONST_ARRAY, arr_type, NULL);
+    if (!v) return NULL;
+    
+    if (num_elements > 0 && elements) {
+        v->data.array.elements = malloc(num_elements * sizeof(anvil_value_t *));
+        if (!v->data.array.elements) {
+            free(v);
+            return NULL;
+        }
+        memcpy(v->data.array.elements, elements, num_elements * sizeof(anvil_value_t *));
+    } else {
+        v->data.array.elements = NULL;
+    }
+    v->data.array.num_elements = num_elements;
+    
+    return v;
+}
+
+void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init)
+{
+    if (!global || global->kind != ANVIL_VAL_GLOBAL) return;
+    global->data.global.init = init;
+}

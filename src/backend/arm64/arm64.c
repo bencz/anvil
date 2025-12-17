@@ -1425,6 +1425,46 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
                 } else {
                     anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)init->data.i);
                 }
+            } else if (init->kind == ANVIL_VAL_CONST_ARRAY) {
+                /* Emit array elements */
+                anvil_type_t *elem_type = init->type->data.array.elem;
+                int elem_size = 8;
+                if (elem_type) {
+                    switch (elem_type->kind) {
+                        case ANVIL_TYPE_I8:
+                        case ANVIL_TYPE_U8:
+                            elem_size = 1;
+                            break;
+                        case ANVIL_TYPE_I16:
+                        case ANVIL_TYPE_U16:
+                            elem_size = 2;
+                            break;
+                        case ANVIL_TYPE_I32:
+                        case ANVIL_TYPE_U32:
+                        case ANVIL_TYPE_F32:
+                            elem_size = 4;
+                            break;
+                        default:
+                            elem_size = 8;
+                            break;
+                    }
+                }
+                for (size_t i = 0; i < init->data.array.num_elements; i++) {
+                    anvil_value_t *elem = init->data.array.elements[i];
+                    if (elem && elem->kind == ANVIL_VAL_CONST_INT) {
+                        if (elem_size == 1) {
+                            anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)elem->data.i);
+                        } else if (elem_size == 2) {
+                            anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)elem->data.i);
+                        } else if (elem_size == 4) {
+                            anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)elem->data.i);
+                        } else {
+                            anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)elem->data.i);
+                        }
+                    } else {
+                        anvil_strbuf_appendf(&be->data, "\t.zero %d\n", elem_size);
+                    }
+                }
             } else {
                 anvil_strbuf_appendf(&be->data, "\t.zero %d\n", size);
             }
