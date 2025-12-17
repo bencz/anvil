@@ -133,6 +133,22 @@ ret
 
 **Savings:** 2 instructions per leaf function (1 in prologue, 1 in epilogue).
 
+### Zero Register Optimization
+Stores of zero use the `wzr`/`xzr` register directly instead of loading zero into a register first:
+
+**Before:**
+```asm
+mov x9, #0
+str w9, [x29, #-24]
+```
+
+**After:**
+```asm
+str wzr, [x29, #-24]
+```
+
+**Savings:** 1 instruction per zero initialization.
+
 ### Register Value Cache
 The backend maintains a cache of values loaded into temporary registers (x9-x15). When a value is requested that's already in a register, a simple `mov` is emitted instead of reloading from stack:
 

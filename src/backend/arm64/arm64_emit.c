@@ -758,6 +758,14 @@ void arm64_emit_store(arm64_backend_t *be, anvil_instr_t *instr)
         instr->operands[1]->data.instr->op == ANVIL_OP_ALLOCA) {
         int offset = arm64_get_stack_slot(be, instr->operands[1]);
         if (offset >= 0) {
+            /* Optimization: use wzr/xzr for storing zero */
+            anvil_value_t *src = instr->operands[0];
+            if (src && src->kind == ANVIL_VAL_CONST_INT && src->data.i == 0) {
+                /* Store zero using zero register */
+                int zr = (size <= 4) ? ARM64_XZR : ARM64_XZR;
+                arm64_emit_store_to_stack(be, zr, offset, size);
+                return;
+            }
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_store_to_stack(be, ARM64_X9, offset, size);
             return;
