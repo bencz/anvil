@@ -336,6 +336,9 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                     }
                 }
                 /* Object-like macro or function-like without '(' */
+                /* Save has_space for first emitted token */
+                pp->next_has_space = tok->has_space;
+                pp->use_next_has_space = true;
                 pp_expand_macro(pp, macro);
                 tok = tok->next;
                 continue;
