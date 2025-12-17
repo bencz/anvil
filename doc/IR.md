@@ -2,9 +2,30 @@
 
 This document specifies the ANVIL IR (Intermediate Representation).
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [SSA Form](#ssa-form)
+3. [Module Structure](#module-structure)
+4. [Types](#types)
+5. [Values](#values)
+6. [Instructions](#instructions)
+7. [Floating-Point Instructions](#floating-point-instructions)
+8. [Well-Formedness Rules](#well-formedness-rules)
+9. [Example IR](#example-ir)
+10. [IR Debug/Dump API](#ir-debugdump-api)
+11. [Lowering to Assembly](#lowering-to-assembly)
+
 ## Overview
 
-ANVIL IR is a low-level, typed, SSA-based intermediate representation designed for code generation. It is similar in spirit to LLVM IR but simpler.
+ANVIL IR is a low-level, typed, SSA-based intermediate representation designed for code generation. It is similar in spirit to LLVM IR but simpler and more focused on practical code generation for multiple architectures.
+
+**Key Characteristics:**
+- **SSA Form**: Static Single Assignment for clean dataflow
+- **Typed**: All values have explicit types
+- **Low-level**: Close to machine operations
+- **Portable**: Architecture-independent representation
+- **Extensible**: Easy to add new operations and types
 
 ## SSA Form
 
@@ -585,13 +606,15 @@ loop:
     // %i is 0 if coming from entry, %i_next if coming from loop
 ```
 
+**Important:** PHI nodes must appear at the beginning of a basic block, before any non-PHI instructions. The backend handles PHI resolution by emitting copy instructions before branches to the target block.
+
 #### select
 
 ```
 %result = select %cond, %then_val, %else_val
 ```
 
-Selects between two values based on a condition. Like the ternary operator.
+Selects between two values based on a condition. Like the ternary operator (`cond ? then_val : else_val`).
 
 **Operands:**
 - `%cond`: Condition (i1)
@@ -599,6 +622,151 @@ Selects between two values based on a condition. Like the ternary operator.
 - `%else_val`: Value if false
 
 **Result:** Selected value
+
+**Example:**
+```
+%abs = select %is_negative, %negated, %val
+```
+
+## Floating-Point Instructions
+
+### Arithmetic
+
+#### fadd
+
+```
+%result = fadd %lhs, %rhs
+```
+
+Floating-point addition.
+
+**Operands:**
+- `%lhs`: Left operand (f32 or f64)
+- `%rhs`: Right operand (same type)
+
+**Result:** Same type as operands
+
+#### fsub
+
+```
+%result = fsub %lhs, %rhs
+```
+
+Floating-point subtraction.
+
+#### fmul
+
+```
+%result = fmul %lhs, %rhs
+```
+
+Floating-point multiplication.
+
+#### fdiv
+
+```
+%result = fdiv %lhs, %rhs
+```
+
+Floating-point division.
+
+#### fneg
+
+```
+%result = fneg %val
+```
+
+Floating-point negation.
+
+#### fabs
+
+```
+%result = fabs %val
+```
+
+Floating-point absolute value.
+
+### Comparison
+
+#### fcmp
+
+```
+%result = fcmp %lhs, %rhs
+```
+
+Floating-point comparison. Returns i1 (boolean).
+
+**Note:** Currently implements equality comparison. Future versions may add ordered/unordered comparisons.
+
+### Conversions
+
+#### fptrunc
+
+```
+%result = fptrunc %val to f32
+```
+
+Truncates f64 to f32.
+
+#### fpext
+
+```
+%result = fpext %val to f64
+```
+
+Extends f32 to f64.
+
+#### fptosi
+
+```
+%result = fptosi %val to T
+```
+
+Converts floating-point to signed integer.
+
+**Operands:**
+- `%val`: Float value (f32 or f64)
+- `T`: Target integer type (i32, i64, etc.)
+
+#### fptoui
+
+```
+%result = fptoui %val to T
+```
+
+Converts floating-point to unsigned integer.
+
+#### sitofp
+
+```
+%result = sitofp %val to T
+```
+
+Converts signed integer to floating-point.
+
+**Operands:**
+- `%val`: Signed integer value
+- `T`: Target float type (f32 or f64)
+
+#### uitofp
+
+```
+%result = uitofp %val to T
+```
+
+Converts unsigned integer to floating-point.
+
+### Floating-Point Example
+
+```
+define f64 @circle_area(f64 %radius) {
+entry:
+    %pi = const_f64 3.14159265358979
+    %r2 = fmul %radius, %radius
+    %area = fmul %pi, %r2
+    ret %area
+}
+```
 
 ## Well-Formedness Rules
 
@@ -747,3 +915,302 @@ S/370 Assembly:
          ... epilogue ...
          BR    R14              Return
 ```
+
+### Example Lowering (ARM64)
+
+IR:
+```
+%result = add %a, %b
+ret %result
+```
+
+ARM64 Assembly (Linux):
+```asm
+        ldr x9, [x29, #-16]     ; Load %a from stack
+        ldr x10, [x29, #-24]    ; Load %b from stack
+        add x0, x9, x10         ; Add
+        str x0, [x29, #-8]      ; Store result
+        ldr x0, [x29, #-8]      ; Load result for return
+        add sp, sp, #32         ; Restore stack
+        ldp x29, x30, [sp], #16 ; Restore frame pointer and link register
+        ret                     ; Return
+```
+
+ARM64 Assembly (macOS/Darwin):
+```asm
+        ldr x9, [x29, #-16]     ; Load %a from stack
+        ldr x10, [x29, #-24]    ; Load %b from stack
+        add x0, x9, x10         ; Add
+        str x0, [x29, #-8]      ; Store result
+        ldr x0, [x29, #-8]      ; Load result for return
+        add sp, sp, #32         ; Restore stack
+        ldp x29, x30, [sp], #16 ; Restore frame pointer and link register
+        ret                     ; Return
+```
+
+**Note:** The ARM64 backend uses a stack-based approach where all SSA values are stored in stack slots. This simplifies register allocation but may generate more load/store instructions than necessary. Future optimizations may improve this.
+
+## IR Debug/Dump API
+
+ANVIL provides functions for inspecting IR structures, which is invaluable for debugging and understanding the generated IR.
+
+### Printing IR
+
+The debug API is automatically included via `anvil.h`:
+
+```c
+#include <anvil/anvil.h>
+
+// Print module IR to stdout
+anvil_print_module(mod);
+
+// Print function IR to stdout
+anvil_print_func(func);
+
+// Print single instruction to stdout
+anvil_print_instr(instr);
+```
+
+### Dumping to FILE*
+
+For custom output destinations:
+
+```c
+// Dump to stderr for debugging
+anvil_dump_module(stderr, mod);
+anvil_dump_func(stderr, func);
+anvil_dump_block(stderr, block);
+anvil_dump_instr(stderr, instr);
+anvil_dump_value(stderr, val);
+anvil_dump_type(stderr, type);
+
+// Dump to file
+FILE *f = fopen("ir_dump.txt", "w");
+anvil_dump_module(f, mod);
+fclose(f);
+```
+
+### Converting to String
+
+For programmatic manipulation:
+
+```c
+// Get IR as string (caller must free)
+char *ir_str = anvil_module_to_string(mod);
+printf("IR length: %zu bytes\n", strlen(ir_str));
+free(ir_str);
+
+// Get function IR as string
+char *func_str = anvil_func_to_string(func);
+// ... use func_str ...
+free(func_str);
+```
+
+### Output Format
+
+The IR dump format is human-readable and similar to LLVM IR:
+
+```
+; ModuleID = 'my_module'
+; Functions: 2, Globals: 1
+
+@counter = external global i32 42
+
+define external i32 @factorial(i32 %arg0) {
+; Stack size: 0 bytes, max call args: 1
+entry:
+    %cmp = cmp_le i8 %arg0, 1
+    br_cond %cmp, label %base_case, label %recurse
+
+recurse:
+    %n_minus_1 = sub i32 %arg0, 1
+    %rec_result = call i32 @factorial, %n_minus_1
+    %product = mul i32 %arg0, %rec_result
+    ret %product
+
+base_case:
+    ret 1
+
+}
+
+define external i32 @test_func(i32 %arg0, i32 %arg1) {
+; Stack size: 0 bytes, max call args: 0
+entry:
+    %cmp = cmp_gt i8 %arg0, %arg1
+    br_cond %cmp, label %then, label %else
+
+then:
+    %sum = add i32 %arg0, %arg1
+    br label %merge
+
+else:
+    %diff = sub i32 %arg0, %arg1
+    br label %merge
+
+merge:
+    %result = phi i32 %sum, %diff [%sum, %then] [%diff, %else]
+    ret %result
+
+}
+```
+
+### Format Details
+
+| Element | Format | Example |
+|---------|--------|---------|
+| Module header | `; ModuleID = 'name'` | `; ModuleID = 'my_module'` |
+| Global variable | `@name = linkage global type [init]` | `@counter = external global i32 42` |
+| Function definition | `define linkage type @name(params)` | `define external i32 @factorial(i32 %arg0)` |
+| Basic block | `label:` | `entry:` |
+| Instruction | `%result = op type operands` | `%sum = add i32 %a, %b` |
+| Branch | `br label %target` | `br label %loop` |
+| Conditional branch | `br_cond %cond, label %t, label %f` | `br_cond %cmp, label %then, label %else` |
+| PHI node | `%r = phi type [val, block]...` | `%i = phi i32 [0, %entry], [%next, %loop]` |
+| Return | `ret value` or `ret_void` | `ret %result` |
+
+## Advanced Examples
+
+### Recursive Factorial
+
+```
+define i32 @factorial(i32 %n) {
+entry:
+    %cmp = cmp_le %n, 1
+    br_cond %cmp, label %base, label %recurse
+
+base:
+    ret 1
+
+recurse:
+    %n_minus_1 = sub %n, 1
+    %rec = call @factorial(%n_minus_1)
+    %result = mul %n, %rec
+    ret %result
+}
+```
+
+### Array Sum with Loop
+
+```
+define i32 @sum_array(ptr<i32> %arr, i32 %len) {
+entry:
+    br label %loop
+
+loop:
+    %i = phi i32 [0, %entry], [%i_next, %body]
+    %sum = phi i32 [0, %entry], [%sum_next, %body]
+    %cmp = cmp_lt %i, %len
+    br_cond %cmp, label %body, label %exit
+
+body:
+    %ptr = gep %arr, %i
+    %val = load %ptr
+    %sum_next = add %sum, %val
+    %i_next = add %i, 1
+    br label %loop
+
+exit:
+    ret %sum
+}
+```
+
+### Struct Field Access
+
+```
+// struct Point { int x; int y; };
+
+define i32 @distance_squared(ptr<{i32, i32}> %p1, ptr<{i32, i32}> %p2) {
+entry:
+    ; Load p1.x and p1.y
+    %p1_x_ptr = struct_gep %p1, 0
+    %p1_y_ptr = struct_gep %p1, 1
+    %p1_x = load %p1_x_ptr
+    %p1_y = load %p1_y_ptr
+    
+    ; Load p2.x and p2.y
+    %p2_x_ptr = struct_gep %p2, 0
+    %p2_y_ptr = struct_gep %p2, 1
+    %p2_x = load %p2_x_ptr
+    %p2_y = load %p2_y_ptr
+    
+    ; Compute (p2.x - p1.x)^2 + (p2.y - p1.y)^2
+    %dx = sub %p2_x, %p1_x
+    %dy = sub %p2_y, %p1_y
+    %dx2 = mul %dx, %dx
+    %dy2 = mul %dy, %dy
+    %result = add %dx2, %dy2
+    ret %result
+}
+```
+
+### Calling External Functions
+
+```
+; Declare external function (malloc)
+declare ptr<i8> @malloc(i64)
+
+define ptr<i32> @alloc_array(i32 %count) {
+entry:
+    ; Calculate size: count * sizeof(i32)
+    %count64 = zext %count to i64
+    %size = mul %count64, 4
+    
+    ; Call malloc
+    %mem = call @malloc(%size)
+    
+    ; Cast to i32*
+    %result = bitcast %mem to ptr<i32>
+    ret %result
+}
+```
+
+### Conditional with Select
+
+```
+define i32 @abs(i32 %x) {
+entry:
+    %zero = const_i32 0
+    %is_neg = cmp_lt %x, %zero
+    %negated = neg %x
+    %result = select %is_neg, %negated, %x
+    ret %result
+}
+```
+
+## Value Kinds
+
+ANVIL IR values can be one of several kinds:
+
+| Kind | Description | Example |
+|------|-------------|---------|
+| `ANVIL_VAL_CONST_INT` | Integer constant | `42`, `-1` |
+| `ANVIL_VAL_CONST_FLOAT` | Float constant | `3.14`, `2.718` |
+| `ANVIL_VAL_CONST_NULL` | Null pointer | `null` |
+| `ANVIL_VAL_CONST_STRING` | String constant | `"hello"` |
+| `ANVIL_VAL_CONST_ARRAY` | Array constant | `[1, 2, 3]` |
+| `ANVIL_VAL_PARAM` | Function parameter | `%arg0` |
+| `ANVIL_VAL_INSTR` | Instruction result | `%result` |
+| `ANVIL_VAL_GLOBAL` | Global variable | `@counter` |
+| `ANVIL_VAL_FUNC` | Function reference | `@factorial` |
+
+## Linkage Types
+
+| Linkage | Description |
+|---------|-------------|
+| `ANVIL_LINK_EXTERNAL` | Visible outside module (default) |
+| `ANVIL_LINK_INTERNAL` | Only visible within module |
+| `ANVIL_LINK_PRIVATE` | Not visible outside function |
+
+## IR Operations Summary
+
+| Category | Operations |
+|----------|------------|
+| **Arithmetic** | add, sub, mul, sdiv, udiv, smod, umod, neg |
+| **Bitwise** | and, or, xor, not, shl, shr, sar |
+| **Comparison** | cmp_eq, cmp_ne, cmp_lt, cmp_le, cmp_gt, cmp_ge, cmp_ult, cmp_ule, cmp_ugt, cmp_uge |
+| **Memory** | alloca, load, store, gep, struct_gep |
+| **Control Flow** | br, br_cond, call, ret, ret_void |
+| **Type Conversion** | trunc, zext, sext, bitcast, ptrtoint, inttoptr |
+| **Floating-Point** | fadd, fsub, fmul, fdiv, fneg, fabs, fcmp |
+| **FP Conversion** | fptrunc, fpext, fptosi, fptoui, sitofp, uitofp |
+| **Miscellaneous** | phi, select |
