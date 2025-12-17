@@ -353,3 +353,6 @@ When working with MCC code:
 - **Block Terminator Detection**: `codegen_block_has_terminator()` now correctly detects if a block has a terminator instruction using `anvil_block_has_terminator()`, eliminating dead code after `return` statements
 - **IR Dump Support**: `-dump-ir` flag generates ANVIL IR dump file (`.ir`) for debugging code generation
 - **Debug-Friendly Optimization (-Og)**: New optimization level for minimal IR cleanup while preserving debuggability
+- **AST Optimization System**: Modular pass manager with constant folding, constant propagation, copy propagation, dead code elimination, strength reduction, and algebraic simplifications
+- **Symbol-Based Variable Tracking**: Optimization passes use symbol pointers for unique variable identification, correctly handling shadowing in nested scopes
+- **Compound Assignment Handling**: Propagation passes correctly invalidate variables on compound assignments (`+=`, `-=`, etc.)

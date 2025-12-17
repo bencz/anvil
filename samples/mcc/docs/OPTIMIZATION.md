@@ -401,6 +401,8 @@ void opt_visit_postorder(mcc_ast_opt_t *opt, mcc_ast_node_t *ast, mcc_opt_visito
 
 - **VAR_DECL tracking**: Variables declared with initializers (`int x = 5;`) cannot be tracked directly because `VAR_DECL` nodes don't have symbol pointers. Tracking works for assignments (`x = 5;`).
 
+- **Compound assignments**: Compound assignments (`+=`, `-=`, `*=`, etc.) invalidate the variable's tracked value since the result depends on the current value. Only simple assignments (`=`) with constant RHS are tracked.
+
 - **Control flow**: The optimizer uses a simplified dataflow analysis that invalidates all tracked values at control flow joins (if/else, loops). More sophisticated analysis would improve optimization opportunities.
 
 - **Stub passes**: Several O2/O3 passes are currently stubs (CSE, LICM, inlining, etc.) and don't perform actual transformations.
