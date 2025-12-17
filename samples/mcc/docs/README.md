@@ -292,7 +292,8 @@ When working with MCC code:
 - `parse_statement()` in `src/parser/parse_stmt.c` checks if identifier is typedef
 
 **Debugging tips:**
-- Use `-ast-dump` to see the parsed AST
+- Use `-dump-ast` to see the parsed AST
+- Use `-dump-sema` to see the semantic analysis info (symbol table)
 - Use `-dump-ir` to see the ANVIL IR before code generation
 - Use `-Og` for debug-friendly optimization (minimal IR cleanup)
 - Check `ctx->error_count` after each phase

@@ -59,6 +59,11 @@ mcc_type_t *sema_apply_function_decay(mcc_sema_t *sema, mcc_type_t *type);
 bool sema_eval_const_expr(mcc_sema_t *sema, mcc_ast_node_t *expr, int64_t *result);
 bool sema_is_null_pointer_constant(mcc_sema_t *sema, mcc_ast_node_t *expr);
 
+/* Dump Functions (sema_dump.c) */
+void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
+
 /* ============================================================
  * C Standard Feature Checks for Semantic Analysis
  * ============================================================ */

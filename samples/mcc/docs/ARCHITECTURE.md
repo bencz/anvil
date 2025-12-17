@@ -174,7 +174,7 @@ The AST module provides utilities for working with the Abstract Syntax Tree:
 
 **Usage:**
 ```bash
-./mcc -ast-dump -fsyntax-only file.c
+./mcc -dump-ast -fsyntax-only file.c
 ```
 
 ### 5. Semantic Analysis (`src/sema/`)
@@ -190,6 +190,7 @@ The semantic analyzer is organized into modular files:
 | `sema_decl.c` | Declaration analysis (function/variable declarations, typedef handling) |
 | `sema_type.c` | Type checking utilities (assignment compatibility, type conversions) |
 | `sema_const.c` | Constant expression evaluation (for array sizes, case labels, etc.) |
+| `sema_dump.c` | Semantic analysis dump functions (symbol table, scopes) |
 
 Semantic analysis performs type checking and symbol resolution:
 
@@ -203,6 +204,19 @@ Semantic analysis performs type checking and symbol resolution:
 - `mcc_sema_t`: Semantic analyzer state
 - `mcc_symtab_t`: Symbol table (hash table with scope chain)
 - `mcc_symbol_t`: Symbol entry (name, type, kind, scope)
+
+**Sema dump features:**
+- Symbol table with all scopes (global, function, block)
+- Symbol kinds (Variable, Function, Parameter, Typedef, Struct, Union, Enum, EnumConst, Label)
+- Type information for each symbol
+- Storage class and flags (defined, used, parameter)
+- Source location for each symbol
+- Enum constant values
+
+**Usage:**
+```bash
+./mcc -dump-sema file.c
+```
 
 ### 6. AST Optimization (`src/opt/`)
 

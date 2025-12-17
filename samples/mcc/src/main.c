@@ -26,7 +26,8 @@ static void print_usage(const char *prog)
     printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
-    printf("  -ast-dump         Print AST\n");
+    printf("  -dump-ast         Print AST\n");
+    printf("  -dump-sema        Print semantic analysis info (symbol table)\n");
     printf("  -dump-ir          Dump ANVIL IR (for debugging)\n");
     printf("  -I<path>          Add include path\n");
     printf("  -D<name>[=value]  Define macro\n");
@@ -189,6 +190,20 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         mcc_parser_destroy(parser);
         mcc_preprocessor_destroy(pp);
         return 1;
+    }
+    
+    /* Dump sema? */
+    if (ctx->options.emit_sema) {
+        FILE *out = stdout;
+        if (ctx->options.output_file) {
+            out = fopen(ctx->options.output_file, "w");
+        }
+        mcc_sema_dump(sema, out);
+        if (ctx->options.output_file) fclose(out);
+        mcc_sema_destroy(sema);
+        mcc_parser_destroy(parser);
+        mcc_preprocessor_destroy(pp);
+        return 0;
     }
     
     /* AST Optimization */
@@ -381,6 +396,27 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
             free(parsers);
             return 1;
         }
+    }
+    
+    /* Dump sema? */
+    if (ctx->options.emit_sema) {
+        FILE *out = stdout;
+        if (ctx->options.output_file) {
+            out = fopen(ctx->options.output_file, "w");
+        }
+        fprintf(out, "/* Semantic analysis for %zu files */\n\n", num_files);
+        mcc_sema_dump(sema, out);
+        if (ctx->options.output_file) fclose(out);
+        
+        mcc_sema_destroy(sema);
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 0;
     }
     
     /* AST Optimization - optimize all ASTs */
@@ -591,8 +627,13 @@ int main(int argc, char **argv)
             continue;
         }
         
-        if (strcmp(arg, "-ast-dump") == 0) {
+        if (strcmp(arg, "-dump-ast") == 0) {
             opts.emit_ast = true;
+            continue;
+        }
+        
+        if (strcmp(arg, "-dump-sema") == 0) {
+            opts.emit_sema = true;
             continue;
         }
         

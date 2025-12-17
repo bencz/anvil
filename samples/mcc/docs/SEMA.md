@@ -25,6 +25,7 @@ The semantic analyzer is organized into modular files in `src/sema/`:
 | `sema_decl.c` | Declaration analysis (functions, variables, typedefs, structs, enums) |
 | `sema_type.c` | Type checking utilities (lvalue checks, assignment compatibility, type conversions) |
 | `sema_const.c` | Constant expression evaluation (for array sizes, case labels, static_assert) |
+| `sema_dump.c` | Dump functions for debugging (symbol table, scopes, semantic state) |
 
 ## Semantic Analyzer Structure
 

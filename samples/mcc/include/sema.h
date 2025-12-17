@@ -61,4 +61,9 @@ mcc_ast_node_t *mcc_sema_implicit_cast(mcc_sema_t *sema, mcc_ast_node_t *expr,
 /* Constant expression evaluation */
 bool mcc_sema_eval_const_expr(mcc_sema_t *sema, mcc_ast_node_t *expr, int64_t *result);
 
+/* Dump functions */
+void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
+
 #endif /* MCC_SEMA_H */
