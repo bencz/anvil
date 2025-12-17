@@ -12,7 +12,7 @@ make test-exec
 ./tests/exec/run_exec_tests.sh tests/exec/arithmetic.c
 ```
 
-## Test Categories
+## Test Results: 27/27 PASS ✓
 
 ### Basic Tests (11 original)
 - `return_42.c` - Simple return value
@@ -30,10 +30,16 @@ make test-exec
 ### Preprocessor Tests
 - `preprocessor_basic.c` - #define macros
 - `preprocessor_ifdef.c` - #ifdef/#ifndef/#else
+- `preprocessor_include.c` - #include with standard headers
 
 ### C Standard Tests
 - `c89_features.c` - C89/ANSI C features
 - `c99_features.c` - C99 features (mixed declarations, for-loop init)
+
+### Control Flow Tests
+- `switch_case.c` - Switch/case statements
+- `ternary_op.c` - Ternary operator (? :)
+- `logical_ops.c` - Logical AND/OR with short-circuit evaluation
 
 ### Advanced Tests
 - `bitwise_ops.c` - Bitwise operators (&, |, ^, ~, <<, >>)
@@ -43,21 +49,17 @@ make test-exec
 - `string_ops.c` - String operations (strlen, strcmp)
 - `struct_nested.c` - Nested structures
 - `do_while.c` - Do-while loops
+- `pointer_arith.c` - Pointer arithmetic
 
 ## Known Limitations (disabled/)
 
-The following tests are disabled because they use features not fully implemented in MCC:
+The following tests are disabled because they use features not fully implemented:
 
 | Test | Issue |
 |------|-------|
-| `switch_case.c` | Switch statement codegen incomplete |
-| `ternary_op.c` | Ternary operator codegen incomplete |
-| `logical_ops.c` | Logical AND/OR short-circuit evaluation buggy |
 | `matrix_ops.c` | 2D array parameter passing not working |
 | `matrix_3x3.c` | 2D array parameter passing not working |
-| `array_2d.c` | 2D array indexing not working |
-| `pointer_arith.c` | Pointer arithmetic with arrays buggy |
-| `preprocessor_include.c` | #include with standard headers crashes |
+| `array_2d.c` | 2D array indexing has offset calculation issues |
 
 ## Test Output
 

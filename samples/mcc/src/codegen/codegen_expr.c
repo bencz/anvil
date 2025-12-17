@@ -187,6 +187,36 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             if (!lhs || !rhs) return NULL;
             
+            /* Handle pointer arithmetic */
+            mcc_type_t *lhs_type = expr->data.binary_expr.lhs->type;
+            mcc_type_t *rhs_type = expr->data.binary_expr.rhs->type;
+            
+            if ((op == BINOP_ADD || op == BINOP_SUB) && lhs_type && lhs_type->kind == TYPE_POINTER) {
+                /* ptr + int or ptr - int: scale by element size */
+                mcc_type_t *pointee = lhs_type->data.pointer.pointee;
+                int elem_size = pointee ? codegen_sizeof(cg, pointee) : 1;
+                if (elem_size > 1) {
+                    anvil_value_t *scale = anvil_const_i64(cg->anvil_ctx, elem_size);
+                    rhs = anvil_build_mul(cg->anvil_ctx, rhs, scale, "scale");
+                }
+                if (op == BINOP_ADD) {
+                    return anvil_build_add(cg->anvil_ctx, lhs, rhs, "ptr.add");
+                } else {
+                    return anvil_build_sub(cg->anvil_ctx, lhs, rhs, "ptr.sub");
+                }
+            }
+            
+            if (op == BINOP_ADD && rhs_type && rhs_type->kind == TYPE_POINTER) {
+                /* int + ptr: scale lhs by element size */
+                mcc_type_t *pointee = rhs_type->data.pointer.pointee;
+                int elem_size = pointee ? codegen_sizeof(cg, pointee) : 1;
+                if (elem_size > 1) {
+                    anvil_value_t *scale = anvil_const_i64(cg->anvil_ctx, elem_size);
+                    lhs = anvil_build_mul(cg->anvil_ctx, lhs, scale, "scale");
+                }
+                return anvil_build_add(cg->anvil_ctx, lhs, rhs, "ptr.add");
+            }
+            
             switch (op) {
                 case BINOP_ADD:
                     if (expr->type && mcc_type_is_floating(expr->type)) {
@@ -491,11 +521,36 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             return NULL;
             
         case AST_SUBSCRIPT_EXPR: {
-            anvil_value_t *array = codegen_expr(cg, expr->data.subscript_expr.array);
+            /* For array subscript, we need to calculate the address correctly */
+            mcc_ast_node_t *array_expr = expr->data.subscript_expr.array;
+            mcc_type_t *array_type = array_expr->type;
+            
+            anvil_value_t *base;
+            /* If the array expression is itself an array type, get its lvalue (address) */
+            if (array_type && array_type->kind == TYPE_ARRAY) {
+                base = codegen_lvalue(cg, array_expr);
+            } else {
+                /* Otherwise it's a pointer, get its value */
+                base = codegen_expr(cg, array_expr);
+            }
+            
             anvil_value_t *index = codegen_expr(cg, expr->data.subscript_expr.index);
-            anvil_type_t *elem_type = codegen_type(cg, expr->type);
-            anvil_value_t *indices[1] = { index };
-            return anvil_build_gep(cg->anvil_ctx, elem_type, array, indices, 1, "gep");
+            
+            /* Calculate element size for proper scaling */
+            mcc_type_t *elem_type_mcc = expr->type;
+            int elem_size = elem_type_mcc ? codegen_sizeof(cg, elem_type_mcc) : 4;
+            
+            /* Scale index by element size */
+            anvil_value_t *offset;
+            if (elem_size > 1) {
+                anvil_value_t *scale = anvil_const_i64(cg->anvil_ctx, elem_size);
+                offset = anvil_build_mul(cg->anvil_ctx, index, scale, "idx.scale");
+            } else {
+                offset = index;
+            }
+            
+            /* Add offset to base */
+            return anvil_build_add(cg->anvil_ctx, base, offset, "arr.idx");
         }
         
         case AST_MEMBER_EXPR: {
