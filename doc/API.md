@@ -654,6 +654,27 @@ Gets the block name.
 
 **Returns:** Block name string.
 
+### anvil_block_has_terminator
+
+```c
+bool anvil_block_has_terminator(anvil_block_t *block);
+```
+
+Checks if a block has a terminator instruction (ret, br, or br_cond).
+
+**Parameters:**
+- `block`: Block to check
+
+**Returns:** `true` if block has a terminator, `false` otherwise.
+
+**Example:**
+```c
+/* Check before adding implicit return */
+if (!anvil_block_has_terminator(current_block)) {
+    anvil_build_ret_void(ctx);
+}
+```
+
 ## Type API
 
 Types define the shape of values.

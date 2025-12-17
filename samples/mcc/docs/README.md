@@ -262,10 +262,18 @@ When working with MCC code:
 - `parse_statement()` in `src/parser/parse_stmt.c` checks if identifier is typedef
 
 **Debugging tips:**
-- Use `-dump-ast` to see the parsed AST
+- Use `-ast-dump` to see the parsed AST
+- Use `-dump-ir` to see the ANVIL IR before code generation
 - Check `ctx->error_count` after each phase
 - Add debug prints in specific functions
 - Test with minimal C programs first
+
+**IR Dump example:**
+```bash
+# Generate assembly and IR dump
+./mcc -arch=arm64_macos -dump-ir -o output.s input.c
+# IR is written to output.s.ir
+```
 
 ### Current Limitations
 
@@ -312,3 +320,5 @@ When working with MCC code:
 - **Function-to-Pointer Assignment**: Functions can now be assigned to function pointer variables
 - **Anonymous Bitfield Handling**: `mcc_type_find_field` skips anonymous bitfield padding fields
 - **Constant Memory Management**: Fixed double-free by collecting constants from all functions before cleanup
+- **Block Terminator Detection**: `codegen_block_has_terminator()` now correctly detects if a block has a terminator instruction using `anvil_block_has_terminator()`, eliminating dead code after `return` statements
+- **IR Dump Support**: `-dump-ir` flag generates ANVIL IR dump file (`.ir`) for debugging code generation

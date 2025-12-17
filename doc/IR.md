@@ -432,6 +432,13 @@ Computes the address of a sub-element of an aggregate type.
 
 ### Control Flow Instructions
 
+Control flow instructions are **terminator instructions** - they end a basic block. Each basic block must end with exactly one terminator instruction.
+
+**Terminator Instructions:**
+- `br` - Unconditional branch
+- `br_cond` - Conditional branch
+- `ret` / `ret_void` - Return from function
+
 #### br
 
 ```

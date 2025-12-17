@@ -439,7 +439,14 @@ anvil_dump_instr(stderr, instr);
 char *ir_str = anvil_module_to_string(mod);
 printf("%s", ir_str);
 free(ir_str);
+
+// Check if block has terminator (ret, br, br_cond)
+if (!anvil_block_has_terminator(block)) {
+    anvil_build_ret_void(ctx);  // Add implicit return
+}
 ```
+
+**String escaping**: String constants in IR dumps are properly escaped (`\n`, `\t`, `\0`, `\xHH` for non-printable characters).
 
 **Output format:**
 ```

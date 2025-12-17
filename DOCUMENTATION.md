@@ -191,6 +191,11 @@ anvil_block_t *merge_block = anvil_block_create(func, "merge");
 
 // Set insertion point
 anvil_set_insert_point(ctx, entry);
+
+// Check if block has a terminator instruction
+if (!anvil_block_has_terminator(entry)) {
+    anvil_build_ret_void(ctx);  // Add implicit return
+}
 ```
 
 ### Value (anvil_value_t)

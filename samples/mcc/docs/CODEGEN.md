@@ -573,6 +573,62 @@ MCC supports optimization levels:
 
 Optimizations are performed by ANVIL on the IR before code generation.
 
+## IR Dump
+
+MCC can dump the ANVIL IR for debugging purposes using the `-dump-ir` flag:
+
+```bash
+# Generate assembly and IR dump
+./mcc -arch=arm64_macos -dump-ir -o output.s input.c
+
+# The IR dump is written to output.s.ir
+```
+
+### IR Dump Output
+
+The IR dump shows the intermediate representation before code generation:
+
+```
+; ANVIL IR Dump
+
+; ModuleID = 'mcc_output'
+; Functions: 2, Globals: 0
+
+define external i32 @main() {
+; Stack size: 0 bytes, max call args: 2
+entry:
+    %v1 = call i32 @add, 5, 3
+    ret %v1
+
+}
+
+define external i32 @add(i32 %a, i32 %b) {
+; Stack size: 0 bytes, max call args: 0
+entry:
+    %v3 = add i32 %a, %b
+    ret %v3
+
+}
+```
+
+### IR Dump Features
+
+- **Module information**: Shows module name, function count, and global count
+- **Function signatures**: Shows return type, name, and parameters
+- **Stack information**: Shows stack size and max call arguments per function
+- **Basic blocks**: Shows block names with predecessor information
+- **Instructions**: Shows operation, result type, and operands
+- **String escaping**: String constants are properly escaped (`\n`, `\t`, `\0`, etc.)
+
+### Using IR Dump for Debugging
+
+The IR dump is useful for:
+
+1. **Verifying code generation**: Check that the AST is correctly translated to IR
+2. **Understanding optimization**: Compare IR before and after optimization passes
+3. **Debugging backend issues**: Isolate whether a bug is in IR generation or backend
+4. **Learning ANVIL IR**: See how C constructs map to IR operations
+
 ## Recent Fixes
 
 ### Long Long Literals
