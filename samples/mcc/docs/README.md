@@ -13,6 +13,7 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 | [PARSER.md](PARSER.md) | Parser and AST documentation |
 | [TYPES.md](TYPES.md) | Type system documentation |
 | [SEMA.md](SEMA.md) | Semantic analysis documentation |
+| [OPTIMIZATION.md](OPTIMIZATION.md) | **AST optimization system and passes** |
 | [CODEGEN.md](CODEGEN.md) | Code generator and ANVIL integration |
 
 ## Quick Reference
@@ -20,7 +21,7 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 ### Compilation Pipeline
 
 ```
-Source (.c) → Preprocessor → Lexer → Parser → Sema → Codegen → Assembly
+Source (.c) → Preprocessor → Lexer → Parser → Sema → AST Optimizer → Codegen → Assembly
 ```
 
 ### Multi-File Compilation
@@ -60,6 +61,7 @@ All files share:
 | `mcc_symtab_t` | symtab.h | Symbol table |
 | `mcc_sema_t` | sema.h | Semantic analyzer |
 | `mcc_codegen_t` | codegen.h | Code generator |
+| `mcc_ast_opt_t` | ast_opt.h | AST optimizer |
 
 ### Source Files Overview
 
@@ -77,6 +79,7 @@ All files share:
 | `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
 | `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
+| `src/opt/` | 7 files | Modular AST optimizer with multiple passes |
 | `src/codegen/` | 5 files | Modular code generator with ANVIL integration |
 
 ### Test Suite

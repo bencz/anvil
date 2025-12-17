@@ -9,26 +9,6 @@
 #include "opt_internal.h"
 
 /* ============================================================
- * Og Passes - Debug-friendly (stubs)
- * ============================================================ */
-
-int opt_pass_copy_prop(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement copy propagation */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-int opt_pass_store_load_prop(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement store-load propagation */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
-
-/* ============================================================
  * O2 Passes - Standard optimizations (stubs)
  * ============================================================ */
 

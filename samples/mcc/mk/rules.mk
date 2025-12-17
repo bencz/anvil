@@ -109,4 +109,5 @@ $(OBJDIR)/opt_opt_helpers.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_const.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_simplify.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_dead.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+$(OBJDIR)/opt_opt_propagate.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_stubs.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h

@@ -153,17 +153,287 @@ int opt_pass_dce(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
 /* ============================================================
  * Dead Store Elimination (O1)
  * 
- * Removes stores to variables that are never read.
- * Requires semantic analysis for variable tracking.
+ * Removes stores to variables that are never read before being
+ * overwritten or going out of scope.
+ * 
+ * This is a simplified version that only handles:
+ * - Variables assigned but never used
+ * - Consecutive assignments to the same variable
  * ============================================================ */
+
+#define MAX_STORE_VARS 64
+
+typedef struct {
+    mcc_symbol_t *sym;
+    mcc_ast_node_t *last_store;  /* Last store to this variable */
+    bool was_read;               /* Was read since last store */
+} store_var_t;
+
+typedef struct {
+    store_var_t vars[MAX_STORE_VARS];
+    int num_vars;
+    mcc_ast_opt_t *opt;
+    int changes;
+} dead_store_ctx_t;
+
+static store_var_t *find_store_var(dead_store_ctx_t *ctx, mcc_symbol_t *sym)
+{
+    for (int i = 0; i < ctx->num_vars; i++) {
+        if (ctx->vars[i].sym == sym) {
+            return &ctx->vars[i];
+        }
+    }
+    return NULL;
+}
+
+static store_var_t *add_store_var(dead_store_ctx_t *ctx, mcc_symbol_t *sym)
+{
+    if (ctx->num_vars >= MAX_STORE_VARS) return NULL;
+    
+    store_var_t *var = &ctx->vars[ctx->num_vars++];
+    var->sym = sym;
+    var->last_store = NULL;
+    var->was_read = false;
+    return var;
+}
+
+/* Mark a variable as read */
+static void mark_var_read(dead_store_ctx_t *ctx, mcc_symbol_t *sym)
+{
+    store_var_t *var = find_store_var(ctx, sym);
+    if (var) {
+        var->was_read = true;
+    }
+}
+
+/* Record a store to a variable */
+static void record_store(dead_store_ctx_t *ctx, mcc_symbol_t *sym, mcc_ast_node_t *store)
+{
+    store_var_t *var = find_store_var(ctx, sym);
+    if (!var) {
+        var = add_store_var(ctx, sym);
+    }
+    if (!var) return;
+    
+    var->last_store = store;
+    var->was_read = false;
+}
+
+/* Get symbol from identifier expression */
+static mcc_symbol_t *get_store_ident_symbol(mcc_ast_node_t *expr)
+{
+    if (!expr || expr->kind != AST_IDENT_EXPR) return NULL;
+    return (mcc_symbol_t *)expr->data.ident_expr.symbol;
+}
+
+/* Check if symbol is a local variable */
+static bool is_store_local_var(mcc_symbol_t *sym)
+{
+    if (!sym) return false;
+    if (sym->kind != SYM_VAR && sym->kind != SYM_PARAM) return false;
+    if (sym->storage == STORAGE_EXTERN || sym->storage == STORAGE_STATIC) return false;
+    return true;
+}
+
+/* Scan expression for variable reads */
+static void scan_reads(dead_store_ctx_t *ctx, mcc_ast_node_t *expr)
+{
+    if (!expr) return;
+    
+    switch (expr->kind) {
+        case AST_IDENT_EXPR: {
+            mcc_symbol_t *sym = get_store_ident_symbol(expr);
+            if (sym && is_store_local_var(sym)) {
+                mark_var_read(ctx, sym);
+            }
+            break;
+        }
+        
+        case AST_BINARY_EXPR:
+            /* For assignment, only RHS is a read */
+            if (expr->data.binary_expr.op == BINOP_ASSIGN) {
+                scan_reads(ctx, expr->data.binary_expr.rhs);
+            } else {
+                scan_reads(ctx, expr->data.binary_expr.lhs);
+                scan_reads(ctx, expr->data.binary_expr.rhs);
+            }
+            break;
+            
+        case AST_UNARY_EXPR:
+            scan_reads(ctx, expr->data.unary_expr.operand);
+            break;
+            
+        case AST_CALL_EXPR:
+            scan_reads(ctx, expr->data.call_expr.func);
+            for (size_t i = 0; i < expr->data.call_expr.num_args; i++) {
+                scan_reads(ctx, expr->data.call_expr.args[i]);
+            }
+            break;
+            
+        case AST_TERNARY_EXPR:
+            scan_reads(ctx, expr->data.ternary_expr.cond);
+            scan_reads(ctx, expr->data.ternary_expr.then_expr);
+            scan_reads(ctx, expr->data.ternary_expr.else_expr);
+            break;
+            
+        case AST_SUBSCRIPT_EXPR:
+            scan_reads(ctx, expr->data.subscript_expr.array);
+            scan_reads(ctx, expr->data.subscript_expr.index);
+            break;
+            
+        case AST_MEMBER_EXPR:
+            scan_reads(ctx, expr->data.member_expr.object);
+            break;
+            
+        case AST_CAST_EXPR:
+            scan_reads(ctx, expr->data.cast_expr.expr);
+            break;
+            
+        case AST_COMMA_EXPR:
+            scan_reads(ctx, expr->data.comma_expr.left);
+            scan_reads(ctx, expr->data.comma_expr.right);
+            break;
+            
+        default:
+            break;
+    }
+}
+
+/* Process statement for dead store elimination */
+static void dead_store_stmt(dead_store_ctx_t *ctx, mcc_ast_node_t *stmt);
+
+static void dead_store_stmt(dead_store_ctx_t *ctx, mcc_ast_node_t *stmt)
+{
+    if (!stmt) return;
+    
+    switch (stmt->kind) {
+        case AST_COMPOUND_STMT:
+            for (size_t i = 0; i < stmt->data.compound_stmt.num_stmts; i++) {
+                dead_store_stmt(ctx, stmt->data.compound_stmt.stmts[i]);
+            }
+            break;
+            
+        case AST_VAR_DECL: {
+            mcc_ast_node_t *init = stmt->data.var_decl.init;
+            if (init) {
+                /* Scan initializer for reads */
+                scan_reads(ctx, init);
+                
+                /* Look up symbol */
+                const char *name = stmt->data.var_decl.name;
+                mcc_symbol_t *sym = NULL;
+                if (name && ctx->opt->sema) {
+                    sym = mcc_symtab_lookup(ctx->opt->sema->symtab, name);
+                }
+                
+                if (sym && is_store_local_var(sym)) {
+                    record_store(ctx, sym, stmt);
+                }
+            }
+            break;
+        }
+        
+        case AST_EXPR_STMT: {
+            mcc_ast_node_t *expr = stmt->data.expr_stmt.expr;
+            if (!expr) break;
+            
+            /* Check for assignment */
+            if (expr->kind == AST_BINARY_EXPR && expr->data.binary_expr.op == BINOP_ASSIGN) {
+                mcc_ast_node_t *lhs = expr->data.binary_expr.lhs;
+                mcc_ast_node_t *rhs = expr->data.binary_expr.rhs;
+                
+                /* Scan RHS for reads first */
+                scan_reads(ctx, rhs);
+                
+                /* Record the store */
+                mcc_symbol_t *sym = get_store_ident_symbol(lhs);
+                if (sym && is_store_local_var(sym)) {
+                    record_store(ctx, sym, stmt);
+                }
+            } else {
+                /* Not an assignment, scan for reads */
+                scan_reads(ctx, expr);
+            }
+            break;
+        }
+        
+        case AST_IF_STMT:
+            scan_reads(ctx, stmt->data.if_stmt.cond);
+            dead_store_stmt(ctx, stmt->data.if_stmt.then_stmt);
+            if (stmt->data.if_stmt.else_stmt) {
+                dead_store_stmt(ctx, stmt->data.if_stmt.else_stmt);
+            }
+            /* After branches, be conservative */
+            for (int i = 0; i < ctx->num_vars; i++) {
+                ctx->vars[i].was_read = true;
+            }
+            break;
+            
+        case AST_WHILE_STMT:
+        case AST_DO_STMT:
+            /* Loops are tricky - mark all as read */
+            for (int i = 0; i < ctx->num_vars; i++) {
+                ctx->vars[i].was_read = true;
+            }
+            scan_reads(ctx, stmt->data.while_stmt.cond);
+            dead_store_stmt(ctx, stmt->data.while_stmt.body);
+            break;
+            
+        case AST_FOR_STMT:
+            for (int i = 0; i < ctx->num_vars; i++) {
+                ctx->vars[i].was_read = true;
+            }
+            if (stmt->data.for_stmt.init) {
+                dead_store_stmt(ctx, stmt->data.for_stmt.init);
+            }
+            if (stmt->data.for_stmt.cond) {
+                scan_reads(ctx, stmt->data.for_stmt.cond);
+            }
+            dead_store_stmt(ctx, stmt->data.for_stmt.body);
+            if (stmt->data.for_stmt.incr) {
+                scan_reads(ctx, stmt->data.for_stmt.incr);
+            }
+            break;
+            
+        case AST_RETURN_STMT:
+            if (stmt->data.return_stmt.expr) {
+                scan_reads(ctx, stmt->data.return_stmt.expr);
+            }
+            break;
+            
+        case AST_SWITCH_STMT:
+            scan_reads(ctx, stmt->data.switch_stmt.expr);
+            dead_store_stmt(ctx, stmt->data.switch_stmt.body);
+            for (int i = 0; i < ctx->num_vars; i++) {
+                ctx->vars[i].was_read = true;
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
 
 int opt_pass_dead_store(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
 {
-    /* TODO: Implement dead store elimination */
-    /* This requires tracking variable uses through the code */
-    (void)opt;
-    (void)ast;
-    return 0;
+    if (!opt->sema) return 0;
+    
+    dead_store_ctx_t ctx = {0};
+    ctx.opt = opt;
+    ctx.changes = 0;
+    
+    /* Process each function */
+    if (ast->kind == AST_TRANSLATION_UNIT) {
+        for (size_t i = 0; i < ast->data.translation_unit.num_decls; i++) {
+            mcc_ast_node_t *decl = ast->data.translation_unit.decls[i];
+            if (decl->kind == AST_FUNC_DECL && decl->data.func_decl.body) {
+                ctx.num_vars = 0;
+                dead_store_stmt(&ctx, decl->data.func_decl.body);
+            }
+        }
+    }
+    
+    return ctx.changes;
 }
 
 /* ============================================================

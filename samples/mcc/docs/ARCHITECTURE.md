@@ -7,7 +7,7 @@ This document describes the internal architecture of the MCC (Micro C Compiler) 
 MCC is a complete C89 compiler frontend that generates code through the ANVIL intermediate representation. The compiler follows a traditional multi-pass architecture:
 
 ```
-Source Code → Preprocessor → Lexer → Parser → Semantic Analysis → Code Generation → Assembly
+Source Code → Preprocessor → Lexer → Parser → Semantic Analysis → AST Optimizer → Code Generation → Assembly
 ```
 
 ### Multi-File Compilation
@@ -35,6 +35,11 @@ MCC supports compiling multiple source files into a single output. The compilati
                            ▼
                  ┌─────────────────┐
                  │  Shared Sema    │  (common symbol table)
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  AST Optimizer  │  (per-file optimization)
                  └────────┬────────┘
                           │
                           ▼
@@ -170,7 +175,45 @@ Semantic analysis performs type checking and symbol resolution:
 - `mcc_symtab_t`: Symbol table (hash table with scope chain)
 - `mcc_symbol_t`: Symbol entry (name, type, kind, scope)
 
-### 5. Code Generation (`src/codegen/`)
+### 5. AST Optimization (`src/opt/`)
+
+The AST optimizer is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `opt_internal.h` | Internal header with structures and function declarations |
+| `ast_opt.c` | Main module - pass manager and initialization |
+| `opt_helpers.c` | Helper functions (constant evaluation, traversal) |
+| `opt_const.c` | Constant-related passes (folding, trivial simplifications) |
+| `opt_simplify.c` | Simplification passes (strength reduction, algebraic) |
+| `opt_dead.c` | Dead code elimination passes |
+| `opt_propagate.c` | Propagation passes (constant, copy) |
+| `opt_stubs.c` | Stub implementations for unimplemented passes |
+
+The AST optimizer performs source-level transformations:
+
+- **Constant folding**: Evaluate constant expressions at compile time
+- **Constant propagation**: Replace variables with known constant values
+- **Copy propagation**: Replace variables with their source copies
+- **Dead code elimination**: Remove unreachable or effectless code
+- **Strength reduction**: Replace expensive operations with cheaper ones
+- **Algebraic simplification**: Apply algebraic identities
+
+**Key data structures:**
+- `mcc_ast_opt_t`: Optimizer state (context, level, enabled passes)
+- `mcc_opt_passes_t`: Bitset of enabled optimization passes
+- `mcc_opt_pass_id_t`: Pass identifier enum
+
+**Optimization levels:**
+- `-O0`: Minimal (always-on passes only)
+- `-Og`: Debug-friendly optimizations
+- `-O1`: Basic optimizations
+- `-O2`: Standard optimizations
+- `-O3`: Aggressive optimizations
+
+See [OPTIMIZATION.md](OPTIMIZATION.md) for detailed documentation.
+
+### 6. Code Generation (`src/codegen/`)
 
 The code generator is organized into modular files:
 

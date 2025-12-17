@@ -331,18 +331,4 @@ int opt_pass_const_fold(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
     return data.changes;
 }
 
-/* ============================================================
- * Constant Propagation (O1)
- * 
- * Propagates known constant values through the code.
- * Requires semantic analysis for symbol tracking.
- * ============================================================ */
-
-int opt_pass_const_prop(mcc_ast_opt_t *opt, mcc_ast_node_t *ast)
-{
-    /* TODO: Implement constant propagation */
-    /* This requires tracking variable values through the code */
-    (void)opt;
-    (void)ast;
-    return 0;
-}
+/* Note: opt_pass_const_prop is implemented in opt_propagate.c */
