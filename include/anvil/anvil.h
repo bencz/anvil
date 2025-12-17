@@ -523,6 +523,16 @@ typedef struct anvil_backend_ops {
     /* Reset backend state (clear cached pointers to IR values) */
     void (*reset)(anvil_backend_t *be);
     
+    /* Prepare/lower IR for code generation (optional).
+     * This is called before codegen_module to perform architecture-specific
+     * analysis, lowering, or transformation of the entire IR. Examples:
+     * - Lower unsupported operations to sequences of supported ones
+     * - Perform target-specific peephole optimizations on IR
+     * - Legalize types (e.g., split 64-bit ops on 32-bit targets)
+     * - Insert spill/reload code for register pressure
+     * Returns ANVIL_OK on success. If NULL, this step is skipped. */
+    anvil_error_t (*prepare_ir)(anvil_backend_t *be, anvil_module_t *mod);
+    
     /* Generate code for a module */
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);

@@ -155,6 +155,28 @@ free(output);
 anvil_module_destroy(mod);
 ```
 
+**Code Generation Flow:**
+
+When `anvil_module_codegen()` is called, the following steps occur:
+
+1. **IR Preparation** (`prepare_ir`): If the backend provides a `prepare_ir` callback, it is called first to perform architecture-specific IR analysis and lowering
+2. **Code Generation** (`codegen_module`): The backend generates assembly code from the prepared IR
+
+```
+anvil_module_codegen()
+    │
+    ├── prepare_ir()        [optional - architecture-specific IR preparation]
+    │   ├── Analyze functions (detect leaf functions, stack layout)
+    │   ├── Lower unsupported operations
+    │   └── Perform target-specific optimizations
+    │
+    └── codegen_module()    [generate assembly output]
+        ├── Emit header/directives
+        ├── Emit functions
+        ├── Emit globals
+        └── Emit string literals
+```
+
 ### Function (anvil_func_t)
 
 Functions contain basic blocks and have a signature (return type and parameters).

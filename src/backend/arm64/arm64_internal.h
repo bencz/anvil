@@ -203,6 +203,9 @@ typedef struct {
     int total_instrs;
     int total_spills;
     int total_reloads;
+    
+    /* Function analysis results */
+    bool is_leaf_func;        /* True if function makes no calls */
 } arm64_backend_t;
 
 /* ============================================================================

@@ -276,7 +276,8 @@ const anvil_backend_ops_t anvil_backend_myarch = {
     .arch = ANVIL_ARCH_MYARCH,
     .init = myarch_init,
     .cleanup = myarch_cleanup,
-    .reset = myarch_reset,  // Clear cached IR pointers (optional but recommended)
+    .reset = myarch_reset,      // Clear cached IR pointers (optional but recommended)
+    .prepare_ir = myarch_prepare_ir,  // Prepare/lower IR before codegen (optional)
     .codegen_module = myarch_codegen_module,
     .codegen_func = myarch_codegen_func,
     .get_arch_info = myarch_get_arch_info
@@ -300,6 +301,15 @@ anvil_register_backend(&anvil_backend_myarch);
 ```
 
 ## Recent Updates
+
+### Backend IR Preparation Phase
+New optional `prepare_ir` callback in backend interface allows architecture-specific IR preparation before code generation:
+- **IR Lowering**: Convert unsupported operations to sequences of supported ones
+- **Peephole Optimizations**: Target-specific optimizations on IR level
+- **Type Legalization**: Split 64-bit ops on 32-bit targets, etc.
+- **Function Analysis**: Detect leaf functions, calculate stack frame layout
+
+The ARM64 backend now uses `prepare_ir` to analyze all functions before code generation.
 
 ### Struct Support
 - Struct field access via `anvil_build_struct_gep()` for all mainframe backends

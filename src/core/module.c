@@ -202,6 +202,12 @@ anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *l
         return ANVIL_ERR_NO_BACKEND;
     }
     
+    /* Call prepare_ir if the backend provides it */
+    if (ctx->backend->ops->prepare_ir) {
+        anvil_error_t err = ctx->backend->ops->prepare_ir(ctx->backend, mod);
+        if (err != ANVIL_OK) return err;
+    }
+    
     return ctx->backend->ops->codegen_module(ctx->backend, mod, output, len);
 }
 

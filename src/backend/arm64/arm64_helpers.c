@@ -468,6 +468,7 @@ void arm64_analyze_function(arm64_backend_t *be, anvil_func_t *func)
     /* Reset frame layout */
     memset(&be->frame, 0, sizeof(be->frame));
     be->used_callee_saved = 0;
+    be->is_leaf_func = true;  /* Assume leaf until we find a call */
     
     /* Count allocas and instruction results */
     int num_allocas = 0;
@@ -496,6 +497,7 @@ void arm64_analyze_function(arm64_backend_t *be, anvil_func_t *func)
             }
             
             if (instr->op == ANVIL_OP_CALL) {
+                be->is_leaf_func = false;  /* Not a leaf function */
                 int call_args = (int)instr->num_operands - 1;
                 if (call_args > max_call_args) {
                     max_call_args = call_args;

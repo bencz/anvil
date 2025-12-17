@@ -125,8 +125,10 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
     be->current_func = func;
     be->num_stack_slots = 0;
     be->next_stack_offset = 0;
+    be->is_leaf_func = true;  /* Assume leaf until we find a call */
     
-    /* First pass: allocate stack slots for allocas and instruction results */
+    /* First pass: allocate stack slots for allocas and instruction results,
+     * and detect if this is a leaf function */
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             if (instr->op == ANVIL_OP_ALLOCA) {
@@ -140,6 +142,11 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
             } else if (instr->result) {
                 int size = instr->result->type ? arm64_type_size(instr->result->type) : 8;
                 arm64_alloc_stack_slot(be, instr->result, size);
+            }
+            
+            /* Detect calls - not a leaf function */
+            if (instr->op == ANVIL_OP_CALL) {
+                be->is_leaf_func = false;
             }
         }
     }
@@ -351,7 +358,7 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
         anvil_strbuf_append(&priv->code, "\t.text\n\n");
     }
     
-    /* Emit functions */
+    /* Emit functions (prepare_ir already called by anvil_module_codegen) */
     for (anvil_func_t *func = mod->funcs; func; func = func->next) {
         arm64_emit_func(priv, func);
     }
@@ -388,9 +395,38 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_init(&priv->code);
     
+    /* Analyze function before code generation */
+    arm64_analyze_function(priv, func);
     arm64_emit_func(priv, func);
     
     *output = anvil_strbuf_detach(&priv->code, len);
+    return ANVIL_OK;
+}
+
+/* ============================================================================
+ * IR Preparation/Lowering
+ * ============================================================================ */
+
+static anvil_error_t arm64_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
+{
+    if (!be || !mod) return ANVIL_ERR_INVALID_ARG;
+    
+    arm64_backend_t *priv = be->priv;
+    
+    /* Analyze all functions in the module */
+    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
+        if (!func->is_declaration) {
+            arm64_analyze_function(priv, func);
+        }
+    }
+    
+    /* Future: Add IR lowering/transformation passes here:
+     * - Lower unsupported operations
+     * - Peephole optimizations on IR
+     * - Dead code elimination
+     * - etc.
+     */
+    
     return ANVIL_OK;
 }
 
@@ -404,6 +440,7 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .init = arm64_init,
     .cleanup = arm64_cleanup,
     .reset = arm64_reset,
+    .prepare_ir = arm64_prepare_ir,
     .codegen_module = arm64_codegen_module,
     .codegen_func = arm64_codegen_func,
     .get_arch_info = arm64_get_arch_info

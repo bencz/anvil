@@ -110,6 +110,10 @@ typedef struct {
     // Clear cached IR pointers (called before module destruction)
     void (*reset)(anvil_backend_t *be);
     
+    // Prepare/lower IR before code generation (optional)
+    // Called automatically by anvil_module_codegen() before codegen_module()
+    anvil_error_t (*prepare_ir)(anvil_backend_t *be, anvil_module_t *mod);
+    
     // Generate code for entire module
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
@@ -122,6 +126,39 @@ typedef struct {
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
 } anvil_backend_ops_t;
 ```
+
+### IR Preparation Phase
+
+The `prepare_ir` callback is called automatically before `codegen_module` to allow architecture-specific IR preparation:
+
+```c
+static anvil_error_t myarch_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
+{
+    myarch_backend_t *priv = be->priv;
+    
+    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
+        if (!func->is_declaration) {
+            // Analyze function (detect leaf functions, calculate stack layout)
+            myarch_analyze_function(priv, func);
+            
+            // Lower unsupported operations
+            // myarch_lower_unsupported_ops(priv, func);
+            
+            // Perform target-specific peephole optimizations
+            // myarch_peephole_optimize(priv, func);
+        }
+    }
+    
+    return ANVIL_OK;
+}
+```
+
+**Use cases for `prepare_ir`:**
+- **Function analysis**: Detect leaf functions, calculate stack frame layout
+- **IR lowering**: Convert unsupported operations to sequences of supported ones
+- **Type legalization**: Split 64-bit operations on 32-bit targets
+- **Peephole optimization**: Target-specific optimizations at IR level
+- **Register pressure analysis**: Insert spill/reload hints
 
 ### Architecture Information
 

@@ -252,20 +252,8 @@ void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
             
         case ANVIL_OP_ALLOCA:
             /* Stack slots are pre-allocated in arm64_emit_func first pass.
-             * Here we just zero-initialize the allocated space. */
-            {
-                int offset = arm64_get_stack_slot(be, instr->result);
-                if (offset >= 0) {
-                    int size = 8;
-                    if (instr->result && instr->result->type && 
-                        instr->result->type->kind == ANVIL_TYPE_PTR &&
-                        instr->result->type->data.pointee) {
-                        size = arm64_type_size(instr->result->type->data.pointee);
-                    }
-                    /* Zero-initialize with correct size */
-                    arm64_emit_store_to_stack(be, ARM64_XZR, offset, size);
-                }
-            }
+             * No need to zero-initialize here - the C code will initialize
+             * the variable with an explicit store instruction. */
             break;
             
         /* Arithmetic */
