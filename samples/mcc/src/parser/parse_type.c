@@ -805,6 +805,8 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
     arr->data.array.element = element_type;
     arr->data.array.length = arr_size;
     arr->data.array.is_vla = is_vla;
+    arr->size = element_type->size * arr_size;
+    arr->align = element_type->align;
     return arr;
 }
 
@@ -878,22 +880,49 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                 param_name = mcc_strdup(p->ctx, p->peek->text);
                 parse_advance(p);
                 
-                /* Parse array brackets (decay to pointer) */
-                while (parse_match(p, TOK_LBRACKET)) {
-                    /* Skip array size expression if present */
+                /* Parse array brackets - collect all dimensions first */
+                size_t array_dims[32];
+                int num_dims = 0;
+                
+                while (parse_check(p, TOK_LBRACKET)) {
+                    parse_advance(p);
+                    size_t dim = 0;
                     if (!parse_check(p, TOK_RBRACKET)) {
                         if (parse_check(p, TOK_STAR)) {
                             parse_advance(p);  /* VLA [*] */
                         } else {
-                            parse_expression(p);
+                            mcc_ast_node_t *size_expr = parse_constant_expr(p);
+                            if (size_expr && size_expr->kind == AST_INT_LIT) {
+                                dim = size_expr->data.int_lit.value;
+                            }
                         }
                     }
                     parse_expect(p, TOK_RBRACKET, "]");
-                    
-                    /* Array decays to pointer in parameter */
+                    if (num_dims < 32) {
+                        array_dims[num_dims++] = dim;
+                    }
+                }
+                
+                if (num_dims > 0) {
+                    /* Build array types from inside out (skip first dimension) */
+                    /* First dimension decays to pointer, rest become array types */
+                    /* e.g., int m[2][3] becomes int (*)[3] */
+                    for (int i = num_dims - 1; i >= 1; i--) {
+                        mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                        arr->kind = TYPE_ARRAY;
+                        arr->data.array.element = param_type;
+                        arr->data.array.length = array_dims[i];
+                        arr->data.array.is_vla = false;
+                        arr->size = param_type->size * array_dims[i];
+                        arr->align = param_type->align;
+                        param_type = arr;
+                    }
+                    /* First dimension decays to pointer */
                     mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
                     ptr->kind = TYPE_POINTER;
                     ptr->data.pointer.pointee = param_type;
+                    ptr->size = 8;  /* pointer size */
+                    ptr->align = 8;
                     param_type = ptr;
                 }
             } else if (parse_check(p, TOK_STAR)) {
@@ -1109,14 +1138,43 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
     }
     
     /* Parse array and function suffixes */
+    /* For arrays, we need to collect all dimensions first, then build types from inside out */
+    /* e.g., int arr[3][4] means arr is array[3] of array[4] of int */
+    /* So we build: int -> int[4] -> int[3][4] */
+    size_t array_dims[32];
+    int num_dims = 0;
+    
     while (1) {
-        if (parse_match(p, TOK_LBRACKET)) {
-            result.type = parse_array_suffix(p, result.type);
+        if (parse_check(p, TOK_LBRACKET)) {
+            parse_advance(p);
+            size_t dim = 0;
+            if (!parse_check(p, TOK_RBRACKET)) {
+                mcc_ast_node_t *size_expr = parse_constant_expr(p);
+                if (size_expr && size_expr->kind == AST_INT_LIT) {
+                    dim = size_expr->data.int_lit.value;
+                }
+            }
+            parse_expect(p, TOK_RBRACKET, "]");
+            if (num_dims < 32) {
+                array_dims[num_dims++] = dim;
+            }
         } else if (parse_match(p, TOK_LPAREN)) {
             result.type = parse_function_suffix(p, result.type);
         } else {
             break;
         }
+    }
+    
+    /* Build array types from inside out (reverse order) */
+    for (int i = num_dims - 1; i >= 0; i--) {
+        mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+        arr->kind = TYPE_ARRAY;
+        arr->data.array.element = result.type;
+        arr->data.array.length = array_dims[i];
+        arr->data.array.is_vla = false;
+        arr->size = result.type->size * array_dims[i];
+        arr->align = result.type->align;
+        result.type = arr;
     }
     
     return result;
