@@ -39,6 +39,10 @@ $(OBJDIR)/cg_%.o: $(CODEGEN_SRCDIR)/%.c | $(OBJDIR)
 $(OBJDIR)/opt_%.o: $(OPT_SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Compile AST source files
+$(OBJDIR)/ast_%.o: $(AST_SRCDIR)/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # ============================================================
 # Dependencies - Main source files
 # ============================================================
@@ -114,3 +118,9 @@ $(OBJDIR)/opt_opt_cse.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_loop.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_inline.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 $(OBJDIR)/opt_opt_stubs.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
+
+# ============================================================
+# Dependencies - AST source files
+# ============================================================
+$(OBJDIR)/ast_ast.o: $(AST_INTERNAL_H) $(INCDIR)/mcc.h $(INCDIR)/ast.h
+$(OBJDIR)/ast_ast_dump.o: $(AST_INTERNAL_H) $(INCDIR)/mcc.h $(INCDIR)/ast.h $(INCDIR)/types.h

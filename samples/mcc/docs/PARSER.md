@@ -710,7 +710,7 @@ struct {
 Multiple declarations are now properly displayed:
 
 ```c
-/* In ast.c */
+/* In src/ast/ast_dump.c */
 case AST_DECL_LIST:
     for (size_t i = 0; i < node->data.decl_list.num_decls; i++) {
         ast_dump_node(node->data.decl_list.decls[i], out, indent + 1);

@@ -148,7 +148,36 @@ The parser builds an Abstract Syntax Tree (AST) using recursive descent:
 - `mcc_generic_assoc_t`: Generic association for `_Generic` (C11)
 - `parse_declarator_result_t`: Result of declarator parsing (type + name)
 
-### 4. Semantic Analysis (`src/sema/`)
+### 4. AST Utilities (`src/ast/`)
+
+The AST module is organized into modular files:
+
+| File | Description |
+|------|-------------|
+| `ast_internal.h` | Internal header with shared name tables |
+| `ast.c` | Core AST functions (create, kind names, operator names) |
+| `ast_dump.c` | AST dump/print functions for debugging |
+
+The AST module provides utilities for working with the Abstract Syntax Tree:
+
+- **Node creation**: `mcc_ast_create()` allocates and initializes AST nodes
+- **Name lookup**: `mcc_ast_kind_name()`, `mcc_binop_name()`, `mcc_unop_name()`
+- **AST dump**: `mcc_ast_dump()` prints a detailed tree representation
+
+**Key features of AST dump:**
+- Type information for expressions and declarations
+- Literal suffixes (U, L, LL, F for integers/floats)
+- C23/GNU attributes display
+- Escaped string/character literals
+- Semantic labels (Parameters, Body, Cond, Then, Else, LHS, RHS, etc.)
+- Enum constant values from type system
+
+**Usage:**
+```bash
+./mcc -ast-dump -fsyntax-only file.c
+```
+
+### 5. Semantic Analysis (`src/sema/`)
 
 The semantic analyzer is organized into modular files:
 
@@ -175,7 +204,7 @@ Semantic analysis performs type checking and symbol resolution:
 - `mcc_symtab_t`: Symbol table (hash table with scope chain)
 - `mcc_symbol_t`: Symbol entry (name, type, kind, scope)
 
-### 5. AST Optimization (`src/opt/`)
+### 6. AST Optimization (`src/opt/`)
 
 The AST optimizer is organized into modular files:
 
@@ -220,7 +249,7 @@ The AST optimizer performs source-level transformations:
 
 See [OPTIMIZATION.md](OPTIMIZATION.md) for detailed documentation.
 
-### 6. Code Generation (`src/codegen/`)
+### 7. Code Generation (`src/codegen/`)
 
 The code generator is organized into modular files:
 

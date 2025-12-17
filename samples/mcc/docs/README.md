@@ -75,6 +75,7 @@ All files share:
 
 | Directory | Files | Description |
 |-----------|-------|-----------|
+| `src/ast/` | 3 files | Modular AST utilities and dump functions |
 | `src/lexer/` | 9 files | Modular lexer with C standard support |
 | `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
 | `src/parser/` | 6 files | Modular parser with C standard support |
