@@ -182,7 +182,7 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                             pp_push_expanding(pp, macro->name);
                         }
                         
-                        /* Build expanded body with argument substitution */
+                        /* Build expanded body with argument substitution and ## handling */
                         mcc_token_t *expanded_head = NULL, *expanded_tail = NULL;
                         
                         #define APPEND_EXP(t) do { \
@@ -191,21 +191,81 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                             expanded_tail = (t); \
                         } while(0)
                         
+                        /* Helper to find parameter index */
+                        #define FIND_PARAM_IDX(tok_text, out_idx) do { \
+                            out_idx = -1; \
+                            mcc_macro_param_t *_p = macro->params; \
+                            for (int _i = 0; _p; _p = _p->next, _i++) { \
+                                if (strcmp(_p->name, tok_text) == 0) { out_idx = _i; break; } \
+                            } \
+                        } while(0)
+                        
                         for (mcc_token_t *body_tok = macro->body; body_tok; body_tok = body_tok->next) {
-                            if (body_tok->type == TOK_IDENT) {
-                                /* Check if it's a parameter */
-                                int param_idx = -1;
-                                mcc_macro_param_t *param = macro->params;
-                                for (int i = 0; param; param = param->next, i++) {
-                                    if (strcmp(param->name, body_tok->text) == 0) {
-                                        param_idx = i;
-                                        break;
+                            /* Handle ## (token pasting) operator */
+                            if (body_tok->type == TOK_HASH_HASH) {
+                                if (!expanded_tail || !body_tok->next) {
+                                    mcc_error(pp->ctx, "'##' cannot appear at beginning or end of macro expansion");
+                                    continue;
+                                }
+                                
+                                /* Get right operand - may need parameter substitution */
+                                mcc_token_t *right_tok = body_tok->next;
+                                mcc_token_t *right_first = right_tok;
+                                
+                                if (right_tok->type == TOK_IDENT) {
+                                    int pidx;
+                                    FIND_PARAM_IDX(right_tok->text, pidx);
+                                    if (pidx >= 0 && pidx < num_args) {
+                                        /* Use unexpanded argument for ## */
+                                        right_first = args[pidx];
                                     }
                                 }
                                 
+                                if (right_first) {
+                                    /* Paste tokens: concatenate text and re-lex */
+                                    const char *left_text = expanded_tail->text ? expanded_tail->text : "";
+                                    const char *right_text = right_first->text ? right_first->text : "";
+                                    size_t len = strlen(left_text) + strlen(right_text);
+                                    char *pasted = mcc_alloc(pp->ctx, len + 1);
+                                    strcpy(pasted, left_text);
+                                    strcat(pasted, right_text);
+                                    
+                                    /* Re-lex to get correct token type */
+                                    mcc_lexer_t *lex = mcc_lexer_create(pp->ctx);
+                                    mcc_lexer_init_string(lex, pasted, "<paste>");
+                                    mcc_token_t *result = mcc_lexer_next(lex);
+                                    result = mcc_token_copy(pp->ctx, result);
+                                    result->has_space = expanded_tail->has_space;
+                                    result->next = NULL;
+                                    
+                                    /* Replace last token with pasted result */
+                                    if (expanded_head == expanded_tail) {
+                                        expanded_head = result;
+                                    } else {
+                                        mcc_token_t *prev = expanded_head;
+                                        while (prev && prev->next != expanded_tail) prev = prev->next;
+                                        if (prev) prev->next = result;
+                                    }
+                                    expanded_tail = result;
+                                }
+                                
+                                body_tok = right_tok; /* Skip right operand */
+                                continue;
+                            }
+                            
+                            if (body_tok->type == TOK_IDENT) {
+                                /* Check if it's a parameter */
+                                int param_idx;
+                                FIND_PARAM_IDX(body_tok->text, param_idx);
+                                
                                 if (param_idx >= 0 && param_idx < num_args) {
-                                    /* Substitute with pre-expanded argument */
-                                    mcc_token_t *arg_list = expanded_args ? expanded_args[param_idx] : args[param_idx];
+                                    /* Check if next is ## - use unexpanded arg */
+                                    mcc_token_t *arg_list;
+                                    if (body_tok->next && body_tok->next->type == TOK_HASH_HASH) {
+                                        arg_list = args[param_idx];
+                                    } else {
+                                        arg_list = expanded_args ? expanded_args[param_idx] : args[param_idx];
+                                    }
                                     for (mcc_token_t *a = arg_list; a; a = a->next) {
                                         mcc_token_t *copy = mcc_token_copy(pp->ctx, a);
                                         copy->next = NULL;
@@ -246,6 +306,7 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                             APPEND_EXP(copy);
                         }
                         
+                        #undef FIND_PARAM_IDX
                         #undef APPEND_EXP
                         
                         /* Recursively process expanded tokens */
