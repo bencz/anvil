@@ -281,7 +281,9 @@ static int64_t pp_eval_logand(mcc_preprocessor_t *pp)
     
     while (mcc_lexer_peek(pp->lexer)->type == TOK_AND) {
         mcc_lexer_next(pp->lexer);
-        left = left && pp_eval_bitor(pp);
+        /* Must evaluate right side to consume tokens, even if left is false */
+        int64_t right = pp_eval_bitor(pp);
+        left = left && right;
     }
     
     return left;
@@ -293,7 +295,9 @@ static int64_t pp_eval_logor(mcc_preprocessor_t *pp)
     
     while (mcc_lexer_peek(pp->lexer)->type == TOK_OR) {
         mcc_lexer_next(pp->lexer);
-        left = left || pp_eval_logand(pp);
+        /* Must evaluate right side to consume tokens, even if left is true */
+        int64_t right = pp_eval_logand(pp);
+        left = left || right;
     }
     
     return left;
