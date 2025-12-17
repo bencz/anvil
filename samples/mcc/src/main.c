@@ -27,6 +27,7 @@ static void print_usage(const char *prog)
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
     printf("  -ast-dump         Print AST\n");
+    printf("  -dump-ir          Dump ANVIL IR (for debugging)\n");
     printf("  -I<path>          Add include path\n");
     printf("  -D<name>[=value]  Define macro\n");
     printf("  -Wall             Enable all warnings\n");
@@ -201,6 +202,28 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         mcc_parser_destroy(parser);
         mcc_preprocessor_destroy(pp);
         return 1;
+    }
+    
+    /* Dump IR if requested */
+    if (ctx->options.dump_ir) {
+        /* Generate IR dump filename based on output file or default */
+        char ir_filename[512];
+        if (ctx->options.output_file) {
+            snprintf(ir_filename, sizeof(ir_filename), "%s.ir", ctx->options.output_file);
+        } else {
+            snprintf(ir_filename, sizeof(ir_filename), "output.ir");
+        }
+        FILE *ir_file = fopen(ir_filename, "w");
+        if (ir_file) {
+            fprintf(ir_file, "; ANVIL IR Dump\n\n");
+            anvil_dump_module(ir_file, cg->anvil_mod);
+            fclose(ir_file);
+            if (ctx->options.verbose) {
+                fprintf(stderr, "IR dump written to: %s\n", ir_filename);
+            }
+        } else {
+            fprintf(stderr, "Warning: Could not write IR dump to %s\n", ir_filename);
+        }
     }
     
     /* Get output */
@@ -393,6 +416,29 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
         return 1;
     }
     
+    /* Dump IR if requested */
+    if (ctx->options.dump_ir) {
+        /* Generate IR dump filename based on output file or default */
+        char ir_filename[512];
+        if (ctx->options.output_file) {
+            snprintf(ir_filename, sizeof(ir_filename), "%s.ir", ctx->options.output_file);
+        } else {
+            snprintf(ir_filename, sizeof(ir_filename), "output.ir");
+        }
+        FILE *ir_file = fopen(ir_filename, "w");
+        if (ir_file) {
+            fprintf(ir_file, "; ANVIL IR Dump\n");
+            fprintf(ir_file, "; Source files: %zu\n\n", num_files);
+            anvil_dump_module(ir_file, cg->anvil_mod);
+            fclose(ir_file);
+            if (ctx->options.verbose) {
+                fprintf(stderr, "IR dump written to: %s\n", ir_filename);
+            }
+        } else {
+            fprintf(stderr, "Warning: Could not write IR dump to %s\n", ir_filename);
+        }
+    }
+    
     /* Get output */
     size_t output_len;
     char *output = mcc_codegen_get_output(cg, &output_len);
@@ -521,6 +567,11 @@ int main(int argc, char **argv)
         
         if (strcmp(arg, "-ast-dump") == 0) {
             opts.emit_ast = true;
+            continue;
+        }
+        
+        if (strcmp(arg, "-dump-ir") == 0) {
+            opts.dump_ir = true;
             continue;
         }
         
