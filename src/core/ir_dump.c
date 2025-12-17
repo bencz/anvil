@@ -103,6 +103,38 @@ static const char *type_kind_name(anvil_type_kind_t kind)
     }
 }
 
+/* Print escaped string to file */
+static void print_escaped_string(FILE *out, const char *str)
+{
+    if (!str) {
+        return;
+    }
+    
+    while (*str) {
+        unsigned char c = (unsigned char)*str;
+        switch (c) {
+            case '\0': fprintf(out, "\\0"); break;
+            case '\a': fprintf(out, "\\a"); break;
+            case '\b': fprintf(out, "\\b"); break;
+            case '\t': fprintf(out, "\\t"); break;
+            case '\n': fprintf(out, "\\n"); break;
+            case '\v': fprintf(out, "\\v"); break;
+            case '\f': fprintf(out, "\\f"); break;
+            case '\r': fprintf(out, "\\r"); break;
+            case '\\': fprintf(out, "\\\\"); break;
+            case '"':  fprintf(out, "\\\""); break;
+            default:
+                if (c >= 32 && c < 127) {
+                    fputc(c, out);
+                } else {
+                    fprintf(out, "\\x%02x", c);
+                }
+                break;
+        }
+        str++;
+    }
+}
+
 /* Get value kind name as string */
 static const char *value_kind_name(anvil_val_kind_t kind)
 {
@@ -210,7 +242,9 @@ void anvil_dump_value(FILE *out, anvil_value_t *val)
             break;
             
         case ANVIL_VAL_CONST_STRING:
-            fprintf(out, "\"%s\"", val->data.str ? val->data.str : "");
+            fprintf(out, "\"");
+            print_escaped_string(out, val->data.str);
+            fprintf(out, "\"");
             break;
             
         case ANVIL_VAL_CONST_ARRAY:
