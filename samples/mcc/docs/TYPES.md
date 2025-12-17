@@ -461,3 +461,29 @@ bool mcc_type_is_integer(mcc_type_t *type)
 ```
 
 This ensures proper type compatibility checking for C99 `long long` and C99/C23 `_Bool`/`bool` types.
+
+### Anonymous Bitfield Field Lookup
+
+The `mcc_type_find_field()` function now properly handles anonymous bitfield padding fields by skipping them during field lookup:
+
+```c
+/* In types.c */
+mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
+{
+    if (type->kind != TYPE_STRUCT && type->kind != TYPE_UNION) {
+        return NULL;
+    }
+    
+    for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+        /* Skip anonymous fields (bitfield padding) */
+        if (!f->name) continue;
+        if (strcmp(f->name, name) == 0) {
+            return f;
+        }
+    }
+    
+    return NULL;
+}
+```
+
+This fixes crashes when accessing fields in structs that contain anonymous bitfield padding (e.g., `unsigned int : 0;` for alignment).

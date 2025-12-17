@@ -654,3 +654,75 @@ size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
 ```
 
 This ensures correct `sizeof` results when cross-compiling (e.g., compiling for 32-bit S/370 on a 64-bit host, or for 31-bit S/390 on x86_64).
+
+### Enum Constants in Expressions
+
+Enum constants are now properly handled in code generation:
+
+```c
+/* In codegen_expr.c - codegen_expr() */
+case AST_IDENT_EXPR: {
+    mcc_symbol_t *sym = expr->data.ident_expr.symbol;
+    
+    /* Enum constant - return its integer value */
+    if (sym && sym->kind == SYM_ENUM_CONST) {
+        return anvil_const_i32(cg->anvil_ctx, sym->data.enum_value);
+    }
+    /* ... other identifier handling ... */
+}
+```
+
+### Switch Statement with Multiple Statements per Case
+
+The switch statement codegen now correctly handles multiple statements between case labels:
+
+```c
+/* In codegen_stmt.c - codegen_switch_stmt() */
+/* In C, case labels are just labels - statements continue until break/return */
+mcc_ast_node_t *body = stmt->data.switch_stmt.body;
+if (body && body->kind == AST_COMPOUND_STMT) {
+    anvil_block_t *current_case_block = NULL;
+    
+    for (size_t i = 0; i < body->data.compound_stmt.num_stmts; i++) {
+        mcc_ast_node_t *s = body->data.compound_stmt.stmts[i];
+        
+        if (s->kind == AST_CASE_STMT) {
+            /* Switch to this case's block */
+            current_case_block = case_blocks[case_idx++];
+            codegen_set_current_block(cg, current_case_block);
+            /* Generate the case's direct statement if any */
+            if (s->data.case_stmt.stmt) {
+                codegen_stmt(cg, s->data.case_stmt.stmt);
+            }
+        } else if (current_case_block) {
+            /* Regular statement - add to current case block */
+            codegen_stmt(cg, s);
+        }
+    }
+}
+```
+
+### Anonymous Bitfield Handling in Structs
+
+When generating struct types, anonymous bitfield padding fields are skipped:
+
+```c
+/* In codegen_type.c - codegen_type() */
+case TYPE_STRUCT:
+case TYPE_UNION: {
+    /* Skip anonymous fields (bitfield padding) */
+    int num_named_fields = 0;
+    for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+        if (f->name) num_named_fields++;
+    }
+    
+    anvil_type_t **field_types = /* allocate */;
+    int i = 0;
+    for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+        if (f->name) {
+            field_types[i++] = codegen_type(cg, f->type);
+        }
+    }
+    return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_named_fields);
+}
+```

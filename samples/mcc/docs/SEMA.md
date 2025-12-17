@@ -577,3 +577,66 @@ if (mcc_type_is_array(type) && type->data.array.length == 0) {
     return false;
 }
 ```
+
+### Case Expression Analysis
+
+Case expressions are now properly analyzed to resolve symbols (like enum constants):
+
+```c
+/* In sema_stmt.c - analyze_case_stmt() */
+static bool analyze_case_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
+{
+    /* Analyze case expression to resolve symbols (e.g., enum constants) */
+    sema_analyze_expr(sema, stmt->data.case_stmt.expr);
+    
+    /* Case expression must be constant */
+    int64_t case_val;
+    if (!sema_eval_const_expr(sema, stmt->data.case_stmt.expr, &case_val)) {
+        mcc_error_at(sema->ctx, stmt->location,
+                     "case expression is not a constant");
+    }
+    
+    sema_analyze_stmt(sema, stmt->data.case_stmt.stmt);
+    return true;
+}
+```
+
+### Function-to-Pointer Assignment
+
+Functions can now be assigned to function pointer variables (function decays to pointer):
+
+```c
+/* In sema_type.c - sema_check_assignment_compat() */
+/* Function can be assigned to pointer-to-function (function decays to pointer) */
+if (mcc_type_is_pointer(lhs) && rhs->kind == TYPE_FUNCTION) {
+    mcc_type_t *lhs_pointee = lhs->data.pointer.pointee;
+    if (lhs_pointee && lhs_pointee->kind == TYPE_FUNCTION) {
+        /* Check if function signatures are compatible */
+        if (mcc_type_is_compatible(lhs_pointee, rhs)) {
+            return true;
+        }
+        mcc_warning_at(sema->ctx, loc,
+                       "incompatible function pointer types in assignment");
+        return true;
+    }
+}
+```
+
+### Anonymous Bitfield Field Lookup
+
+The `mcc_type_find_field` function now skips anonymous bitfield padding fields:
+
+```c
+/* In types.c - mcc_type_find_field() */
+mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
+{
+    for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+        /* Skip anonymous fields (bitfield padding) */
+        if (!f->name) continue;
+        if (strcmp(f->name, name) == 0) {
+            return f;
+        }
+    }
+    return NULL;
+}
+```

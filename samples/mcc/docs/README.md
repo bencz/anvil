@@ -307,3 +307,8 @@ When working with MCC code:
 - **String Literal Concatenation**: Adjacent string literals are concatenated by the parser
 - **Token `raw_text` Field**: Tokens store original source text with quotes for preprocessor output
 - **Token Pasting Operator (`##`)**: Full support for concatenating tokens in macros
+- **Enum Constants in Switch Cases**: Case expressions with enum constants are now properly resolved
+- **Switch Statement Codegen**: Fixed to process all statements between case labels (not just direct case statement)
+- **Function-to-Pointer Assignment**: Functions can now be assigned to function pointer variables
+- **Anonymous Bitfield Handling**: `mcc_type_find_field` skips anonymous bitfield padding fields
+- **Constant Memory Management**: Fixed double-free by collecting constants from all functions before cleanup
