@@ -102,14 +102,19 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
         
         for (size_t i = 0; i < num_elements; i++) {
             mcc_ast_node_t *elem_expr = init->data.init_list.exprs[i];
-            /* Sema already folded constant expressions to AST_INT_LIT */
-            int64_t val = 0;
             if (elem_expr->kind == AST_INT_LIT) {
-                val = (int64_t)elem_expr->data.int_lit.value;
+                int64_t val = (int64_t)elem_expr->data.int_lit.value;
+                elements[i] = anvil_const_i64(cg->anvil_ctx, val);
             } else if (elem_expr->kind == AST_CHAR_LIT) {
-                val = (int64_t)elem_expr->data.char_lit.value;
+                int64_t val = (int64_t)elem_expr->data.char_lit.value;
+                elements[i] = anvil_const_i64(cg->anvil_ctx, val);
+            } else if (elem_expr->kind == AST_STRING_LIT) {
+                /* String literal - get pointer to the string constant */
+                elements[i] = codegen_get_string_literal(cg, elem_expr->data.string_lit.value);
+            } else {
+                /* Default to zero for unsupported types */
+                elements[i] = anvil_const_i64(cg->anvil_ctx, 0);
             }
-            elements[i] = anvil_const_i64(cg->anvil_ctx, val);
         }
         
         anvil_value_t *arr_init = anvil_const_array(cg->anvil_ctx, anvil_elem_type, elements, num_elements);

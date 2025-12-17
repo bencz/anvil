@@ -288,9 +288,15 @@ static void arm64_emit_stack_load(arm64_backend_t *be, int offset, int target_re
         /* Small offset - use direct addressing */
         anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #-%d]\n",
             arm64_xreg_names[target_reg], offset);
-    } else {
-        /* Large offset - compute address first */
+    } else if (offset <= 4095) {
+        /* Medium offset - compute address with sub first */
         anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tldr %s, [x16]\n",
+            arm64_xreg_names[target_reg]);
+    } else {
+        /* Large offset (>4095) - use mov + sub */
+        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
         anvil_strbuf_appendf(&be->code, "\tldr %s, [x16]\n",
             arm64_xreg_names[target_reg]);
     }
@@ -304,9 +310,14 @@ static void arm64_emit_stack_store(arm64_backend_t *be, int offset, int src_reg)
     if (offset <= 255) {
         /* Small offset - use direct addressing */
         anvil_strbuf_appendf(&be->code, "\tstr %s, [x29, #-%d]\n", reg_name, offset);
-    } else {
-        /* Large offset - compute address first */
+    } else if (offset <= 4095) {
+        /* Medium offset - compute address with sub first */
         anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tstr %s, [x16]\n", reg_name);
+    } else {
+        /* Large offset (>4095) - use mov + sub */
+        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
+        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
         anvil_strbuf_appendf(&be->code, "\tstr %s, [x16]\n", reg_name);
     }
 }
@@ -439,7 +450,13 @@ static void arm64_emit_prologue(arm64_backend_t *be, anvil_func_t *func)
     /* Allocate stack space for locals (16-byte aligned) */
     size_t stack_size = (be->next_stack_offset + 15) & ~15;
     if (stack_size > 0) {
-        anvil_strbuf_appendf(&be->code, "\tsub sp, sp, #%zu\n", stack_size);
+        if (stack_size <= 4095) {
+            anvil_strbuf_appendf(&be->code, "\tsub sp, sp, #%zu\n", stack_size);
+        } else {
+            /* Large stack - use mov + sub */
+            anvil_strbuf_appendf(&be->code, "\tmov x16, #%zu\n", stack_size);
+            anvil_strbuf_append(&be->code, "\tsub sp, sp, x16\n");
+        }
     }
     be->stack_size = (int)stack_size;
 }
@@ -449,7 +466,13 @@ static void arm64_emit_epilogue(arm64_backend_t *be)
 {
     /* Restore stack */
     if (be->stack_size > 0) {
-        anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%d\n", be->stack_size);
+        if (be->stack_size <= 4095) {
+            anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%d\n", be->stack_size);
+        } else {
+            /* Large stack - use mov + add */
+            anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", be->stack_size);
+            anvil_strbuf_append(&be->code, "\tadd sp, sp, x16\n");
+        }
     }
     
     /* Restore frame pointer and link register, return */
@@ -1328,8 +1351,13 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
                 /* Use helper for large offsets */
                 if (offset <= 255) {
                     anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x29, #-%d]\n", i, offset);
-                } else {
+                } else if (offset <= 4095) {
                     anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
+                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x16]\n", i);
+                } else {
+                    /* Large offset (>4095) - use mov + sub */
+                    anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
+                    anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
                     anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x16]\n", i);
                 }
             }
@@ -1461,6 +1489,10 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
                         } else {
                             anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)elem->data.i);
                         }
+                    } else if (elem && elem->kind == ANVIL_VAL_CONST_STRING) {
+                        /* Pointer to string constant - get or create label */
+                        const char *label = arm64_add_string(be, elem->data.str);
+                        anvil_strbuf_appendf(&be->data, "\t.quad %s\n", label);
                     } else {
                         anvil_strbuf_appendf(&be->data, "\t.zero %d\n", elem_size);
                     }

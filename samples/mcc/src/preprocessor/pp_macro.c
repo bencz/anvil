@@ -70,6 +70,15 @@ void pp_pop_expanding(mcc_preprocessor_t *pp)
  * Helper Functions
  * ============================================================ */
 
+/* Helper to get token text, using token_type_str for punctuation */
+static const char *stringify_get_token_text(mcc_token_t *t)
+{
+    if (t->raw_text) return t->raw_text;
+    if (t->text) return t->text;
+    /* For punctuation tokens, use the standard representation */
+    return mcc_token_type_name(t->type);
+}
+
 /* Stringify a token list (for # operator) */
 mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
 {
@@ -77,7 +86,7 @@ mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
     size_t len = 2; /* For quotes */
     for (mcc_token_t *t = tokens; t; t = t->next) {
         if (t != tokens && t->has_space) len++; /* Space between tokens */
-        const char *text = t->raw_text ? t->raw_text : t->text;
+        const char *text = stringify_get_token_text(t);
         if (text) {
             if (t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT) {
                 /* Need to escape quotes and backslashes in the content */
@@ -98,7 +107,7 @@ mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
     
     for (mcc_token_t *t = tokens; t; t = t->next) {
         if (t != tokens && t->has_space) *p++ = ' ';
-        const char *text = t->raw_text ? t->raw_text : t->text;
+        const char *text = stringify_get_token_text(t);
         if (text) {
             if (t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT) {
                 for (const char *s = text; *s; s++) {
