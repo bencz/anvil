@@ -571,7 +571,8 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             int field_idx = 0;
             for (mcc_struct_field_t *f = obj_type->data.record.fields; f; f = f->next, field_idx++) {
-                if (strcmp(f->name, expr->data.member_expr.member) == 0) {
+                /* Skip anonymous fields (padding bitfields) */
+                if (f->name && strcmp(f->name, expr->data.member_expr.member) == 0) {
                     break;
                 }
             }

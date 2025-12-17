@@ -131,6 +131,22 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     tctx->type_ldouble->size = 8;
     tctx->type_ldouble->align = (word_size >= 8) ? 8 : word_size;
     
+    /* C99 Complex types (size is 2x the base type) */
+    tctx->type_cfloat = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_cfloat->kind = TYPE_COMPLEX_FLOAT;
+    tctx->type_cfloat->size = 8;   /* 2 * sizeof(float) */
+    tctx->type_cfloat->align = 4;
+    
+    tctx->type_cdouble = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_cdouble->kind = TYPE_COMPLEX_DOUBLE;
+    tctx->type_cdouble->size = 16;  /* 2 * sizeof(double) */
+    tctx->type_cdouble->align = 8;
+    
+    tctx->type_cldouble = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_cldouble->kind = TYPE_COMPLEX_LDOUBLE;
+    tctx->type_cldouble->size = 16;  /* 2 * sizeof(long double) - platform dependent */
+    tctx->type_cldouble->align = 8;
+    
     /* Store pointer size for use in mcc_type_pointer */
     tctx->ptr_size = ptr_size;
     
@@ -158,6 +174,9 @@ mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx) { return tctx->type_ullong
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx) { return tctx->type_float; }
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx) { return tctx->type_double; }
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx) { return tctx->type_ldouble; }
+mcc_type_t *mcc_type_complex_float(mcc_type_context_t *tctx) { return tctx->type_cfloat; }
+mcc_type_t *mcc_type_complex_double(mcc_type_context_t *tctx) { return tctx->type_cdouble; }
+mcc_type_t *mcc_type_complex_ldouble(mcc_type_context_t *tctx) { return tctx->type_cldouble; }
 
 /* Derived type constructors */
 mcc_type_t *mcc_type_pointer(mcc_type_context_t *tctx, mcc_type_t *pointee)

@@ -52,10 +52,10 @@ extern char *getenv(const char *name);
 extern int system(const char *command);
 
 /* Searching and sorting */
+typedef int (*__compar_fn_t)(const void *, const void *);
 extern void *bsearch(const void *key, const void *base, size_t nmemb,
-                     size_t size, int (*compar)(const void *, const void *));
-extern void qsort(void *base, size_t nmemb, size_t size,
-                  int (*compar)(const void *, const void *));
+                     size_t size, __compar_fn_t compar);
+extern void qsort(void *base, size_t nmemb, size_t size, __compar_fn_t compar);
 
 /* Integer arithmetic */
 extern int abs(int n);

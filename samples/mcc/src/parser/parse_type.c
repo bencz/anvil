@@ -220,6 +220,52 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
             do {
                 /* Parse pointer(s) for this field */
                 mcc_type_t *field_type = field_base_type;
+                const char *field_name_str = NULL;
+                
+                /* Check for function pointer: type (*name)(params) */
+                if (parse_check(p, TOK_LPAREN) && p->peek->type == TOK_LPAREN) {
+                    parse_advance(p); /* consume '(' */
+                    if (parse_match(p, TOK_STAR)) {
+                        /* This is a function pointer */
+                        if (parse_check(p, TOK_IDENT)) {
+                            field_name_str = mcc_strdup(p->ctx, p->peek->text);
+                            parse_advance(p);
+                        }
+                        parse_expect(p, TOK_RPAREN, ")");
+                        
+                        /* Parse function parameters */
+                        parse_expect(p, TOK_LPAREN, "(");
+                        /* Skip parameters for now - just match parens */
+                        int paren_depth = 1;
+                        while (paren_depth > 0 && !parse_check(p, TOK_EOF)) {
+                            if (parse_check(p, TOK_LPAREN)) paren_depth++;
+                            else if (parse_check(p, TOK_RPAREN)) paren_depth--;
+                            if (paren_depth > 0) parse_advance(p);
+                        }
+                        parse_expect(p, TOK_RPAREN, ")");
+                        
+                        /* Create function pointer type */
+                        mcc_type_t *func_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                        func_type->kind = TYPE_FUNCTION;
+                        func_type->data.function.return_type = field_base_type;
+                        func_type->data.function.params = NULL;
+                        func_type->data.function.num_params = 0;
+                        func_type->data.function.is_variadic = false;
+                        
+                        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                        ptr->kind = TYPE_POINTER;
+                        ptr->data.pointer.pointee = func_type;
+                        ptr->size = 8;
+                        ptr->align = 8;
+                        field_type = ptr;
+                        
+                        goto add_field;
+                    } else {
+                        /* Not a function pointer, backtrack - this shouldn't happen in valid C */
+                        mcc_error_at(p->ctx, loc, "unexpected '(' in struct field");
+                    }
+                }
+                
                 while (parse_match(p, TOK_STAR)) {
                     mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
                     ptr->kind = TYPE_POINTER;
@@ -238,7 +284,15 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                     }
                 }
                 
-                mcc_token_t *field_name = parse_expect(p, TOK_IDENT, "field name");
+                /* Check for anonymous bitfield (e.g., "unsigned int : 5;") */
+                if (parse_check(p, TOK_IDENT)) {
+                    field_name_str = mcc_strdup(p->ctx, p->peek->text);
+                    parse_advance(p);
+                } else if (!parse_check(p, TOK_COLON)) {
+                    /* Not an anonymous bitfield - error */
+                    parse_expect(p, TOK_IDENT, "field name");
+                }
+                /* If we're here with field_name_str == NULL, it's an anonymous bitfield */
                 
                 /* Parse array brackets for this field */
                 while (parse_match(p, TOK_LBRACKET)) {
@@ -254,7 +308,7 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                         /* C99: Flexible array member */
                         is_flexible = true;
                         if (!parse_has_flexible_array(p)) {
-                            mcc_warning_at(p->ctx, field_name->location,
+                            mcc_warning_at(p->ctx, loc,
                                 "flexible array members are a C99 extension");
                         }
                     }
@@ -276,22 +330,23 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                     if (width_expr && width_expr->kind == AST_INT_LIT) {
                         bitfield_width = (int)width_expr->data.int_lit.value;
                         if (bitfield_width < 0) {
-                            mcc_error_at(p->ctx, field_name->location,
+                            mcc_error_at(p->ctx, loc,
                                 "bitfield width cannot be negative");
                             bitfield_width = 0;
                         } else if (bitfield_width > 64) {
-                            mcc_error_at(p->ctx, field_name->location,
+                            mcc_error_at(p->ctx, loc,
                                 "bitfield width exceeds maximum (64 bits)");
                             bitfield_width = 64;
                         }
                     } else {
-                        mcc_error_at(p->ctx, field_name->location,
+                        mcc_error_at(p->ctx, loc,
                             "bitfield width must be a constant expression");
                     }
                 }
                 
+            add_field: ;
                 mcc_struct_field_t *field = mcc_alloc(p->ctx, sizeof(mcc_struct_field_t));
-                field->name = mcc_strdup(p->ctx, field_name->text);
+                field->name = field_name_str;
                 field->type = field_type;
                 field->bitfield_width = bitfield_width;
                 field->next = NULL;
@@ -443,6 +498,8 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
     bool is_restrict = false;
     bool is_inline = false;
     bool is_noreturn = false;
+    bool is_complex = false;
+    bool is_imaginary = false;
     int type_spec = 0; /* 0=none, 1=void, 2=char, 3=short, 4=int, 5=long, 6=float, 7=double, 8=long long */
     int long_count = 0;
     
@@ -539,11 +596,11 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
             case TOK_FLOAT:
                 parse_advance(p);
                 type_spec = 6;
-                break;
+                continue;  /* Allow 'float _Complex' */
             case TOK_DOUBLE:
                 parse_advance(p);
                 type_spec = 7;
-                break;
+                continue;  /* Allow 'double _Complex' */
             case TOK__BOOL:
                 if (!parse_has_bool(p)) {
                     mcc_warning_at(p->ctx, p->peek->location,
@@ -552,6 +609,22 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 parse_advance(p);
                 type_spec = 9; /* _Bool */
                 break;
+            case TOK__COMPLEX:
+                if (!parse_has_feature(p, MCC_FEAT_COMPLEX)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "'_Complex' is a C99 extension");
+                }
+                parse_advance(p);
+                is_complex = true;
+                continue;
+            case TOK__IMAGINARY:
+                if (!parse_has_feature(p, MCC_FEAT_IMAGINARY)) {
+                    mcc_warning_at(p->ctx, p->peek->location,
+                        "'_Imaginary' is a C99 extension");
+                }
+                parse_advance(p);
+                is_imaginary = true;
+                continue;
             case TOK_BOOL:
                 if (!parse_has_bool_keyword(p)) {
                     mcc_warning_at(p->ctx, p->peek->location,
@@ -694,20 +767,66 @@ done:
         type_spec = 4; /* int */
     }
     
+    /* Default to double if only _Complex/_Imaginary */
+    if (type_spec == 0 && (is_complex || is_imaginary)) {
+        type_spec = 7; /* double _Complex by default */
+    }
+    
     /* Create type */
     mcc_type_t *type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
     
-    switch (type_spec) {
-        case 1: type->kind = TYPE_VOID; type->size = 0; type->align = 1; break;
-        case 2: type->kind = TYPE_CHAR; type->size = 1; type->align = 1; break;
-        case 3: type->kind = TYPE_SHORT; type->size = 2; type->align = 2; break;
-        case 4: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
-        case 5: type->kind = TYPE_LONG; type->size = 4; type->align = 4; break; /* Will be corrected by codegen_sizeof */
-        case 6: type->kind = TYPE_FLOAT; type->size = 4; type->align = 4; break;
-        case 7: type->kind = TYPE_DOUBLE; type->size = 8; type->align = 8; break;
-        case 8: type->kind = TYPE_LONG_LONG; type->size = 8; type->align = 8; break;
-        case 9: type->kind = TYPE_BOOL; type->size = 1; type->align = 1; break;
-        default: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
+    /* Handle _Complex types */
+    if (is_complex) {
+        switch (type_spec) {
+            case 6: /* float _Complex */
+                type->kind = TYPE_COMPLEX_FLOAT;
+                type->size = 8;   /* 2 * sizeof(float) */
+                type->align = 4;
+                break;
+            case 7: /* double _Complex */
+                type->kind = TYPE_COMPLEX_DOUBLE;
+                type->size = 16;  /* 2 * sizeof(double) */
+                type->align = 8;
+                break;
+            case 5: /* long double _Complex (long_count == 1 && type_spec == 7) */
+                if (long_count > 0) {
+                    type->kind = TYPE_COMPLEX_LDOUBLE;
+                    type->size = 16;
+                    type->align = 8;
+                } else {
+                    /* Default to double _Complex */
+                    type->kind = TYPE_COMPLEX_DOUBLE;
+                    type->size = 16;
+                    type->align = 8;
+                }
+                break;
+            default:
+                /* Default to double _Complex */
+                type->kind = TYPE_COMPLEX_DOUBLE;
+                type->size = 16;
+                type->align = 8;
+                break;
+        }
+    } else {
+        switch (type_spec) {
+            case 1: type->kind = TYPE_VOID; type->size = 0; type->align = 1; break;
+            case 2: type->kind = TYPE_CHAR; type->size = 1; type->align = 1; break;
+            case 3: type->kind = TYPE_SHORT; type->size = 2; type->align = 2; break;
+            case 4: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
+            case 5: type->kind = TYPE_LONG; type->size = 4; type->align = 4; break; /* Will be corrected by codegen_sizeof */
+            case 6: type->kind = TYPE_FLOAT; type->size = 4; type->align = 4; break;
+            case 7: type->kind = TYPE_DOUBLE; type->size = 8; type->align = 8; break;
+            case 8: type->kind = TYPE_LONG_LONG; type->size = 8; type->align = 8; break;
+            case 9: type->kind = TYPE_BOOL; type->size = 1; type->align = 1; break;
+            default: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
+        }
+    }
+    
+    /* Handle long double _Complex specially */
+    if (is_complex && long_count > 0 && type_spec == 7) {
+        type->kind = TYPE_COMPLEX_LDOUBLE;
+        type->size = 16;
+        type->align = 8;
     }
     
     type->is_unsigned = is_unsigned;

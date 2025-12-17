@@ -18,6 +18,9 @@ typedef enum {
     TYPE_DOUBLE,
     TYPE_LONG_DOUBLE,
     TYPE_BOOL,          /* C99 _Bool */
+    TYPE_COMPLEX_FLOAT,     /* C99 float _Complex */
+    TYPE_COMPLEX_DOUBLE,    /* C99 double _Complex */
+    TYPE_COMPLEX_LDOUBLE,   /* C99 long double _Complex */
     TYPE_POINTER,
     TYPE_ARRAY,
     TYPE_FUNCTION,
@@ -162,6 +165,9 @@ typedef struct mcc_type_context {
     mcc_type_t *type_float;
     mcc_type_t *type_double;
     mcc_type_t *type_ldouble;
+    mcc_type_t *type_cfloat;    /* C99 float _Complex */
+    mcc_type_t *type_cdouble;   /* C99 double _Complex */
+    mcc_type_t *type_cldouble;  /* C99 long double _Complex */
     
     /* Type hash table for deduplication */
     mcc_type_t **type_table;
@@ -188,6 +194,9 @@ mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx);  /* C99 unsigned long lon
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx);
+mcc_type_t *mcc_type_complex_float(mcc_type_context_t *tctx);   /* C99 float _Complex */
+mcc_type_t *mcc_type_complex_double(mcc_type_context_t *tctx);  /* C99 double _Complex */
+mcc_type_t *mcc_type_complex_ldouble(mcc_type_context_t *tctx); /* C99 long double _Complex */
 
 /* Derived type constructors */
 mcc_type_t *mcc_type_pointer(mcc_type_context_t *tctx, mcc_type_t *pointee);

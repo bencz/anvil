@@ -12,7 +12,7 @@ make test-exec
 ./tests/exec/run_exec_tests.sh tests/exec/arithmetic.c
 ```
 
-## Test Results: 27/27 PASS ✓
+## Test Results: 30/30 PASS ✓
 
 ### Basic Tests (11 original)
 - `return_42.c` - Simple return value
@@ -41,6 +41,11 @@ make test-exec
 - `ternary_op.c` - Ternary operator (? :)
 - `logical_ops.c` - Logical AND/OR with short-circuit evaluation
 
+### Array & Matrix Tests
+- `array_2d.c` - 2D array operations
+- `matrix_ops.c` - 2x2 matrix multiplication, trace, determinant
+- `matrix_3x3.c` - 3x3 matrix operations
+
 ### Advanced Tests
 - `bitwise_ops.c` - Bitwise operators (&, |, ^, ~, <<, >>)
 - `compound_assign.c` - Compound assignment (+=, -=, etc.)
@@ -50,16 +55,6 @@ make test-exec
 - `struct_nested.c` - Nested structures
 - `do_while.c` - Do-while loops
 - `pointer_arith.c` - Pointer arithmetic
-
-## Known Limitations (disabled/)
-
-The following tests are disabled because they use features not fully implemented:
-
-| Test | Issue |
-|------|-------|
-| `matrix_ops.c` | 2D array parameter passing not working |
-| `matrix_3x3.c` | 2D array parameter passing not working |
-| `array_2d.c` | 2D array indexing has offset calculation issues |
 
 ## Test Output
 
