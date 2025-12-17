@@ -792,8 +792,32 @@ void arm64_emit_struct_gep(arm64_backend_t *be, anvil_instr_t *instr)
  * Comparison Operations
  * ============================================================================ */
 
+/* Check if comparison result is only used by the immediately following BR_COND */
+static bool cmp_used_only_by_next_br_cond(anvil_instr_t *cmp_instr)
+{
+    if (!cmp_instr || !cmp_instr->result) return false;
+    
+    anvil_instr_t *next = cmp_instr->next;
+    if (!next || next->op != ANVIL_OP_BR_COND) return false;
+    
+    /* Check if BR_COND uses this comparison result */
+    if (next->num_operands >= 1 && next->operands[0] == cmp_instr->result) {
+        return true;
+    }
+    
+    return false;
+}
+
 void arm64_emit_cmp(arm64_backend_t *be, anvil_instr_t *instr)
 {
+    /* Optimization: if this comparison is immediately followed by BR_COND
+     * that uses the result, skip cset and save - BR_COND will emit the
+     * fused cmp + b.cond sequence */
+    if (cmp_used_only_by_next_br_cond(instr)) {
+        /* Don't emit anything - arm64_emit_br_cond will handle it */
+        return;
+    }
+    
     int64_t imm;
     /* Check if second operand is immediate */
     if (arm64_is_imm12(instr->operands[1], &imm)) {

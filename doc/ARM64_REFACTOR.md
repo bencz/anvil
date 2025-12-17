@@ -74,6 +74,26 @@ cmp x9, #0        ; instead of: mov x10, #0; cmp x9, x10
 b.gt .label
 ```
 
+### Comparison Fusion
+When a comparison is immediately followed by BR_COND that uses the result, the `cset` and `strb` are eliminated:
+
+**Before:**
+```asm
+cmp x9, x10
+cset x0, le           ; 2 extra instructions
+strb w0, [x29, #-48]
+cmp x9, x10           ; redundant comparison
+b.le .body
+```
+
+**After:**
+```asm
+cmp x9, x10
+b.le .body            ; direct branch, no cset/strb
+```
+
+**Savings:** 3 instructions per comparison in control flow.
+
 ### CBZ/CBNZ Optimization
 Comparisons with zero using `==` or `!=` are optimized to use `cbz`/`cbnz`:
 
