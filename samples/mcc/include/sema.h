@@ -66,5 +66,6 @@ void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
 void mcc_sema_dump_full(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
 void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
 void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_verbose(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
 
 #endif /* MCC_SEMA_H */

@@ -28,6 +28,7 @@ static void print_usage(const char *prog)
     printf("  -fsyntax-only     Parse and check syntax only\n");
     printf("  -dump-ast         Print AST\n");
     printf("  -dump-sema        Print semantic analysis info (symbol table)\n");
+    printf("  -dump-sema-verbose Print detailed semantic analysis (all info)\n");
     printf("  -dump-ir          Dump ANVIL IR (for debugging)\n");
     printf("  -I<path>          Add include path\n");
     printf("  -D<name>[=value]  Define macro\n");
@@ -193,12 +194,16 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     }
     
     /* Dump sema? */
-    if (ctx->options.emit_sema) {
+    if (ctx->options.emit_sema || ctx->options.emit_sema_verbose) {
         FILE *out = stdout;
         if (ctx->options.output_file) {
             out = fopen(ctx->options.output_file, "w");
         }
-        mcc_sema_dump_full(sema, ast, out);
+        if (ctx->options.emit_sema_verbose) {
+            mcc_sema_dump_verbose(sema, ast, out);
+        } else {
+            mcc_sema_dump_full(sema, ast, out);
+        }
         if (ctx->options.output_file) fclose(out);
         mcc_sema_destroy(sema);
         mcc_parser_destroy(parser);
@@ -399,7 +404,7 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
     }
     
     /* Dump sema? */
-    if (ctx->options.emit_sema) {
+    if (ctx->options.emit_sema || ctx->options.emit_sema_verbose) {
         FILE *out = stdout;
         if (ctx->options.output_file) {
             out = fopen(ctx->options.output_file, "w");
@@ -408,7 +413,11 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
         /* Dump each AST with full details */
         for (size_t i = 0; i < num_files; i++) {
             fprintf(out, "=== File: %s ===\n\n", files[i]);
-            mcc_sema_dump_full(sema, asts[i], out);
+            if (ctx->options.emit_sema_verbose) {
+                mcc_sema_dump_verbose(sema, asts[i], out);
+            } else {
+                mcc_sema_dump_full(sema, asts[i], out);
+            }
         }
         if (ctx->options.output_file) fclose(out);
         
@@ -638,6 +647,11 @@ int main(int argc, char **argv)
         
         if (strcmp(arg, "-dump-sema") == 0) {
             opts.emit_sema = true;
+            continue;
+        }
+        
+        if (strcmp(arg, "-dump-sema-verbose") == 0) {
+            opts.emit_sema_verbose = true;
             continue;
         }
         

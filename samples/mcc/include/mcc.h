@@ -74,6 +74,7 @@ struct mcc_options {
     bool syntax_only;           /* -fsyntax-only */
     bool emit_ast;              /* -ast-dump */
     bool emit_sema;             /* -sema-dump */
+    bool emit_sema_verbose;     /* -dump-sema-verbose */
     bool dump_ir;               /* -dump-ir */
     
     /* Input files (multiple file support) */

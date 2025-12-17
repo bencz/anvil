@@ -115,6 +115,10 @@ bool parse_is_declaration_start(mcc_parser_t *p)
             return parse_has_alignas(p);
         case TOK_STATIC_ASSERT:
             return parse_has_static_assert(p);
+        
+        /* C23: Attribute syntax [[...]] - could be start of declaration */
+        case TOK_LBRACKET2:
+            return true;
             
         default:
             return parse_is_type_start(p);
