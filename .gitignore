@@ -5,6 +5,11 @@ lib/
 # Object files
 *.o
 
+# Assembly files
+*.s
+*.asm
+*.hlasm
+
 # Static libraries
 *.a
 

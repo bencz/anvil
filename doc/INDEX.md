@@ -14,6 +14,7 @@ This documentation provides comprehensive technical details about the ANVIL libr
 | [OPTIMIZATION.md](OPTIMIZATION.md) | IR optimization passes and pass manager |
 | [BACKENDS.md](BACKENDS.md) | Backend system and how to implement new backends |
 | [MAINFRAME.md](MAINFRAME.md) | IBM Mainframe backends (S/370, S/390, z/Architecture) |
+| [ARM64_REFACTOR.md](ARM64_REFACTOR.md) | ARM64 backend architecture and refactoring notes |
 | [HACKING.md](HACKING.md) | Guide for contributors and hackers |
 
 ## Quick Reference
@@ -189,6 +190,14 @@ Example: `examples/cpu_model_test.c`
 - Global variable emission
 
 ### ARM64 Backend Improvements
+**Modular Architecture:**
+- `arm64.c`: Main backend (lifecycle, codegen entry points)
+- `arm64_internal.h`: Definitions, structures, register constants
+- `arm64_helpers.c`: Helper functions (type size, stack slots, code emission)
+- `arm64_emit.c`: Instruction emission (arithmetic, memory, control flow, FP)
+
+**Code Generation:**
+- **PHI node handling**: Correct SSA resolution with copies before branches
 - **External function calls**: Direct `bl` for C library functions (`malloc`, `free`, `memcpy`)
 - **SSA value preservation**: Results saved to stack slots via `arm64_save_result()`
 - **Large stack frames**: `arm64_emit_stack_load/store/addr()` for offsets >255 bytes
@@ -196,6 +205,19 @@ Example: `examples/cpu_model_test.c`
 - **Type-aware memory ops**: `ldr w0`/`str w9` for 32-bit, `ldrb`/`strb` for 8-bit
 - **Parameter spilling**: Parameters saved at function entry for loop safety
 - **String pointer arrays**: Proper `.quad .LCn` emission for global arrays of string pointers
+
+### IR Debug/Dump API
+New debugging functionality for inspecting IR structures:
+
+```c
+#include <anvil/anvil.h>  // anvil_debug.h is included automatically
+
+anvil_print_module(mod);           // Print to stdout
+anvil_dump_func(stderr, func);     // Dump to FILE*
+char *ir = anvil_module_to_string(mod);  // Get as string (caller frees)
+```
+
+Example: `examples/ir_dump_test.c`
 
 ### Advanced Examples
 Three advanced examples demonstrate generating linkable libraries:

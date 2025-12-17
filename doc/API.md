@@ -15,8 +15,9 @@ Complete API reference for the ANVIL library.
 9. [Constants API](#constants-api)
 10. [Global Variables API](#global-variables-api)
 11. [Optimization API](#optimization-api)
-12. [Enumerations](#enumerations)
-13. [Structures](#structures)
+12. [Debug/Dump API](#debugdump-api)
+13. [Enumerations](#enumerations)
+14. [Structures](#structures)
 
 ## Context API
 
@@ -1456,6 +1457,129 @@ bool anvil_pass_dead_store(anvil_func_t *func);    // Dead store elimination
 bool anvil_pass_load_elim(anvil_func_t *func);     // Redundant load elimination
 bool anvil_pass_loop_unroll(anvil_func_t *func);   // Loop unrolling (experimental)
 bool anvil_pass_cse(anvil_func_t *func);           // Common subexpression elimination
+```
+
+## Debug/Dump API
+
+Functions for inspecting IR structures. Useful for debugging and understanding generated IR.
+The debug API is automatically included via `anvil.h` (through `anvil_debug.h`).
+
+### anvil_print_module
+
+```c
+void anvil_print_module(anvil_module_t *mod);
+```
+
+Prints module IR to stdout in human-readable format.
+
+### anvil_print_func
+
+```c
+void anvil_print_func(anvil_func_t *func);
+```
+
+Prints function IR to stdout.
+
+### anvil_print_instr
+
+```c
+void anvil_print_instr(anvil_instr_t *instr);
+```
+
+Prints a single instruction to stdout.
+
+### anvil_dump_module
+
+```c
+void anvil_dump_module(FILE *out, anvil_module_t *mod);
+```
+
+Dumps module IR to specified FILE stream.
+
+**Parameters:**
+- `out`: Output FILE stream (e.g., `stderr`, `stdout`, or file handle)
+- `mod`: Module to dump
+
+### anvil_dump_func
+
+```c
+void anvil_dump_func(FILE *out, anvil_func_t *func);
+```
+
+Dumps function IR to specified FILE stream.
+
+### anvil_dump_block
+
+```c
+void anvil_dump_block(FILE *out, anvil_block_t *block);
+```
+
+Dumps basic block IR to specified FILE stream.
+
+### anvil_dump_instr
+
+```c
+void anvil_dump_instr(FILE *out, anvil_instr_t *instr);
+```
+
+Dumps instruction to specified FILE stream.
+
+### anvil_dump_value
+
+```c
+void anvil_dump_value(FILE *out, anvil_value_t *val);
+```
+
+Dumps value reference to specified FILE stream.
+
+### anvil_dump_type
+
+```c
+void anvil_dump_type(FILE *out, anvil_type_t *type);
+```
+
+Dumps type to specified FILE stream.
+
+### anvil_module_to_string
+
+```c
+char *anvil_module_to_string(anvil_module_t *mod);
+```
+
+Converts module IR to a newly allocated string.
+
+**Returns:** Allocated string (caller must free), or NULL on failure.
+
+### anvil_func_to_string
+
+```c
+char *anvil_func_to_string(anvil_func_t *func);
+```
+
+Converts function IR to a newly allocated string.
+
+**Returns:** Allocated string (caller must free), or NULL on failure.
+
+### Example Usage
+
+```c
+#include <anvil/anvil.h>
+
+// Print IR to stdout
+anvil_print_module(mod);
+
+// Dump to stderr for debugging
+anvil_dump_func(stderr, func);
+
+// Save IR to file
+FILE *f = fopen("ir_dump.txt", "w");
+anvil_dump_module(f, mod);
+fclose(f);
+
+// Get IR as string
+char *ir = anvil_module_to_string(mod);
+printf("IR: %s\n", ir);
+free(ir);
 ```
 
 ## Structures

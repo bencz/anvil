@@ -36,6 +36,24 @@ src/backend/ppc64/
 └── ppc64_cpu.c       # CPU-specific optimizations
 ```
 
+**Example: ARM64 Backend Organization**
+
+The ARM64 backend uses a similar modular structure:
+
+```
+src/backend/arm64/
+├── arm64.c           # Main backend (lifecycle, codegen entry points)
+├── arm64_internal.h  # Definitions, structures, register constants
+├── arm64_helpers.c   # Helper functions (type size, stack slots, code emission)
+└── arm64_emit.c      # Instruction emission (arithmetic, memory, control flow, FP)
+```
+
+**Key ARM64 Components:**
+- **`arm64_internal.h`**: Defines `arm64_backend_t`, stack slot structures, frame layout, register constants
+- **`arm64_helpers.c`**: `arm64_type_size()`, `arm64_alloc_stack_slot()`, `arm64_emit_mov_imm()`, etc.
+- **`arm64_emit.c`**: `arm64_emit_instr()`, `arm64_emit_load()`, `arm64_emit_call()`, PHI handling
+- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, `arm64_codegen_module()`, `arm64_emit_func()`
+
 **CPU-Specific Code Generation (ppc64_cpu.c):**
 ```c
 void ppc64_emit_popcnt(ppc64_backend_t *be, int dest_reg, int src_reg)

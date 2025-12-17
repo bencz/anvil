@@ -391,8 +391,16 @@ anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
 - `fcpsgn`: FP copy sign on POWER7+
 
 ### ARM64 Backend Improvements
-Recent fixes to the ARM64 backend for robust code generation:
+Recent fixes and refactoring of the ARM64 backend for robust code generation:
 
+**Modular Architecture:**
+- **`arm64_internal.h`**: Definitions, structures, and declarations
+- **`arm64_helpers.c`**: Helper functions (type size, stack slots, code emission)
+- **`arm64_emit.c`**: Instruction emission (arithmetic, memory, control flow, FP)
+- **`arm64.c`**: Main backend (lifecycle, codegen entry points)
+
+**Code Generation Improvements:**
+- **PHI node handling**: Correct SSA resolution with copies before branches
 - **External function calls**: Proper handling of `malloc`, `free`, `memcpy` and other C library functions
 - **SSA value preservation**: All instruction results saved to stack slots to prevent register clobbering
 - **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
@@ -401,8 +409,47 @@ Recent fixes to the ARM64 backend for robust code generation:
 - **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
 - **macOS global variable syntax**: Proper `@PAGE`/`@PAGEOFF` relocations for Darwin ABI (instead of `:lo12:`)
 - **Array stack allocation**: Correct stack frame sizing for arrays based on element type and count
-- **Type size calculation**: New `arm64_type_size()` function for accurate allocation of arrays, structs, and primitives
+- **Type size calculation**: `arm64_type_size()` function for accurate allocation of arrays, structs, and primitives
 - **String pointer arrays**: Proper emission of string constant pointers in global array initializers (`.quad .LCn` directives)
+
+### IR Debug/Dump API
+New debugging functionality for inspecting IR structures:
+
+```c
+#include <anvil/anvil.h>  // anvil_debug.h is now included automatically
+
+// Print module IR to stdout
+anvil_print_module(mod);
+
+// Print function IR to stdout
+anvil_print_func(func);
+
+// Dump to FILE*
+anvil_dump_module(stderr, mod);
+anvil_dump_func(stderr, func);
+anvil_dump_block(stderr, block);
+anvil_dump_instr(stderr, instr);
+
+// Convert to string (caller must free)
+char *ir_str = anvil_module_to_string(mod);
+printf("%s", ir_str);
+free(ir_str);
+```
+
+**Output format:**
+```
+; ModuleID = 'my_module'
+; Functions: 2, Globals: 1
+
+@counter = external global i32 42
+
+define external i32 @factorial(i32 %arg0) {
+entry:
+    %cmp = cmp_le i8 %arg0, 1
+    br_cond %cmp, label %base_case, label %recurse
+...
+}
+```
 
 ### Memory Management Improvements
 Improved cleanup flow to prevent dangling pointers and use-after-free issues:

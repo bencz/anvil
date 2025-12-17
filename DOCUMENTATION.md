@@ -22,7 +22,10 @@ anvil/
 ├── include/
 │   └── anvil/
 │       ├── anvil.h           # Public API header
-│       └── anvil_internal.h  # Internal structures
+│       ├── anvil_internal.h  # Internal structures
+│       ├── anvil_cpu.h       # CPU model system
+│       ├── anvil_debug.h     # IR debug/dump API
+│       └── anvil_opt.h       # Optimization API
 ├── src/
 │   ├── core/
 │   │   ├── context.c         # Context management
@@ -33,7 +36,13 @@ anvil/
 │   │   ├── builder.c         # IR builder
 │   │   ├── strbuf.c          # String buffer utilities
 │   │   ├── backend.c         # Backend registry
-│   │   └── memory.c          # Memory management
+│   │   ├── memory.c          # Memory management
+│   │   └── ir_dump.c         # IR debug/dump implementation
+│   ├── opt/                  # Optimization passes
+│   │   ├── opt.c             # Pass manager
+│   │   ├── const_fold.c      # Constant folding
+│   │   ├── dce.c             # Dead code elimination
+│   │   └── ...               # Other passes
 │   └── backend/
 │       ├── x86/x86.c         # x86 32-bit backend
 │       ├── x86_64/x86_64.c   # x86-64 backend
@@ -42,13 +51,22 @@ anvil/
 │       ├── s390/s390.c       # IBM S/390 backend
 │       ├── zarch/zarch.c     # IBM z/Architecture backend
 │       ├── ppc32/ppc32.c     # PowerPC 32-bit backend
-│       ├── ppc64/ppc64.c     # PowerPC 64-bit BE backend
+│       ├── ppc64/             # PowerPC 64-bit BE backend
+│       │   ├── ppc64.c
+│       │   ├── ppc64_emit.c
+│       │   └── ppc64_cpu.c
 │       ├── ppc64le/ppc64le.c # PowerPC 64-bit LE backend
-│       └── arm64/arm64.c     # ARM64/AArch64 backend
+│       └── arm64/             # ARM64/AArch64 backend (modular)
+│           ├── arm64.c        # Main backend (lifecycle, codegen)
+│           ├── arm64_internal.h # Definitions and structures
+│           ├── arm64_helpers.c  # Helper functions
+│           └── arm64_emit.c     # Instruction emission
 ├── examples/
-│   ├── arch_select.h         # Common architecture selection utility
 │   ├── simple.c              # Basic usage example
-│   └── multiarch.c           # Multi-architecture example
+│   ├── multiarch.c           # Multi-architecture example
+│   ├── ir_dump_test.c        # IR dump/debug example
+│   └── ...                   # Other examples
+├── doc/                      # Documentation
 ├── Makefile
 └── README.md
 ```
@@ -729,6 +747,71 @@ anvil_value_t *anvil_build_uitofp(anvil_ctx_t *ctx, anvil_value_t *val, anvil_ty
 /* FP constants */
 anvil_value_t *anvil_const_f32(anvil_ctx_t *ctx, float val);
 anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val);
+```
+
+### IR Debug/Dump API
+
+ANVIL provides functions for inspecting IR structures, useful for debugging and understanding the generated IR. The debug API is automatically included via `anvil.h`.
+
+```c
+/* Print to stdout (convenience functions) */
+void anvil_print_module(anvil_module_t *mod);
+void anvil_print_func(anvil_func_t *func);
+void anvil_print_instr(anvil_instr_t *instr);
+
+/* Dump to FILE* (for custom output destinations) */
+void anvil_dump_module(FILE *out, anvil_module_t *mod);
+void anvil_dump_func(FILE *out, anvil_func_t *func);
+void anvil_dump_block(FILE *out, anvil_block_t *block);
+void anvil_dump_instr(FILE *out, anvil_instr_t *instr);
+void anvil_dump_value(FILE *out, anvil_value_t *val);
+void anvil_dump_type(FILE *out, anvil_type_t *type);
+
+/* Convert to string (caller must free returned string) */
+char *anvil_module_to_string(anvil_module_t *mod);
+char *anvil_func_to_string(anvil_func_t *func);
+```
+
+**Example Usage:**
+```c
+#include <anvil/anvil.h>
+
+// After building IR...
+anvil_print_module(mod);  // Print to stdout
+
+// Or dump to file
+FILE *f = fopen("ir_dump.txt", "w");
+anvil_dump_module(f, mod);
+fclose(f);
+
+// Or get as string
+char *ir = anvil_module_to_string(mod);
+printf("IR length: %zu\n", strlen(ir));
+free(ir);
+```
+
+**Output Format:**
+```
+; ModuleID = 'my_module'
+; Functions: 2, Globals: 1
+
+@counter = external global i32 42
+
+define external i32 @factorial(i32 %arg0) {
+; Stack size: 0 bytes, max call args: 1
+entry:
+    %cmp = cmp_le i8 %arg0, 1
+    br_cond %cmp, label %base_case, label %recurse
+
+recurse:
+    %n_minus_1 = sub i32 %arg0, 1
+    %rec_result = call i32 @factorial, %n_minus_1
+    %product = mul i32 %arg0, %rec_result
+    ret %product
+
+base_case:
+    ret 1
+}
 ```
 
 ### Array Access (GEP)

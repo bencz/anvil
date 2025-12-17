@@ -29,7 +29,8 @@ CORE_SRCS = \
 	$(SRC_DIR)/core/builder.c \
 	$(SRC_DIR)/core/strbuf.c \
 	$(SRC_DIR)/core/backend.c \
-	$(SRC_DIR)/core/memory.c
+	$(SRC_DIR)/core/memory.c \
+	$(SRC_DIR)/core/ir_dump.c
 
 BACKEND_SRCS = \
 	$(SRC_DIR)/backend/x86/x86.c \
@@ -43,7 +44,9 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc64/ppc64_emit.c \
 	$(SRC_DIR)/backend/ppc64/ppc64_cpu.c \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
-	$(SRC_DIR)/backend/arm64/arm64.c
+	$(SRC_DIR)/backend/arm64/arm64.c \
+	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
+	$(SRC_DIR)/backend/arm64/arm64_emit.c
 
 OPT_SRCS = \
 	$(SRC_DIR)/opt/opt.c \
@@ -78,7 +81,8 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/memory_opt_test \
 	$(BUILD_DIR)/examples/cse_test \
 	$(BUILD_DIR)/examples/global_test \
-	$(BUILD_DIR)/examples/cpu_model_test
+	$(BUILD_DIR)/examples/cpu_model_test \
+	$(BUILD_DIR)/examples/ir_dump_test
 
 .PHONY: all clean lib examples install examples-advanced test-examples-advanced clean-examples-advanced
 

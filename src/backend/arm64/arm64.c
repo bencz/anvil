@@ -1,108 +1,22 @@
 /*
  * ANVIL - ARM64 (AArch64) Backend
  * 
+ * Main backend file - lifecycle, code generation entry points.
+ * 
  * Little-endian, stack grows downward
  * Generates GAS syntax (GNU Assembler)
  * Uses AAPCS64 (ARM 64-bit Procedure Call Standard)
+ * Supports both Linux (ELF) and Darwin/macOS (Mach-O) ABIs
  */
 
-#include "anvil/anvil_internal.h"
+#include "arm64_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-/* ARM64 general-purpose registers (64-bit) */
-static const char *arm64_xreg_names[] = {
-    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
-    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
-    "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
-    "x24", "x25", "x26", "x27", "x28", "x29", "x30", "sp"
-};
-
-/* ARM64 general-purpose registers (32-bit) */
-static const char *arm64_wreg_names[] = {
-    "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7",
-    "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15",
-    "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23",
-    "w24", "w25", "w26", "w27", "w28", "w29", "w30", "wsp"
-};
-
-/* AAPCS64: argument registers x0-x7, return in x0 */
-#define ARM64_NUM_ARG_REGS 8
-
-/* Register indices */
-#define ARM64_X0  0
-#define ARM64_X1  1
-#define ARM64_X2  2
-#define ARM64_X3  3
-#define ARM64_X4  4
-#define ARM64_X5  5
-#define ARM64_X6  6
-#define ARM64_X7  7
-#define ARM64_X8  8   /* Indirect result location register */
-#define ARM64_X9  9   /* Temporary */
-#define ARM64_X10 10  /* Temporary */
-#define ARM64_X11 11  /* Temporary */
-#define ARM64_X12 12  /* Temporary */
-#define ARM64_X13 13  /* Temporary */
-#define ARM64_X14 14  /* Temporary */
-#define ARM64_X15 15  /* Temporary */
-#define ARM64_X16 16  /* IP0 - Intra-procedure scratch */
-#define ARM64_X17 17  /* IP1 - Intra-procedure scratch */
-#define ARM64_X18 18  /* Platform register (reserved) */
-#define ARM64_X19 19  /* Callee-saved */
-#define ARM64_X20 20  /* Callee-saved */
-#define ARM64_X21 21  /* Callee-saved */
-#define ARM64_X22 22  /* Callee-saved */
-#define ARM64_X23 23  /* Callee-saved */
-#define ARM64_X24 24  /* Callee-saved */
-#define ARM64_X25 25  /* Callee-saved */
-#define ARM64_X26 26  /* Callee-saved */
-#define ARM64_X27 27  /* Callee-saved */
-#define ARM64_X28 28  /* Callee-saved */
-#define ARM64_FP  29  /* Frame pointer (x29) */
-#define ARM64_LR  30  /* Link register (x30) */
-#define ARM64_SP  31  /* Stack pointer */
-#define ARM64_XZR 32  /* Zero register (special) */
-
-/* String table entry */
-typedef struct {
-    const char *str;
-    char label[32];
-    size_t len;
-} arm64_string_entry_t;
-
-/* Stack slot tracking */
-typedef struct {
-    anvil_value_t *value;
-    int offset;
-} arm64_stack_slot_t;
-
-/* Backend private data */
-typedef struct {
-    anvil_strbuf_t code;
-    anvil_strbuf_t data;
-    int label_counter;
-    int string_counter;
-    int stack_size;
-    
-    /* Stack slots for local variables */
-    arm64_stack_slot_t *stack_slots;
-    size_t num_stack_slots;
-    size_t stack_slots_cap;
-    int next_stack_offset;
-    
-    /* String table */
-    arm64_string_entry_t *strings;
-    size_t num_strings;
-    size_t strings_cap;
-    
-    /* Current function being generated */
-    anvil_func_t *current_func;
-    
-    /* Context reference for ABI detection */
-    anvil_ctx_t *ctx;
-} arm64_backend_t;
+/* ============================================================================
+ * Architecture Info
+ * ============================================================================ */
 
 static const anvil_arch_info_t arm64_arch_info = {
     .arch = ANVIL_ARCH_ARM64,
@@ -117,6 +31,10 @@ static const anvil_arch_info_t arm64_arch_info = {
     .has_condition_codes = true,
     .has_delay_slots = false
 };
+
+/* ============================================================================
+ * Backend Lifecycle
+ * ============================================================================ */
 
 static anvil_error_t arm64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
@@ -140,6 +58,7 @@ static void arm64_cleanup(anvil_backend_t *be)
     anvil_strbuf_destroy(&priv->data);
     free(priv->strings);
     free(priv->stack_slots);
+    free(priv->value_locs);
     free(priv);
     be->priv = NULL;
 }
@@ -150,18 +69,28 @@ static void arm64_reset(anvil_backend_t *be)
     
     arm64_backend_t *priv = be->priv;
     
-    /* Clear stack slots (contain pointers to anvil_value_t) */
+    /* Clear stack slots */
     priv->num_stack_slots = 0;
     priv->next_stack_offset = 0;
     
-    /* Clear string table (contain pointers to string data) */
+    /* Clear string table */
     priv->num_strings = 0;
     priv->string_counter = 0;
     
+    /* Reset frame layout */
+    memset(&priv->frame, 0, sizeof(priv->frame));
+    
+    /* Reset register state */
+    memset(priv->gpr, 0, sizeof(priv->gpr));
+    memset(priv->fpr, 0, sizeof(priv->fpr));
+    priv->used_callee_saved = 0;
+    
     /* Reset other state */
     priv->label_counter = 0;
-    priv->stack_size = 0;
     priv->current_func = NULL;
+    priv->total_instrs = 0;
+    priv->total_spills = 0;
+    priv->total_reloads = 0;
 }
 
 static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
@@ -170,1122 +99,10 @@ static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
     return &arm64_arch_info;
 }
 
-/* Check if targeting Darwin/macOS ABI */
-static inline bool arm64_is_darwin(arm64_backend_t *be)
-{
-    return be->ctx && be->ctx->abi == ANVIL_ABI_DARWIN;
-}
+/* ============================================================================
+ * Block and Function Emission
+ * ============================================================================ */
 
-/* Get symbol prefix for current ABI */
-static inline const char *arm64_symbol_prefix(arm64_backend_t *be)
-{
-    return arm64_is_darwin(be) ? "_" : "";
-}
-
-/* Get register name based on size */
-static const char *arm64_get_reg(int reg, int size)
-{
-    if (reg == ARM64_SP) return size <= 4 ? "wsp" : "sp";
-    if (size <= 4) return arm64_wreg_names[reg];
-    return arm64_xreg_names[reg];
-}
-
-/* Get size of a type in bytes */
-static int arm64_type_size(anvil_type_t *type)
-{
-    if (!type) return 8;
-    
-    switch (type->kind) {
-        case ANVIL_TYPE_I8:
-        case ANVIL_TYPE_U8:
-            return 1;
-        case ANVIL_TYPE_I16:
-        case ANVIL_TYPE_U16:
-            return 2;
-        case ANVIL_TYPE_I32:
-        case ANVIL_TYPE_U32:
-        case ANVIL_TYPE_F32:
-            return 4;
-        case ANVIL_TYPE_I64:
-        case ANVIL_TYPE_U64:
-        case ANVIL_TYPE_F64:
-        case ANVIL_TYPE_PTR:
-            return 8;
-        case ANVIL_TYPE_ARRAY:
-            return type->data.array.count * arm64_type_size(type->data.array.elem);
-        case ANVIL_TYPE_STRUCT:
-            /* Sum of all field sizes (simplified, no padding) */
-            {
-                int size = 0;
-                for (size_t i = 0; i < type->data.struc.num_fields; i++) {
-                    size += arm64_type_size(type->data.struc.fields[i]);
-                }
-                return size > 0 ? size : 8;
-            }
-        default:
-            return 8;
-    }
-}
-
-/* Add a stack slot for a value with specified size */
-static int arm64_add_stack_slot_sized(arm64_backend_t *be, anvil_value_t *val, int size)
-{
-    if (be->num_stack_slots >= be->stack_slots_cap) {
-        size_t new_cap = be->stack_slots_cap ? be->stack_slots_cap * 2 : 16;
-        arm64_stack_slot_t *new_slots = realloc(be->stack_slots,
-            new_cap * sizeof(arm64_stack_slot_t));
-        if (!new_slots) return -1;
-        be->stack_slots = new_slots;
-        be->stack_slots_cap = new_cap;
-    }
-    
-    /* ARM64 stack grows down, allocate requested size (8-byte aligned) */
-    int aligned_size = (size + 7) & ~7;
-    be->next_stack_offset += aligned_size;
-    int offset = be->next_stack_offset;
-    
-    be->stack_slots[be->num_stack_slots].value = val;
-    be->stack_slots[be->num_stack_slots].offset = offset;
-    be->num_stack_slots++;
-    
-    return offset;
-}
-
-/* Add a stack slot for a value (default 8 bytes) */
-static int arm64_add_stack_slot(arm64_backend_t *be, anvil_value_t *val)
-{
-    return arm64_add_stack_slot_sized(be, val, 8);
-}
-
-/* Get stack slot offset for a value */
-static int arm64_get_stack_slot(arm64_backend_t *be, anvil_value_t *val)
-{
-    for (size_t i = 0; i < be->num_stack_slots; i++) {
-        if (be->stack_slots[i].value == val) {
-            return be->stack_slots[i].offset;
-        }
-    }
-    return -1;
-}
-
-/* Get or create stack slot for instruction result */
-static int arm64_get_or_create_slot(arm64_backend_t *be, anvil_value_t *val)
-{
-    int offset = arm64_get_stack_slot(be, val);
-    if (offset < 0) {
-        offset = arm64_add_stack_slot(be, val);
-    }
-    return offset;
-}
-
-/* Forward declarations */
-static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int target_reg);
-
-/* Emit load from stack slot with large offset support */
-static void arm64_emit_stack_load(arm64_backend_t *be, int offset, int target_reg)
-{
-    if (offset <= 255) {
-        /* Small offset - use direct addressing */
-        anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #-%d]\n",
-            arm64_xreg_names[target_reg], offset);
-    } else if (offset <= 4095) {
-        /* Medium offset - compute address with sub first */
-        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
-        anvil_strbuf_appendf(&be->code, "\tldr %s, [x16]\n",
-            arm64_xreg_names[target_reg]);
-    } else {
-        /* Large offset (>4095) - use mov + sub */
-        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
-        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
-        anvil_strbuf_appendf(&be->code, "\tldr %s, [x16]\n",
-            arm64_xreg_names[target_reg]);
-    }
-}
-
-/* Emit store to stack slot with large offset support */
-static void arm64_emit_stack_store(arm64_backend_t *be, int offset, int src_reg)
-{
-    const char *reg_name = (src_reg == ARM64_XZR) ? "xzr" : arm64_xreg_names[src_reg];
-    
-    if (offset <= 255) {
-        /* Small offset - use direct addressing */
-        anvil_strbuf_appendf(&be->code, "\tstr %s, [x29, #-%d]\n", reg_name, offset);
-    } else if (offset <= 4095) {
-        /* Medium offset - compute address with sub first */
-        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
-        anvil_strbuf_appendf(&be->code, "\tstr %s, [x16]\n", reg_name);
-    } else {
-        /* Large offset (>4095) - use mov + sub */
-        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
-        anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
-        anvil_strbuf_appendf(&be->code, "\tstr %s, [x16]\n", reg_name);
-    }
-}
-
-/* Emit sub for stack address with large offset support */
-static void arm64_emit_stack_addr(arm64_backend_t *be, int offset, int target_reg)
-{
-    if (offset <= 4095) {
-        /* Small offset - single sub instruction */
-        anvil_strbuf_appendf(&be->code, "\tsub %s, x29, #%d\n",
-            arm64_xreg_names[target_reg], offset);
-    } else {
-        /* Large offset - use mov + sub */
-        anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
-        anvil_strbuf_appendf(&be->code, "\tsub %s, x29, x16\n",
-            arm64_xreg_names[target_reg]);
-    }
-}
-
-/* Save instruction result to stack slot (for SSA value preservation) */
-static void arm64_save_result(arm64_backend_t *be, anvil_instr_t *instr)
-{
-    if (instr->result) {
-        int offset = arm64_get_or_create_slot(be, instr->result);
-        if (offset >= 0) {
-            arm64_emit_stack_store(be, offset, ARM64_X0);
-        }
-    }
-}
-
-/* Add string to string table */
-static const char *arm64_add_string(arm64_backend_t *be, const char *str)
-{
-    for (size_t i = 0; i < be->num_strings; i++) {
-        if (strcmp(be->strings[i].str, str) == 0) {
-            return be->strings[i].label;
-        }
-    }
-    
-    if (be->num_strings >= be->strings_cap) {
-        size_t new_cap = be->strings_cap ? be->strings_cap * 2 : 16;
-        arm64_string_entry_t *new_strings = realloc(be->strings,
-            new_cap * sizeof(arm64_string_entry_t));
-        if (!new_strings) return ".str_err";
-        be->strings = new_strings;
-        be->strings_cap = new_cap;
-    }
-    
-    arm64_string_entry_t *entry = &be->strings[be->num_strings];
-    entry->str = str;
-    entry->len = strlen(str);
-    snprintf(entry->label, sizeof(entry->label), ".LC%d", be->string_counter++);
-    be->num_strings++;
-    
-    return entry->label;
-}
-
-/* Emit floating-point value to FP register */
-static void arm64_emit_load_fp_value(arm64_backend_t *be, anvil_value_t *val, int target_dreg)
-{
-    if (!val) return;
-    
-    const char *dreg = target_dreg == 0 ? "d0" : (target_dreg == 1 ? "d1" : "d2");
-    const char *sreg = target_dreg == 0 ? "s0" : (target_dreg == 1 ? "s1" : "s2");
-    
-    switch (val->kind) {
-        case ANVIL_VAL_CONST_FLOAT:
-            /* Load FP constant - use literal pool */
-            if (val->type && val->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_appendf(&be->code, "\tldr %s, =0x%08x\n", sreg,
-                    *(uint32_t*)&(float){(float)val->data.f});
-            } else {
-                anvil_strbuf_appendf(&be->code, "\tldr %s, =0x%016llx\n", dreg,
-                    *(uint64_t*)&val->data.f);
-            }
-            break;
-            
-        case ANVIL_VAL_INSTR:
-            /* FP result - assume in d0 */
-            if (target_dreg != 0) {
-                anvil_strbuf_appendf(&be->code, "\tfmov %s, d0\n", dreg);
-            }
-            break;
-            
-        case ANVIL_VAL_PARAM:
-            /* FP parameters in d0-d7 (AAPCS64) */
-            {
-                size_t idx = val->data.param.index;
-                if (idx < 8) {
-                    if (target_dreg != (int)idx) {
-                        anvil_strbuf_appendf(&be->code, "\tfmov %s, d%zu\n", dreg, idx);
-                    }
-                } else {
-                    /* Load from stack */
-                    int offset = 16 + (int)(idx - 8) * 8;
-                    anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #%d]\n", dreg, offset);
-                }
-            }
-            break;
-            
-        default:
-            /* Load as integer then move to FP */
-            arm64_emit_load_value(be, val, ARM64_X9);
-            anvil_strbuf_appendf(&be->code, "\tfmov %s, x9\n", dreg);
-            break;
-    }
-}
-
-/* Emit function prologue */
-static void arm64_emit_prologue(arm64_backend_t *be, anvil_func_t *func)
-{
-    bool is_darwin = arm64_is_darwin(be);
-    
-    if (is_darwin) {
-        /* macOS/Darwin: underscore prefix, no .type directive */
-        anvil_strbuf_appendf(&be->code, "\t.globl _%s\n", func->name);
-        anvil_strbuf_appendf(&be->code, "\t.p2align 2\n");
-        anvil_strbuf_appendf(&be->code, "_%s:\n", func->name);
-    } else {
-        /* Linux/ELF: no prefix, .type directive */
-        anvil_strbuf_appendf(&be->code, "\t.globl %s\n", func->name);
-        anvil_strbuf_appendf(&be->code, "\t.type %s, %%function\n", func->name);
-        anvil_strbuf_appendf(&be->code, "%s:\n", func->name);
-    }
-    
-    /* Save frame pointer and link register */
-    anvil_strbuf_append(&be->code, "\tstp x29, x30, [sp, #-16]!\n");
-    anvil_strbuf_append(&be->code, "\tmov x29, sp\n");
-    
-    /* Allocate stack space for locals (16-byte aligned) */
-    size_t stack_size = (be->next_stack_offset + 15) & ~15;
-    if (stack_size > 0) {
-        if (stack_size <= 4095) {
-            anvil_strbuf_appendf(&be->code, "\tsub sp, sp, #%zu\n", stack_size);
-        } else {
-            /* Large stack - use mov + sub */
-            anvil_strbuf_appendf(&be->code, "\tmov x16, #%zu\n", stack_size);
-            anvil_strbuf_append(&be->code, "\tsub sp, sp, x16\n");
-        }
-    }
-    be->stack_size = (int)stack_size;
-}
-
-/* Emit function epilogue */
-static void arm64_emit_epilogue(arm64_backend_t *be)
-{
-    /* Restore stack */
-    if (be->stack_size > 0) {
-        if (be->stack_size <= 4095) {
-            anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%d\n", be->stack_size);
-        } else {
-            /* Large stack - use mov + add */
-            anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", be->stack_size);
-            anvil_strbuf_append(&be->code, "\tadd sp, sp, x16\n");
-        }
-    }
-    
-    /* Restore frame pointer and link register, return */
-    anvil_strbuf_append(&be->code, "\tldp x29, x30, [sp], #16\n");
-    anvil_strbuf_append(&be->code, "\tret\n");
-}
-
-/* Load a value into a register */
-static void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int target_reg)
-{
-    if (!val) return;
-    
-    switch (val->kind) {
-        case ANVIL_VAL_CONST_INT:
-            if (val->data.i >= 0 && val->data.i <= 65535) {
-                /* Use MOV for small positive immediates */
-                anvil_strbuf_appendf(&be->code, "\tmov %s, #%lld\n",
-                    arm64_xreg_names[target_reg], (long long)val->data.i);
-            } else if (val->data.i >= -65536 && val->data.i < 0) {
-                /* Use MOVN for small negative immediates */
-                anvil_strbuf_appendf(&be->code, "\tmov %s, #%lld\n",
-                    arm64_xreg_names[target_reg], (long long)val->data.i);
-            } else {
-                /* Use LDR with literal pool for large constants */
-                anvil_strbuf_appendf(&be->code, "\tldr %s, =%lld\n",
-                    arm64_xreg_names[target_reg], (long long)val->data.i);
-            }
-            break;
-            
-        case ANVIL_VAL_CONST_NULL:
-            anvil_strbuf_appendf(&be->code, "\tmov %s, #0\n",
-                arm64_xreg_names[target_reg]);
-            break;
-            
-        case ANVIL_VAL_CONST_STRING:
-            {
-                const char *label = arm64_add_string(be, val->data.str);
-                if (arm64_is_darwin(be)) {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s@PAGE\n",
-                        arm64_xreg_names[target_reg], label);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s@PAGEOFF\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], label);
-                } else {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                        arm64_xreg_names[target_reg], label);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], label);
-                }
-            }
-            break;
-            
-        case ANVIL_VAL_PARAM:
-            {
-                /* Parameters are saved to stack slots at function entry */
-                int offset = arm64_get_stack_slot(be, val);
-                if (offset >= 0) {
-                    arm64_emit_stack_load(be, offset, target_reg);
-                } else {
-                    /* Fallback: load from register (only valid at function entry) */
-                    size_t idx = val->data.param.index;
-                    if (idx < ARM64_NUM_ARG_REGS) {
-                        if (target_reg != (int)idx) {
-                            anvil_strbuf_appendf(&be->code, "\tmov %s, %s\n",
-                                arm64_xreg_names[target_reg], arm64_xreg_names[idx]);
-                        }
-                    } else {
-                        /* Load from stack (parameters beyond x7) */
-                        int stack_offset = 16 + (int)(idx - ARM64_NUM_ARG_REGS) * 8;
-                        anvil_strbuf_appendf(&be->code, "\tldr %s, [x29, #%d]\n",
-                            arm64_xreg_names[target_reg], stack_offset);
-                    }
-                }
-            }
-            break;
-            
-        case ANVIL_VAL_INSTR:
-            if (val->data.instr && val->data.instr->op == ANVIL_OP_ALLOCA) {
-                /* Load address of stack slot */
-                int offset = arm64_get_stack_slot(be, val);
-                if (offset >= 0) {
-                    arm64_emit_stack_addr(be, offset, target_reg);
-                }
-            } else {
-                /* Load result from stack slot where it was saved */
-                int offset = arm64_get_stack_slot(be, val);
-                if (offset >= 0) {
-                    arm64_emit_stack_load(be, offset, target_reg);
-                } else {
-                    /* Fallback: result should be in x0 by convention */
-                    if (target_reg != ARM64_X0) {
-                        anvil_strbuf_appendf(&be->code, "\tmov %s, x0\n",
-                            arm64_xreg_names[target_reg]);
-                    }
-                }
-            }
-            break;
-            
-        case ANVIL_VAL_GLOBAL:
-            /* Load address of global using ADRP + ADD */
-            {
-                const char *prefix = arm64_symbol_prefix(be);
-                if (arm64_is_darwin(be)) {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s%s@PAGE\n",
-                        arm64_xreg_names[target_reg], prefix, val->name);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s%s@PAGEOFF\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], prefix, val->name);
-                } else {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                        arm64_xreg_names[target_reg], val->name);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
-                }
-            }
-            break;
-            
-        case ANVIL_VAL_FUNC:
-            /* Load function address */
-            {
-                const char *prefix = arm64_symbol_prefix(be);
-                if (arm64_is_darwin(be)) {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s%s@PAGE\n",
-                        arm64_xreg_names[target_reg], prefix, val->name);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s%s@PAGEOFF\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], prefix, val->name);
-                } else {
-                    anvil_strbuf_appendf(&be->code, "\tadrp %s, %s\n",
-                        arm64_xreg_names[target_reg], val->name);
-                    anvil_strbuf_appendf(&be->code, "\tadd %s, %s, :lo12:%s\n",
-                        arm64_xreg_names[target_reg], arm64_xreg_names[target_reg], val->name);
-                }
-            }
-            break;
-            
-        default:
-            anvil_strbuf_appendf(&be->code, "\t// Unknown value kind %d\n", val->kind);
-            break;
-    }
-}
-
-/* Emit a single instruction */
-static void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
-{
-    if (!instr) return;
-    
-    switch (instr->op) {
-        case ANVIL_OP_PHI:
-            /* PHI nodes handled during SSA resolution */
-            break;
-            
-        case ANVIL_OP_ALLOCA:
-            {
-                int offset = arm64_add_stack_slot(be, instr->result);
-                /* Zero-initialize the slot */
-                arm64_emit_stack_store(be, offset, ARM64_XZR);
-            }
-            break;
-            
-        case ANVIL_OP_ADD:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tadd x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SUB:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsub x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_MUL:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tmul x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SDIV:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsdiv x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_UDIV:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tudiv x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SMOD:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsdiv x11, x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tmsub x0, x11, x10, x9\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_UMOD:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tudiv x11, x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tmsub x0, x11, x10, x9\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_AND:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tand x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_OR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\torr x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_XOR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\teor x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_NOT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tmvn x0, x9\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SHL:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tlsl x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SHR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tlsr x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SAR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tasr x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_NEG:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tneg x0, x9\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_LOAD:
-            {
-                /* Determine load size based on result type */
-                const char *ldr_instr = "ldr x0";
-                if (instr->result && instr->result->type) {
-                    switch (instr->result->type->kind) {
-                        case ANVIL_TYPE_I8:
-                        case ANVIL_TYPE_U8:
-                            ldr_instr = "ldrb w0";
-                            break;
-                        case ANVIL_TYPE_I16:
-                        case ANVIL_TYPE_U16:
-                            ldr_instr = "ldrh w0";
-                            break;
-                        case ANVIL_TYPE_I32:
-                        case ANVIL_TYPE_U32:
-                        case ANVIL_TYPE_F32:
-                            ldr_instr = "ldr w0";
-                            break;
-                        default:
-                            ldr_instr = "ldr x0";
-                            break;
-                    }
-                }
-                
-                /* Check if loading from stack slot */
-                if (instr->operands[0]->kind == ANVIL_VAL_INSTR &&
-                    instr->operands[0]->data.instr &&
-                    instr->operands[0]->data.instr->op == ANVIL_OP_ALLOCA) {
-                    int offset = arm64_get_stack_slot(be, instr->operands[0]);
-                    if (offset >= 0) {
-                        arm64_emit_stack_load(be, offset, ARM64_X0);
-                        arm64_save_result(be, instr);
-                        break;
-                    }
-                }
-                /* Check if loading from global */
-                if (instr->operands[0]->kind == ANVIL_VAL_GLOBAL) {
-                    const char *prefix = arm64_symbol_prefix(be);
-                    if (arm64_is_darwin(be)) {
-                        anvil_strbuf_appendf(&be->code, "\tadrp x9, %s%s@PAGE\n", prefix, instr->operands[0]->name);
-                        anvil_strbuf_appendf(&be->code, "\t%s, [x9, %s%s@PAGEOFF]\n", ldr_instr, prefix, instr->operands[0]->name);
-                    } else {
-                        anvil_strbuf_appendf(&be->code, "\tadrp x9, %s\n", instr->operands[0]->name);
-                        anvil_strbuf_appendf(&be->code, "\t%s, [x9, :lo12:%s]\n", ldr_instr, instr->operands[0]->name);
-                    }
-                    arm64_save_result(be, instr);
-                    break;
-                }
-                /* Generic load from pointer */
-                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                anvil_strbuf_appendf(&be->code, "\t%s, [x9]\n", ldr_instr);
-                arm64_save_result(be, instr);
-            }
-            break;
-            
-        case ANVIL_OP_STORE:
-            {
-                /* Determine store size based on value type */
-                const char *str_instr = "str x9";
-                if (instr->operands[0] && instr->operands[0]->type) {
-                    switch (instr->operands[0]->type->kind) {
-                        case ANVIL_TYPE_I8:
-                        case ANVIL_TYPE_U8:
-                            str_instr = "strb w9";
-                            break;
-                        case ANVIL_TYPE_I16:
-                        case ANVIL_TYPE_U16:
-                            str_instr = "strh w9";
-                            break;
-                        case ANVIL_TYPE_I32:
-                        case ANVIL_TYPE_U32:
-                        case ANVIL_TYPE_F32:
-                            str_instr = "str w9";
-                            break;
-                        default:
-                            str_instr = "str x9";
-                            break;
-                    }
-                }
-                
-                /* Check if storing to stack slot */
-                if (instr->operands[1]->kind == ANVIL_VAL_INSTR &&
-                    instr->operands[1]->data.instr &&
-                    instr->operands[1]->data.instr->op == ANVIL_OP_ALLOCA) {
-                    int offset = arm64_get_stack_slot(be, instr->operands[1]);
-                    if (offset >= 0) {
-                        arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                        arm64_emit_stack_store(be, offset, ARM64_X9);
-                        break;
-                    }
-                }
-                /* Check if storing to global */
-                if (instr->operands[1]->kind == ANVIL_VAL_GLOBAL) {
-                    const char *prefix = arm64_symbol_prefix(be);
-                    arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                    if (arm64_is_darwin(be)) {
-                        anvil_strbuf_appendf(&be->code, "\tadrp x10, %s%s@PAGE\n", prefix, instr->operands[1]->name);
-                        anvil_strbuf_appendf(&be->code, "\t%s, [x10, %s%s@PAGEOFF]\n", str_instr, prefix, instr->operands[1]->name);
-                    } else {
-                        anvil_strbuf_appendf(&be->code, "\tadrp x10, %s\n", instr->operands[1]->name);
-                        anvil_strbuf_appendf(&be->code, "\t%s, [x10, :lo12:%s]\n", str_instr, instr->operands[1]->name);
-                    }
-                    break;
-                }
-                /* Generic store to pointer */
-                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-                anvil_strbuf_appendf(&be->code, "\t%s, [x10]\n", str_instr);
-            }
-            break;
-            
-        case ANVIL_OP_GEP:
-            /* Get Element Pointer - array indexing */
-            {
-                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                
-                if (instr->num_operands > 1) {
-                    arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-                    
-                    int elem_size = 8;
-                    if (instr->result && instr->result->type) {
-                        anvil_type_t *ptr_type = instr->result->type;
-                        if (ptr_type->kind == ANVIL_TYPE_PTR && ptr_type->data.pointee) {
-                            anvil_type_t *elem_type = ptr_type->data.pointee;
-                            switch (elem_type->kind) {
-                                case ANVIL_TYPE_I8:
-                                case ANVIL_TYPE_U8:
-                                    elem_size = 1;
-                                    break;
-                                case ANVIL_TYPE_I16:
-                                case ANVIL_TYPE_U16:
-                                    elem_size = 2;
-                                    break;
-                                case ANVIL_TYPE_I32:
-                                case ANVIL_TYPE_U32:
-                                case ANVIL_TYPE_F32:
-                                    elem_size = 4;
-                                    break;
-                                default:
-                                    elem_size = 8;
-                                    break;
-                            }
-                        }
-                    }
-                    
-                    if (elem_size == 1) {
-                        anvil_strbuf_append(&be->code, "\tadd x0, x9, x10\n");
-                    } else if (elem_size == 2) {
-                        anvil_strbuf_append(&be->code, "\tadd x0, x9, x10, lsl #1\n");
-                    } else if (elem_size == 4) {
-                        anvil_strbuf_append(&be->code, "\tadd x0, x9, x10, lsl #2\n");
-                    } else {
-                        anvil_strbuf_append(&be->code, "\tadd x0, x9, x10, lsl #3\n");
-                    }
-                } else {
-                    anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-                }
-                arm64_save_result(be, instr);
-            }
-            break;
-            
-        case ANVIL_OP_STRUCT_GEP:
-            /* Get Struct Field Pointer */
-            {
-                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-                
-                int offset = 0;
-                if (instr->aux_type && instr->aux_type->kind == ANVIL_TYPE_STRUCT &&
-                    instr->num_operands > 1 && instr->operands[1]->kind == ANVIL_VAL_CONST_INT) {
-                    unsigned field_idx = (unsigned)instr->operands[1]->data.i;
-                    if (field_idx < instr->aux_type->data.struc.num_fields) {
-                        offset = (int)instr->aux_type->data.struc.offsets[field_idx];
-                    }
-                }
-                
-                if (offset == 0) {
-                    anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-                } else {
-                    anvil_strbuf_appendf(&be->code, "\tadd x0, x9, #%d\n", offset);
-                }
-                arm64_save_result(be, instr);
-            }
-            break;
-            
-        case ANVIL_OP_CMP_EQ:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, eq\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_NE:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, ne\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_LT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, lt\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_LE:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, le\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_GT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, gt\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_GE:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, ge\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_ULT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, lo\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_ULE:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, ls\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_UGT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, hi\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_CMP_UGE:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tcset x0, hs\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_BR:
-            /* Unconditional branch - use true_block */
-            if (instr->true_block) {
-                anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
-                    be->current_func->name, instr->true_block->name);
-            }
-            break;
-            
-        case ANVIL_OP_BR_COND:
-            /* Conditional branch - use true_block and false_block */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            if (instr->true_block && instr->false_block) {
-                anvil_strbuf_appendf(&be->code, "\tcbnz x9, .L%s_%s\n",
-                    be->current_func->name, instr->true_block->name);
-                anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
-                    be->current_func->name, instr->false_block->name);
-            }
-            break;
-            
-        case ANVIL_OP_CALL:
-            {
-                /* Load arguments into temporary registers first (x9-x15) to avoid
-                 * clobbering x0-x7 during argument loading, then move to x0-x7 */
-                size_t num_args = instr->num_operands - 1;
-                if (num_args > ARM64_NUM_ARG_REGS) num_args = ARM64_NUM_ARG_REGS;
-                
-                /* Load all arguments into temporaries first */
-                for (size_t i = 0; i < num_args; i++) {
-                    arm64_emit_load_value(be, instr->operands[i + 1], ARM64_X9 + (int)i);
-                }
-                
-                /* Move from temporaries to argument registers */
-                for (size_t i = 0; i < num_args; i++) {
-                    anvil_strbuf_appendf(&be->code, "\tmov x%zu, x%d\n", i, ARM64_X9 + (int)i);
-                }
-                
-                /* Call function */
-                anvil_value_t *callee = instr->operands[0];
-                const char *prefix = arm64_symbol_prefix(be);
-                
-                if (callee->kind == ANVIL_VAL_FUNC) {
-                    /* Direct call to defined function */
-                    anvil_strbuf_appendf(&be->code, "\tbl %s%s\n", prefix, callee->name);
-                } else if (callee->kind == ANVIL_VAL_GLOBAL && callee->type && 
-                           callee->type->kind == ANVIL_TYPE_FUNC) {
-                    /* Call to external function (declared via anvil_module_add_extern) */
-                    anvil_strbuf_appendf(&be->code, "\tbl %s%s\n", prefix, callee->name);
-                } else {
-                    /* Indirect call through function pointer */
-                    arm64_emit_load_value(be, callee, ARM64_X9);
-                    anvil_strbuf_append(&be->code, "\tblr x9\n");
-                }
-                /* Save return value if this call has a result */
-                arm64_save_result(be, instr);
-            }
-            break;
-            
-        case ANVIL_OP_RET:
-            if (instr->num_operands > 0 && instr->operands[0]) {
-                arm64_emit_load_value(be, instr->operands[0], ARM64_X0);
-            }
-            arm64_emit_epilogue(be);
-            break;
-            
-        case ANVIL_OP_TRUNC:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X0);
-            /* Truncation is implicit in ARM64 when using w registers */
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_ZEXT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            /* Zero extension - use UXTB, UXTH, or UXTW */
-            if (instr->operands[0]->type) {
-                switch (instr->operands[0]->type->kind) {
-                    case ANVIL_TYPE_I8:
-                    case ANVIL_TYPE_U8:
-                        anvil_strbuf_append(&be->code, "\tuxtb x0, w9\n");
-                        break;
-                    case ANVIL_TYPE_I16:
-                    case ANVIL_TYPE_U16:
-                        anvil_strbuf_append(&be->code, "\tuxth x0, w9\n");
-                        break;
-                    default:
-                        anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-                        break;
-                }
-            } else {
-                anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-            }
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SEXT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            /* Sign extension - use SXTB, SXTH, or SXTW */
-            if (instr->operands[0]->type) {
-                switch (instr->operands[0]->type->kind) {
-                    case ANVIL_TYPE_I8:
-                        anvil_strbuf_append(&be->code, "\tsxtb x0, w9\n");
-                        break;
-                    case ANVIL_TYPE_I16:
-                        anvil_strbuf_append(&be->code, "\tsxth x0, w9\n");
-                        break;
-                    case ANVIL_TYPE_I32:
-                        anvil_strbuf_append(&be->code, "\tsxtw x0, w9\n");
-                        break;
-                    default:
-                        anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-                        break;
-                }
-            } else {
-                anvil_strbuf_append(&be->code, "\tmov x0, x9\n");
-            }
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_BITCAST:
-        case ANVIL_OP_PTRTOINT:
-        case ANVIL_OP_INTTOPTR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X0);
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SELECT:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);  /* condition */
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10); /* true value */
-            arm64_emit_load_value(be, instr->operands[2], ARM64_X11); /* false value */
-            anvil_strbuf_append(&be->code, "\tcmp x9, #0\n");
-            anvil_strbuf_append(&be->code, "\tcsel x0, x10, x11, ne\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        /* Floating-point operations (IEEE 754) */
-        case ANVIL_OP_FADD:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            arm64_emit_load_fp_value(be, instr->operands[1], 1);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfadd s0, s0, s1\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfadd d0, d0, d1\n");
-            }
-            break;
-            
-        case ANVIL_OP_FSUB:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            arm64_emit_load_fp_value(be, instr->operands[1], 1);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfsub s0, s0, s1\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfsub d0, d0, d1\n");
-            }
-            break;
-            
-        case ANVIL_OP_FMUL:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            arm64_emit_load_fp_value(be, instr->operands[1], 1);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfmul s0, s0, s1\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfmul d0, d0, d1\n");
-            }
-            break;
-            
-        case ANVIL_OP_FDIV:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            arm64_emit_load_fp_value(be, instr->operands[1], 1);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfdiv s0, s0, s1\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfdiv d0, d0, d1\n");
-            }
-            break;
-            
-        case ANVIL_OP_FNEG:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfneg s0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfneg d0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_FABS:
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfabs s0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfabs d0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_FCMP:
-            /* Floating-point compare */
-            arm64_emit_load_fp_value(be, instr->operands[0], 0);
-            arm64_emit_load_fp_value(be, instr->operands[1], 1);
-            if (instr->operands[0]->type &&
-                instr->operands[0]->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfcmp s0, s1\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfcmp d0, d1\n");
-            }
-            anvil_strbuf_append(&be->code, "\tcset x0, eq\n");
-            break;
-            
-        case ANVIL_OP_SITOFP:
-            /* Signed integer to floating-point */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tscvtf s0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfmov w0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tscvtf d0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfmov x0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_UITOFP:
-            /* Unsigned integer to floating-point */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            if (instr->result && instr->result->type &&
-                instr->result->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tucvtf s0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfmov w0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tucvtf d0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfmov x0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_FPTOSI:
-            /* Floating-point to signed integer */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            if (instr->operands[0]->type &&
-                instr->operands[0]->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfmov s0, w9\n");
-                anvil_strbuf_append(&be->code, "\tfcvtzs x0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfmov d0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfcvtzs x0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_FPTOUI:
-            /* Floating-point to unsigned integer */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            if (instr->operands[0]->type &&
-                instr->operands[0]->type->kind == ANVIL_TYPE_F32) {
-                anvil_strbuf_append(&be->code, "\tfmov s0, w9\n");
-                anvil_strbuf_append(&be->code, "\tfcvtzu x0, s0\n");
-            } else {
-                anvil_strbuf_append(&be->code, "\tfmov d0, x9\n");
-                anvil_strbuf_append(&be->code, "\tfcvtzu x0, d0\n");
-            }
-            break;
-            
-        case ANVIL_OP_FPEXT:
-            /* Extend float to double */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tfmov s0, w9\n");
-            anvil_strbuf_append(&be->code, "\tfcvt d0, s0\n");
-            anvil_strbuf_append(&be->code, "\tfmov x0, d0\n");
-            break;
-            
-        case ANVIL_OP_FPTRUNC:
-            /* Truncate double to float */
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tfmov d0, x9\n");
-            anvil_strbuf_append(&be->code, "\tfcvt s0, d0\n");
-            anvil_strbuf_append(&be->code, "\tfmov w0, s0\n");
-            break;
-            
-        default:
-            anvil_strbuf_appendf(&be->code, "\t// Unimplemented op %d\n", instr->op);
-            break;
-    }
-}
-
-/* Emit a basic block */
 static void arm64_emit_block(arm64_backend_t *be, anvil_block_t *block)
 {
     if (!block) return;
@@ -1296,13 +113,11 @@ static void arm64_emit_block(arm64_backend_t *be, anvil_block_t *block)
             be->current_func->name, block->name);
     }
     
-    /* Emit instructions */
     for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
         arm64_emit_instr(be, instr);
     }
 }
 
-/* Emit a function */
 static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
 {
     if (!func || func->is_declaration) return;
@@ -1311,55 +126,42 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
     be->num_stack_slots = 0;
     be->next_stack_offset = 0;
     
-    /* First pass: count ALL stack slots needed (allocas, params, and instruction results) */
+    /* First pass: allocate stack slots for allocas and instruction results */
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             if (instr->op == ANVIL_OP_ALLOCA) {
-                /* Allocate based on the pointee type size */
                 int size = 8;
                 if (instr->result && instr->result->type && 
                     instr->result->type->kind == ANVIL_TYPE_PTR &&
                     instr->result->type->data.pointee) {
                     size = arm64_type_size(instr->result->type->data.pointee);
                 }
-                arm64_add_stack_slot_sized(be, instr->result, size);
-            }
-            /* Pre-allocate slots for all instructions that produce results */
-            if (instr->result && instr->op != ANVIL_OP_ALLOCA) {
-                arm64_add_stack_slot(be, instr->result);
+                arm64_alloc_stack_slot(be, instr->result, size);
+            } else if (instr->result) {
+                int size = instr->result->type ? arm64_type_size(instr->result->type) : 8;
+                arm64_alloc_stack_slot(be, instr->result, size);
             }
         }
     }
     
-    /* Pre-allocate stack slots for function parameters */
+    /* Allocate slots for parameters */
     for (size_t i = 0; i < func->num_params && i < ARM64_NUM_ARG_REGS; i++) {
-        anvil_value_t *param = func->params[i];
-        if (param) {
-            arm64_add_stack_slot(be, param);
+        if (func->params[i]) {
+            int size = func->params[i]->type ? arm64_type_size(func->params[i]->type) : 8;
+            arm64_alloc_stack_slot(be, func->params[i], size);
         }
     }
     
     /* Emit prologue */
     arm64_emit_prologue(be, func);
     
-    /* Save parameters to their stack slots */
+    /* Save parameters to stack */
     for (size_t i = 0; i < func->num_params && i < ARM64_NUM_ARG_REGS; i++) {
-        anvil_value_t *param = func->params[i];
-        if (param) {
-            int offset = arm64_get_stack_slot(be, param);
+        if (func->params[i]) {
+            int offset = arm64_get_stack_slot(be, func->params[i]);
             if (offset >= 0) {
-                /* Use helper for large offsets */
-                if (offset <= 255) {
-                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x29, #-%d]\n", i, offset);
-                } else if (offset <= 4095) {
-                    anvil_strbuf_appendf(&be->code, "\tsub x16, x29, #%d\n", offset);
-                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x16]\n", i);
-                } else {
-                    /* Large offset (>4095) - use mov + sub */
-                    anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", offset);
-                    anvil_strbuf_appendf(&be->code, "\tsub x16, x29, x16\n");
-                    anvil_strbuf_appendf(&be->code, "\tstr x%zu, [x16]\n", i);
-                }
+                int size = func->params[i]->type ? arm64_type_size(func->params[i]->type) : 8;
+                arm64_emit_store_to_stack(be, (int)i, offset, size);
             }
         }
     }
@@ -1369,26 +171,27 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
         arm64_emit_block(be, block);
     }
     
-    /* .size directive only for ELF (Linux), not for Mach-O (macOS) */
+    /* Size directive (ELF only) */
     if (!arm64_is_darwin(be)) {
         anvil_strbuf_appendf(&be->code, "\t.size %s, .-%s\n", func->name, func->name);
     }
     anvil_strbuf_append(&be->code, "\n");
 }
 
-/* Emit global variables */
+/* ============================================================================
+ * Global Variables
+ * ============================================================================ */
+
 static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
 {
     if (mod->num_globals == 0) return;
     
     const char *prefix = arm64_symbol_prefix(be);
     
-    /* Count actual globals (skip external function declarations) */
+    /* Count actual globals (skip function declarations) */
     int actual_globals = 0;
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) {
-            continue;  /* Skip external function declarations */
-        }
+        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
         actual_globals++;
     }
     if (actual_globals == 0) return;
@@ -1396,106 +199,30 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
     anvil_strbuf_append(&be->data, "\t.data\n");
     
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        /* Skip external function declarations - they're not data */
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) {
-            continue;
-        }
+        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
         
         anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix, g->value->name);
         
-        /* Determine alignment and size based on type */
-        int size = 8;
-        int align = 8;
-        anvil_type_t *type = g->value->type;
-        
-        if (type) {
-            switch (type->kind) {
-                case ANVIL_TYPE_I8:
-                case ANVIL_TYPE_U8:
-                    size = 1;
-                    align = 1;
-                    break;
-                case ANVIL_TYPE_I16:
-                case ANVIL_TYPE_U16:
-                    size = 2;
-                    align = 2;
-                    break;
-                case ANVIL_TYPE_I32:
-                case ANVIL_TYPE_U32:
-                case ANVIL_TYPE_F32:
-                    size = 4;
-                    align = 4;
-                    break;
-                default:
-                    size = 8;
-                    align = 8;
-                    break;
-            }
-        }
+        int size = g->value->type ? arm64_type_size(g->value->type) : 8;
+        int align = g->value->type ? arm64_type_align(g->value->type) : 8;
         
         if (arm64_is_darwin(be)) {
-            anvil_strbuf_appendf(&be->data, "\t.p2align %d\n", align == 1 ? 0 : align == 2 ? 1 : align == 4 ? 2 : 3);
+            int p2align = (align <= 1) ? 0 : (align <= 2) ? 1 : (align <= 4) ? 2 : 3;
+            anvil_strbuf_appendf(&be->data, "\t.p2align %d\n", p2align);
         } else {
             anvil_strbuf_appendf(&be->data, "\t.align %d\n", align);
         }
+        
         anvil_strbuf_appendf(&be->data, "%s%s:\n", prefix, g->value->name);
         
-        /* Check for initializer */
         if (g->value->data.global.init) {
             anvil_value_t *init = g->value->data.global.init;
             if (init->kind == ANVIL_VAL_CONST_INT) {
-                if (size == 1) {
-                    anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)init->data.i);
-                } else if (size == 2) {
-                    anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)init->data.i);
-                } else if (size == 4) {
-                    anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)init->data.i);
-                } else {
-                    anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)init->data.i);
-                }
-            } else if (init->kind == ANVIL_VAL_CONST_ARRAY) {
-                /* Emit array elements */
-                anvil_type_t *elem_type = init->type->data.array.elem;
-                int elem_size = 8;
-                if (elem_type) {
-                    switch (elem_type->kind) {
-                        case ANVIL_TYPE_I8:
-                        case ANVIL_TYPE_U8:
-                            elem_size = 1;
-                            break;
-                        case ANVIL_TYPE_I16:
-                        case ANVIL_TYPE_U16:
-                            elem_size = 2;
-                            break;
-                        case ANVIL_TYPE_I32:
-                        case ANVIL_TYPE_U32:
-                        case ANVIL_TYPE_F32:
-                            elem_size = 4;
-                            break;
-                        default:
-                            elem_size = 8;
-                            break;
-                    }
-                }
-                for (size_t i = 0; i < init->data.array.num_elements; i++) {
-                    anvil_value_t *elem = init->data.array.elements[i];
-                    if (elem && elem->kind == ANVIL_VAL_CONST_INT) {
-                        if (elem_size == 1) {
-                            anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)elem->data.i);
-                        } else if (elem_size == 2) {
-                            anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)elem->data.i);
-                        } else if (elem_size == 4) {
-                            anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)elem->data.i);
-                        } else {
-                            anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)elem->data.i);
-                        }
-                    } else if (elem && elem->kind == ANVIL_VAL_CONST_STRING) {
-                        /* Pointer to string constant - get or create label */
-                        const char *label = arm64_add_string(be, elem->data.str);
-                        anvil_strbuf_appendf(&be->data, "\t.quad %s\n", label);
-                    } else {
-                        anvil_strbuf_appendf(&be->data, "\t.zero %d\n", elem_size);
-                    }
+                switch (size) {
+                    case 1: anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)init->data.i); break;
+                    case 2: anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)init->data.i); break;
+                    case 4: anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)init->data.i); break;
+                    default: anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)init->data.i); break;
                 }
             } else {
                 anvil_strbuf_appendf(&be->data, "\t.zero %d\n", size);
@@ -1508,7 +235,10 @@ static void arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
     anvil_strbuf_append(&be->data, "\n");
 }
 
-/* Emit string constants */
+/* ============================================================================
+ * String Constants
+ * ============================================================================ */
+
 static void arm64_emit_strings(arm64_backend_t *be)
 {
     if (be->num_strings == 0) return;
@@ -1524,7 +254,6 @@ static void arm64_emit_strings(arm64_backend_t *be)
         anvil_strbuf_appendf(&be->data, "%s:\n", entry->label);
         anvil_strbuf_append(&be->data, "\t.asciz \"");
         
-        /* Escape special characters */
         for (const char *p = entry->str; *p; p++) {
             switch (*p) {
                 case '\n': anvil_strbuf_append(&be->data, "\\n"); break;
@@ -1540,6 +269,10 @@ static void arm64_emit_strings(arm64_backend_t *be)
     
     anvil_strbuf_append(&be->data, "\n");
 }
+
+/* ============================================================================
+ * Code Generation Entry Points
+ * ============================================================================ */
 
 static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *mod,
                                           char **output, size_t *len)
@@ -1572,13 +305,11 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
         arm64_emit_func(priv, func);
     }
     
-    /* Emit globals */
+    /* Emit globals and strings */
     arm64_emit_globals(priv, mod);
-    
-    /* Emit strings */
     arm64_emit_strings(priv);
     
-    /* Combine code and data sections */
+    /* Combine output */
     anvil_strbuf_t result;
     anvil_strbuf_init(&result);
     char *code_str = anvil_strbuf_detach(&priv->code, NULL);
@@ -1611,6 +342,10 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
     *output = anvil_strbuf_detach(&priv->code, len);
     return ANVIL_OK;
 }
+
+/* ============================================================================
+ * Backend Registration
+ * ============================================================================ */
 
 const anvil_backend_ops_t anvil_backend_arm64 = {
     .name = "ARM64",

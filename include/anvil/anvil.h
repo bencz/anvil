@@ -545,4 +545,7 @@ anvil_backend_t *anvil_get_backend(anvil_ctx_t *ctx, anvil_arch_t arch);
 }
 #endif
 
+/* Include debug/dump API - must be after type declarations */
+#include "anvil_debug.h"
+
 #endif /* ANVIL_H */
