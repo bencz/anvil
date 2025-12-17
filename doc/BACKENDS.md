@@ -38,14 +38,22 @@ src/backend/ppc64/
 
 **Example: ARM64 Backend Organization**
 
-The ARM64 backend uses a similar modular structure:
+The ARM64 backend uses a similar modular structure with architecture-specific optimizations:
 
 ```
 src/backend/arm64/
 ├── arm64.c           # Main backend (lifecycle, codegen entry points)
 ├── arm64_internal.h  # Definitions, structures, register constants
 ├── arm64_helpers.c   # Helper functions (type size, stack slots, code emission)
-└── arm64_emit.c      # Instruction emission (arithmetic, memory, control flow, FP)
+├── arm64_emit.c      # Instruction emission (arithmetic, memory, control flow, FP)
+└── opt/              # ARM64-specific optimizations
+    ├── arm64_opt.h       # Optimization interface
+    ├── arm64_opt.c       # Pass manager
+    ├── arm64_peephole.c  # Peephole optimizations
+    ├── arm64_dead_store.c # Dead store elimination
+    ├── arm64_load_elim.c  # Redundant load elimination
+    ├── arm64_branch.c     # Branch optimization
+    └── arm64_immediate.c  # Immediate optimization
 ```
 
 **Key ARM64 Components:**
@@ -53,6 +61,7 @@ src/backend/arm64/
 - **`arm64_helpers.c`**: `arm64_type_size()`, `arm64_alloc_stack_slot()`, `arm64_emit_mov_imm()`, etc.
 - **`arm64_emit.c`**: `arm64_emit_instr()`, `arm64_emit_load()`, `arm64_emit_call()`, PHI handling
 - **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, `arm64_codegen_module()`, `arm64_emit_func()`
+- **`opt/`**: Architecture-specific optimizations run during `prepare_ir` phase
 
 **CPU-Specific Code Generation (ppc64_cpu.c):**
 ```c
@@ -159,6 +168,41 @@ static anvil_error_t myarch_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
 - **Type legalization**: Split 64-bit operations on 32-bit targets
 - **Peephole optimization**: Target-specific optimizations at IR level
 - **Register pressure analysis**: Insert spill/reload hints
+
+### Architecture-Specific Optimizations
+
+Backends can implement their own optimization passes that run during `prepare_ir`. These are separate from the generic IR optimizations in `src/opt/` and can leverage architecture-specific knowledge.
+
+**Example: ARM64 Optimization Structure**
+
+```
+src/backend/arm64/opt/
+├── arm64_opt.h       # Interface declarations
+├── arm64_opt.c       # Pass manager
+├── arm64_peephole.c  # Peephole optimizations
+├── arm64_dead_store.c # Dead store elimination
+├── arm64_load_elim.c  # Redundant load elimination
+├── arm64_branch.c     # Branch optimization
+└── arm64_immediate.c  # Immediate optimization
+```
+
+**Pass Manager Example:**
+```c
+void arm64_opt_function(arm64_backend_t *be, anvil_func_t *func)
+{
+    /* Run optimization passes in order */
+    arm64_opt_peephole(be, func);     // Local improvements
+    arm64_opt_dead_store(be, func);   // Remove dead stores
+    arm64_opt_load_elim(be, func);    // Eliminate redundant loads
+    arm64_opt_branch(be, func);       // Optimize branches
+    arm64_opt_immediate(be, func);    // Use immediate forms
+}
+```
+
+**ARM64-Specific Optimizations:**
+- **Peephole**: Redundant store elimination, load-store same address removal
+- **Branch**: Combine `cmp`+`cset`+`cbnz` into `cmp`+`b.cond`, use `cbz`/`cbnz`/`tbz`/`tbnz`
+- **Immediate**: Use `add`/`sub` immediate forms, efficient constant loading with `mov`/`movn`/`movz`
 
 ### Architecture Information
 

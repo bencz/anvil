@@ -10,6 +10,7 @@
  */
 
 #include "arm64_internal.h"
+#include "opt/arm64_opt.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -420,12 +421,8 @@ static anvil_error_t arm64_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
         }
     }
     
-    /* Future: Add IR lowering/transformation passes here:
-     * - Lower unsupported operations
-     * - Peephole optimizations on IR
-     * - Dead code elimination
-     * - etc.
-     */
+    /* Run ARM64-specific optimizations */
+    arm64_opt_module(priv, mod);
     
     return ANVIL_OK;
 }

@@ -46,7 +46,13 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
-	$(SRC_DIR)/backend/arm64/arm64_emit.c
+	$(SRC_DIR)/backend/arm64/arm64_emit.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_opt.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_peephole.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_dead_store.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_load_elim.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_branch.c \
+	$(SRC_DIR)/backend/arm64/opt/arm64_immediate.c
 
 OPT_SRCS = \
 	$(SRC_DIR)/opt/opt.c \

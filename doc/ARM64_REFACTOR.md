@@ -2,7 +2,22 @@
 
 ## Recent Improvements (Implemented)
 
-The ARM64 backend has received significant improvements for correctness and robustness:
+The ARM64 backend has received significant improvements for correctness, robustness, and optimization:
+
+### Architecture-Specific Optimizations
+New optimization pass infrastructure in `src/backend/arm64/opt/`:
+- **Pass Manager**: `arm64_opt.c` coordinates all optimization passes
+- **Peephole Optimizations**: Redundant store elimination, load-store same address removal
+- **Dead Store Elimination**: Remove stores that are immediately overwritten
+- **Redundant Load Elimination**: Reuse values already loaded from same address
+- **Branch Optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
+- **Immediate Optimization**: Use immediate forms of instructions when possible
+
+### IR Preparation Phase
+New `prepare_ir` callback in backend interface:
+- Called automatically by `anvil_module_codegen()` before code generation
+- Analyzes all functions (detect leaf functions, calculate stack layout)
+- Runs architecture-specific optimizations via `arm64_opt_module()`
 
 ### Variadic Function Calls (Darwin/macOS)
 - **Problem**: `printf` and other variadic functions were receiving incorrect arguments

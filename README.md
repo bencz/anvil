@@ -408,6 +408,14 @@ Recent fixes and refactoring of the ARM64 backend for robust code generation:
 - **`arm64_helpers.c`**: Helper functions (type size, stack slots, code emission)
 - **`arm64_emit.c`**: Instruction emission (arithmetic, memory, control flow, FP)
 - **`arm64.c`**: Main backend (lifecycle, codegen entry points)
+- **`opt/`**: Architecture-specific optimization passes
+
+**ARM64-Specific Optimizations (`src/backend/arm64/opt/`):**
+- **Peephole optimizations**: Redundant store elimination, load-store same address removal
+- **Dead store elimination**: Remove stores that are immediately overwritten
+- **Redundant load elimination**: Reuse values already loaded from same address
+- **Branch optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
+- **Immediate optimization**: Use immediate forms of instructions when possible
 
 **Code Generation Improvements:**
 - **PHI node handling**: Correct SSA resolution with copies before branches

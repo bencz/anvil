@@ -60,7 +60,15 @@ anvil/
 │           ├── arm64.c        # Main backend (lifecycle, codegen)
 │           ├── arm64_internal.h # Definitions and structures
 │           ├── arm64_helpers.c  # Helper functions
-│           └── arm64_emit.c     # Instruction emission
+│           ├── arm64_emit.c     # Instruction emission
+│           └── opt/           # ARM64-specific optimizations
+│               ├── arm64_opt.h      # Optimization interface
+│               ├── arm64_opt.c      # Pass manager
+│               ├── arm64_peephole.c # Peephole optimizations
+│               ├── arm64_dead_store.c # Dead store elimination
+│               ├── arm64_load_elim.c  # Redundant load elimination
+│               ├── arm64_branch.c     # Branch optimization
+│               └── arm64_immediate.c  # Immediate optimization
 ├── examples/
 │   ├── simple.c              # Basic usage example
 │   ├── multiarch.c           # Multi-architecture example
