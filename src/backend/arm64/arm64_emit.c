@@ -526,14 +526,20 @@ void arm64_emit_store(arm64_backend_t *be, anvil_instr_t *instr)
     const char *str_instr = "str x9";
     int size = 8;
     
-    /* Determine size from the destination pointer type (pointee) */
-    if (instr->operands[1] && instr->operands[1]->type &&
-        instr->operands[1]->type->kind == ANVIL_TYPE_PTR &&
-        instr->operands[1]->type->data.pointee) {
-        size = arm64_type_size(instr->operands[1]->type->data.pointee);
-    } else if (instr->operands[0] && instr->operands[0]->type) {
-        /* Fallback to source type if destination type not available */
+    /* Determine size from the source value type (what we're storing) */
+    if (instr->operands[0] && instr->operands[0]->type) {
         size = arm64_type_size(instr->operands[0]->type);
+    }
+    
+    /* For alloca destinations, use the pointee type size */
+    if (instr->operands[1] && instr->operands[1]->kind == ANVIL_VAL_INSTR &&
+        instr->operands[1]->data.instr &&
+        instr->operands[1]->data.instr->op == ANVIL_OP_ALLOCA) {
+        if (instr->operands[1]->type &&
+            instr->operands[1]->type->kind == ANVIL_TYPE_PTR &&
+            instr->operands[1]->type->data.pointee) {
+            size = arm64_type_size(instr->operands[1]->type->data.pointee);
+        }
     }
     
     switch (size) {

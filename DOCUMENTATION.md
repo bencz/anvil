@@ -2015,6 +2015,86 @@ _names:
         .asciz "Blue"
 ```
 
+### Variadic Function Calls (Darwin/macOS)
+
+On Darwin/macOS ARM64, variadic function arguments must be passed on the stack, not in registers. This is a key difference from Linux AAPCS64.
+
+**Example: `printf("a=%d, b=%d\n", 1, 2)`**
+
+```asm
+// Allocate stack for variadic args (2 args × 8 bytes = 16, aligned)
+sub sp, sp, #16
+
+// Load format string (fixed argument) into x0
+adrp x9, .LC0@PAGE
+add x9, x9, .LC0@PAGEOFF
+mov x0, x9
+
+// Store variadic arguments on stack
+mov x9, #1
+str x9, [sp, #0]        // First variadic arg
+mov x9, #2
+str x9, [sp, #8]        // Second variadic arg
+
+// Call printf
+bl _printf
+
+// Restore stack
+add sp, sp, #16
+```
+
+The backend automatically detects variadic functions via `type->data.func.variadic` and generates the appropriate calling sequence.
+
+### Global Array Initializers
+
+Arrays with initializers are properly emitted with correct element values:
+
+```c
+// C code
+static const uint16_t lookup[4] = { 10, 20, 30, 40 };
+```
+
+**Generated assembly:**
+```asm
+_lookup:
+        .short 10
+        .short 20
+        .short 30
+        .short 40
+```
+
+### Floating-Point Global Initializers
+
+Float and double constants are emitted using their bit representation:
+
+```c
+// C code
+static const float pi = 3.14159f;
+static const double e = 2.71828;
+```
+
+**Generated assembly:**
+```asm
+_pi:
+        .long 0x40490fd0    ; IEEE 754 bit pattern for 3.14159f
+
+_e:
+        .quad 0x4005bf0a8b145769  ; IEEE 754 bit pattern for 2.71828
+```
+
+### Sign-Extending Loads
+
+For signed integer types smaller than 64 bits, the backend uses sign-extending load instructions:
+
+| Type | Instruction | Description |
+|------|-------------|-------------|
+| `i8` (signed) | `ldrsb x0, [addr]` | Load signed byte, sign-extend to 64 bits |
+| `i16` (signed) | `ldrsh x0, [addr]` | Load signed halfword, sign-extend to 64 bits |
+| `i32` (signed) | `ldrsw x0, [addr]` | Load signed word, sign-extend to 64 bits |
+| `u8` (unsigned) | `ldrb w0, [addr]` | Load unsigned byte, zero-extend |
+| `u16` (unsigned) | `ldrh w0, [addr]` | Load unsigned halfword, zero-extend |
+| `u32` (unsigned) | `ldr w0, [addr]` | Load unsigned word, zero-extend |
+
 ## Advanced Examples
 
 ANVIL includes three advanced examples that demonstrate generating linkable libraries:

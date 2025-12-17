@@ -749,14 +749,29 @@ xor eax, eax        ; No vector args
 call printf
 ```
 
-**ARM64:**
+**ARM64 (Linux):**
 ```asm
-// Call printf("Hello %d", 42)
+// Call printf("Hello %d", 42) - non-variadic style
 adrp x0, fmt            // Load page address of fmt
 add x0, x0, :lo12:fmt   // Add page offset
 mov w1, #42             // Second arg: integer
 bl printf               // Branch with link
 ```
+
+**ARM64 (Darwin/macOS) - Variadic Functions:**
+```asm
+// Call printf("Hello %d", 42) - variadic args on stack
+sub sp, sp, #16         // Allocate stack for variadic args
+adrp x9, fmt@PAGE       // Load page address of fmt
+add x9, x9, fmt@PAGEOFF // Add page offset
+mov x0, x9              // First arg (fixed): format string
+mov x9, #42             // Load variadic arg
+str x9, [sp, #0]        // Store variadic arg on stack
+bl _printf              // Branch with link (underscore prefix)
+add sp, sp, #16         // Restore stack
+```
+
+**Note:** On Darwin/macOS ARM64, variadic function arguments (those after the fixed parameters) must be passed on the stack, not in registers. This is a key difference from Linux AAPCS64 where all arguments can go in registers.
 
 **S/370:**
 ```asm

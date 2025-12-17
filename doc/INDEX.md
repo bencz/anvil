@@ -203,8 +203,13 @@ Example: `examples/cpu_model_test.c`
 - **Large stack frames**: `arm64_emit_stack_load/store/addr()` for offsets >255 bytes
 - **Very large stack frames (>4095 bytes)**: Uses `mov x16, #offset` + `sub/add sp, sp, x16` sequence
 - **Type-aware memory ops**: `ldr w0`/`str w9` for 32-bit, `ldrb`/`strb` for 8-bit
+- **Sign-extending loads**: `ldrsb`, `ldrsh`, `ldrsw` for signed types
 - **Parameter spilling**: Parameters saved at function entry for loop safety
 - **String pointer arrays**: Proper `.quad .LCn` emission for global arrays of string pointers
+- **Variadic function calls (Darwin)**: Variadic args passed on stack as required by AAPCS64 on macOS
+- **Array initializers in globals**: Full support for emitting initialized arrays with correct element values
+- **Float/double global initializers**: FP constants emitted using bit representation
+- **Correct store sizes**: Store instructions use source value type size to avoid corrupting adjacent array elements
 
 ### IR Debug/Dump API
 New debugging functionality for inspecting IR structures:

@@ -406,11 +406,16 @@ Recent fixes and refactoring of the ARM64 backend for robust code generation:
 - **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
 - **Very large stack frames (>4095 bytes)**: Support for stack allocation/deallocation using `mov x16, #offset` + `sub/add sp, sp, x16` sequence
 - **Type-aware load/store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit)
+- **Sign-extending loads**: Proper `ldrsb`, `ldrsh`, `ldrsw` for signed types to preserve sign in 64-bit registers
 - **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
 - **macOS global variable syntax**: Proper `@PAGE`/`@PAGEOFF` relocations for Darwin ABI (instead of `:lo12:`)
 - **Array stack allocation**: Correct stack frame sizing for arrays based on element type and count
 - **Type size calculation**: `arm64_type_size()` function for accurate allocation of arrays, structs, and primitives
 - **String pointer arrays**: Proper emission of string constant pointers in global array initializers (`.quad .LCn` directives)
+- **Variadic function calls (Darwin)**: Arguments to variadic functions (e.g., `printf`) passed on stack as required by AAPCS64 on macOS
+- **Array initializers in globals**: Full support for emitting initialized arrays with correct element values
+- **Float/double global initializers**: Floating-point constants emitted using bit representation (`.long`/`.quad` with hex values)
+- **Correct store sizes for array elements**: Store instructions use source value type size to avoid corrupting adjacent elements in multi-dimensional arrays
 
 ### IR Debug/Dump API
 New debugging functionality for inspecting IR structures:

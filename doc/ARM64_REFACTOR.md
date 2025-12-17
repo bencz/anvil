@@ -1,13 +1,66 @@
 # ARM64 Backend Refactoring Plan
 
-## Current Issues
+## Recent Improvements (Implemented)
+
+The ARM64 backend has received significant improvements for correctness and robustness:
+
+### Variadic Function Calls (Darwin/macOS)
+- **Problem**: `printf` and other variadic functions were receiving incorrect arguments
+- **Solution**: On Darwin/macOS, variadic arguments are now passed on the stack as required by AAPCS64
+- **Implementation**: `arm64_emit_call()` detects variadic functions via `type->data.func.variadic` and allocates stack space for variadic args
+
+### Global Variable Initializers
+- **Array initializers**: Full support for emitting initialized arrays with `.byte`, `.short`, `.long`, `.quad` directives
+- **Float/double initializers**: Floating-point constants emitted using bit representation via `memcpy` to preserve exact values
+- **Float arrays**: Proper handling of float/double element types in array initializers
+
+### Type-Aware Load/Store
+- **Sign-extending loads**: `ldrsb`, `ldrsh`, `ldrsw` for signed types to preserve sign in 64-bit registers
+- **Correct store sizes**: Store instructions now use source value type size, fixing corruption of adjacent array elements
+- **Unsigned types**: Proper `is_unsigned` flag handling from MCC type system
+
+### Multi-dimensional Array Access
+- **Problem**: Stores to 2D array elements were corrupting adjacent elements
+- **Root cause**: Store size was determined from pointer type (which could be `ptr<[N x T]>`) instead of value type
+- **Solution**: `arm64_emit_store()` now uses source operand type for size determination
+
+## Current Architecture (Working)
+
+### Register Usage
+- **x0**: Primary result register
+- **x9-x15**: Temporary registers for operand loading
+- **x16**: Scratch register for large offsets (>255 bytes)
+- **x29**: Frame pointer (FP)
+- **x30**: Link register (LR)
+- **sp**: Stack pointer
+
+### Stack Frame Layout
+```
+[Higher addresses]
++------------------+
+| Saved LR (x30)   | <- x29 + 8
++------------------+
+| Saved FP (x29)   | <- x29 (frame pointer)
++------------------+
+| Local var 1      | <- x29 - 8
++------------------+
+| Local var 2      | <- x29 - 16
++------------------+
+| ...              |
++------------------+
+| Spill slots      |
++------------------+ <- sp
+[Lower addresses]
+```
+
+## Future Improvements (Planned)
 
 ### 1. Inefficient Register Usage
 - Only uses x0 for results, x9-x15 as temporaries
 - Wastes callee-saved registers (x19-x28)
 - Every SSA value is spilled to stack immediately
 
-### 2. Stack Frame Problems
+### 2. Stack Frame Optimization
 - Stack size calculated in first pass but not optimized
 - No consideration for value liveness
 - All instruction results are saved even if never used again
@@ -16,11 +69,9 @@
 ### 3. Code Quality Issues
 - Redundant load/store sequences
 - No peephole optimization
-- Type-size mismatches (using x registers for i32 values)
 
 ### 4. Missing Features
 - No callee-saved register preservation when needed
-- No proper handling of large immediates in all cases
 - Limited floating-point register usage
 
 ## Proposed Architecture
