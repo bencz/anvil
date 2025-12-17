@@ -265,12 +265,39 @@ void arm64_emit_prologue(arm64_backend_t *be, anvil_func_t *func)
         anvil_strbuf_appendf(&be->code, "%s:\n", func->name);
     }
     
-    /* Save frame pointer and link register */
+    /* Calculate stack size (16-byte aligned) */
+    int stack_size = (be->next_stack_offset + 15) & ~15;
+    
+    /* Leaf function optimization: skip saving x30 (link register) if no calls are made.
+     * We still need x29 (frame pointer) for stack access in most cases. */
+    if (be->is_leaf_func && stack_size == 0) {
+        /* Minimal leaf function - no stack frame needed at all */
+        be->frame.total_size = 0;
+        return;
+    }
+    
+    if (be->is_leaf_func) {
+        /* Leaf function with stack - save only x29, not x30 */
+        anvil_strbuf_append(&be->code, "\tstr x29, [sp, #-16]!\n");
+        anvil_strbuf_append(&be->code, "\tmov x29, sp\n");
+        
+        if (stack_size > 0) {
+            if (stack_size <= 4095) {
+                anvil_strbuf_appendf(&be->code, "\tsub sp, sp, #%d\n", stack_size);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", stack_size);
+                anvil_strbuf_append(&be->code, "\tsub sp, sp, x16\n");
+            }
+        }
+        be->frame.total_size = stack_size;
+        return;
+    }
+    
+    /* Non-leaf function: save frame pointer and link register */
     anvil_strbuf_append(&be->code, "\tstp x29, x30, [sp, #-16]!\n");
     anvil_strbuf_append(&be->code, "\tmov x29, sp\n");
     
-    /* Allocate stack space (16-byte aligned) */
-    int stack_size = (be->next_stack_offset + 15) & ~15;
+    /* Allocate stack space */
     if (stack_size > 0) {
         if (stack_size <= 4095) {
             anvil_strbuf_appendf(&be->code, "\tsub sp, sp, #%d\n", stack_size);
@@ -286,6 +313,28 @@ void arm64_emit_epilogue(arm64_backend_t *be)
 {
     int stack_size = be->frame.total_size;
     
+    /* Minimal leaf function - no stack frame */
+    if (be->is_leaf_func && stack_size == 0) {
+        anvil_strbuf_append(&be->code, "\tret\n");
+        return;
+    }
+    
+    /* Leaf function with stack - restore only x29 */
+    if (be->is_leaf_func) {
+        if (stack_size > 0) {
+            if (stack_size <= 4095) {
+                anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%d\n", stack_size);
+            } else {
+                anvil_strbuf_appendf(&be->code, "\tmov x16, #%d\n", stack_size);
+                anvil_strbuf_append(&be->code, "\tadd sp, sp, x16\n");
+            }
+        }
+        anvil_strbuf_append(&be->code, "\tldr x29, [sp], #16\n");
+        anvil_strbuf_append(&be->code, "\tret\n");
+        return;
+    }
+    
+    /* Non-leaf function: restore stack and x29/x30 */
     if (stack_size > 0) {
         if (stack_size <= 4095) {
             anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%d\n", stack_size);

@@ -110,6 +110,29 @@ cbz x9, .label    ; 1 instruction
 
 Similarly, `x != 0` uses `cbnz x9, .label`.
 
+### Leaf Function Optimization
+Functions that don't call other functions (leaf functions) skip saving the link register (x30):
+
+**Non-leaf function:**
+```asm
+stp x29, x30, [sp, #-16]!   ; save both FP and LR
+mov x29, sp
+...
+ldp x29, x30, [sp], #16     ; restore both
+ret
+```
+
+**Leaf function:**
+```asm
+str x29, [sp, #-16]!        ; save only FP
+mov x29, sp
+...
+ldr x29, [sp], #16          ; restore only FP
+ret
+```
+
+**Savings:** 2 instructions per leaf function (1 in prologue, 1 in epilogue).
+
 ### Register Value Cache
 The backend maintains a cache of values loaded into temporary registers (x9-x15). When a value is requested that's already in a register, a simple `mov` is emitted instead of reloading from stack:
 
