@@ -9,12 +9,71 @@
 #include <string.h>
 
 /* ============================================================================
+ * Register Value Cache
+ * ============================================================================ */
+
+/* Check if value is already in a register */
+static int arm64_find_cached_value(arm64_backend_t *be, anvil_value_t *val)
+{
+    if (!val) return -1;
+    
+    /* Only cache instruction results (stack-allocated values) */
+    if (val->kind != ANVIL_VAL_INSTR && val->kind != ANVIL_VAL_PARAM) return -1;
+    
+    /* Check temporary registers x9-x15 */
+    for (int r = ARM64_X9; r <= ARM64_X15; r++) {
+        if (be->gpr[r].value == val && !be->gpr[r].is_dirty) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+/* Mark register as containing a value */
+static void arm64_cache_value(arm64_backend_t *be, int reg, anvil_value_t *val)
+{
+    if (reg < ARM64_X9 || reg > ARM64_X15) return;
+    be->gpr[reg].value = val;
+    be->gpr[reg].is_dirty = false;
+}
+
+/* Invalidate cache for a value (called after store) */
+static void arm64_invalidate_cached_value(arm64_backend_t *be, anvil_value_t *val)
+{
+    if (!val) return;
+    for (int r = ARM64_X9; r <= ARM64_X15; r++) {
+        if (be->gpr[r].value == val) {
+            be->gpr[r].value = NULL;
+        }
+    }
+}
+
+/* Clear all cached values (called at block boundaries) */
+static void arm64_clear_reg_cache(arm64_backend_t *be)
+{
+    for (int r = ARM64_X9; r <= ARM64_X15; r++) {
+        be->gpr[r].value = NULL;
+        be->gpr[r].is_dirty = false;
+    }
+}
+
+/* ============================================================================
  * Value Loading
  * ============================================================================ */
 
 void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int target_reg)
 {
     if (!val) return;
+    
+    /* Check if value is already in a register */
+    int cached_reg = arm64_find_cached_value(be, val);
+    if (cached_reg >= 0 && cached_reg != target_reg) {
+        /* Value already in a register, just move it */
+        anvil_strbuf_appendf(&be->code, "\tmov %s, %s\n",
+            arm64_xreg_names[target_reg], arm64_xreg_names[cached_reg]);
+        arm64_cache_value(be, target_reg, val);
+        return;
+    }
     
     const char *xreg = arm64_xreg_names[target_reg];
     
@@ -94,6 +153,9 @@ void arm64_emit_load_value(arm64_backend_t *be, anvil_value_t *val, int target_r
             anvil_strbuf_appendf(&be->code, "\t// Unknown value kind %d\n", val->kind);
             break;
     }
+    
+    /* Cache the loaded value in the target register */
+    arm64_cache_value(be, target_reg, val);
 }
 
 /* Save instruction result to stack slot */
@@ -768,6 +830,9 @@ void arm64_emit_cmp(arm64_backend_t *be, anvil_instr_t *instr)
 
 void arm64_emit_br(arm64_backend_t *be, anvil_instr_t *instr)
 {
+    /* Clear register cache at branch (values may not be valid in target block) */
+    arm64_clear_reg_cache(be);
+    
     if (instr->true_block) {
         arm64_emit_phi_copies(be, instr->parent, instr->true_block);
         anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
@@ -809,6 +874,9 @@ static anvil_instr_t *get_cmp_instr(anvil_value_t *val)
 
 void arm64_emit_br_cond(arm64_backend_t *be, anvil_instr_t *instr)
 {
+    /* Clear register cache at branch */
+    arm64_clear_reg_cache(be);
+    
     anvil_value_t *cond = instr->operands[0];
     anvil_instr_t *cmp_instr = get_cmp_instr(cond);
     
@@ -823,11 +891,33 @@ void arm64_emit_br_cond(arm64_backend_t *be, anvil_instr_t *instr)
             const char *cond_code = arm64_cond_for_cmp(cmp_instr->op);
             if (cond_code) {
                 int64_t imm;
-                /* Load comparison operands and emit cmp + b.cond */
-                arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
-                if (arm64_is_imm12(cmp_instr->operands[1], &imm)) {
+                /* Special case: comparison with zero can use cbz/cbnz */
+                if (arm64_is_imm12(cmp_instr->operands[1], &imm) && imm == 0) {
+                    arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
+                    if (cmp_instr->op == ANVIL_OP_CMP_EQ) {
+                        /* x == 0 -> cbz */
+                        anvil_strbuf_appendf(&be->code, "\tcbz x9, .L%s_%s\n",
+                            be->current_func->name, instr->true_block->name);
+                        anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
+                            be->current_func->name, instr->false_block->name);
+                        return;
+                    } else if (cmp_instr->op == ANVIL_OP_CMP_NE) {
+                        /* x != 0 -> cbnz */
+                        anvil_strbuf_appendf(&be->code, "\tcbnz x9, .L%s_%s\n",
+                            be->current_func->name, instr->true_block->name);
+                        anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",
+                            be->current_func->name, instr->false_block->name);
+                        return;
+                    }
+                    /* For other comparisons with 0, use cmp #0 + b.cond */
+                    anvil_strbuf_append(&be->code, "\tcmp x9, #0\n");
+                } else if (arm64_is_imm12(cmp_instr->operands[1], &imm)) {
+                    /* Non-zero immediate */
+                    arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
                     anvil_strbuf_appendf(&be->code, "\tcmp x9, #%lld\n", (long long)imm);
                 } else {
+                    /* Register comparison */
+                    arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
                     arm64_emit_load_value(be, cmp_instr->operands[1], ARM64_X10);
                     anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
                 }
@@ -875,6 +965,9 @@ void arm64_emit_br_cond(arm64_backend_t *be, anvil_instr_t *instr)
 
 void arm64_emit_call(arm64_backend_t *be, anvil_instr_t *instr)
 {
+    /* Clear register cache - call clobbers caller-saved registers */
+    arm64_clear_reg_cache(be);
+    
     size_t num_args = instr->num_operands - 1;
     anvil_value_t *callee = instr->operands[0];
     

@@ -74,6 +74,39 @@ cmp x9, #0        ; instead of: mov x10, #0; cmp x9, x10
 b.gt .label
 ```
 
+### CBZ/CBNZ Optimization
+Comparisons with zero using `==` or `!=` are optimized to use `cbz`/`cbnz`:
+
+**Before:**
+```asm
+cmp x9, #0
+b.eq .label       ; 2 instructions
+```
+
+**After:**
+```asm
+cbz x9, .label    ; 1 instruction
+```
+
+Similarly, `x != 0` uses `cbnz x9, .label`.
+
+### Register Value Cache
+The backend maintains a cache of values loaded into temporary registers (x9-x15). When a value is requested that's already in a register, a simple `mov` is emitted instead of reloading from stack:
+
+```asm
+; Without cache:
+ldrsw x9, [x29, #-8]    ; load value
+ldrsw x10, [x29, #-8]   ; load same value again
+
+; With cache:
+ldrsw x9, [x29, #-8]    ; load value
+mov x10, x9             ; reuse cached value
+```
+
+The cache is invalidated at:
+- Branch instructions (values may not be valid in target block)
+- Function calls (caller-saved registers are clobbered)
+
 ### IR Preparation Phase
 New `prepare_ir` callback in backend interface:
 - Called automatically by `anvil_module_codegen()` before code generation

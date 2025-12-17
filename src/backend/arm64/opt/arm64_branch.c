@@ -85,17 +85,12 @@ void arm64_opt_branch(arm64_backend_t *be, anvil_func_t *func)
     analyze_cmp_branch_pattern(func);
     
     /* Note: The actual optimization of comparison/branch sequences
-     * would require either:
-     * 1. Modifying the IR to use a fused compare-and-branch operation
-     * 2. Pattern matching during code emission in arm64_emit.c
+     * is now implemented in arm64_emit_br_cond() which:
+     * 1. Detects when BR_COND condition is a comparison result
+     * 2. Emits fused cmp + b.cond (or cbz/cbnz for zero comparisons)
      * 
-     * The current MCC code generator produces:
-     *   CMP_LE -> STORE -> LOAD -> CMP_NE -> BR_COND
-     * 
-     * A better approach would be to generate:
-     *   CMP_LE -> BR_COND (directly on comparison result)
-     * 
-     * This requires changes in MCC's codegen, not just backend optimization.
+     * This optimization works at the backend level, independent of
+     * the frontend that generates the ANVIL IR.
      */
     
     (void)be;

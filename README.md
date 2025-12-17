@@ -418,7 +418,8 @@ Recent fixes and refactoring of the ARM64 backend for robust code generation:
 - **Immediate optimization**: Use immediate forms of instructions when possible
 - **Conditional branch fusion**: `arm64_emit_br_cond()` detects comparison results and emits `cmp` + `b.cond` directly
 - **32-bit register usage**: Arithmetic/bitwise ops use W registers for 32-bit types (reduces code size)
-- **Immediate operands**: ADD/SUB use immediate form for small constants (`add w0, w9, #1`)
+- **Immediate operands**: ADD/SUB/CMP use immediate form for small constants (`add w0, w9, #1`)
+- **CBZ/CBNZ optimization**: `x == 0` uses `cbz`, `x != 0` uses `cbnz` (saves 1 instruction)
 
 **Code Generation Improvements:**
 - **PHI node handling**: Correct SSA resolution with copies before branches
