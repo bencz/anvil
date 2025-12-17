@@ -336,11 +336,12 @@ anvil_register_backend(&anvil_backend_myarch);
 - **Relative branches**: J/JNZ instead of B/BNZ for better performance (S/390+)
 
 ### Global Variables Support
-- Full support for global variables on all mainframe backends
+- Full support for global variables on all backends
 - Direct load/store to globals without intermediate address calculation
-- Type-aware storage allocation (C, H, F, FD, E, D)
+- Type-aware storage allocation (C, H, F, FD, E, D for mainframes)
 - Support for initialized globals with `DC` (Define Constant)
-- UPPERCASE naming convention (GCCMVS compatible)
+- **Array constant initializers**: `anvil_const_array()` and `anvil_global_set_initializer()`
+- UPPERCASE naming convention (GCCMVS compatible for mainframes)
 - Example: `examples/global_test.c`
 
 ### PowerPC Backend Support

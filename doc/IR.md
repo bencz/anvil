@@ -103,6 +103,7 @@ const_i32 42           // Integer constant
 const_f64 3.14159      // Float constant
 const_null ptr<i32>    // Null pointer
 const_string "hello"   // String constant
+const_array [i16 x 3] { 1, 2, 3 }  // Array constant
 ```
 
 ### Parameters

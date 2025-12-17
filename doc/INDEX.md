@@ -167,6 +167,7 @@ Example: `examples/cpu_model_test.c`
 - Direct load/store to globals (no intermediate address calculation)
 - Type-aware storage allocation (C, H, F, FD, E, D for mainframes)
 - Support for initialized globals with `DC` (Define Constant)
+- **Array constant initializers**: `anvil_const_array()` and `anvil_global_set_initializer()`
 - UPPERCASE naming convention for mainframes (GCCMVS compatible)
 - Example: `examples/global_test.c`
 

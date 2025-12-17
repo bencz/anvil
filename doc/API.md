@@ -1068,6 +1068,8 @@ anvil_value_t *anvil_const_f32(anvil_ctx_t *ctx, float val);
 anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val);
 anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
+anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
+                                  anvil_value_t **elements, size_t num_elements);
 ```
 
 **Example:**
@@ -1075,6 +1077,10 @@ anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *forty_two = anvil_const_i32(ctx, 42);
 anvil_value_t *pi = anvil_const_f64(ctx, 3.14159265359);
 anvil_value_t *null_ptr = anvil_const_null(ctx, anvil_type_ptr(ctx, anvil_type_i8(ctx)));
+
+// Create array constant
+anvil_value_t *elems[] = { anvil_const_i32(ctx, 1), anvil_const_i32(ctx, 2), anvil_const_i32(ctx, 3) };
+anvil_value_t *arr = anvil_const_array(ctx, anvil_type_i32(ctx), elems, 3);
 ```
 
 ## Global Variables API
@@ -1108,6 +1114,43 @@ anvil_value_t *val = anvil_build_load(ctx, anvil_type_i32(ctx), counter, "val");
 // Store to global
 anvil_value_t *new_val = anvil_build_add(ctx, val, anvil_const_i32(ctx, 1), "inc");
 anvil_build_store(ctx, new_val, counter);
+```
+
+### anvil_global_set_initializer
+
+```c
+void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
+```
+
+Sets the initializer for a global variable. The initializer must be a constant value (integer, float, string, or array constant).
+
+**Parameters:**
+- `global`: Global variable value (from `anvil_module_add_global`)
+- `init`: Constant initializer value
+
+**Example:**
+```c
+// Create initialized global array (lookup table)
+anvil_type_t *i16 = anvil_type_i16(ctx);
+anvil_type_t *arr_type = anvil_type_array(ctx, i16, 256);
+anvil_value_t *lookup = anvil_module_add_global(mod, "lookup_table", arr_type, ANVIL_LINK_INTERNAL);
+
+// Create array initializer
+anvil_value_t *elems[256];
+for (int i = 0; i < 256; i++) {
+    elems[i] = anvil_const_i64(ctx, i * 2);  // Example: each element is i*2
+}
+anvil_value_t *init = anvil_const_array(ctx, i16, elems, 256);
+anvil_global_set_initializer(lookup, init);
+```
+
+**Generated Code (ARM64 macOS):**
+```asm
+_lookup_table:
+        .short 0
+        .short 2
+        .short 4
+        ...
 ```
 
 ### anvil_module_add_extern
