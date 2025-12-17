@@ -164,6 +164,20 @@ bool sema_check_assignment_compat(mcc_sema_t *sema, mcc_type_t *lhs, mcc_type_t 
         return true;
     }
     
+    /* Function can be assigned to pointer-to-function (function decays to pointer) */
+    if (mcc_type_is_pointer(lhs) && rhs->kind == TYPE_FUNCTION) {
+        mcc_type_t *lhs_pointee = lhs->data.pointer.pointee;
+        if (lhs_pointee && lhs_pointee->kind == TYPE_FUNCTION) {
+            /* Check if function signatures are compatible */
+            if (mcc_type_is_compatible(lhs_pointee, rhs)) {
+                return true;
+            }
+            mcc_warning_at(sema->ctx, loc,
+                           "incompatible function pointer types in assignment");
+            return true;
+        }
+    }
+    
     /* C23: nullptr can be assigned to any pointer */
     if (sema_has_nullptr(sema) && mcc_type_is_pointer(lhs)) {
         /* TODO: Check for nullptr constant */

@@ -618,6 +618,8 @@ mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
     }
     
     for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+        /* Skip anonymous fields (bitfield padding) */
+        if (!f->name) continue;
         if (strcmp(f->name, name) == 0) {
             return f;
         }

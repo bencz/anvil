@@ -78,6 +78,11 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 return anvil_build_load(cg->anvil_ctx, type, global, "gload");
             }
             
+            /* Enum constant - return its integer value */
+            if (sym && sym->kind == SYM_ENUM_CONST) {
+                return anvil_const_i32(cg->anvil_ctx, sym->data.enum_value);
+            }
+            
             return NULL;
         }
         
@@ -570,11 +575,15 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             }
             
             int field_idx = 0;
-            for (mcc_struct_field_t *f = obj_type->data.record.fields; f; f = f->next, field_idx++) {
-                /* Skip anonymous fields (padding bitfields) */
-                if (f->name && strcmp(f->name, expr->data.member_expr.member) == 0) {
+            for (mcc_struct_field_t *f = obj_type->data.record.fields; f; f = f->next) {
+                /* Skip anonymous fields (padding bitfields) - don't count them */
+                if (!f->name) {
+                    continue;
+                }
+                if (strcmp(f->name, expr->data.member_expr.member) == 0) {
                     break;
                 }
+                field_idx++;
             }
             
             anvil_type_t *struct_type = codegen_type(cg, obj_type);

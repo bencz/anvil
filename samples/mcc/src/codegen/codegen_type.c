@@ -38,17 +38,23 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                 type->data.array.length);
         case TYPE_STRUCT:
         case TYPE_UNION: {
-            /* Create struct type */
-            int num_fields = type->data.record.num_fields;
-            anvil_type_t **field_types = mcc_alloc(cg->mcc_ctx,
-                num_fields * sizeof(anvil_type_t*));
-            
-            int i = 0;
-            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next, i++) {
-                field_types[i] = codegen_type(cg, f->type);
+            /* Create struct type - skip anonymous fields (bitfield padding) */
+            int num_named_fields = 0;
+            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+                if (f->name) num_named_fields++;
             }
             
-            return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_fields);
+            anvil_type_t **field_types = mcc_alloc(cg->mcc_ctx,
+                (num_named_fields > 0 ? num_named_fields : 1) * sizeof(anvil_type_t*));
+            
+            int i = 0;
+            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+                if (f->name) {
+                    field_types[i++] = codegen_type(cg, f->type);
+                }
+            }
+            
+            return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_named_fields);
         }
         case TYPE_FUNCTION: {
             anvil_type_t *ret_type = codegen_type(cg, type->data.function.return_type);
@@ -90,10 +96,12 @@ size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
         
         case TYPE_STRUCT: {
             /* Recalculate struct size with correct pointer sizes */
+            /* Skip anonymous fields (bitfield padding) */
             size_t offset = 0;
             size_t max_align = 1;
             
             for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
+                if (!f->name || !f->type) continue;  /* Skip anonymous/invalid fields */
                 size_t field_size = codegen_sizeof(cg, f->type);
                 size_t field_align = field_size < 8 ? field_size : 8;
                 if (f->type->kind == TYPE_POINTER) field_align = ptr_size;

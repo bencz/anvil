@@ -193,6 +193,9 @@ static bool analyze_case_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
         mcc_error_at(sema->ctx, stmt->location, SEMA_ERR_CASE_OUTSIDE);
     }
     
+    /* Analyze case expression to resolve symbols (e.g., enum constants) */
+    sema_analyze_expr(sema, stmt->data.case_stmt.expr);
+    
     /* Case expression must be constant */
     int64_t case_val;
     if (!sema_eval_const_expr(sema, stmt->data.case_stmt.expr, &case_val)) {
