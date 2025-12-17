@@ -48,6 +48,14 @@ void pp_process_define(mcc_preprocessor_t *pp);
 /* Stringify a token list (for # operator) */
 mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens);
 
+/* ---- New Expansion API (pp_expand.c) ---- */
+
+/* Expand macros in a token list and return the result */
+mcc_token_t *pp_expand_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens);
+
+/* Process and expand a token list, emitting to output */
+void pp_expand_and_emit(mcc_preprocessor_t *pp, mcc_token_t *tokens);
+
 /* ---- Token Output (pp_token.c or preprocessor.c) ---- */
 
 /* Emit a token to output */

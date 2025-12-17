@@ -90,10 +90,77 @@ void pp_process_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
         
         mcc_macro_t *macro = pp_lookup_macro(pp, tok->text);
         if (macro && !pp_is_expanding(pp, tok->text)) {
-            /* Save has_space for first emitted token */
+            /* Collect tokens from lexer for expansion */
+            /* Start with the macro name token */
+            mcc_token_t *token_list = mcc_token_copy(pp->ctx, tok);
+            token_list->next = NULL;
+            mcc_token_t *list_tail = token_list;
+            
+            /* For function-like macros, collect arguments */
+            if (macro->is_function_like) {
+                mcc_token_t *peek = mcc_lexer_peek(pp->lexer);
+                
+                /* Skip empty object-like macros to find ( */
+                while (peek->type == TOK_IDENT) {
+                    mcc_macro_t *m = pp_lookup_macro(pp, peek->text);
+                    if (m && !m->is_function_like && !m->body) {
+                        /* Empty macro - collect it and continue looking */
+                        mcc_token_t *next = mcc_lexer_next(pp->lexer);
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, next);
+                        copy->next = NULL;
+                        list_tail->next = copy;
+                        list_tail = copy;
+                        peek = mcc_lexer_peek(pp->lexer);
+                    } else {
+                        break;
+                    }
+                }
+                
+                if (peek->type == TOK_LPAREN) {
+                    /* Collect all tokens until matching ) */
+                    int paren_depth = 0;
+                    do {
+                        mcc_token_t *next = mcc_lexer_next(pp->lexer);
+                        /* Skip newlines inside macro arguments */
+                        if (next->type == TOK_NEWLINE) continue;
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, next);
+                        copy->next = NULL;
+                        list_tail->next = copy;
+                        list_tail = copy;
+                        
+                        if (next->type == TOK_LPAREN) paren_depth++;
+                        else if (next->type == TOK_RPAREN) paren_depth--;
+                        else if (next->type == TOK_EOF) break;
+                    } while (paren_depth > 0);
+                }
+            } else {
+                /* For object-like macros, check if next token is ( 
+                 * This enables deferred expansion where an object-like macro
+                 * expands to a function-like macro name */
+                mcc_token_t *peek = mcc_lexer_peek(pp->lexer);
+                if (peek->type == TOK_LPAREN) {
+                    /* Collect potential function call for deferred expansion */
+                    int paren_depth = 0;
+                    do {
+                        mcc_token_t *next = mcc_lexer_next(pp->lexer);
+                        /* Skip newlines inside macro arguments */
+                        if (next->type == TOK_NEWLINE) continue;
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, next);
+                        copy->next = NULL;
+                        list_tail->next = copy;
+                        list_tail = copy;
+                        
+                        if (next->type == TOK_LPAREN) paren_depth++;
+                        else if (next->type == TOK_RPAREN) paren_depth--;
+                        else if (next->type == TOK_EOF) break;
+                    } while (paren_depth > 0);
+                }
+            }
+            
+            /* Now expand the collected tokens */
             pp->next_has_space = tok->has_space;
             pp->use_next_has_space = true;
-            pp_expand_macro(pp, macro);
+            pp_expand_and_emit(pp, token_list);
             return;
         }
     }
@@ -106,6 +173,14 @@ void pp_process_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
 
 /* Process a token list with support for nested macro expansion */
 void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
+{
+    /* Use the new expansion algorithm that correctly handles deferred expansion */
+    pp_expand_and_emit(pp, tokens);
+}
+
+/* Old implementation - kept for reference but not used */
+#if 0
+void pp_process_token_list_old(mcc_preprocessor_t *pp, mcc_token_t *tokens)
 {
     mcc_token_t *tok = tokens;
     
@@ -352,6 +427,7 @@ void pp_process_token_list(mcc_preprocessor_t *pp, mcc_token_t *tokens)
         tok = tok->next;
     }
 }
+#endif /* Old implementation */
 
 /* ============================================================
  * Main Preprocessing Loop
