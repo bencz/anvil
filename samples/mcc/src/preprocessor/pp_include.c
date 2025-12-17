@@ -20,6 +20,7 @@ void pp_push_include(mcc_preprocessor_t *pp)
     inc->pos = pp->lexer->source + pp->lexer->pos;
     inc->line = pp->lexer->line;
     inc->column = pp->lexer->column;
+    inc->at_bol = pp->lexer->at_bol;
     inc->next = pp->include_stack;
     pp->include_stack = inc;
     pp->include_depth++;
@@ -43,6 +44,7 @@ bool pp_pop_include(mcc_preprocessor_t *pp)
     pp->lexer->line = inc->line;
     pp->lexer->column = inc->column;
     pp->lexer->current = inc->pos[0];
+    pp->lexer->at_bol = true;  /* After include, we're at beginning of line */
     pp->lexer->peek_token = NULL;
     
     return true;

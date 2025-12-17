@@ -35,6 +35,7 @@ typedef struct mcc_include_file {
     const char *pos;            /* Current position in content */
     int line;                   /* Current line number */
     int column;                 /* Current column number */
+    bool at_bol;                /* Was at beginning of line */
     struct mcc_include_file *next;
 } mcc_include_file_t;
 
