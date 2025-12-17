@@ -238,6 +238,27 @@ void arm64_emit_epilogue(arm64_backend_t *be)
 }
 
 /* ============================================================================
+ * Register Size Helpers
+ * ============================================================================ */
+
+/* Determine if we should use 32-bit (W) or 64-bit (X) registers for an instruction */
+static bool arm64_use_32bit_regs(anvil_instr_t *instr)
+{
+    if (!instr || !instr->result || !instr->result->type) return false;
+    
+    int size = arm64_type_size(instr->result->type);
+    return size <= 4;
+}
+
+/* Get register name with correct size suffix */
+static const char *arm64_sized_reg(int reg, bool use_32bit)
+{
+    if (reg == ARM64_XZR) return use_32bit ? "wzr" : "xzr";
+    if (reg < 0 || reg > 30) return "?";
+    return use_32bit ? arm64_wreg_names[reg] : arm64_xreg_names[reg];
+}
+
+/* ============================================================================
  * Instruction Emission
  * ============================================================================ */
 
@@ -257,111 +278,158 @@ void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
             break;
             
         /* Arithmetic */
-        case ANVIL_OP_ADD:
+        case ANVIL_OP_ADD: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tadd x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_SUB:
+        case ANVIL_OP_SUB: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsub x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tsub %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_MUL:
+        case ANVIL_OP_MUL: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tmul x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tmul %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_SDIV:
+        case ANVIL_OP_SDIV: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsdiv x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tsdiv %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_UDIV:
+        case ANVIL_OP_UDIV: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tudiv x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tudiv %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_SMOD:
+        case ANVIL_OP_SMOD: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tsdiv x11, x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tmsub x0, x11, x10, x9\n");
+            anvil_strbuf_appendf(&be->code, "\tsdiv %s, %s, %s\n",
+                arm64_sized_reg(11, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            anvil_strbuf_appendf(&be->code, "\tmsub %s, %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(11, w), arm64_sized_reg(10, w), arm64_sized_reg(9, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_UMOD:
+        case ANVIL_OP_UMOD: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tudiv x11, x9, x10\n");
-            anvil_strbuf_append(&be->code, "\tmsub x0, x11, x10, x9\n");
+            anvil_strbuf_appendf(&be->code, "\tudiv %s, %s, %s\n",
+                arm64_sized_reg(11, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            anvil_strbuf_appendf(&be->code, "\tmsub %s, %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(11, w), arm64_sized_reg(10, w), arm64_sized_reg(9, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_NEG:
+        case ANVIL_OP_NEG: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tneg x0, x9\n");
+            anvil_strbuf_appendf(&be->code, "\tneg %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w));
             arm64_save_result(be, instr);
             break;
+        }
             
         /* Bitwise */
-        case ANVIL_OP_AND:
+        case ANVIL_OP_AND: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tand x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tand %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_OR:
+        case ANVIL_OP_OR: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\torr x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\torr %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_XOR:
+        case ANVIL_OP_XOR: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\teor x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\teor %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_NOT:
+        case ANVIL_OP_NOT: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            anvil_strbuf_append(&be->code, "\tmvn x0, x9\n");
+            anvil_strbuf_appendf(&be->code, "\tmvn %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w));
             arm64_save_result(be, instr);
             break;
+        }
             
-        case ANVIL_OP_SHL:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tlsl x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SHR:
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tlsr x0, x9, x10\n");
-            arm64_save_result(be, instr);
-            break;
-            
-        case ANVIL_OP_SAR:
+        case ANVIL_OP_SHL: {
+            bool w = arm64_use_32bit_regs(instr);
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
             arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_append(&be->code, "\tasr x0, x9, x10\n");
+            anvil_strbuf_appendf(&be->code, "\tlsl %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
             arm64_save_result(be, instr);
             break;
+        }
+            
+        case ANVIL_OP_SHR: {
+            bool w = arm64_use_32bit_regs(instr);
+            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
+            anvil_strbuf_appendf(&be->code, "\tlsr %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            arm64_save_result(be, instr);
+            break;
+        }
+            
+        case ANVIL_OP_SAR: {
+            bool w = arm64_use_32bit_regs(instr);
+            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
+            anvil_strbuf_appendf(&be->code, "\tasr %s, %s, %s\n",
+                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            arm64_save_result(be, instr);
+            break;
+        }
             
         /* Memory */
         case ANVIL_OP_LOAD:
