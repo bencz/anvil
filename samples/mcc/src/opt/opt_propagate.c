@@ -233,8 +233,8 @@ static void const_prop_stmt(propagate_ctx_t *ctx, mcc_ast_node_t *stmt)
             mcc_ast_node_t *expr = stmt->data.expr_stmt.expr;
             if (!expr) break;
             
-            /* Check for assignment */
-            if (expr->kind == AST_BINARY_EXPR && expr->data.binary_expr.op == BINOP_ASSIGN) {
+            /* Check for assignment (simple or compound) */
+            if (expr->kind == AST_BINARY_EXPR && expr->data.binary_expr.op >= BINOP_ASSIGN) {
                 mcc_ast_node_t *lhs = expr->data.binary_expr.lhs;
                 mcc_ast_node_t *rhs = expr->data.binary_expr.rhs;
                 
@@ -244,10 +244,16 @@ static void const_prop_stmt(propagate_ctx_t *ctx, mcc_ast_node_t *stmt)
                 /* Track the assignment */
                 void *sym = get_ident_sym(lhs);
                 if (sym) {
-                    int64_t val;
-                    if (opt_eval_const_int(rhs, &val)) {
-                        set_const_int(ctx, sym, val);
+                    /* Only track simple assignments with constant RHS */
+                    if (expr->data.binary_expr.op == BINOP_ASSIGN) {
+                        int64_t val;
+                        if (opt_eval_const_int(rhs, &val)) {
+                            set_const_int(ctx, sym, val);
+                        } else {
+                            invalidate(ctx, sym);
+                        }
                     } else {
+                        /* Compound assignment - invalidate since we don't know the result */
                         invalidate(ctx, sym);
                     }
                 }
@@ -437,7 +443,8 @@ static void copy_prop_stmt(propagate_ctx_t *ctx, mcc_ast_node_t *stmt)
             mcc_ast_node_t *expr = stmt->data.expr_stmt.expr;
             if (!expr) break;
             
-            if (expr->kind == AST_BINARY_EXPR && expr->data.binary_expr.op == BINOP_ASSIGN) {
+            /* Check for assignment (simple or compound) */
+            if (expr->kind == AST_BINARY_EXPR && expr->data.binary_expr.op >= BINOP_ASSIGN) {
                 mcc_ast_node_t *lhs = expr->data.binary_expr.lhs;
                 mcc_ast_node_t *rhs = expr->data.binary_expr.rhs;
                 
@@ -447,10 +454,16 @@ static void copy_prop_stmt(propagate_ctx_t *ctx, mcc_ast_node_t *stmt)
                 /* Track the assignment */
                 void *sym = get_ident_sym(lhs);
                 if (sym) {
-                    void *src = get_ident_sym(rhs);
-                    if (src) {
-                        set_copy(ctx, sym, src);
+                    /* Only track simple assignments */
+                    if (expr->data.binary_expr.op == BINOP_ASSIGN) {
+                        void *src = get_ident_sym(rhs);
+                        if (src) {
+                            set_copy(ctx, sym, src);
+                        } else {
+                            invalidate(ctx, sym);
+                        }
                     } else {
+                        /* Compound assignment - invalidate */
                         invalidate(ctx, sym);
                     }
                 }
