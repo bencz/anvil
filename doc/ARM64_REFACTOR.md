@@ -33,6 +33,25 @@ b.le .body
 
 Supported condition codes: `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `lo`, `ls`, `hi`, `hs` (unsigned).
 
+### 32-bit Register Optimization
+Arithmetic and bitwise operations now use 32-bit registers (W) when the result type is 32 bits or smaller:
+
+**Before:**
+```asm
+ldrsw x9, [x29, #-8]
+ldrsw x10, [x29, #-16]
+add x0, x9, x10       ; 64-bit operation
+```
+
+**After:**
+```asm
+ldrsw x9, [x29, #-8]
+ldrsw x10, [x29, #-16]
+add w0, w9, w10       ; 32-bit operation
+```
+
+Affected operations: `add`, `sub`, `mul`, `sdiv`, `udiv`, `smod`, `umod`, `neg`, `and`, `or`, `xor`, `not`, `shl`, `shr`, `sar`.
+
 ### IR Preparation Phase
 New `prepare_ir` callback in backend interface:
 - Called automatically by `anvil_module_codegen()` before code generation
