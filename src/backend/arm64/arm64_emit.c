@@ -258,6 +258,18 @@ static const char *arm64_sized_reg(int reg, bool use_32bit)
     return use_32bit ? arm64_wreg_names[reg] : arm64_xreg_names[reg];
 }
 
+/* Check if value is a small immediate constant (fits in 12-bit unsigned) */
+static bool arm64_is_imm12(anvil_value_t *val, int64_t *out_imm)
+{
+    if (!val || val->kind != ANVIL_VAL_CONST_INT) return false;
+    int64_t imm = val->data.i;
+    if (imm >= 0 && imm <= 4095) {
+        if (out_imm) *out_imm = imm;
+        return true;
+    }
+    return false;
+}
+
 /* ============================================================================
  * Instruction Emission
  * ============================================================================ */
@@ -280,20 +292,44 @@ void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
         /* Arithmetic */
         case ANVIL_OP_ADD: {
             bool w = arm64_use_32bit_regs(instr);
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s\n",
-                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            int64_t imm;
+            /* Check if second operand is immediate */
+            if (arm64_is_imm12(instr->operands[1], &imm)) {
+                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+                anvil_strbuf_appendf(&be->code, "\tadd %s, %s, #%lld\n",
+                    arm64_sized_reg(0, w), arm64_sized_reg(9, w), (long long)imm);
+            }
+            /* Check if first operand is immediate (commutative) */
+            else if (arm64_is_imm12(instr->operands[0], &imm)) {
+                arm64_emit_load_value(be, instr->operands[1], ARM64_X9);
+                anvil_strbuf_appendf(&be->code, "\tadd %s, %s, #%lld\n",
+                    arm64_sized_reg(0, w), arm64_sized_reg(9, w), (long long)imm);
+            }
+            else {
+                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+                arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
+                anvil_strbuf_appendf(&be->code, "\tadd %s, %s, %s\n",
+                    arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            }
             arm64_save_result(be, instr);
             break;
         }
             
         case ANVIL_OP_SUB: {
             bool w = arm64_use_32bit_regs(instr);
-            arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-            arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-            anvil_strbuf_appendf(&be->code, "\tsub %s, %s, %s\n",
-                arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            int64_t imm;
+            /* Check if second operand is immediate */
+            if (arm64_is_imm12(instr->operands[1], &imm)) {
+                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+                anvil_strbuf_appendf(&be->code, "\tsub %s, %s, #%lld\n",
+                    arm64_sized_reg(0, w), arm64_sized_reg(9, w), (long long)imm);
+            }
+            else {
+                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+                arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
+                anvil_strbuf_appendf(&be->code, "\tsub %s, %s, %s\n",
+                    arm64_sized_reg(0, w), arm64_sized_reg(9, w), arm64_sized_reg(10, w));
+            }
             arm64_save_result(be, instr);
             break;
         }
@@ -696,9 +732,17 @@ void arm64_emit_struct_gep(arm64_backend_t *be, anvil_instr_t *instr)
 
 void arm64_emit_cmp(arm64_backend_t *be, anvil_instr_t *instr)
 {
-    arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
-    arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
-    anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
+    int64_t imm;
+    /* Check if second operand is immediate */
+    if (arm64_is_imm12(instr->operands[1], &imm)) {
+        arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+        anvil_strbuf_appendf(&be->code, "\tcmp x9, #%lld\n", (long long)imm);
+    }
+    else {
+        arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+        arm64_emit_load_value(be, instr->operands[1], ARM64_X10);
+        anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
+    }
     
     const char *cond;
     switch (instr->op) {
@@ -778,10 +822,15 @@ void arm64_emit_br_cond(arm64_backend_t *be, anvil_instr_t *instr)
         if (cmp_instr && !true_has_phi && !false_has_phi) {
             const char *cond_code = arm64_cond_for_cmp(cmp_instr->op);
             if (cond_code) {
+                int64_t imm;
                 /* Load comparison operands and emit cmp + b.cond */
                 arm64_emit_load_value(be, cmp_instr->operands[0], ARM64_X9);
-                arm64_emit_load_value(be, cmp_instr->operands[1], ARM64_X10);
-                anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
+                if (arm64_is_imm12(cmp_instr->operands[1], &imm)) {
+                    anvil_strbuf_appendf(&be->code, "\tcmp x9, #%lld\n", (long long)imm);
+                } else {
+                    arm64_emit_load_value(be, cmp_instr->operands[1], ARM64_X10);
+                    anvil_strbuf_append(&be->code, "\tcmp x9, x10\n");
+                }
                 anvil_strbuf_appendf(&be->code, "\tb.%s .L%s_%s\n",
                     cond_code, be->current_func->name, instr->true_block->name);
                 anvil_strbuf_appendf(&be->code, "\tb .L%s_%s\n",

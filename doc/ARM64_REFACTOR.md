@@ -52,6 +52,28 @@ add w0, w9, w10       ; 32-bit operation
 
 Affected operations: `add`, `sub`, `mul`, `sdiv`, `udiv`, `smod`, `umod`, `neg`, `and`, `or`, `xor`, `not`, `shl`, `shr`, `sar`.
 
+### Immediate Operand Optimization
+ADD and SUB operations now use immediate form when the operand is a small constant (0-4095):
+
+**Before:**
+```asm
+mov x10, #1
+add w0, w9, w10       ; 2 instructions
+```
+
+**After:**
+```asm
+add w0, w9, #1        ; 1 instruction
+```
+
+**Savings:** 1 instruction per operation with small constant.
+
+Also applies to CMP instructions:
+```asm
+cmp x9, #0        ; instead of: mov x10, #0; cmp x9, x10
+b.gt .label
+```
+
 ### IR Preparation Phase
 New `prepare_ir` callback in backend interface:
 - Called automatically by `anvil_module_codegen()` before code generation
