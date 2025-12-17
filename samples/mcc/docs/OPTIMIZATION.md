@@ -62,10 +62,13 @@ MCC supports five optimization levels, controlled by the `-O` flag:
 | `src/opt/ast_opt.c` | Pass manager and initialization |
 | `src/opt/opt_helpers.c` | Helper functions (eval, traversal, etc.) |
 | `src/opt/opt_const.c` | Constant-related passes |
-| `src/opt/opt_simplify.c` | Simplification passes |
+| `src/opt/opt_simplify.c` | Simplification passes (strength reduction, algebraic) |
 | `src/opt/opt_dead.c` | Dead code elimination passes |
-| `src/opt/opt_propagate.c` | Propagation passes |
-| `src/opt/opt_stubs.c` | Stub implementations for unimplemented passes |
+| `src/opt/opt_propagate.c` | Propagation passes (constant, copy) |
+| `src/opt/opt_cse.c` | Common subexpression elimination |
+| `src/opt/opt_loop.c` | Loop optimizations (simplification, unrolling, LICM) |
+| `src/opt/opt_inline.c` | Function inlining and tail call optimization |
+| `src/opt/opt_stubs.c` | Stub implementations (vectorize only) |
 
 ### Key Data Structures
 
@@ -198,7 +201,10 @@ Detects stores to variables that are never read (analysis only).
 Replaces expensive operations with cheaper ones:
 - `x * 2` → `x << 1`
 - `x * 4` → `x << 2`
-- `x / 2` → `x >> 1` (for unsigned)
+- `x / 2^n` → `x >> n` (for unsigned types only)
+- `x % 2^n` → `x & (2^n - 1)` (for unsigned types only)
+
+Uses semantic information (symbol types) to verify unsigned types before applying division/modulo optimizations.
 
 #### `algebraic`
 Applies algebraic identities:
@@ -217,34 +223,57 @@ Simplifies branches with constant conditions:
 ### O2 Passes (Standard)
 
 #### `cse` (Common Subexpression Elimination)
-Identifies redundant computations (detection only, stub):
+Identifies redundant computations within basic blocks:
 ```c
 int a = x + y;
-int b = x + y;  // Could reuse result of first computation
+int b = x + y;  // Detected as common subexpression
 ```
 
+Features:
+- Tracks expressions by structural equality
+- Uses symbol pointers for variable comparison
+- Invalidates on function calls and control flow
+- Only considers expressions without side effects
+
 #### `licm` (Loop-Invariant Code Motion)
-Moves invariant computations out of loops (stub).
+Stub - LICM is better implemented at IR level where SSA form is available.
 
-#### `loop_simp`
-Simplifies loop structures (stub).
+#### `loop_simp` (Loop Simplification)
+Simplifies loop structures:
+- `while(0) { body }` → removed
+- `do { body } while(0)` → `body` (single execution)
+- `for(init; 0; incr) { body }` → `init` (condition always false)
 
-#### `tail_call`
-Optimizes tail-recursive calls (stub).
+#### `tail_call` (Tail Call Detection)
+Detects tail calls for backend optimization:
+- Identifies `return f(args);` patterns
+- Detects recursive tail calls
+- Marks calls for potential jump optimization by backend
 
-#### `inline_small`
-Inlines small functions (stub).
+#### `inline_small` (Small Function Inlining)
+Identifies small functions suitable for inlining:
+- Maximum 5 statements
+- Maximum 4 parameters
+- No recursion
+- No loops in body
+- No goto/labels
 
 ### O3 Passes (Aggressive)
 
-#### `loop_unroll`
-Unrolls loops for better performance (stub).
+#### `loop_unroll` (Loop Unrolling)
+Detects loops suitable for unrolling:
+- Pattern: `for (i = 0; i < N; i++)` where N ≤ 8
+- Body with ≤ 10 statements
+- No break/continue in body
+- Unit increment only
 
-#### `inline_aggr`
-Aggressively inlines functions (stub).
+#### `inline_aggr` (Aggressive Inlining)
+More aggressive inlining with higher thresholds:
+- Maximum 15 statements
+- Maximum 8 parameters
 
 #### `vectorize`
-Adds vectorization hints (stub).
+Stub - ANVIL does not currently support vectorization.
 
 ## Integration
 
@@ -405,7 +434,11 @@ void opt_visit_postorder(mcc_ast_opt_t *opt, mcc_ast_node_t *ast, mcc_opt_visito
 
 - **Control flow**: The optimizer uses a simplified dataflow analysis that invalidates all tracked values at control flow joins (if/else, loops). More sophisticated analysis would improve optimization opportunities.
 
-- **Stub passes**: Several O2/O3 passes are currently stubs (CSE, LICM, inlining, etc.) and don't perform actual transformations.
+- **Detection vs transformation**: Some passes (CSE, tail_call, inline, loop_unroll) currently detect optimization opportunities but don't perform full AST transformations. Full implementation would require AST cloning and variable substitution infrastructure.
+
+- **LICM stub**: Loop-invariant code motion is a stub because it's better implemented at IR level with SSA form.
+
+- **Vectorization stub**: ANVIL does not currently support vectorization instructions.
 
 ## Examples
 
@@ -478,5 +511,51 @@ After optimization (`-O1`):
 ```c
 int main(void) {
     return 42;  // branch_simp: if(1) → then branch
+}
+```
+
+### Strength Reduction (Unsigned)
+
+Input:
+```c
+unsigned int test(unsigned int x) {
+    unsigned int a;
+    a = x / 8;
+    unsigned int b;
+    b = x % 16;
+    return a + b;
+}
+```
+
+After optimization (`-O1`):
+```c
+unsigned int test(unsigned int x) {
+    unsigned int a;
+    a = x >> 3;   // strength_red: x/8 → x>>3 (unsigned)
+    unsigned int b;
+    b = x & 15;   // strength_red: x%16 → x&15 (unsigned)
+    return a + b;
+}
+```
+
+### Loop Simplification
+
+Input:
+```c
+int main(void) {
+    int x = 0;
+    while (0) { x = 1; }      // Never executes
+    do { x = 5; } while (0);  // Executes once
+    return x;
+}
+```
+
+After optimization (`-O2`):
+```c
+int main(void) {
+    int x = 0;
+    // while(0) removed
+    x = 5;        // do-while(0) → single execution
+    return x;
 }
 ```

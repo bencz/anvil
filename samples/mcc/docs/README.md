@@ -79,7 +79,7 @@ All files share:
 | `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
 | `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
-| `src/opt/` | 7 files | Modular AST optimizer with multiple passes |
+| `src/opt/` | 10 files | Modular AST optimizer with multiple passes |
 | `src/codegen/` | 5 files | Modular code generator with ANVIL integration |
 
 ### Test Suite

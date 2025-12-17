@@ -188,7 +188,10 @@ The AST optimizer is organized into modular files:
 | `opt_simplify.c` | Simplification passes (strength reduction, algebraic) |
 | `opt_dead.c` | Dead code elimination passes |
 | `opt_propagate.c` | Propagation passes (constant, copy) |
-| `opt_stubs.c` | Stub implementations for unimplemented passes |
+| `opt_cse.c` | Common subexpression elimination |
+| `opt_loop.c` | Loop optimizations (simplification, unrolling, LICM) |
+| `opt_inline.c` | Function inlining and tail call optimization |
+| `opt_stubs.c` | Stub implementations (vectorize only) |
 
 The AST optimizer performs source-level transformations:
 
@@ -196,8 +199,12 @@ The AST optimizer performs source-level transformations:
 - **Constant propagation**: Replace variables with known constant values
 - **Copy propagation**: Replace variables with their source copies
 - **Dead code elimination**: Remove unreachable or effectless code
-- **Strength reduction**: Replace expensive operations with cheaper ones
+- **Strength reduction**: Replace expensive operations with cheaper ones (uses semantic type info)
 - **Algebraic simplification**: Apply algebraic identities
+- **Loop simplification**: Remove dead loops, simplify constant-condition loops
+- **CSE detection**: Identify common subexpressions within basic blocks
+- **Tail call detection**: Identify tail calls for backend optimization
+- **Inlining candidates**: Identify small functions suitable for inlining
 
 **Key data structures:**
 - `mcc_ast_opt_t`: Optimizer state (context, level, enabled passes)
