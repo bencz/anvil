@@ -22,10 +22,10 @@ The semantic analyzer is organized into modular files in `src/sema/`:
 | `sema.c` | Main module - public API and entry points |
 | `sema_expr.c` | Expression analysis (literals, identifiers, binary/unary ops, calls, member access) |
 | `sema_stmt.c` | Statement analysis (if, while, for, switch, return, break, continue, goto) |
-| `sema_decl.c` | Declaration analysis (functions, variables, typedefs, structs, enums) |
+| `sema_decl.c` | Declaration analysis (functions, variables, typedefs, structs, enums) - registers tags in symbol table |
 | `sema_type.c` | Type checking utilities (lvalue checks, assignment compatibility, type conversions) |
 | `sema_const.c` | Constant expression evaluation (for array sizes, case labels, static_assert) |
-| `sema_dump.c` | Dump functions for debugging (symbol table, scopes, semantic state) |
+| `sema_dump.c` | Dump functions for debugging (symbol table, scopes, AST declarations with full details) |
 
 ## Semantic Analyzer Structure
 

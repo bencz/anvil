@@ -63,6 +63,7 @@ bool mcc_sema_eval_const_expr(mcc_sema_t *sema, mcc_ast_node_t *expr, int64_t *r
 
 /* Dump functions */
 void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_full(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
 void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
 void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
 

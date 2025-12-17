@@ -61,6 +61,7 @@ bool sema_is_null_pointer_constant(mcc_sema_t *sema, mcc_ast_node_t *expr);
 
 /* Dump Functions (sema_dump.c) */
 void mcc_sema_dump(mcc_sema_t *sema, FILE *out);
+void mcc_sema_dump_full(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
 void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
 void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
 

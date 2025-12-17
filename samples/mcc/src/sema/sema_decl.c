@@ -171,12 +171,16 @@ static bool analyze_typedef_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
  * Struct/Union Declaration Analysis
  * ============================================================ */
 
-static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
+static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl, bool is_union)
 {
-    /* Struct type is already created by parser */
-    /* Just register the tag if named */
-    (void)sema;
-    (void)decl;
+    /* Register the tag in symbol table if named */
+    if (decl->data.struct_decl.tag && decl->data.struct_decl.struct_type) {
+        mcc_symtab_define_tag(sema->symtab,
+            decl->data.struct_decl.tag,
+            is_union ? SYM_UNION : SYM_STRUCT,
+            decl->data.struct_decl.struct_type,
+            decl->location);
+    }
     return true;
 }
 
@@ -189,6 +193,15 @@ static bool analyze_enum_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
     /* Get the enum type from the declaration */
     mcc_type_t *enum_type = decl->data.enum_decl.enum_type;
     if (!enum_type) return true;
+    
+    /* Register the enum tag in symbol table if named */
+    if (decl->data.enum_decl.tag) {
+        mcc_symtab_define_tag(sema->symtab,
+            decl->data.enum_decl.tag,
+            SYM_ENUM,
+            enum_type,
+            decl->location);
+    }
     
     /* Register each enum constant in the symbol table */
     mcc_type_t *int_type = mcc_type_int(sema->types);
@@ -270,7 +283,10 @@ bool sema_analyze_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
             return analyze_typedef_decl(sema, decl);
             
         case AST_STRUCT_DECL:
-            return analyze_struct_decl(sema, decl);
+            return analyze_struct_decl(sema, decl, false);
+            
+        case AST_UNION_DECL:
+            return analyze_struct_decl(sema, decl, true);
             
         case AST_ENUM_DECL:
             return analyze_enum_decl(sema, decl);

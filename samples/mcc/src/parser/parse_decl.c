@@ -618,6 +618,7 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
             decl->data.struct_decl.fields = NULL; /* Fields stored in type */
             decl->data.struct_decl.num_fields = 0;
             decl->data.struct_decl.is_definition = base_type->data.record.is_complete;
+            decl->data.struct_decl.struct_type = base_type;
             return decl;
         } else if (base_type->kind == TYPE_UNION) {
             mcc_ast_node_t *decl = mcc_ast_create(p->ctx, AST_UNION_DECL, loc);
@@ -625,6 +626,7 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
             decl->data.struct_decl.fields = NULL;
             decl->data.struct_decl.num_fields = 0;
             decl->data.struct_decl.is_definition = base_type->data.record.is_complete;
+            decl->data.struct_decl.struct_type = base_type;
             return decl;
         } else if (base_type->kind == TYPE_ENUM) {
             mcc_ast_node_t *decl = mcc_ast_create(p->ctx, AST_ENUM_DECL, loc);

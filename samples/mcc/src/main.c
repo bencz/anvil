@@ -198,7 +198,7 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         if (ctx->options.output_file) {
             out = fopen(ctx->options.output_file, "w");
         }
-        mcc_sema_dump(sema, out);
+        mcc_sema_dump_full(sema, ast, out);
         if (ctx->options.output_file) fclose(out);
         mcc_sema_destroy(sema);
         mcc_parser_destroy(parser);
@@ -405,7 +405,11 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
             out = fopen(ctx->options.output_file, "w");
         }
         fprintf(out, "/* Semantic analysis for %zu files */\n\n", num_files);
-        mcc_sema_dump(sema, out);
+        /* Dump each AST with full details */
+        for (size_t i = 0; i < num_files; i++) {
+            fprintf(out, "=== File: %s ===\n\n", files[i]);
+            mcc_sema_dump_full(sema, asts[i], out);
+        }
         if (ctx->options.output_file) fclose(out);
         
         mcc_sema_destroy(sema);

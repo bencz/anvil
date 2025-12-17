@@ -241,6 +241,7 @@ struct mcc_ast_node {
             mcc_ast_node_t **fields;
             size_t num_fields;
             bool is_definition;
+            struct mcc_type *struct_type;  /* For accessing struct fields */
         } struct_decl;
         
         /* Enum declaration */
