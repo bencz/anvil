@@ -151,12 +151,28 @@ AnvilCompileResult anvil_compile(AnvilModule* mod, AnvilTarget target, int opt_l
     const AnvilABI* abi = backend->get_abi(target.os, target.abi_name);
     AnvilMIR* mir = anvil_lower_module_with_abi(mod, abi);
     
-    // 3. MIR Analysis + Optimization
-    anvil_mir_opt_run_all(mir, opt_level, NULL);  // Includes analyze_function
+    // 3. MIR Analysis + Optimization (includes strength reduction)
+    anvil_mir_opt_run_all(mir, opt_level, NULL);
     
-    // 4. Register Allocation + Target Peephole
+    // 4. Per-function passes
     for (AnvilMFunc* func = mir->first_func; func; func = func->next) {
+        // Instruction Selection (target-specific patterns)
+        if (backend->isel) backend->isel(backend, func);
+        
+        // Vectorization (at aggressive opt level)
+        if (backend->vectorize && opt_level >= ANVIL_OPT_AGGRESSIVE)
+            backend->vectorize(backend, func);
+        
+        // Register Allocation
         backend->regalloc(backend, func, target.os, target.abi_name);
+        
+        // Instruction Scheduling (per block)
+        for (each block in func->blocks) {
+            if (backend->schedule_instructions && opt_level >= ANVIL_OPT_STANDARD)
+                backend->schedule_instructions(backend, block);
+        }
+        
+        // Target-specific Peephole
         backend->peephole_optimize(backend, func);
     }
     
@@ -356,6 +372,33 @@ Each backend can have its own `opt/peephole.c` for architecture-specific optimiz
 - **x86_64**: LEA optimization, redundant move elimination after regalloc
 - **ARM64**: MOV-OP-MOV folding for 3-operand instructions
 - **PPC64**: Similar patterns for PowerPC instruction set
+
+### Instruction Selection (backend/*/isel/)
+
+Each backend has an `isel/` folder with pattern-based instruction selection:
+
+```c
+// Rule-based instruction selection
+typedef struct AnvilISelRule {
+    const char* name;
+    AnvilMInstKind src_kind;
+    AnvilISelMatchFn match;   // Pattern matching function
+    AnvilISelEmitFn emit;     // Emit replacement instruction(s)
+    AnvilISelCostFn cost;     // Cost estimation
+    int priority;
+} AnvilISelRule;
+
+// Example rules for x86_64
+static const AnvilISelRule x86_64_rules[] = {
+    { "mul_by_2", ANVIL_MIR_MUL, match_mul_by_2, emit_mul_by_2, NULL, 1 },
+    { "mul_by_3_5_9", ANVIL_MIR_MUL, match_mul_by_3_5_9, emit_mul_by_3_5_9, NULL, 2 },
+    { "mul_power_of_2", ANVIL_MIR_MUL, match_mul_power_of_2, emit_mul_power_of_2, NULL, 3 },
+    { "add_to_lea", ANVIL_MIR_ADD, match_add_to_lea, emit_add_to_lea, NULL, 5 },
+    // ...
+};
+```
+
+The isel pass runs after MIR optimization and before register allocation.
 
 ## Register Allocation
 

@@ -136,6 +136,7 @@ See the `examples/` directory for complete examples:
 - `fibonacci.c` - Recursive Fibonacci implementation
 - `sum_array.c` - Array iteration with for loop
 - `multi_target.c` - Cross-compilation to multiple targets
+- `isel_test.c` - Instruction selection and strength reduction optimizations
 
 ## Architecture
 
@@ -185,13 +186,28 @@ anvil/
 ## Compilation Pipeline
 
 ```
-IR → IR Opt → MIR Lowering → MIR Analyze → MIR Opt → Regalloc → Target Peephole → Emit
+IR → IR Opt → MIR Lowering → MIR Analyze → MIR Opt → ISel → Vectorize → Regalloc → Schedule → Peephole → Emit
 ```
 
 1. **IR Optimization**: Constant folding, dead code elimination
 2. **MIR Lowering**: Convert IR to machine-level IR with ABI awareness
 3. **MIR Analysis**: Detect leaf functions, compute frame requirements
-4. **MIR Optimization**: Generic peephole optimizations
-5. **Register Allocation**: Linear scan with ABI-aware preallocation
-6. **Target Peephole**: Architecture-specific optimizations
-7. **Emit**: Generate assembly output
+4. **MIR Optimization**: Strength reduction (mul→shift), copy propagation, move chain elimination
+5. **Instruction Selection**: Target-specific instruction patterns (LEA, combined ops)
+6. **Vectorization**: Auto-vectorization (at aggressive optimization level)
+7. **Register Allocation**: Linear scan with ABI-aware preallocation
+8. **Instruction Scheduling**: Reorder instructions for better pipeline utilization
+9. **Target Peephole**: Architecture-specific optimizations
+10. **Emit**: Generate assembly output
+
+## Strength Reduction Optimizations
+
+ANVIL automatically optimizes common patterns:
+
+| Pattern | Optimization |
+|---------|-------------|
+| `x * 2` | `x + x` or `x << 1` |
+| `x * 4` | `x << 2` |
+| `x * 8` | `x << 3` |
+| `x / 4` | `x >> 2` (unsigned) |
+| `x % 16` | `x & 15` |

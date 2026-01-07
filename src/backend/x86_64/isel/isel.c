@@ -10,13 +10,10 @@ static bool match_mul_by_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMat
 }
 
 static void emit_mul_by_2(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
-    AnvilMInst* add = anvil_isel_create_inst(ctx, ANVIL_MIR_ADD);
-    add->operands[0] = match->inst->operands[0];
-    add->operands[1] = match->inst->operands[0];
-    add->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = add;
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_ADD;
+    match->inst->operands[1] = match->inst->operands[0];
 }
 
 static bool match_mul_by_3_5_9(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -28,21 +25,19 @@ static bool match_mul_by_3_5_9(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISe
 }
 
 static void emit_mul_by_3_5_9(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
     int64_t val = match->inst->operands[1].imm.value;
     int scale = (val == 3) ? 2 : (val == 5) ? 4 : 8;
     
-    AnvilMInst* lea = anvil_isel_create_inst(ctx, ANVIL_MIR_LEA);
-    lea->operands[0] = match->inst->operands[0];
-    lea->operands[1].kind = ANVIL_MOP_MEM;
-    lea->operands[1].mem.base_reg = match->inst->operands[0].preg.id;
-    lea->operands[1].mem.index_reg = match->inst->operands[0].preg.id;
-    lea->operands[1].mem.scale = scale;
-    lea->operands[1].mem.disp = 0;
-    lea->operands[1].size = match->inst->operands[0].size;
-    lea->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = lea;
+    match->inst->kind = ANVIL_MIR_LEA;
+    AnvilMOperand op0 = match->inst->operands[0];
+    match->inst->operands[1].kind = ANVIL_MOP_MEM;
+    match->inst->operands[1].mem.base_reg = op0.preg.id;
+    match->inst->operands[1].mem.index_reg = op0.preg.id;
+    match->inst->operands[1].mem.scale = scale;
+    match->inst->operands[1].mem.disp = 0;
+    match->inst->operands[1].size = op0.size;
 }
 
 static bool match_mul_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -55,16 +50,13 @@ static bool match_mul_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilI
 }
 
 static void emit_mul_power_of_2(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
     int shift;
     anvil_isel_match_power_of_2(match->inst->operands[1].imm.value, &shift);
     
-    AnvilMInst* shl = anvil_isel_create_inst(ctx, ANVIL_MIR_SHL);
-    shl->operands[0] = match->inst->operands[0];
-    shl->operands[1] = anvil_mop_imm(shift, match->inst->operands[1].size);
-    shl->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = shl;
+    match->inst->kind = ANVIL_MIR_SHL;
+    match->inst->operands[1] = anvil_mop_imm(shift, match->inst->operands[1].size);
 }
 
 static bool match_div_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -75,16 +67,13 @@ static bool match_div_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilI
 }
 
 static void emit_div_power_of_2(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
     int shift;
     anvil_isel_match_power_of_2(match->inst->operands[1].imm.value, &shift);
     
-    AnvilMInst* shr = anvil_isel_create_inst(ctx, ANVIL_MIR_SHR);
-    shr->operands[0] = match->inst->operands[0];
-    shr->operands[1] = anvil_mop_imm(shift, match->inst->operands[1].size);
-    shr->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = shr;
+    match->inst->kind = ANVIL_MIR_SHR;
+    match->inst->operands[1] = anvil_mop_imm(shift, match->inst->operands[1].size);
 }
 
 static bool match_add_to_lea(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -96,18 +85,18 @@ static bool match_add_to_lea(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelM
 }
 
 static void emit_add_to_lea(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
-    AnvilMInst* lea = anvil_isel_create_inst(ctx, ANVIL_MIR_LEA);
-    lea->operands[0] = match->inst->operands[0];
-    lea->operands[1].kind = ANVIL_MOP_MEM;
-    lea->operands[1].mem.base_reg = match->inst->operands[0].preg.id;
-    lea->operands[1].mem.index_reg = match->inst->operands[1].preg.id;
-    lea->operands[1].mem.scale = 1;
-    lea->operands[1].mem.disp = 0;
-    lea->operands[1].size = match->inst->operands[0].size;
-    lea->num_operands = 2;
+    (void)ctx;
+    (void)output;
+    AnvilMOperand op0 = match->inst->operands[0];
+    AnvilMOperand op1 = match->inst->operands[1];
     
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = lea;
+    match->inst->kind = ANVIL_MIR_LEA;
+    match->inst->operands[1].kind = ANVIL_MOP_MEM;
+    match->inst->operands[1].mem.base_reg = op0.preg.id;
+    match->inst->operands[1].mem.index_reg = op1.preg.id;
+    match->inst->operands[1].mem.scale = 1;
+    match->inst->operands[1].mem.disp = 0;
+    match->inst->operands[1].size = op0.size;
 }
 
 static bool match_mov_zero(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -118,13 +107,10 @@ static bool match_mov_zero(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMat
 }
 
 static void emit_mov_zero(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
-    AnvilMInst* xor = anvil_isel_create_inst(ctx, ANVIL_MIR_XOR);
-    xor->operands[0] = match->inst->operands[0];
-    xor->operands[1] = match->inst->operands[0];
-    xor->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = xor;
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_XOR;
+    match->inst->operands[1] = match->inst->operands[0];
 }
 
 static bool match_sub_to_neg(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -135,13 +121,10 @@ static bool match_sub_to_neg(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelM
 }
 
 static void emit_sub_to_neg(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
-    AnvilMInst* add = anvil_isel_create_inst(ctx, ANVIL_MIR_ADD);
-    add->operands[0] = match->inst->operands[0];
-    add->operands[1] = anvil_mop_imm(-match->inst->operands[1].imm.value, match->inst->operands[1].size);
-    add->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = add;
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_ADD;
+    match->inst->operands[1] = anvil_mop_imm(-match->inst->operands[1].imm.value, match->inst->operands[1].size);
 }
 
 static bool match_mod_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
@@ -152,15 +135,12 @@ static bool match_mod_power_of_2(AnvilISelContext* ctx, AnvilMInst* inst, AnvilI
 }
 
 static void emit_mod_power_of_2(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
     int64_t val = match->inst->operands[1].imm.value;
     
-    AnvilMInst* and = anvil_isel_create_inst(ctx, ANVIL_MIR_AND);
-    and->operands[0] = match->inst->operands[0];
-    and->operands[1] = anvil_mop_imm(val - 1, match->inst->operands[1].size);
-    and->num_operands = 2;
-    
-    AnvilMInst** slot = (AnvilMInst**)anvil_vec_push(output);
-    *slot = and;
+    match->inst->kind = ANVIL_MIR_AND;
+    match->inst->operands[1] = anvil_mop_imm(val - 1, match->inst->operands[1].size);
 }
 
 static const AnvilISelRule x86_64_rules[] = {

@@ -96,32 +96,31 @@ static void replace_inst_in_block(AnvilMBlock* block, AnvilMInst* old_inst, Anvi
 }
 
 void anvil_isel_run(AnvilISelContext* ctx) {
-    if (!ctx->ruleset || ctx->ruleset->num_rules == 0) return;
+    if (!ctx || !ctx->func || !ctx->ruleset || ctx->ruleset->num_rules == 0) return;
     
     for (size_t bi = 0; bi < anvil_vec_len(&ctx->func->blocks); bi++) {
         AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&ctx->func->blocks, bi);
+        if (!block) continue;
         
-        AnvilMInst* inst = block->first;
-        while (inst) {
-            AnvilMInst* next = inst->next;
-            
-            AnvilISelMatch match = {0};
-            const AnvilISelRule* rule = find_best_rule(ctx, inst, &match);
-            
-            if (rule && rule->emit) {
-                AnvilVec new_insts;
-                anvil_vec_init(&new_insts, sizeof(AnvilMInst*));
+        for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
+            for (int i = 0; i < ctx->ruleset->num_rules; i++) {
+                const AnvilISelRule* rule = &ctx->ruleset->rules[i];
                 
-                rule->emit(ctx, &match, &new_insts);
+                if (rule->src_kind != inst->kind) continue;
                 
-                if (anvil_vec_len(&new_insts) > 0) {
-                    replace_inst_in_block(block, inst, &new_insts);
+                AnvilISelMatch match = {0};
+                match.inst = inst;
+                
+                if (rule->match && rule->match(ctx, inst, &match)) {
+                    if (rule->emit) {
+                        AnvilVec new_insts;
+                        anvil_vec_init(&new_insts, sizeof(AnvilMInst*));
+                        rule->emit(ctx, &match, &new_insts);
+                        anvil_vec_free(&new_insts);
+                    }
+                    break;
                 }
-                
-                anvil_vec_free(&new_insts);
             }
-            
-            inst = next;
         }
     }
 }

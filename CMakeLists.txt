@@ -108,6 +108,9 @@ if(ANVIL_BUILD_EXAMPLES)
     
     add_executable(test_compile examples/test_compile.c)
     target_link_libraries(test_compile anvil)
+    
+    add_executable(isel_test examples/isel_test.c)
+    target_link_libraries(isel_test anvil)
 endif()
 
 if(ANVIL_BUILD_TESTS)

@@ -419,8 +419,19 @@ AnvilCompileResult anvil_compile(AnvilModule* mod, AnvilTarget target, int opt_l
             backend->isel(backend, func);
         }
         
+        if (backend->vectorize && opt_level >= ANVIL_OPT_AGGRESSIVE) {
+            backend->vectorize(backend, func);
+        }
+        
         if (backend->regalloc) {
             backend->regalloc(backend, func, target.os, target.abi_name);
+        }
+        
+        for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
+            AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
+            if (backend->schedule_instructions && opt_level >= ANVIL_OPT_STANDARD) {
+                backend->schedule_instructions(backend, block);
+            }
         }
         
         if (backend->peephole_optimize) {
