@@ -320,10 +320,6 @@ void x86_64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBu
 void x86_64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
     (void)backend;
     
-    if (!func->needs_frame) {
-        return;
-    }
-    
     anvil_asm_append(out, "\tpushq %%rbp\n");
     anvil_asm_append(out, "\tmovq %%rsp, %%rbp\n");
     
@@ -335,10 +331,7 @@ void x86_64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffe
 
 void x86_64_emit_epilogue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
     (void)backend;
-    
-    if (!func->needs_frame) {
-        return;
-    }
+    (void)func;
     
     anvil_asm_append(out, "\tmovq %%rbp, %%rsp\n");
     anvil_asm_append(out, "\tpopq %%rbp\n");

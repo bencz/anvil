@@ -356,10 +356,6 @@ void arm64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
 void arm64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
     (void)backend;
     
-    if (!func->needs_frame) {
-        return;
-    }
-    
     anvil_asm_append(out, "\tstp x29, x30, [sp, #-16]!\n");
     anvil_asm_append(out, "\tmov x29, sp\n");
     
@@ -371,10 +367,6 @@ void arm64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer
 
 void arm64_emit_epilogue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
     (void)backend;
-    
-    if (!func->needs_frame) {
-        return;
-    }
     
     if (func->stack_size > 0) {
         int aligned_size = (func->stack_size + 15) & ~15;

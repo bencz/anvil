@@ -500,23 +500,7 @@ void ppc64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
 }
 
 void ppc64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
-    bool needs_frame = func->stack_size > 0 || func->spill_slots > 0;
-    bool has_calls = false;
-    
-    for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
-        AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
-        for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
-            if (inst->kind == ANVIL_MIR_CALL) {
-                has_calls = true;
-                break;
-            }
-        }
-        if (has_calls) break;
-    }
-    
-    if (!needs_frame && !has_calls) {
-        return;
-    }
+    (void)backend;
     
     int frame_size = func->stack_size;
     if (frame_size < 32) frame_size = 32;
@@ -524,43 +508,23 @@ void ppc64_emit_prologue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer
     
     anvil_asm_append(out, "\tstdu r1, -%d(r1)\n", frame_size);
     
-    if (has_calls) {
+    if (!func->is_leaf) {
         anvil_asm_append(out, "\tmflr r0\n");
         anvil_asm_append(out, "\tstd r0, %d(r1)\n", frame_size + 16);
     }
-    
-    (void)backend;
 }
 
 void ppc64_emit_epilogue(AnvilBackend* backend, AnvilMFunc* func, AnvilAsmBuffer* out) {
-    bool needs_frame = func->stack_size > 0 || func->spill_slots > 0;
-    bool has_calls = false;
-    
-    for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
-        AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
-        for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
-            if (inst->kind == ANVIL_MIR_CALL) {
-                has_calls = true;
-                break;
-            }
-        }
-        if (has_calls) break;
-    }
-    
-    if (!needs_frame && !has_calls) {
-        return;
-    }
+    (void)backend;
     
     int frame_size = func->stack_size;
     if (frame_size < 32) frame_size = 32;
     frame_size = (frame_size + 15) & ~15;
     
-    if (has_calls) {
+    if (!func->is_leaf) {
         anvil_asm_append(out, "\tld r0, %d(r1)\n", frame_size + 16);
         anvil_asm_append(out, "\tmtlr r0\n");
     }
     
     anvil_asm_append(out, "\taddi r1, r1, %d\n", frame_size);
-    
-    (void)backend;
 }

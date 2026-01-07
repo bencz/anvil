@@ -45,13 +45,15 @@ static void x86_64_emit_mir_full(AnvilBackend* backend, AnvilMIR* mir, AnvilAsmB
             anvil_asm_append(out, "%s:\n", func->name);
         }
         
-        x86_64_emit_prologue(backend, func, out);
+        if (func->needs_frame) {
+            x86_64_emit_prologue(backend, func, out);
+        }
         
         for (size_t i = 0; i < anvil_vec_len(&func->blocks); i++) {
             AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, i);
             
             for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
-                if (inst->kind == ANVIL_MIR_RET) {
+                if (inst->kind == ANVIL_MIR_RET && func->needs_frame) {
                     x86_64_emit_epilogue(backend, func, out);
                 }
                 x86_64_emit_instruction(backend, inst, out);
