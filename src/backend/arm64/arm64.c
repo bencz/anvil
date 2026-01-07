@@ -5,6 +5,7 @@
 #include "abi/aapcs64.h"
 #include "abi/apple.h"
 #include "opt/peephole.h"
+#include "isel/isel.h"
 #include "../../mir/regalloc.h"
 #include <string.h>
 #include <stdio.h>
@@ -95,12 +96,6 @@ static void arm64_emit_mir_full(AnvilBackend* backend, AnvilMIR* mir, AnvilAsmBu
     }
 }
 
-static void arm64_select_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilVec* output) {
-    (void)backend;
-    (void)inst;
-    (void)output;
-}
-
 static void arm64_regalloc(AnvilBackend* backend, AnvilMFunc* func, int os, const char* abi_name) {
     const AnvilABI* abi = arm64_get_abi(os, abi_name);
     
@@ -187,7 +182,6 @@ static AnvilBackend arm64_backend = {
     
     .lower_mir = arm64_lower_mir,
     .emit_mir = arm64_emit_mir_full,
-    .select_instruction = arm64_select_instruction,
     .regalloc = arm64_regalloc,
     .spill_cost = arm64_spill_cost,
     
@@ -200,6 +194,7 @@ static AnvilBackend arm64_backend = {
     .peephole_optimize = arm64_backend_peephole_optimize,
     .schedule_instructions = arm64_schedule_instructions,
     .vectorize = arm64_vectorize,
+    .isel = arm64_isel_run,
     
     .reg_name_for_size = arm64_reg_name_for_size,
     .immediate_fits = arm64_immediate_fits,

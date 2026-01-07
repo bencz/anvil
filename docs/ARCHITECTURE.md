@@ -101,31 +101,70 @@ Source Code (User)
        │
        ▼
 ┌──────────────┐
-│  IR Optimize │  Constant folding, DCE, CFG simplification
+│  IR Optimize │  anvil_opt_run_all() - Constant folding, DCE, CFG simplification
 └──────────────┘
        │
        ▼
 ┌──────────────┐
-│  MIR Lower   │  anvil_lower_module() - IR to MIR
+│  MIR Lower   │  anvil_lower_module_with_abi() - IR to MIR with ABI awareness
 └──────────────┘
        │
        ▼
 ┌──────────────┐
-│ MIR Optimize │  Peephole, strength reduction
+│ MIR Analyze  │  anvil_mir_analyze_function() - Detect leaf, compute needs_frame
 └──────────────┘
        │
        ▼
 ┌──────────────┐
-│  Reg Alloc   │  Linear scan with ABI-aware preallocation
+│ MIR Optimize │  anvil_mir_opt_run_all() - Peephole, strength reduction, copy prop
 └──────────────┘
        │
        ▼
 ┌──────────────┐
-│  Emit ASM    │  Target-specific assembly generation
+│  Reg Alloc   │  backend->regalloc() - Linear scan with ABI-aware preallocation
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│Target Peephole│  backend->peephole_optimize() - Architecture-specific opts
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│  Emit ASM    │  backend->emit_mir() - Target-specific assembly generation
 └──────────────┘
        │
        ▼
    Assembly Output
+```
+
+### Pipeline Implementation (api.c)
+
+```c
+AnvilCompileResult anvil_compile(AnvilModule* mod, AnvilTarget target, int opt_level) {
+    AnvilBackend* backend = anvil_get_backend(target.arch);
+    
+    // 1. IR Optimization
+    anvil_opt_run_all(mod, opt_level, NULL);
+    
+    // 2. MIR Lowering with ABI
+    const AnvilABI* abi = backend->get_abi(target.os, target.abi_name);
+    AnvilMIR* mir = anvil_lower_module_with_abi(mod, abi);
+    
+    // 3. MIR Analysis + Optimization
+    anvil_mir_opt_run_all(mir, opt_level, NULL);  // Includes analyze_function
+    
+    // 4. Register Allocation + Target Peephole
+    for (AnvilMFunc* func = mir->first_func; func; func = func->next) {
+        backend->regalloc(backend, func, target.os, target.abi_name);
+        backend->peephole_optimize(backend, func);
+    }
+    
+    // 5. Emit Assembly
+    backend->emit_mir(backend, mir, &asm_buf, target.os, target.abi_name);
+    
+    return result;
+}
 ```
 
 ## Key Data Structures
@@ -298,6 +337,25 @@ void anvil_backends_init(void) {
 
 1. **Redundant Move Removal**: Remove `mov r0, r0`
 2. **Strength Reduction**: Replace MUL by power of 2 with SHL
+3. **Copy Propagation**: Propagate register copies through uses
+4. **Move Chain Elimination**: Collapse `mov a, b; mov c, a` to `mov c, b`
+5. **MOV-OP-MOV Folding**: Optimize patterns like `mov tmp, src; op tmp, x; mov dst, tmp`
+6. **Dead Code Elimination**: Remove NOP and unused instructions
+
+### MIR Analysis (src/opt/mir_opt.c)
+
+The `anvil_mir_analyze_function()` pass computes:
+- **is_leaf**: True if function contains no CALL instructions
+- **needs_frame**: True if function needs prologue/epilogue (has calls, stack usage, or spills)
+
+This information is used by backends to skip prologue/epilogue for simple leaf functions.
+
+### Target-Specific Optimizations (backend/*/opt/)
+
+Each backend can have its own `opt/peephole.c` for architecture-specific optimizations:
+- **x86_64**: LEA optimization, redundant move elimination after regalloc
+- **ARM64**: MOV-OP-MOV folding for 3-operand instructions
+- **PPC64**: Similar patterns for PowerPC instruction set
 
 ## Register Allocation
 
@@ -388,6 +446,20 @@ AnvilCompileResult result = anvil_compile(mod, target, ANVIL_OPT_STANDARD);
 
 ## Future Work
 
+### Completed
+- [x] Multi-target support (x86_64, ARM64, PPC64)
+- [x] Multiple ABIs per target
+- [x] Leaf function detection
+- [x] Prologue/epilogue optimization
+- [x] Target-specific peephole optimizations
+- [x] Copy propagation and move chain elimination
+- [x] ABI-aware register allocation
+
+### In Progress
+- [ ] Constant materialization (`materialize_constant`)
+- [ ] Instruction scheduling (`schedule_instructions`)
+
+### Planned
 - [ ] Floating-point register allocation
 - [ ] SIMD/vector support
 - [ ] More optimization passes (SCCP, mem2reg, loop opts)

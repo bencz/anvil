@@ -4,11 +4,13 @@ ANVIL is a lightweight code generation library designed as a simpler alternative
 
 ## Features
 
-- **Multi-target support**: x86_64 (Linux/Windows) and ARM64 (Linux/macOS)
+- **Multi-target support**: x86_64 (Linux/Windows), ARM64 (Linux/macOS), PPC64 Big Endian (Linux)
 - **Clean C API**: Simple, intuitive API for building IR
 - **No #ifdef for targets**: All backends compile together, selection at runtime
 - **Arena-based allocation**: Fast, efficient memory management
-- **Multiple ABIs**: System V AMD64, Win64, AAPCS64, Apple ARM64
+- **Multiple ABIs**: System V AMD64, Win64, AAPCS64, Apple ARM64, PPC64 ELFv2
+- **Optimized code generation**: Leaf function detection, peephole optimizations, minimal prologue/epilogue
+- **Vtable-based architecture**: Easy to extend with new targets and ABIs
 
 ## Building
 
@@ -60,12 +62,13 @@ int main(void) {
 
 ## Supported Targets
 
-| Architecture | OS | ABI |
-|-------------|-----|-----|
-| x86_64 | Linux | System V AMD64 |
-| x86_64 | Windows | Win64 |
-| ARM64 | Linux | AAPCS64 |
-| ARM64 | macOS | Apple ARM64 |
+| Architecture | OS | ABI | Endianness |
+|-------------|-----|-----|------------|
+| x86_64 | Linux | System V AMD64 | Little |
+| x86_64 | Windows | Win64 | Little |
+| ARM64 | Linux | AAPCS64 | Little |
+| ARM64 | macOS | Apple ARM64 | Little |
+| PPC64 | Linux | ELFv2 | Big |
 
 ## API Overview
 
@@ -160,15 +163,35 @@ anvil/
 │   │   ├── cfg.c/h          # Control flow graph
 │   │   ├── liveness.c/h     # Liveness analysis
 │   │   └── regalloc.c/h     # Register allocation
+│   ├── opt/                 # Generic optimizations
+│   │   ├── ir_opt.c/h       # IR-level optimizations
+│   │   └── mir_opt.c/h      # MIR-level optimizations
 │   ├── backend/             # Code generation backends
 │   │   ├── backend.c/h      # Backend interface
 │   │   ├── x86_64/          # x86_64 backend
-│   │   └── arm64/           # ARM64 backend
+│   │   │   ├── opt/         # Target-specific optimizations
+│   │   │   └── abi/         # ABI implementations (sysv, win64)
+│   │   ├── arm64/           # ARM64 backend
+│   │   │   ├── opt/         # Target-specific optimizations
+│   │   │   └── abi/         # ABI implementations (aapcs64, apple)
+│   │   └── ppc64/           # PPC64 Big Endian backend
+│   │       ├── opt/         # Target-specific optimizations
+│   │       └── abi/         # ABI implementations (elfv2)
 │   └── api.c                # Public API implementation
 ├── examples/                # Example programs
 └── tests/                   # Unit tests
 ```
 
-## License
+## Compilation Pipeline
 
-MIT License
+```
+IR → IR Opt → MIR Lowering → MIR Analyze → MIR Opt → Regalloc → Target Peephole → Emit
+```
+
+1. **IR Optimization**: Constant folding, dead code elimination
+2. **MIR Lowering**: Convert IR to machine-level IR with ABI awareness
+3. **MIR Analysis**: Detect leaf functions, compute frame requirements
+4. **MIR Optimization**: Generic peephole optimizations
+5. **Register Allocation**: Linear scan with ABI-aware preallocation
+6. **Target Peephole**: Architecture-specific optimizations
+7. **Emit**: Generate assembly output

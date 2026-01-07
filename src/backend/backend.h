@@ -228,6 +228,7 @@ typedef void (*AnvilEmitDataFn)(struct AnvilBackend* backend, void* data, AnvilA
 typedef void (*AnvilPeepholeFn)(struct AnvilBackend* backend, AnvilMFunc* func);
 typedef void (*AnvilScheduleFn)(struct AnvilBackend* backend, AnvilMBlock* block);
 typedef void (*AnvilVectorizeFn)(struct AnvilBackend* backend, AnvilMFunc* func);
+typedef void (*AnvilISelFn)(struct AnvilBackend* backend, AnvilMFunc* func);
 typedef const char* (*AnvilRegNameFn)(struct AnvilBackend* backend, int reg_id, int size_bits);
 typedef bool (*AnvilImmFitsFn)(struct AnvilBackend* backend, int64_t value, AnvilMInstKind kind);
 typedef void (*AnvilMaterializeConstFn)(struct AnvilBackend* backend, int64_t value, int dest_reg, AnvilVec* output);
@@ -248,7 +249,6 @@ typedef struct AnvilBackend {
     
     AnvilLowerMirFn lower_mir;
     AnvilEmitMirFn emit_mir;
-    AnvilSelectInstFn select_instruction;
     AnvilRegAllocFn regalloc;
     AnvilSpillCostFn spill_cost;
     
@@ -261,6 +261,7 @@ typedef struct AnvilBackend {
     AnvilPeepholeFn peephole_optimize;
     AnvilScheduleFn schedule_instructions;
     AnvilVectorizeFn vectorize;
+    AnvilISelFn isel;
     
     AnvilRegNameFn reg_name_for_size;
     AnvilImmFitsFn immediate_fits;

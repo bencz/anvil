@@ -33,6 +33,7 @@ set(ANVIL_MIR_SOURCES
     src/mir/cfg.c
     src/mir/liveness.c
     src/mir/regalloc.c
+    src/mir/isel.c
 )
 
 set(ANVIL_OPT_SOURCES
@@ -49,6 +50,7 @@ set(ANVIL_BACKEND_SOURCES
     src/backend/x86_64/abi/sysv.c
     src/backend/x86_64/abi/win64.c
     src/backend/x86_64/opt/peephole.c
+    src/backend/x86_64/isel/isel.c
     src/backend/arm64/target.c
     src/backend/arm64/regs.c
     src/backend/arm64/emit.c
@@ -56,12 +58,14 @@ set(ANVIL_BACKEND_SOURCES
     src/backend/arm64/abi/aapcs64.c
     src/backend/arm64/abi/apple.c
     src/backend/arm64/opt/peephole.c
+    src/backend/arm64/isel/isel.c
     src/backend/ppc64/target.c
     src/backend/ppc64/regs.c
     src/backend/ppc64/emit.c
     src/backend/ppc64/ppc64.c
     src/backend/ppc64/abi/elfv2.c
     src/backend/ppc64/opt/peephole.c
+    src/backend/ppc64/isel/isel.c
 )
 
 set(ANVIL_API_SOURCES

@@ -415,6 +415,10 @@ AnvilCompileResult anvil_compile(AnvilModule* mod, AnvilTarget target, int opt_l
     anvil_mir_opt_run_all(mir, opt_level, NULL);
     
     for (AnvilMFunc* func = mir->first_func; func; func = func->next) {
+        if (backend->isel) {
+            backend->isel(backend, func);
+        }
+        
         if (backend->regalloc) {
             backend->regalloc(backend, func, target.os, target.abi_name);
         }
