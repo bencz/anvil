@@ -186,6 +186,60 @@ static void emit_tail_call(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVe
     match->inst->kind = ANVIL_MIR_TAIL_CALL;
 }
 
+static bool match_fmadd(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    if (inst->num_operands < 2) return false;
+    if (!inst->operands[0].is_fp) return false;
+    
+    AnvilMInst* prev = inst->prev;
+    if (!prev || prev->kind != ANVIL_MIR_FMUL) return false;
+    if (prev->num_operands < 2) return false;
+    
+    if (prev->operands[0].kind == ANVIL_MOP_PREG &&
+        inst->operands[1].kind == ANVIL_MOP_PREG &&
+        prev->operands[0].preg.id == inst->operands[1].preg.id) {
+        match->matched_insts[0] = prev;
+        match->num_matched = 1;
+        return true;
+    }
+    return false;
+}
+
+static void emit_fmadd(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    AnvilMInst* fmul = match->matched_insts[0];
+    AnvilMInst* fadd = match->inst;
+    
+    fadd->kind = ANVIL_MIR_FMADD;
+    fadd->operands[1] = fmul->operands[0];
+    fadd->operands[2] = fmul->operands[1];
+    if (fadd->num_operands < 4) {
+        fadd->operands[3] = fadd->operands[0];
+        fadd->num_operands = 4;
+    }
+    
+    fmul->kind = ANVIL_MIR_NOP;
+    fmul->num_operands = 0;
+}
+
+static bool match_cmov_pattern(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    (void)match;
+    if (inst->num_operands < 2) return false;
+    
+    AnvilMInst* prev = inst->prev;
+    if (!prev || prev->kind != ANVIL_MIR_JCC) return false;
+    
+    return false;
+}
+
+static void emit_cmov_pattern(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)match;
+    (void)output;
+}
+
 static const AnvilISelRule x86_64_rules[] = {
     { "mul_by_2", ANVIL_MIR_MUL, match_mul_by_2, emit_mul_by_2, NULL, 1 },
     { "mul_by_3_5_9", ANVIL_MIR_MUL, match_mul_by_3_5_9, emit_mul_by_3_5_9, NULL, 2 },
@@ -198,6 +252,7 @@ static const AnvilISelRule x86_64_rules[] = {
     { "sub_neg_to_add", ANVIL_MIR_SUB, match_sub_to_neg, emit_sub_to_neg, NULL, 2 },
     { "call_indirect", ANVIL_MIR_CALL, match_call_indirect, emit_call_indirect, NULL, 5 },
     { "tail_call", ANVIL_MIR_CALL, match_tail_call, emit_tail_call, NULL, 10 },
+    { "fmadd", ANVIL_MIR_FADD, match_fmadd, emit_fmadd, NULL, 15 },
 };
 
 const AnvilISelRuleSet x86_64_isel_ruleset = {

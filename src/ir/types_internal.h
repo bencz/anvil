@@ -27,6 +27,7 @@ typedef enum AnvilTypeKind {
     ANVIL_TYPE_ARRAY,
     ANVIL_TYPE_STRUCT,
     ANVIL_TYPE_FUNC,
+    ANVIL_TYPE_VECTOR,
 } AnvilTypeKind;
 
 typedef struct AnvilStructField {
@@ -63,6 +64,11 @@ typedef struct AnvilType {
             AnvilVec param_types;
             bool is_vararg;
         } func;
+        
+        struct {
+            struct AnvilType* elem;
+            size_t lanes;
+        } vector;
     };
 } AnvilType;
 
@@ -99,8 +105,10 @@ void anvil_type_struct_add_field(AnvilType* struct_type, AnvilArena* arena,
                                   const char* name, AnvilType* field_type);
 AnvilType* anvil_type_func_create(AnvilArena* arena, AnvilType* ret_type, bool is_vararg);
 void anvil_type_func_add_param(AnvilType* func_type, AnvilType* param_type);
+AnvilType* anvil_type_vector_create(AnvilArena* arena, AnvilType* elem, size_t lanes);
 
 bool anvil_type_is_integer(const AnvilType* type);
+bool anvil_type_is_vector(const AnvilType* type);
 bool anvil_type_is_signed(const AnvilType* type);
 bool anvil_type_is_unsigned(const AnvilType* type);
 bool anvil_type_is_float(const AnvilType* type);

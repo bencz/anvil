@@ -153,38 +153,31 @@ static void x86_64_vectorize(AnvilBackend* backend, AnvilMFunc* func) {
         AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
         if (!block) continue;
         
-        AnvilMInst* fmul_start = NULL;
-        int consecutive_fmuls = 0;
-        AnvilMInst* fadd_start = NULL;
-        int consecutive_fadds = 0;
-        
         for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
             if (inst->kind == ANVIL_MIR_FMUL && inst->operands[0].size == 8) {
-                if (consecutive_fmuls == 0) fmul_start = inst;
-                consecutive_fmuls++;
-                
-                if (consecutive_fmuls >= 2) {
-                    AnvilMInst* next = inst->next;
-                    if (next && next->kind == ANVIL_MIR_FADD && 
-                        next->operands[0].size == 8) {
+                AnvilMInst* next = inst->next;
+                if (next && next->kind == ANVIL_MIR_FADD && 
+                    next->operands[0].size == 8 &&
+                    next->operands[0].is_fp && inst->operands[0].is_fp) {
+                    
+                    if (inst->operands[0].kind == ANVIL_MOP_PREG &&
+                        next->operands[1].kind == ANVIL_MOP_PREG &&
+                        inst->operands[0].preg.id == next->operands[1].preg.id) {
+                        
+                        next->kind = ANVIL_MIR_FMADD;
+                        if (next->num_operands < 4) {
+                            next->operands[3] = next->operands[0];
+                            next->operands[2] = inst->operands[1];
+                            next->operands[1] = inst->operands[0];
+                            next->num_operands = 4;
+                        }
+                        
+                        inst->kind = ANVIL_MIR_NOP;
+                        inst->num_operands = 0;
                     }
                 }
-            } else {
-                fmul_start = NULL;
-                consecutive_fmuls = 0;
-            }
-            
-            if (inst->kind == ANVIL_MIR_FADD && inst->operands[0].size == 8) {
-                if (consecutive_fadds == 0) fadd_start = inst;
-                consecutive_fadds++;
-            } else {
-                fadd_start = NULL;
-                consecutive_fadds = 0;
             }
         }
-        
-        (void)fmul_start;
-        (void)fadd_start;
     }
 }
 

@@ -111,6 +111,43 @@ static void emit_mov_fp(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* 
     match->inst->kind = ANVIL_MIR_MOVSD;
 }
 
+static bool match_fmadd(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    if (inst->num_operands < 2) return false;
+    if (!inst->operands[0].is_fp) return false;
+    
+    AnvilMInst* prev = inst->prev;
+    if (!prev || prev->kind != ANVIL_MIR_FMUL) return false;
+    if (prev->num_operands < 2) return false;
+    
+    if (prev->operands[0].kind == ANVIL_MOP_PREG &&
+        inst->operands[1].kind == ANVIL_MOP_PREG &&
+        prev->operands[0].preg.id == inst->operands[1].preg.id) {
+        match->matched_insts[0] = prev;
+        match->num_matched = 1;
+        return true;
+    }
+    return false;
+}
+
+static void emit_fmadd(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    AnvilMInst* fmul = match->matched_insts[0];
+    AnvilMInst* fadd = match->inst;
+    
+    fadd->kind = ANVIL_MIR_FMADD;
+    if (fadd->num_operands < 4) {
+        fadd->operands[3] = fadd->operands[0];
+        fadd->operands[2] = fmul->operands[1];
+        fadd->operands[1] = fmul->operands[0];
+        fadd->num_operands = 4;
+    }
+    
+    fmul->kind = ANVIL_MIR_NOP;
+    fmul->num_operands = 0;
+}
+
 static const AnvilISelRule ppc64_rules[] = {
     { "mul_power_of_2", ANVIL_MIR_MUL, match_mul_power_of_2, emit_mul_power_of_2, NULL, 1 },
     { "mul_by_neg_1", ANVIL_MIR_MUL, match_mul_by_neg_1, emit_mul_by_neg_1, NULL, 1 },
@@ -119,6 +156,7 @@ static const AnvilISelRule ppc64_rules[] = {
     { "mov_zero", ANVIL_MIR_MOV, match_mov_zero, emit_mov_zero, NULL, 1 },
     { "mov_fp", ANVIL_MIR_MOV, match_mov_fp, emit_mov_fp, NULL, 10 },
     { "sub_neg_to_add", ANVIL_MIR_SUB, match_sub_neg_to_add, emit_sub_neg_to_add, NULL, 2 },
+    { "fmadd", ANVIL_MIR_FADD, match_fmadd, emit_fmadd, NULL, 15 },
 };
 
 const AnvilISelRuleSet ppc64_isel_ruleset = {

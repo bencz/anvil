@@ -25,9 +25,9 @@ typedef enum AnvilISelPatternKind {
 
 typedef struct AnvilISelMatch {
     AnvilMInst* inst;
-    AnvilMInst* operands[8];
+    AnvilMInst* matched_insts[8];
     int64_t imm_values[8];
-    int matched_count;
+    int num_matched;
 } AnvilISelMatch;
 
 typedef bool (*AnvilISelMatchFn)(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match);

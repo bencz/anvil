@@ -403,9 +403,61 @@ bool anvil_mir_fold_mov_op_mov(AnvilMFunc* func, AnvilMirOptStats* stats) {
     return changed;
 }
 
+static bool anvil_mir_coalesce_fp_operations(AnvilMFunc* func, AnvilMirOptStats* stats) {
+    bool changed = false;
+    
+    for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
+        AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
+        
+        AnvilMInst* inst = block->first;
+        while (inst && inst->next && inst->next->next) {
+            AnvilMInst* mov1 = inst;
+            AnvilMInst* op = inst->next;
+            AnvilMInst* mov2 = inst->next->next;
+            
+            bool is_mov1 = (mov1->kind == ANVIL_MIR_MOV || mov1->kind == ANVIL_MIR_MOVSD || 
+                           mov1->kind == ANVIL_MIR_MOVSS) && mov1->num_operands >= 2;
+            bool is_fp_op = (op->kind == ANVIL_MIR_FADD || op->kind == ANVIL_MIR_FSUB ||
+                            op->kind == ANVIL_MIR_FMUL || op->kind == ANVIL_MIR_FDIV) && 
+                           op->num_operands >= 2;
+            bool is_mov2 = (mov2->kind == ANVIL_MIR_MOV || mov2->kind == ANVIL_MIR_MOVSD ||
+                           mov2->kind == ANVIL_MIR_MOVSS) && mov2->num_operands >= 2;
+            
+            if (is_mov1 && is_fp_op && is_mov2) {
+                AnvilMOperand* tmp = &mov1->operands[0];
+                AnvilMOperand* src = &mov1->operands[1];
+                AnvilMOperand* op_dst = &op->operands[0];
+                AnvilMOperand* final_dst = &mov2->operands[0];
+                AnvilMOperand* mov2_src = &mov2->operands[1];
+                
+                if (operands_equal(tmp, op_dst) && operands_equal(tmp, mov2_src)) {
+                    if (src->kind == ANVIL_MOP_PREG && final_dst->kind == ANVIL_MOP_PREG &&
+                        src->preg.id == final_dst->preg.id) {
+                        
+                        op->operands[0] = *final_dst;
+                        
+                        remove_inst(block, mov1);
+                        remove_inst(block, mov2);
+                        
+                        changed = true;
+                        if (stats) stats->instructions_combined += 2;
+                        inst = op;
+                        continue;
+                    }
+                }
+            }
+            
+            inst = inst->next;
+        }
+    }
+    
+    return changed;
+}
+
 bool anvil_mir_peephole(AnvilMFunc* func, AnvilMirOptStats* stats) {
     bool changed = false;
     
+    changed |= anvil_mir_coalesce_fp_operations(func, stats);
     changed |= anvil_mir_eliminate_dead_fp_moves(func, stats);
     changed |= anvil_mir_fold_mov_op_mov(func, stats);
     changed |= anvil_mir_eliminate_move_chains(func, stats);

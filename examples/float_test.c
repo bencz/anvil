@@ -48,7 +48,7 @@ int main(void) {
     
     printf("--- x86_64 Linux ---\n");
     AnvilTarget target_x86 = anvil_target_x86_64_linux();
-    AnvilCompileResult result_x86 = anvil_compile(mod, target_x86, ANVIL_OPT_STANDARD);
+    AnvilCompileResult result_x86 = anvil_compile(mod, target_x86, ANVIL_OPT_AGGRESSIVE);
     if (result_x86.errors) {
         fprintf(stderr, "Error: %s\n", result_x86.errors);
     } else {
@@ -58,7 +58,7 @@ int main(void) {
     
     printf("--- ARM64 Linux ---\n");
     AnvilTarget target_arm = anvil_target_arm64_linux();
-    AnvilCompileResult result_arm = anvil_compile(mod, target_arm, ANVIL_OPT_STANDARD);
+    AnvilCompileResult result_arm = anvil_compile(mod, target_arm, ANVIL_OPT_AGGRESSIVE);
     if (result_arm.errors) {
         fprintf(stderr, "Error: %s\n", result_arm.errors);
     } else {
@@ -68,7 +68,7 @@ int main(void) {
     
     printf("--- PPC64 Linux ---\n");
     AnvilTarget target_ppc = anvil_target_ppc64_linux();
-    AnvilCompileResult result_ppc = anvil_compile(mod, target_ppc, ANVIL_OPT_STANDARD);
+    AnvilCompileResult result_ppc = anvil_compile(mod, target_ppc, ANVIL_OPT_AGGRESSIVE);
     if (result_ppc.errors) {
         fprintf(stderr, "Error: %s\n", result_ppc.errors);
     } else {

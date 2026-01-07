@@ -454,6 +454,23 @@ void ppc64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
             break;
         }
             
+        case ANVIL_MIR_CALL_INDIRECT: {
+            const char* reg = ppc64_get_reg(&inst->operands[0]);
+            anvil_asm_append(out, "\tmtctr %s\n", reg);
+            anvil_asm_append(out, "\tbctrl\n");
+            break;
+        }
+            
+        case ANVIL_MIR_TAIL_CALL:
+            if (inst->operands[0].kind == ANVIL_MOP_FUNC) {
+                anvil_asm_append(out, "\tb %s\n", inst->operands[0].func.name);
+            } else {
+                const char* reg = ppc64_get_reg(&inst->operands[0]);
+                anvil_asm_append(out, "\tmtctr %s\n", reg);
+                anvil_asm_append(out, "\tbctr\n");
+            }
+            break;
+            
         case ANVIL_MIR_PUSH: {
             const char* src = ppc64_get_reg(&inst->operands[0]);
             anvil_asm_append(out, "\tstdu %s, -8(r1)\n", src);
@@ -586,6 +603,82 @@ void ppc64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
             const char* dst = ppc64_get_reg(&inst->operands[0]);
             const char* src = ppc64_get_reg(&inst->operands[1]);
             anvil_asm_append(out, "\tfmr %s, %s\n", dst, src);
+            break;
+        }
+            
+        case ANVIL_MIR_FABS: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\tfabs %s, %s\n", dst, src);
+            break;
+        }
+            
+        case ANVIL_MIR_FSQRT: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\tfsqrt %s, %s\n", dst, src);
+            break;
+        }
+            
+        case ANVIL_MIR_FMADD: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* a = ppc64_get_reg(&inst->operands[1]);
+            const char* b = ppc64_get_reg(&inst->operands[2]);
+            const char* c = ppc64_get_reg(&inst->operands[3]);
+            anvil_asm_append(out, "\tfmadd %s, %s, %s, %s\n", dst, a, b, c);
+            break;
+        }
+            
+        case ANVIL_MIR_FMSUB: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* a = ppc64_get_reg(&inst->operands[1]);
+            const char* b = ppc64_get_reg(&inst->operands[2]);
+            const char* c = ppc64_get_reg(&inst->operands[3]);
+            anvil_asm_append(out, "\tfmsub %s, %s, %s, %s\n", dst, a, b, c);
+            break;
+        }
+            
+        case ANVIL_MIR_FNMADD: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* a = ppc64_get_reg(&inst->operands[1]);
+            const char* b = ppc64_get_reg(&inst->operands[2]);
+            const char* c = ppc64_get_reg(&inst->operands[3]);
+            anvil_asm_append(out, "\tfnmadd %s, %s, %s, %s\n", dst, a, b, c);
+            break;
+        }
+            
+        case ANVIL_MIR_FNMSUB: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* a = ppc64_get_reg(&inst->operands[1]);
+            const char* b = ppc64_get_reg(&inst->operands[2]);
+            const char* c = ppc64_get_reg(&inst->operands[3]);
+            anvil_asm_append(out, "\tfnmsub %s, %s, %s, %s\n", dst, a, b, c);
+            break;
+        }
+            
+        case ANVIL_MIR_LOAD_UPDATE: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            int offset = inst->operands[1].kind == ANVIL_MOP_IMM ? (int)inst->operands[1].imm.value : 0;
+            const char* base = ppc64_get_reg(&inst->operands[2]);
+            anvil_asm_append(out, "\tldu %s, %d(%s)\n", dst, offset, base);
+            break;
+        }
+            
+        case ANVIL_MIR_STORE_UPDATE: {
+            const char* src = ppc64_get_reg(&inst->operands[0]);
+            int offset = inst->operands[1].kind == ANVIL_MOP_IMM ? (int)inst->operands[1].imm.value : 0;
+            const char* base = ppc64_get_reg(&inst->operands[2]);
+            anvil_asm_append(out, "\tstdu %s, %d(%s)\n", src, offset, base);
+            break;
+        }
+            
+        case ANVIL_MIR_FENCE:
+            anvil_asm_append(out, "\tsync\n");
+            break;
+            
+        case ANVIL_MIR_PREFETCH: {
+            const char* addr = ppc64_get_reg(&inst->operands[0]);
+            anvil_asm_append(out, "\tdcbt 0, %s\n", addr);
             break;
         }
             

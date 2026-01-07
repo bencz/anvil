@@ -147,6 +147,20 @@ bool anvil_type_is_aggregate(const AnvilType* type) {
     return type->kind == ANVIL_TYPE_STRUCT || type->kind == ANVIL_TYPE_ARRAY;
 }
 
+bool anvil_type_is_vector(const AnvilType* type) {
+    return type->kind == ANVIL_TYPE_VECTOR;
+}
+
+AnvilType* anvil_type_vector_create(AnvilArena* arena, AnvilType* elem, size_t lanes) {
+    AnvilType* type = anvil_arena_alloc(arena, sizeof(AnvilType));
+    type->kind = ANVIL_TYPE_VECTOR;
+    type->vector.elem = elem;
+    type->vector.lanes = lanes;
+    type->size = elem->size * lanes;
+    type->align = type->size >= 32 ? 32 : (type->size >= 16 ? 16 : 8);
+    return type;
+}
+
 bool anvil_type_eq(const AnvilType* a, const AnvilType* b) {
     if (a == b) return true;
     if (a->kind != b->kind) return false;

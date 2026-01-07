@@ -171,21 +171,149 @@ void anvil_lower_inst(AnvilLowerCtx* ctx, AnvilInst* inst) {
             break;
         }
         
-        case ANVIL_INST_FNEG: {
-            mir_kind = ANVIL_MIR_FNEG;
+        case ANVIL_INST_FNEG:
+        case ANVIL_INST_FABS:
+        case ANVIL_INST_FSQRT: {
+            switch (inst->kind) {
+                case ANVIL_INST_FNEG: mir_kind = ANVIL_MIR_FNEG; break;
+                case ANVIL_INST_FABS: mir_kind = ANVIL_MIR_FABS; break;
+                case ANVIL_INST_FSQRT: mir_kind = ANVIL_MIR_FSQRT; break;
+                default: mir_kind = ANVIL_MIR_FNEG; break;
+            }
             int dst_vreg = anvil_lower_value(ctx, inst->result);
             AnvilMOperand src = anvil_lower_to_operand(ctx, inst->operands[0]);
             int size = get_type_size(inst->result->type);
             AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
             
-            AnvilMInst* mov = anvil_minst_mov(ctx->arena, dst, src);
+            AnvilMInst* op = anvil_minst_create(ctx->arena, mir_kind);
+            op->operands[0] = dst;
+            op->operands[1] = src;
+            op->num_operands = 2;
+            op->operands[0].is_fp = true;
+            op->operands[1].is_fp = true;
+            emit(ctx, op);
+            break;
+        }
+        
+        case ANVIL_INST_FMIN:
+        case ANVIL_INST_FMAX: {
+            mir_kind = inst->kind == ANVIL_INST_FMIN ? ANVIL_MIR_FMIN : ANVIL_MIR_FMAX;
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand lhs = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand rhs = anvil_lower_to_operand(ctx, inst->operands[1]);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            
+            AnvilMInst* op = anvil_minst_create_with_capacity(ctx->arena, mir_kind, 3);
+            op->operands[0] = dst;
+            op->operands[1] = lhs;
+            op->operands[2] = rhs;
+            op->num_operands = 3;
+            op->operands[0].is_fp = true;
+            op->operands[1].is_fp = true;
+            op->operands[2].is_fp = true;
+            emit(ctx, op);
+            break;
+        }
+        
+        case ANVIL_INST_FMADD:
+        case ANVIL_INST_FMSUB: {
+            mir_kind = inst->kind == ANVIL_INST_FMADD ? ANVIL_MIR_FMADD : ANVIL_MIR_FMSUB;
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand a = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand b = anvil_lower_to_operand(ctx, inst->operands[1]);
+            AnvilMOperand c = anvil_lower_to_operand(ctx, inst->operands[2]);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            
+            AnvilMInst* op = anvil_minst_create_with_capacity(ctx->arena, mir_kind, 4);
+            op->operands[0] = dst;
+            op->operands[1] = a;
+            op->operands[2] = b;
+            op->operands[3] = c;
+            op->num_operands = 4;
+            for (int i = 0; i < 4; i++) op->operands[i].is_fp = true;
+            emit(ctx, op);
+            break;
+        }
+        
+        case ANVIL_INST_FCMP: {
+            AnvilMOperand lhs = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand rhs = anvil_lower_to_operand(ctx, inst->operands[1]);
+            
+            AnvilMInst* cmp = anvil_minst_create(ctx->arena, ANVIL_MIR_FCMP);
+            cmp->operands[0] = lhs;
+            cmp->operands[1] = rhs;
+            cmp->num_operands = 2;
+            cmp->operands[0].is_fp = true;
+            cmp->operands[1].is_fp = true;
+            emit(ctx, cmp);
+            
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand dst = anvil_mop_vreg(dst_vreg, 1);
+            
+            AnvilMInst* setcc = anvil_minst_create(ctx->arena, ANVIL_MIR_SETCC);
+            setcc->cc = ANVIL_CC_EQ;
+            setcc->operands[0] = dst;
+            setcc->num_operands = 1;
+            emit(ctx, setcc);
+            break;
+        }
+        
+        case ANVIL_INST_VADD:
+        case ANVIL_INST_VSUB:
+        case ANVIL_INST_VMUL:
+        case ANVIL_INST_VDIV: {
+            switch (inst->kind) {
+                case ANVIL_INST_VADD: mir_kind = ANVIL_MIR_ADDPD; break;
+                case ANVIL_INST_VSUB: mir_kind = ANVIL_MIR_SUBPD; break;
+                case ANVIL_INST_VMUL: mir_kind = ANVIL_MIR_MULPD; break;
+                case ANVIL_INST_VDIV: mir_kind = ANVIL_MIR_DIVPD; break;
+                default: mir_kind = ANVIL_MIR_ADDPD; break;
+            }
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand lhs = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand rhs = anvil_lower_to_operand(ctx, inst->operands[1]);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            
+            AnvilMInst* mov = anvil_minst_mov(ctx->arena, dst, lhs);
             mov->operands[0].is_fp = true;
             mov->operands[1].is_fp = true;
             emit(ctx, mov);
             
-            AnvilMInst* op = anvil_minst_unary(ctx->arena, mir_kind, dst);
+            AnvilMInst* op = anvil_minst_binary(ctx->arena, mir_kind, dst, rhs);
             op->operands[0].is_fp = true;
+            op->operands[1].is_fp = true;
             emit(ctx, op);
+            break;
+        }
+        
+        case ANVIL_INST_VLOAD: {
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            AnvilMOperand src = anvil_lower_to_operand(ctx, inst->operands[0]);
+            
+            AnvilMInst* load = anvil_minst_create(ctx->arena, ANVIL_MIR_MOVUPS);
+            load->operands[0] = dst;
+            load->operands[1] = src;
+            load->num_operands = 2;
+            load->operands[0].is_fp = true;
+            emit(ctx, load);
+            break;
+        }
+        
+        case ANVIL_INST_VSTORE: {
+            AnvilMOperand dst = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand src = anvil_lower_to_operand(ctx, inst->operands[1]);
+            
+            AnvilMInst* store = anvil_minst_create(ctx->arena, ANVIL_MIR_MOVUPS);
+            store->operands[0] = dst;
+            store->operands[1] = src;
+            store->num_operands = 2;
+            store->operands[1].is_fp = true;
+            emit(ctx, store);
             break;
         }
         

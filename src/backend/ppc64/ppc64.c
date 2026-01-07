@@ -160,7 +160,37 @@ static void ppc64_schedule_instructions(AnvilBackend* backend, AnvilMBlock* bloc
 
 static void ppc64_vectorize(AnvilBackend* backend, AnvilMFunc* func) {
     (void)backend;
-    (void)func;
+    if (!func) return;
+    
+    for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
+        AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
+        if (!block) continue;
+        
+        for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
+            if (inst->kind == ANVIL_MIR_FMUL && inst->operands[0].is_fp) {
+                AnvilMInst* next = inst->next;
+                if (next && next->kind == ANVIL_MIR_FADD && 
+                    next->operands[0].is_fp) {
+                    
+                    if (inst->operands[0].kind == ANVIL_MOP_PREG &&
+                        next->operands[1].kind == ANVIL_MOP_PREG &&
+                        inst->operands[0].preg.id == next->operands[1].preg.id) {
+                        
+                        next->kind = ANVIL_MIR_FMADD;
+                        if (next->num_operands < 4) {
+                            next->operands[3] = next->operands[0];
+                            next->operands[2] = inst->operands[1];
+                            next->operands[1] = inst->operands[0];
+                            next->num_operands = 4;
+                        }
+                        
+                        inst->kind = ANVIL_MIR_NOP;
+                        inst->num_operands = 0;
+                    }
+                }
+            }
+        }
+    }
 }
 
 static const char* ppc64_reg_name_for_size(AnvilBackend* backend, int reg_id, int size_bits) {

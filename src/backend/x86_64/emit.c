@@ -12,28 +12,26 @@ static const char* size_suffix(int size) {
     }
 }
 
-static const char* xmm_reg_name(int id) {
-    static const char* names[] = {
-        "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-        "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"
-    };
-    if (id >= X86_64_XMM0 && id <= X86_64_XMM15) {
-        return names[id - X86_64_XMM0];
+static const char* cc_suffix(AnvilCondCode cc) {
+    switch (cc) {
+        case ANVIL_CC_EQ:  return "e";
+        case ANVIL_CC_NE:  return "ne";
+        case ANVIL_CC_LT:  return "l";
+        case ANVIL_CC_LE:  return "le";
+        case ANVIL_CC_GT:  return "g";
+        case ANVIL_CC_GE:  return "ge";
+        case ANVIL_CC_ULT: return "b";
+        case ANVIL_CC_ULE: return "be";
+        case ANVIL_CC_UGT: return "a";
+        case ANVIL_CC_UGE: return "ae";
+        default: return "e";
     }
-    if (id >= 0 && id < 16) {
-        return names[id];
-    }
-    return "xmm0";
 }
 
 static void emit_operand(AnvilBackend* backend, AnvilMOperand* op, AnvilAsmBuffer* out) {
     switch (op->kind) {
         case ANVIL_MOP_PREG:
-            if (op->is_fp) {
-                anvil_asm_append(out, "%%%s", xmm_reg_name(op->preg.id));
-            } else {
-                anvil_asm_append(out, "%%%s", x86_64_reg_name(op->preg.id, op->size * 8));
-            }
+            anvil_asm_append(out, "%%%s", x86_64_reg_name(op->preg.id, op->size * 8));
             break;
         case ANVIL_MOP_VREG:
             if (op->is_fp) {
@@ -83,26 +81,6 @@ static void emit_operand(AnvilBackend* backend, AnvilMOperand* op, AnvilAsmBuffe
             break;
     }
     (void)backend;
-}
-
-static const char* cc_suffix(AnvilCondCode cc) {
-    switch (cc) {
-        case ANVIL_CC_EQ: return "e";
-        case ANVIL_CC_NE: return "ne";
-        case ANVIL_CC_LT: return "l";
-        case ANVIL_CC_LE: return "le";
-        case ANVIL_CC_GT: return "g";
-        case ANVIL_CC_GE: return "ge";
-        case ANVIL_CC_ULT: return "b";
-        case ANVIL_CC_ULE: return "be";
-        case ANVIL_CC_UGT: return "a";
-        case ANVIL_CC_UGE: return "ae";
-        case ANVIL_CC_S: return "s";
-        case ANVIL_CC_NS: return "ns";
-        case ANVIL_CC_O: return "o";
-        case ANVIL_CC_NO: return "no";
-        default: return "e";
-    }
 }
 
 void x86_64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuffer* out) {
@@ -477,8 +455,282 @@ void x86_64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBu
             anvil_asm_append(out, "\n");
             break;
             
+        case ANVIL_MIR_FABS: {
+            const char* suffix = inst->operands[0].size == 4 ? "ss" : "sd";
+            anvil_asm_append(out, "\tandp%s .LC_absmask_%s(%%rip), ", suffix, suffix);
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+        }
+            
+        case ANVIL_MIR_FSQRT:
+            anvil_asm_append(out, "\tsqrt%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FMIN:
+            anvil_asm_append(out, "\tmin%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FMAX:
+            anvil_asm_append(out, "\tmax%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FMADD:
+            anvil_asm_append(out, "\tvfmadd213%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[2], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FMSUB:
+            anvil_asm_append(out, "\tvfmsub213%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[2], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FNMADD:
+            anvil_asm_append(out, "\tvfnmadd213%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[2], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FNMSUB:
+            anvil_asm_append(out, "\tvfnmsub213%s ", inst->operands[0].size == 4 ? "ss" : "sd");
+            emit_operand(backend, &inst->operands[2], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MOVAPS:
+            anvil_asm_append(out, "\tmovaps ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MOVUPS:
+            anvil_asm_append(out, "\tmovups ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MOVAPD:
+            anvil_asm_append(out, "\tmovapd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MOVUPD:
+            anvil_asm_append(out, "\tmovupd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_ADDPS:
+            anvil_asm_append(out, "\taddps ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_ADDPD:
+            anvil_asm_append(out, "\taddpd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_SUBPS:
+            anvil_asm_append(out, "\tsubps ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_SUBPD:
+            anvil_asm_append(out, "\tsubpd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MULPS:
+            anvil_asm_append(out, "\tmulps ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_MULPD:
+            anvil_asm_append(out, "\tmulpd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_DIVPS:
+            anvil_asm_append(out, "\tdivps ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_DIVPD:
+            anvil_asm_append(out, "\tdivpd ");
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_CMOV:
+            anvil_asm_append(out, "\tcmov%s ", cc_suffix(inst->cc));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_ROL:
+            anvil_asm_append(out, "\trol%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_ROR:
+            anvil_asm_append(out, "\tror%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_XCHG:
+            anvil_asm_append(out, "\txchg%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_CMPXCHG:
+            anvil_asm_append(out, "\tlock cmpxchg%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_LOCK_ADD:
+            anvil_asm_append(out, "\tlock add%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_LOCK_SUB:
+            anvil_asm_append(out, "\tlock sub%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_LOCK_AND:
+            anvil_asm_append(out, "\tlock and%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_LOCK_OR:
+            anvil_asm_append(out, "\tlock or%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_LOCK_XOR:
+            anvil_asm_append(out, "\tlock xor%s ", size_suffix(inst->operands[0].size));
+            emit_operand(backend, &inst->operands[1], out);
+            anvil_asm_append(out, ", ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_PREFETCH:
+            anvil_asm_append(out, "\tprefetcht0 ");
+            emit_operand(backend, &inst->operands[0], out);
+            anvil_asm_append(out, "\n");
+            break;
+            
+        case ANVIL_MIR_FENCE:
+            anvil_asm_append(out, "\tmfence\n");
+            break;
+            
+        case ANVIL_MIR_BITCAST:
+            if (inst->operands[0].is_fp && !inst->operands[1].is_fp) {
+                anvil_asm_append(out, "\tmovq ");
+                emit_operand(backend, &inst->operands[1], out);
+                anvil_asm_append(out, ", ");
+                emit_operand(backend, &inst->operands[0], out);
+                anvil_asm_append(out, "\n");
+            } else if (!inst->operands[0].is_fp && inst->operands[1].is_fp) {
+                anvil_asm_append(out, "\tmovq ");
+                emit_operand(backend, &inst->operands[1], out);
+                anvil_asm_append(out, ", ");
+                emit_operand(backend, &inst->operands[0], out);
+                anvil_asm_append(out, "\n");
+            }
+            break;
+            
         default:
-            anvil_asm_append(out, "\t# unknown instruction\n");
+            anvil_asm_append(out, "\t# unknown instruction %d\n", inst->kind);
             break;
     }
 }
