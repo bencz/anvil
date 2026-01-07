@@ -1,285 +1,216 @@
-/*
- * ANVIL - PowerPC 64-bit Backend (Big-Endian)
- * 
- * Big-endian, stack grows downward
- * Generates GAS syntax for PowerPC64
- * 
- * Register conventions (ELFv1 ABI for PPC64 BE):
- * - r0: Volatile, used in prologue/epilogue
- * - r1: Stack pointer (SP)
- * - r2: TOC pointer (Table of Contents)
- * - r3-r10: Function arguments and return values
- * - r3: Return value
- * - r11: Environment pointer for nested functions
- * - r12: Volatile, used for linkage (function entry point)
- * - r13: Thread pointer (reserved)
- * - r14-r30: Non-volatile (callee-saved)
- * - r31: Non-volatile, often used as frame pointer
- * - f0: Volatile
- * - f1-f13: Floating-point arguments
- * - f1: Floating-point return value
- * - f14-f31: Non-volatile (callee-saved)
- * - CR0-CR7: Condition registers (CR2-CR4 non-volatile)
- * - LR: Link register (return address)
- * - CTR: Count register
- * 
- * Stack frame (ELFv1):
- * - Minimum frame size: 112 bytes
- * - Parameter save area starts at SP+48
- * - TOC save area at SP+40
- * - LR save area at SP+16
- */
-
-#include "ppc64_internal.h"
-#include <stdlib.h>
+#include "../backend.h"
+#include "target.h"
+#include "regs.h"
+#include "emit.h"
+#include "abi/elfv2.h"
+#include "opt/peephole.h"
+#include "../../mir/regalloc.h"
 #include <string.h>
 #include <stdio.h>
 
-/* ============================================================================
- * Global Data
- * ============================================================================ */
-
-/* PowerPC 64-bit register names */
-const char *ppc64_gpr_names[] = {
-    "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",
-    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
-    "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
-    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
+static const AnvilABI* ppc64_supported_abis[] = {
+    &ppc64_elfv2_abi,
 };
 
-const char *ppc64_fpr_names[] = {
-    "f0",  "f1",  "f2",  "f3",  "f4",  "f5",  "f6",  "f7",
-    "f8",  "f9",  "f10", "f11", "f12", "f13", "f14", "f15",
-    "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
-    "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31"
+static void ppc64_lower_mir(AnvilBackend* backend, AnvilMIR* mir) {
+    (void)backend;
+    (void)mir;
+}
+
+static const AnvilABI* ppc64_get_abi(int os, const char* abi_name) {
+    (void)os;
+    (void)abi_name;
+    return &ppc64_elfv2_abi;
+}
+
+static void ppc64_emit_mir_full(AnvilBackend* backend, AnvilMIR* mir, AnvilAsmBuffer* out, int os, const char* abi_name) {
+    const AnvilABI* abi = ppc64_get_abi(os, abi_name);
+    
+    anvil_asm_append(out, "\t.abiversion 2\n");
+    anvil_asm_append(out, "\t.section .text\n");
+    
+    for (AnvilMFunc* func = mir->first_func; func; func = func->next) {
+        func->abi = abi;
+        
+        anvil_asm_append(out, "\t.globl %s\n", func->name);
+        anvil_asm_append(out, "\t.type %s, @function\n", func->name);
+        anvil_asm_append(out, "%s:\n", func->name);
+        
+        ppc64_emit_prologue(backend, func, out);
+        
+        for (size_t i = 0; i < anvil_vec_len(&func->blocks); i++) {
+            AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, i);
+            
+            for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
+                if (inst->kind == ANVIL_MIR_RET) {
+                    ppc64_emit_epilogue(backend, func, out);
+                }
+                ppc64_emit_instruction(backend, inst, out);
+            }
+        }
+        
+        anvil_asm_append(out, "\t.size %s, .-%s\n", func->name, func->name);
+        anvil_asm_append(out, "\n");
+    }
+    
+    if (mir->string_count > 0) {
+        anvil_asm_append(out, "\t.section .rodata\n");
+        for (int i = 0; i < mir->string_count; i++) {
+            char label[64];
+            snprintf(label, sizeof(label), ".Lstr%d", mir->strings[i].id);
+            if (abi->emit_string) {
+                abi->emit_string(abi, label, mir->strings[i].value, out);
+            } else {
+                anvil_asm_append(out, "%s:\n", label);
+                anvil_asm_append(out, "\t.string \"");
+                for (const char* p = mir->strings[i].value; *p; p++) {
+                    if (*p == '\n') anvil_asm_append(out, "\\n");
+                    else if (*p == '\t') anvil_asm_append(out, "\\t");
+                    else if (*p == '\\') anvil_asm_append(out, "\\\\");
+                    else if (*p == '"') anvil_asm_append(out, "\\\"");
+                    else anvil_asm_append(out, "%c", *p);
+                }
+                anvil_asm_append(out, "\"\n");
+            }
+        }
+    }
+}
+
+static void ppc64_select_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilVec* output) {
+    (void)backend;
+    (void)inst;
+    (void)output;
+}
+
+static void ppc64_regalloc(AnvilBackend* backend, AnvilMFunc* func, int os, const char* abi_name) {
+    const AnvilABI* abi = ppc64_get_abi(os, abi_name);
+    
+    static const int available_regs[] = {
+        PPC64_R3, PPC64_R4, PPC64_R5, PPC64_R6, PPC64_R7, PPC64_R8, PPC64_R9, PPC64_R10,
+        PPC64_R14, PPC64_R15, PPC64_R16, PPC64_R17, PPC64_R18, PPC64_R19, PPC64_R20,
+        PPC64_R21, PPC64_R22, PPC64_R23, PPC64_R24, PPC64_R25, PPC64_R26, PPC64_R27,
+        PPC64_R28, PPC64_R29, PPC64_R30, PPC64_R31
+    };
+    
+    int param_prealloc[32];
+    int num_prealloc = 0;
+    for (int i = 0; i < func->num_params && i < abi->num_arg_regs_int; i++) {
+        param_prealloc[num_prealloc++] = i + 1;
+        param_prealloc[num_prealloc++] = abi->arg_regs_int[i];
+    }
+    
+    AnvilRegAllocConfig config = {
+        .available_regs = available_regs,
+        .num_available_regs = sizeof(available_regs) / sizeof(available_regs[0]),
+        .callee_saved = abi->callee_saved_regs,
+        .num_callee_saved = abi->num_callee_saved,
+        .stack_slot_size = 8,
+        .prealloc = param_prealloc,
+        .num_prealloc = num_prealloc / 2,
+    };
+    
+    AnvilRegAllocResult* result = anvil_regalloc_linear_scan(func, &config);
+    anvil_regalloc_apply(func, result, &config);
+    anvil_regalloc_result_free(result);
+    
+    (void)backend;
+}
+
+static int ppc64_spill_cost(AnvilBackend* backend, int reg) {
+    (void)backend;
+    if (reg >= PPC64_R3 && reg <= PPC64_R10) return 10;
+    if (reg >= PPC64_R14 && reg <= PPC64_R31) return 5;
+    return 1;
+}
+
+static void ppc64_backend_peephole_optimize(AnvilBackend* backend, AnvilMFunc* func) {
+    ppc64_peephole_run_all(backend, func);
+}
+
+static void ppc64_schedule_instructions(AnvilBackend* backend, AnvilMBlock* block) {
+    (void)backend;
+    (void)block;
+}
+
+static void ppc64_vectorize(AnvilBackend* backend, AnvilMFunc* func) {
+    (void)backend;
+    (void)func;
+}
+
+static const char* ppc64_reg_name_for_size(AnvilBackend* backend, int reg_id, int size_bits) {
+    (void)backend;
+    (void)size_bits;
+    return ppc64_reg_name(reg_id);
+}
+
+static bool ppc64_immediate_fits(AnvilBackend* backend, int64_t value, AnvilMInstKind kind) {
+    (void)backend;
+    
+    switch (kind) {
+        case ANVIL_MIR_ADD:
+        case ANVIL_MIR_SUB:
+        case ANVIL_MIR_CMP:
+            return value >= -32768 && value <= 32767;
+        case ANVIL_MIR_AND:
+        case ANVIL_MIR_OR:
+        case ANVIL_MIR_XOR:
+            return value >= 0 && value <= 65535;
+        case ANVIL_MIR_MUL:
+            return value >= -32768 && value <= 32767;
+        default:
+            return value >= -32768 && value <= 32767;
+    }
+}
+
+static void ppc64_materialize_constant(AnvilBackend* backend, int64_t value, int dest_reg, AnvilVec* output) {
+    (void)backend;
+    (void)value;
+    (void)dest_reg;
+    (void)output;
+}
+
+static void ppc64_emit_label(AnvilBackend* backend, const char* label, AnvilAsmBuffer* out) {
+    (void)backend;
+    anvil_asm_append(out, "%s:\n", label);
+}
+
+static void ppc64_emit_data(AnvilBackend* backend, void* data, AnvilAsmBuffer* out) {
+    (void)backend;
+    (void)data;
+    (void)out;
+}
+
+static AnvilBackend ppc64_backend = {
+    .name = "ppc64",
+    
+    .target_info = &ppc64_target_info,
+    .reg_set = &ppc64_reg_set,
+    
+    .default_abi = &ppc64_elfv2_abi,
+    .supported_abis = ppc64_supported_abis,
+    .num_supported_abis = sizeof(ppc64_supported_abis) / sizeof(ppc64_supported_abis[0]),
+    
+    .lower_mir = ppc64_lower_mir,
+    .emit_mir = ppc64_emit_mir_full,
+    .select_instruction = ppc64_select_instruction,
+    .regalloc = ppc64_regalloc,
+    .spill_cost = ppc64_spill_cost,
+    
+    .emit_prologue = ppc64_emit_prologue,
+    .emit_epilogue = ppc64_emit_epilogue,
+    .emit_instruction = ppc64_emit_instruction,
+    .emit_label = ppc64_emit_label,
+    .emit_data = ppc64_emit_data,
+    
+    .peephole_optimize = ppc64_backend_peephole_optimize,
+    .schedule_instructions = ppc64_schedule_instructions,
+    .vectorize = ppc64_vectorize,
+    
+    .reg_name_for_size = ppc64_reg_name_for_size,
+    .immediate_fits = ppc64_immediate_fits,
+    .materialize_constant = ppc64_materialize_constant,
 };
 
-/* Argument registers */
-const int ppc64_arg_regs[] = { PPC64_R3, PPC64_R4, PPC64_R5, PPC64_R6, PPC64_R7, PPC64_R8, PPC64_R9, PPC64_R10 };
-
-static const anvil_arch_info_t ppc64_arch_info = {
-    .arch = ANVIL_ARCH_PPC64,
-    .name = "PowerPC 64-bit",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 32,
-    .num_fpr = 32,
-    .endian = ANVIL_ENDIAN_BIG,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false
-};
-
-/* ============================================================================
- * Backend Initialization
- * ============================================================================ */
-
-static anvil_error_t ppc64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
-{
-    ppc64_backend_t *priv = calloc(1, sizeof(ppc64_backend_t));
-    if (!priv) return ANVIL_ERR_NOMEM;
-    
-    anvil_strbuf_init(&priv->code);
-    anvil_strbuf_init(&priv->data);
-    priv->label_counter = 0;
-    priv->ctx = ctx;
-    
-    be->priv = priv;
-    return ANVIL_OK;
+AnvilBackend* anvil_create_ppc64_backend(void) {
+    return &ppc64_backend;
 }
-
-static void ppc64_cleanup(anvil_backend_t *be)
-{
-    if (!be || !be->priv) return;
-    
-    ppc64_backend_t *priv = be->priv;
-    anvil_strbuf_destroy(&priv->code);
-    anvil_strbuf_destroy(&priv->data);
-    free(priv->strings);
-    free(priv->stack_slots);
-    free(priv);
-    be->priv = NULL;
-}
-
-static void ppc64_reset(anvil_backend_t *be)
-{
-    if (!be || !be->priv) return;
-    
-    ppc64_backend_t *priv = be->priv;
-    
-    /* Clear stack slots (contain pointers to anvil_value_t) */
-    priv->num_stack_slots = 0;
-    priv->next_stack_offset = 0;
-    priv->stack_offset = 0;
-    priv->local_offset = 0;
-    
-    /* Clear string table (contain pointers to string data) */
-    priv->num_strings = 0;
-    priv->string_counter = 0;
-    
-    /* Reset other state */
-    priv->label_counter = 0;
-    priv->frame_size = 0;
-    priv->current_func = NULL;
-}
-
-/* ============================================================================
- * Stack Slot Management
- * ============================================================================ */
-
-int ppc64_add_stack_slot(ppc64_backend_t *be, anvil_value_t *val)
-{
-    if (be->num_stack_slots >= be->stack_slots_cap) {
-        size_t new_cap = be->stack_slots_cap ? be->stack_slots_cap * 2 : 16;
-        ppc64_stack_slot_t *new_slots = realloc(be->stack_slots,
-            new_cap * sizeof(ppc64_stack_slot_t));
-        if (!new_slots) return -1;
-        be->stack_slots = new_slots;
-        be->stack_slots_cap = new_cap;
-    }
-    
-    be->next_stack_offset += 8;
-    int offset = be->next_stack_offset;
-    
-    be->stack_slots[be->num_stack_slots].value = val;
-    be->stack_slots[be->num_stack_slots].offset = offset;
-    be->num_stack_slots++;
-    
-    return offset;
-}
-
-int ppc64_get_stack_slot(ppc64_backend_t *be, anvil_value_t *val)
-{
-    for (size_t i = 0; i < be->num_stack_slots; i++) {
-        if (be->stack_slots[i].value == val) {
-            return be->stack_slots[i].offset;
-        }
-    }
-    return -1;
-}
-
-const char *ppc64_add_string(ppc64_backend_t *be, const char *str)
-{
-    for (size_t i = 0; i < be->num_strings; i++) {
-        if (strcmp(be->strings[i].str, str) == 0) {
-            return be->strings[i].label;
-        }
-    }
-    
-    if (be->num_strings >= be->strings_cap) {
-        size_t new_cap = be->strings_cap ? be->strings_cap * 2 : 16;
-        ppc64_string_entry_t *new_strings = realloc(be->strings,
-            new_cap * sizeof(ppc64_string_entry_t));
-        if (!new_strings) return ".str_err";
-        be->strings = new_strings;
-        be->strings_cap = new_cap;
-    }
-    
-    ppc64_string_entry_t *entry = &be->strings[be->num_strings];
-    entry->str = str;
-    entry->len = strlen(str);
-    snprintf(entry->label, sizeof(entry->label), ".LC%d", be->string_counter++);
-    be->num_strings++;
-    
-    return entry->label;
-}
-
-/* ============================================================================
- * Backend Interface
- * ============================================================================ */
-
-static const anvil_arch_info_t *ppc64_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &ppc64_arch_info;
-}
-
-static anvil_error_t ppc64_codegen_module(anvil_backend_t *be, anvil_module_t *mod,
-                                           char **output, size_t *len)
-{
-    if (!be || !mod || !output) return ANVIL_ERR_INVALID_ARG;
-    
-    ppc64_backend_t *priv = be->priv;
-    
-    anvil_strbuf_destroy(&priv->code);
-    anvil_strbuf_destroy(&priv->data);
-    anvil_strbuf_init(&priv->code);
-    anvil_strbuf_init(&priv->data);
-    priv->label_counter = 0;
-    priv->num_strings = 0;
-    priv->string_counter = 0;
-    
-    /* Emit header with CPU model info */
-    anvil_strbuf_append(&priv->code, "# Generated by ANVIL for PowerPC 64-bit (big-endian, ELFv1 ABI)\n");
-    
-    /* Emit CPU-specific directive */
-    ppc64_emit_cpu_directive(priv);
-    
-    anvil_strbuf_append(&priv->code, "\t.abiversion 1\n");
-    anvil_strbuf_append(&priv->code, "\t.text\n\n");
-    
-    /* Emit extern declarations */
-    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        if (func->is_declaration) {
-            anvil_strbuf_appendf(&priv->code, "\t.extern %s\n", func->name);
-        }
-    }
-    
-    /* Emit functions */
-    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        if (!func->is_declaration) {
-            ppc64_emit_func(priv, func);
-        }
-    }
-    
-    /* Emit globals */
-    ppc64_emit_globals(priv, mod);
-    
-    /* Emit strings */
-    ppc64_emit_strings(priv);
-    
-    /* Combine code and data sections */
-    anvil_strbuf_t result;
-    anvil_strbuf_init(&result);
-    char *code_str = anvil_strbuf_detach(&priv->code, NULL);
-    char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (code_str) {
-        anvil_strbuf_append(&result, code_str);
-        free(code_str);
-    }
-    if (data_str) {
-        anvil_strbuf_append(&result, data_str);
-        free(data_str);
-    }
-    
-    *output = anvil_strbuf_detach(&result, len);
-    return ANVIL_OK;
-}
-
-static anvil_error_t ppc64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
-                                         char **output, size_t *len)
-{
-    if (!be || !func || !output) return ANVIL_ERR_INVALID_ARG;
-    
-    ppc64_backend_t *priv = be->priv;
-    
-    anvil_strbuf_destroy(&priv->code);
-    anvil_strbuf_init(&priv->code);
-    
-    ppc64_emit_func(priv, func);
-    
-    *output = anvil_strbuf_detach(&priv->code, len);
-    return ANVIL_OK;
-}
-
-const anvil_backend_ops_t anvil_backend_ppc64 = {
-    .name = "PowerPC 64-bit",
-    .arch = ANVIL_ARCH_PPC64,
-    .init = ppc64_init,
-    .cleanup = ppc64_cleanup,
-    .reset = ppc64_reset,
-    .codegen_module = ppc64_codegen_module,
-    .codegen_func = ppc64_codegen_func,
-    .get_arch_info = ppc64_get_arch_info
-};

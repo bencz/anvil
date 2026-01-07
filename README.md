@@ -1,615 +1,174 @@
-# ANVIL
+# ANVIL - A Nimble Versatile Intermediate Language
 
-A C library for compiler code generation with support for multiple architectures through a portable intermediate representation (IR) system.
+ANVIL is a lightweight code generation library designed as a simpler alternative to LLVM. It provides a clean C API for generating machine code for multiple architectures.
 
 ## Features
 
-* Portable IR: Architecture-independent intermediate representation
-* Multiple Backends: Support for x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit, ARM64
-* Assembly Output: Generates assembly text (HLASM for mainframes, GAS for x86/PPC)
-* **IR Optimization**: Configurable optimization passes (constant folding, DCE, strength reduction)
-* **CPU Model System**: Target-specific code generation with CPU model selection and feature flags
-* Extensible: Plugin architecture for adding new backends
-* Opcode Ready: Design prepared for future binary code generation
-
-## Supported Architectures
-
-| Architecture | Bits | Endianness | Stack | FP Format | ABI | Syntax |
-|--------------|------|------------|-------|-----------|-----|--------|
-| x86 | 32 | Little | Down | IEEE 754 | System V | GAS/NASM |
-| x86-64 | 64 | Little | Down | IEEE 754 | System V | GAS/NASM |
-| S/370 | 24 | Big | Up | HFP | MVS | HLASM |
-| S/370-XA | 31 | Big | Up | HFP | MVS | HLASM |
-| S/390 | 31 | Big | Up | HFP | MVS | HLASM |
-| z/Architecture | 64 | Big | Up | HFP+IEEE | MVS | HLASM |
-| PowerPC 32 | 32 | Big | Down | IEEE 754 | System V | GAS |
-| PowerPC 64 | 64 | Big | Down | IEEE 754 | System V | GAS |
-| PowerPC 64 LE | 64 | Little | Down | IEEE 754 | System V | GAS |
-| ARM64 (Linux) | 64 | Little | Down | IEEE 754 | System V | GAS |
-| ARM64 (macOS) | 64 | Little | Down | IEEE 754 | Darwin | GAS |
-
-**Floating-Point Formats:**
-- **IEEE 754**: Standard IEEE floating-point (binary)
-- **HFP**: IBM Hexadecimal Floating Point (base-16 exponent, used in S/370, S/390)
-- **HFP+IEEE**: Both formats supported (z/Architecture)
-
-**OS ABI Variants:**
-- **System V**: Standard Unix/Linux ABI
-- **Darwin**: macOS/Apple ABI (underscore prefix, Mach-O format)
-- **MVS**: IBM z/OS ABI
+- **Multi-target support**: x86_64 (Linux/Windows) and ARM64 (Linux/macOS)
+- **Clean C API**: Simple, intuitive API for building IR
+- **No #ifdef for targets**: All backends compile together, selection at runtime
+- **Arena-based allocation**: Fast, efficient memory management
+- **Multiple ABIs**: System V AMD64, Win64, AAPCS64, Apple ARM64
 
 ## Building
 
 ```bash
-# Build library and examples
+mkdir build && cd build
+cmake ..
 make
-
-# Library only
-make lib
-
-# Examples only
-make examples
-
-# Advanced examples (fp_math_lib, dynamic_array)
-make examples-advanced
-
-# Test advanced examples
-make test-examples-advanced
-
-# Clean
-make clean
-
-# Clean advanced examples
-make clean-examples-advanced
-
-# Install (requires root)
-sudo make install
 ```
 
-## Basic Usage
+### Build Options
+
+- `ANVIL_BUILD_EXAMPLES=ON/OFF` - Build example programs (default: ON)
+- `ANVIL_BUILD_TESTS=ON/OFF` - Build test programs (default: ON)
+
+## Quick Start
 
 ```c
-#include <anvil/anvil.h>
+#include <anvil.h>
+#include <stdio.h>
 
-int main(void)
-{
-    // Create context
-    anvil_ctx_t *ctx = anvil_ctx_create();
+int main(void) {
+    anvil_init();
     
-    // Set target architecture
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
+    // Create a module
+    AnvilModule* mod = anvil_module_new("example");
     
-    // Create module
-    anvil_module_t *mod = anvil_module_create(ctx, "my_module");
+    // Create a function that returns 42
+    AnvilFunc* fn = anvil_func_new(mod, "get_answer", anvil_type_i32());
+    AnvilValue* val = anvil_const_i32(fn, 42);
+    anvil_ret(fn, val);
     
-    // Create function type: int add(int a, int b)
-    anvil_type_t *i32 = anvil_type_i32(ctx);
-    anvil_type_t *params[] = { i32, i32 };
-    anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 2, false);
+    // Compile for native target
+    AnvilTarget target = anvil_target_native();
+    AnvilCompileResult result = anvil_compile(mod, target, ANVIL_OPT_STANDARD);
     
-    // Create function
-    anvil_func_t *func = anvil_func_create(mod, "add", func_type, ANVIL_LINK_EXTERNAL);
+    if (result.errors) {
+        fprintf(stderr, "Error: %s\n", result.errors);
+    } else {
+        printf("%s", result.code);
+    }
     
-    // Set insertion point
-    anvil_block_t *entry = anvil_func_get_entry(func);
-    anvil_set_insert_point(ctx, entry);
-    
-    // Get parameters
-    anvil_value_t *a = anvil_func_get_param(func, 0);
-    anvil_value_t *b = anvil_func_get_param(func, 1);
-    
-    // Build IR: result = a + b
-    anvil_value_t *result = anvil_build_add(ctx, a, b, "result");
-    
-    // Build IR: return result
-    anvil_build_ret(ctx, result);
-    
-    // Generate code
-    char *output = NULL;
-    size_t len = 0;
-    anvil_module_codegen(mod, &output, &len);
-    
-    printf("%s", output);
-    
-    // Cleanup
-    free(output);
-    anvil_module_destroy(mod);
-    anvil_ctx_destroy(ctx);
+    anvil_result_free(&result);
+    anvil_module_free(mod);
+    anvil_shutdown();
     
     return 0;
 }
 ```
 
-## Supported IR Operations
+## Supported Targets
 
-### Arithmetic
+| Architecture | OS | ABI |
+|-------------|-----|-----|
+| x86_64 | Linux | System V AMD64 |
+| x86_64 | Windows | Win64 |
+| ARM64 | Linux | AAPCS64 |
+| ARM64 | macOS | Apple ARM64 |
 
-* `anvil_build_add` : Addition
-* `anvil_build_sub` : Subtraction
-* `anvil_build_mul` : Multiplication
-* `anvil_build_sdiv` / `anvil_build_udiv` : Division (signed/unsigned)
-* `anvil_build_smod` / `anvil_build_umod` : Modulo (signed/unsigned)
-* `anvil_build_neg` : Negation
+## API Overview
 
-### Bitwise
-
-* `anvil_build_and` : AND
-* `anvil_build_or` : OR
-* `anvil_build_xor` : XOR
-* `anvil_build_not` : NOT
-* `anvil_build_shl` : Shift left
-* `anvil_build_shr` : Shift right (logical)
-* `anvil_build_sar` : Shift right (arithmetic)
-
-### Comparison
-
-* `anvil_build_cmp_eq` / `anvil_build_cmp_ne` : Equal / Not equal
-* `anvil_build_cmp_lt` / `anvil_build_cmp_le` : Less than / Less or equal
-* `anvil_build_cmp_gt` / `anvil_build_cmp_ge` : Greater than / Greater or equal
-* Unsigned versions: `_ult`, `_ule`, `_ugt`, `_uge`
-
-### Memory
-
-* `anvil_build_alloca` : Stack allocation
-* `anvil_build_load` : Load from memory
-* `anvil_build_store` : Store to memory
-* `anvil_build_gep` : Get Element Pointer (array indexing)
-* `anvil_build_struct_gep` : Get Struct Field Pointer
-* `anvil_module_add_global` : Add global variable
-
-### Control Flow
-
-* `anvil_build_br` : Unconditional branch
-* `anvil_build_br_cond` : Conditional branch
-* `anvil_build_call` : Function call
-* `anvil_build_ret` / `anvil_build_ret_void` : Return
-
-### Type Conversion
-
-* `anvil_build_trunc` : Truncate
-* `anvil_build_zext` : Zero extend
-* `anvil_build_sext` : Sign extend
-* `anvil_build_bitcast` : Bitcast
-* `anvil_build_ptrtoint` / `anvil_build_inttoptr` : Pointer/integer conversion
-
-### Floating-Point
-
-* `anvil_build_fadd` : FP Addition
-* `anvil_build_fsub` : FP Subtraction
-* `anvil_build_fmul` : FP Multiplication
-* `anvil_build_fdiv` : FP Division
-* `anvil_build_fneg` : FP Negation
-* `anvil_build_fabs` : FP Absolute value
-* `anvil_build_fcmp` : FP Comparison
-
-### FP Conversions
-
-* `anvil_build_fptrunc` : Truncate (f64 → f32)
-* `anvil_build_fpext` : Extend (f32 → f64)
-* `anvil_build_fptosi` : FP to signed integer
-* `anvil_build_fptoui` : FP to unsigned integer
-* `anvil_build_sitofp` : Signed integer to FP
-* `anvil_build_uitofp` : Unsigned integer to FP
-
-### Miscellaneous
-
-* `anvil_build_phi` : PHI node
-* `anvil_build_select` : Select (ternary)
-
-## Supported Types
-
-* Integers: `i8`, `i16`, `i32`, `i64` (signed)
-* Integers: `u8`, `u16`, `u32`, `u64` (unsigned)
-* Floating point: `f32`, `f64`
-* Pointers: `anvil_type_ptr(ctx, pointee_type)`
-* Arrays: `anvil_type_array(ctx, elem_type, count)`
-* Structs: `anvil_type_struct(ctx, name, fields, num_fields)`
-* Functions: `anvil_type_func(ctx, ret_type, params, num_params, variadic)`
-
-## Calling Conventions
-
-| Architecture | Convention | Description |
-|--------------|------------|-------------|
-| x86 | CDECL | Parameters on stack, caller cleanup |
-| x86-64 | System V | RDI, RSI, RDX, RCX, R8, R9, then stack |
-| S/370 | MVS | R1 points to parameter list |
-| S/390 | MVS | R1 points to parameter list |
-| z/Arch | z/OS 64-bit | R1 points to parameter list (64-bit) |
-| PPC32 | System V | r3-r10 for args, r3 for return |
-| PPC64 BE | ELFv1 | r3-r10 for args, function descriptors |
-| PPC64 LE | ELFv2 | r3-r10 for args, local entry points |
-| ARM64 (Linux) | AAPCS64 | x0-x7 for args, x0 for return |
-| ARM64 (macOS) | Apple ARM64 | x0-x7 for args, underscore prefix on symbols |
-
-## Mainframe Notes
-
-### GCCMVS Compatibility
-
-ANVIL generates code compatible with GCCMVS conventions:
-
-* **CSECT**: Blank (no module name prefix)
-* **AMODE/RMODE**: `AMODE ANY`, `RMODE ANY` for maximum flexibility
-* **Function Names**: UPPERCASE (e.g., `FACTORIAL`, `SUM_ARRAY`)
-* **Stack Allocation**: Direct stack offset from R13 (no GETMAIN/FREEMAIN)
-* **VL Bit**: NOT cleared, allowing full 31/64-bit addressing
-
-### Stack Direction
-
-Unlike x86 where the stack grows downward (toward lower addresses), IBM mainframes grow the stack upward (toward higher addresses). ANVIL handles this automatically.
-
-### Save Areas
-
-Mainframes use chained save areas instead of push/pop on the stack:
-
-* S/370/S/390: 72 bytes (18 fullwords of 4 bytes)
-* z/Architecture: 144 bytes (18 doublewords of 8 bytes)
-
-### Stack-Based Code Generation
-
-The mainframe backends generate efficient stack-based code:
-
-* Stack frame allocation via `LA R2,72(,R13)` (no GETMAIN overhead)
-* Proper save area chaining
-* Thread-safe execution
-* Simplified epilogue (no FREEMAIN cleanup)
-
-### HLASM Output
-
-Generated mainframe code is in HLASM (High Level Assembler) format:
-
-* Labels in columns 1-8
-* Opcodes starting at column 10
-* Operands starting at column 16
-* Comments with asterisk in column 1
-
-## Adding New Backends
-
-To add support for a new architecture:
-
-1. Create a new file at `src/backend/<arch>/<arch>.c`
-
-2. Implement the `anvil_backend_ops_t` structure:
+### Types
 
 ```c
-const anvil_backend_ops_t anvil_backend_myarch = {
-    .name = "MyArch",
-    .arch = ANVIL_ARCH_MYARCH,
-    .init = myarch_init,
-    .cleanup = myarch_cleanup,
-    .reset = myarch_reset,      // Clear cached IR pointers (optional but recommended)
-    .prepare_ir = myarch_prepare_ir,  // Prepare/lower IR before codegen (optional)
-    .codegen_module = myarch_codegen_module,
-    .codegen_func = myarch_codegen_func,
-    .get_arch_info = myarch_get_arch_info
-};
+AnvilType* anvil_type_void(void);
+AnvilType* anvil_type_i8(void);
+AnvilType* anvil_type_i16(void);
+AnvilType* anvil_type_i32(void);
+AnvilType* anvil_type_i64(void);
+AnvilType* anvil_type_f32(void);
+AnvilType* anvil_type_f64(void);
+AnvilType* anvil_type_ptr(AnvilModule* mod, AnvilType* pointee);
+AnvilType* anvil_type_array(AnvilModule* mod, AnvilType* elem, int count);
+AnvilType* anvil_type_struct(AnvilModule* mod, const char* name);
 ```
 
-3. Add the architecture to `anvil.h`:
+### Functions
 
 ```c
-typedef enum {
-    // ...
-    ANVIL_ARCH_MYARCH,
-    ANVIL_ARCH_COUNT
-} anvil_arch_t;
+AnvilFunc* anvil_func_new(AnvilModule* mod, const char* name, AnvilType* ret_type);
+AnvilVar* anvil_func_add_param(AnvilFunc* fn, const char* name, AnvilType* type);
+AnvilVar* anvil_func_add_local(AnvilFunc* fn, const char* name, AnvilType* type);
 ```
 
-4. Register the backend in `backend.c`:
+### Operations
 
 ```c
-anvil_register_backend(&anvil_backend_myarch);
+// Arithmetic
+AnvilValue* anvil_add(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_sub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_mul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_div(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+
+// Comparisons
+AnvilValue* anvil_eq(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_lt(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+
+// Memory
+AnvilValue* anvil_load(AnvilFunc* fn, AnvilVar* var);
+void anvil_store(AnvilFunc* fn, AnvilVar* var, AnvilValue* val);
+
+// Control flow
+void anvil_ret(AnvilFunc* fn, AnvilValue* val);
+AnvilIf* anvil_if_begin(AnvilFunc* fn, AnvilValue* cond);
+AnvilLoop* anvil_while_begin(AnvilFunc* fn, AnvilValue* cond);
+AnvilLoop* anvil_for_begin(AnvilFunc* fn, AnvilVar* var, AnvilValue* start, 
+                            AnvilValue* end, AnvilValue* step);
 ```
 
-## Recent Updates
-
-### Backend IR Preparation Phase
-New optional `prepare_ir` callback in backend interface allows architecture-specific IR preparation before code generation:
-- **IR Lowering**: Convert unsupported operations to sequences of supported ones
-- **Peephole Optimizations**: Target-specific optimizations on IR level
-- **Type Legalization**: Split 64-bit ops on 32-bit targets, etc.
-- **Function Analysis**: Detect leaf functions, calculate stack frame layout
-
-The ARM64 backend now uses `prepare_ir` to analyze all functions before code generation.
-
-### Struct Support
-- Struct field access via `anvil_build_struct_gep()` for all mainframe backends
-- Automatic field offset calculation at compile time
-- Efficient `LA` (Load Address) instruction for small offsets
-- Example: `struct Point { int x; int y; }` in `examples/struct_test.c`
-
-### Array Support (GEP)
-- Full array indexing via `anvil_build_gep()` for all mainframe backends
-- Automatic element size calculation (1, 2, 4, 8 bytes)
-- Efficient index multiplication using shifts (`SLL`/`SLLG`)
-- Example: `sum_array(int *arr, int n)` in `examples/array_test.c`
-
-### Floating-Point Support (Mainframes)
-- Full floating-point arithmetic for all mainframe backends
-- **HFP (Hexadecimal FP)**: S/370, S/370-XA, S/390 (ADR, MDR, DDR instructions)
-- **IEEE 754 (Binary FP)**: z/Architecture, S/390 optional (ADBR, MDBR, DDBR instructions)
-- FP format selection via `anvil_ctx_set_fp_format()`
-- Float↔Int conversion using Magic Number technique (HFP) or native CFDBR (IEEE)
-
-### Control Flow Support
-- Full support for loops (while, for) and conditionals (if/else)
-- Proper branch label generation with function-prefixed names (`func$block`)
-- Correct conditional branch code generation
-
-### Local Variable Allocation
-- Stack slot allocation for local variables via `anvil_build_alloca`
-- Direct stack offset addressing for efficient memory access
-- Automatic dynamic area sizing including local variables and FP temps
-
-### Instruction Optimizations
-- **AHI/AGHI**: Add Halfword Immediate for small constants (S/390, z/Architecture)
-- **Direct stack access**: Load/Store directly from stack slots without intermediate registers
-- **Relative branches**: J/JNZ instead of B/BNZ for better performance (S/390+)
-
-### Global Variables Support
-- Full support for global variables on all backends
-- Direct load/store to globals without intermediate address calculation
-- Type-aware storage allocation (C, H, F, FD, E, D for mainframes)
-- Support for initialized globals with `DC` (Define Constant)
-- **Array constant initializers**: `anvil_const_array()` and `anvil_global_set_initializer()`
-- UPPERCASE naming convention (GCCMVS compatible for mainframes)
-- Example: `examples/global_test.c`
-
-### PowerPC Backend Support
-- **PPC32**: 32-bit big-endian, System V ABI, GAS output
-- **PPC64 BE**: 64-bit big-endian, ELFv1 ABI with function descriptors (`.opd` section)
-- **PPC64 LE**: 64-bit little-endian, ELFv2 ABI with `.localentry` directives
-- Full IR operation support: arithmetic, bitwise, memory, control flow, comparisons
-- Type conversions: truncation, zero/sign extension, bitcast, pointer-int
-- Floating-point operations (IEEE 754): fadd, fsub, fmul, fdiv, fneg, fabs, fcmp
-- FP conversions: sitofp, uitofp, fptosi, fptoui, fpext, fptrunc
-- Stack slot allocation for local variables (`alloca`)
-- String table management for string literals
-- Global variable emission with proper alignment
-- GEP and STRUCT_GEP for array and struct access
-- **CPU Model System**: Target-specific code generation based on CPU model (POWER5-POWER10)
-
-### CPU Model System
-ANVIL supports CPU model-specific code generation, allowing optimized code for specific processor generations.
-
-**Supported CPU Models:**
-- **PowerPC**: G3, G4, 970 (G5), POWER4-POWER10
-- **z/Architecture**: z900, z9, z10, z196, zEC12, z13-z16
-- **ARM64**: Generic, Cortex-A53/A72/A76, Neoverse N1/V1, Apple M1/M2/M3
-- **x86-64**: Generic, Core2, Nehalem, Sandy Bridge, Haswell, Skylake, Ice Lake, Zen/Zen3/Zen4
-
-**Usage:**
-```c
-// Set target architecture and CPU model
-anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
-anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
-
-// Check available features
-if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
-    // VSX vector instructions available
-}
-
-// Enable/disable specific features
-anvil_ctx_enable_feature(ctx, ANVIL_FEATURE_PPC_HTM);
-anvil_ctx_disable_feature(ctx, ANVIL_FEATURE_PPC_VSX);
-```
-
-**CPU-Specific Optimizations (PPC64):**
-- `popcntd`: Native on POWER5+, emulated on older CPUs
-- `isel`: Conditional select on POWER7+, branch-based fallback
-- `ldbrx/stdbrx`: Byte reversal on POWER7+
-- `cmpb`: Byte comparison on POWER6+
-- `fcpsgn`: FP copy sign on POWER7+
-
-### ARM64 Backend Improvements
-Recent fixes and refactoring of the ARM64 backend for robust code generation:
-
-**Modular Architecture:**
-- **`arm64_internal.h`**: Definitions, structures, and declarations
-- **`arm64_helpers.c`**: Helper functions (type size, stack slots, code emission)
-- **`arm64_emit.c`**: Instruction emission (arithmetic, memory, control flow, FP)
-- **`arm64.c`**: Main backend (lifecycle, codegen entry points)
-- **`opt/`**: Architecture-specific optimization passes
-
-**ARM64-Specific Optimizations (`src/backend/arm64/opt/`):**
-- **Peephole optimizations**: Redundant store elimination, load-store same address removal
-- **Dead store elimination**: Remove stores that are immediately overwritten
-- **Redundant load elimination**: Reuse values already loaded from same address
-- **Branch optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
-- **Immediate optimization**: Use immediate forms of instructions when possible
-- **Conditional branch fusion**: `arm64_emit_br_cond()` detects comparison results and emits `cmp` + `b.cond` directly
-- **32-bit register usage**: Arithmetic/bitwise ops use W registers for 32-bit types (reduces code size)
-- **Immediate operands**: ADD/SUB/CMP use immediate form for small constants (`add w0, w9, #1`)
-- **CBZ/CBNZ optimization**: `x == 0` uses `cbz`, `x != 0` uses `cbnz` (saves 1 instruction)
-
-**Code Generation Improvements:**
-- **PHI node handling**: Correct SSA resolution with copies before branches
-- **External function calls**: Proper handling of `malloc`, `free`, `memcpy` and other C library functions
-- **SSA value preservation**: All instruction results saved to stack slots to prevent register clobbering
-- **Large stack frames**: Support for stack offsets >255 bytes using `x16` as scratch register
-- **Very large stack frames (>4095 bytes)**: Support for stack allocation/deallocation using `mov x16, #offset` + `sub/add sp, sp, x16` sequence
-- **Type-aware load/store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit)
-- **Sign-extending loads**: Proper `ldrsb`, `ldrsh`, `ldrsw` for signed types to preserve sign in 64-bit registers
-- **Parameter spilling**: Function parameters saved to stack at entry for safe access in loops
-- **macOS global variable syntax**: Proper `@PAGE`/`@PAGEOFF` relocations for Darwin ABI (instead of `:lo12:`)
-- **Array stack allocation**: Correct stack frame sizing for arrays based on element type and count
-- **Type size calculation**: `arm64_type_size()` function for accurate allocation of arrays, structs, and primitives
-- **String pointer arrays**: Proper emission of string constant pointers in global array initializers (`.quad .LCn` directives)
-- **Variadic function calls (Darwin)**: Arguments to variadic functions (e.g., `printf`) passed on stack as required by AAPCS64 on macOS
-- **Array initializers in globals**: Full support for emitting initialized arrays with correct element values
-- **Float/double global initializers**: Floating-point constants emitted using bit representation (`.long`/`.quad` with hex values)
-- **Correct store sizes for array elements**: Store instructions use source value type size to avoid corrupting adjacent elements in multi-dimensional arrays
-
-### IR Debug/Dump API
-New debugging functionality for inspecting IR structures:
+### Compilation
 
 ```c
-#include <anvil/anvil.h>  // anvil_debug.h is now included automatically
-
-// Print module IR to stdout
-anvil_print_module(mod);
-
-// Print function IR to stdout
-anvil_print_func(func);
-
-// Dump to FILE*
-anvil_dump_module(stderr, mod);
-anvil_dump_func(stderr, func);
-anvil_dump_block(stderr, block);
-anvil_dump_instr(stderr, instr);
-
-// Convert to string (caller must free)
-char *ir_str = anvil_module_to_string(mod);
-printf("%s", ir_str);
-free(ir_str);
-
-// Check if block has terminator (ret, br, br_cond)
-if (!anvil_block_has_terminator(block)) {
-    anvil_build_ret_void(ctx);  // Add implicit return
-}
-
-// Check if value is boolean (comparison result)
-if (anvil_value_is_bool(cond)) {
-    // Already boolean, use directly in br_cond
-} else {
-    // Need to compare with zero first
-    cond = anvil_build_cmp_ne(ctx, cond, zero, "tobool");
-}
-
-// Get type of a value
-anvil_type_t *type = anvil_value_get_type(val);
+AnvilTarget anvil_target_native(void);
+AnvilTarget anvil_target_from_triple(const char* triple);
+AnvilCompileResult anvil_compile(AnvilModule* mod, AnvilTarget target, AnvilOptLevel opt);
 ```
 
-**String escaping**: String constants in IR dumps are properly escaped (`\n`, `\t`, `\0`, `\xHH` for non-printable characters).
+## Examples
 
-**Output format:**
+See the `examples/` directory for complete examples:
+
+- `hello.c` - Simple function returning a constant
+- `fibonacci.c` - Recursive Fibonacci implementation
+- `sum_array.c` - Array iteration with for loop
+- `multi_target.c` - Cross-compilation to multiple targets
+
+## Architecture
+
 ```
-; ModuleID = 'my_module'
-; Functions: 2, Globals: 1
-
-@counter = external global i32 42
-
-define external i32 @factorial(i32 %arg0) {
-entry:
-    %cmp = cmp_le i8 %arg0, 1
-    br_cond %cmp, label %base_case, label %recurse
-...
-}
+anvil/
+├── include/
+│   └── anvil.h              # Public API
+├── src/
+│   ├── core/                # Core utilities
+│   │   ├── arena.c/h        # Arena allocator
+│   │   ├── vec.c/h          # Dynamic vector
+│   │   ├── hash.c/h         # Hash table
+│   │   ├── str.c/h          # String utilities
+│   │   └── error.c/h        # Error handling
+│   ├── ir/                  # Intermediate Representation
+│   │   ├── types.c/h        # Type system
+│   │   ├── value.c/h        # Values and constants
+│   │   ├── inst.c/h         # Instructions
+│   │   ├── func.c/h         # Functions and blocks
+│   │   ├── builder.c/h      # IR builder
+│   │   └── module.c/h       # Module management
+│   ├── mir/                 # Machine IR
+│   │   ├── mir.c/h          # MIR structures
+│   │   ├── lower.c/h        # IR to MIR lowering
+│   │   ├── cfg.c/h          # Control flow graph
+│   │   ├── liveness.c/h     # Liveness analysis
+│   │   └── regalloc.c/h     # Register allocation
+│   ├── backend/             # Code generation backends
+│   │   ├── backend.c/h      # Backend interface
+│   │   ├── x86_64/          # x86_64 backend
+│   │   └── arm64/           # ARM64 backend
+│   └── api.c                # Public API implementation
+├── examples/                # Example programs
+└── tests/                   # Unit tests
 ```
-
-### Memory Management Improvements
-Improved cleanup flow to prevent dangling pointers and use-after-free issues:
-
-- **Backend reset function**: New `reset` callback in `anvil_backend_ops_t` to clear cached IR pointers
-- **Safe cleanup order**: `anvil_ctx_destroy()` now resets backend state before destroying modules
-- **All backends updated**: x86, x86-64, ARM64, S/370, S/370-XA, S/390, z/Architecture, PPC32, PPC64, PPC64LE
-
-### Advanced Examples
-Three advanced examples demonstrate ANVIL's capabilities for generating linkable libraries:
-
-- **`examples/fp_math_lib/`**: Floating-point math library
-  - Generates exportable FP functions: `fp_add`, `fp_sub`, `fp_mul`, `fp_div`, `fp_neg`, `fp_abs`
-  - Demonstrates ANVIL IR for floating-point operations
-  - Includes C test program that links with generated assembly (24 tests)
-
-- **`examples/dynamic_array/`**: Dynamic array library with C library calls
-  - Demonstrates calling external C functions: `malloc`, `free`, `memcpy`
-  - Functions: `array_create`, `array_destroy`, `array_copy`, `array_sum`, `array_max`, `array_min`, `array_count_if`, `array_scale`
-  - Shows pointer arithmetic, loops, conditionals, and memory management
-  - Includes comprehensive test suite (41 tests)
-
-- **`examples/base64_lib/`**: Base64 encoding library
-  - Demonstrates complex bitwise operations, byte manipulation, and lookup table logic
-  - Functions: `base64_encode`, `base64_encoded_len`
-  - Shows `select` operations for conditional value computation
-  - Includes test suite with RFC 4648 test vectors (28 tests)
-
-## IR Optimization
-
-ANVIL includes a configurable optimization pass infrastructure that can be enabled or disabled.
-
-### Optimization Levels
-
-| Level | Name | Description |
-|-------|------|-------------|
-| O0 | `ANVIL_OPT_NONE` | No optimization (default) |
-| Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
-| O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop unrolling |
-
-### Available Passes
-
-| Pass | Level | Description |
-|------|-------|-------------|
-| **Constant Folding** | O1+ | Evaluates constant expressions at compile time (`3 + 5` → `8`) |
-| **Dead Code Elimination (DCE)** | O1+ | Removes unused instructions |
-| **Copy Propagation** | Og+ | Replaces uses of copied values with originals |
-| **Store-Load Propagation** | Og+ | Replaces load after store with stored value |
-| **Strength Reduction** | O2+ | Replaces expensive ops with cheaper ones (`x * 8` → `x << 3`) |
-| **CFG Simplification** | O2+ | Merges blocks, removes unreachable code |
-| **Dead Store Elimination** | O2+ | Removes stores overwritten before read |
-| **Redundant Load Elimination** | O2+ | Reuses loaded values from same address |
-| **Common Subexpression Elimination (CSE)** | O2+ | Reuses computed values |
-| **Loop Unrolling** | O3+ | Unrolls small loops with known trip counts (experimental) |
-
-### Usage
-
-```c
-#include <anvil/anvil_opt.h>
-
-// Set optimization level
-anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
-
-// Optimize module before codegen
-anvil_module_optimize(mod);
-
-// Or fine-grained control
-anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
-anvil_pass_manager_enable(pm, ANVIL_PASS_CONST_FOLD);
-anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
-```
-
-### Example: Constant Folding (S/390)
-
-**Before optimization:**
-```hlasm
-         LA    R2,3            Load constant 3
-         AHI   R2,5            Add 5
-         LR    R15,R2          Result in R15
-```
-
-**After optimization:**
-```hlasm
-         LA    R15,8           Load constant 8 directly
-```
-
-### Example: Strength Reduction (S/390)
-
-**Before optimization:**
-```hlasm
-         LA    R3,8            Load constant 8
-         MSR   R2,R3           Multiply (expensive)
-```
-
-**After optimization:**
-```hlasm
-         LA    R3,3            Load shift amount
-         SLL   R2,0(R3)        Shift left by 3 (x * 8 = x << 3)
-```
-
-## Roadmap
-
-* Binary opcode generation
-* ASI/AGSI optimization (Add to Storage Immediate)
-* Register allocation improvements
-* RISC-V support
-* Debug info (DWARF)
-* Extend CPU model system to more backends (ARM64, z/Architecture, x86-64)
-
-## Documentation
-
-See `DOCUMENTATION.md` for complete API reference and detailed usage examples.
 
 ## License
 
-Unlicense
+MIT License
