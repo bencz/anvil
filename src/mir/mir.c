@@ -303,8 +303,17 @@ AnvilMOperand anvil_mop_vreg(int id, int size) {
     AnvilMOperand op = {0};
     op.kind = ANVIL_MOP_VREG;
     op.size = size;
+    op.is_fp = false;
     op.vreg.id = id;
-    op.vreg.type = NULL;
+    return op;
+}
+
+AnvilMOperand anvil_mop_vreg_fp(int id, int size) {
+    AnvilMOperand op = {0};
+    op.kind = ANVIL_MOP_VREG;
+    op.size = size;
+    op.is_fp = true;
+    op.vreg.id = id;
     return op;
 }
 
@@ -312,6 +321,16 @@ AnvilMOperand anvil_mop_preg(int id, int size) {
     AnvilMOperand op = {0};
     op.kind = ANVIL_MOP_PREG;
     op.size = size;
+    op.is_fp = false;
+    op.preg.id = id;
+    return op;
+}
+
+AnvilMOperand anvil_mop_preg_fp(int id, int size) {
+    AnvilMOperand op = {0};
+    op.kind = ANVIL_MOP_PREG;
+    op.size = size;
+    op.is_fp = true;
     op.preg.id = id;
     return op;
 }
@@ -321,6 +340,14 @@ AnvilMOperand anvil_mop_imm(int64_t value, int size) {
     op.kind = ANVIL_MOP_IMM;
     op.size = size;
     op.imm.value = value;
+    return op;
+}
+
+AnvilMOperand anvil_mop_fimm(double value, int size) {
+    AnvilMOperand op = {0};
+    op.kind = ANVIL_MOP_FIMM;
+    op.size = size;
+    op.fimm.value = value;
     return op;
 }
 

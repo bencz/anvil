@@ -107,21 +107,49 @@ static void arm64_regalloc(AnvilBackend* backend, AnvilMFunc* func, int os, cons
         ARM64_X25, ARM64_X26, ARM64_X27, ARM64_X28
     };
     
+    static const int available_fp_regs[] = {
+        ARM64_V0, ARM64_V1, ARM64_V2, ARM64_V3, ARM64_V4, ARM64_V5, ARM64_V6, ARM64_V7,
+        ARM64_V8, ARM64_V9, ARM64_V10, ARM64_V11, ARM64_V12, ARM64_V13, ARM64_V14, ARM64_V15,
+        ARM64_V16, ARM64_V17, ARM64_V18, ARM64_V19, ARM64_V20, ARM64_V21, ARM64_V22, ARM64_V23,
+        ARM64_V24, ARM64_V25, ARM64_V26, ARM64_V27, ARM64_V28, ARM64_V29, ARM64_V30, ARM64_V31
+    };
+    
     int param_prealloc[32];
     int num_prealloc = 0;
-    for (int i = 0; i < func->num_params && i < abi->num_arg_regs_int; i++) {
-        param_prealloc[num_prealloc++] = i + 1;
-        param_prealloc[num_prealloc++] = abi->arg_regs_int[i];
+    int fp_param_prealloc[32];
+    int num_fp_prealloc = 0;
+    
+    int int_idx = 0;
+    int fp_idx = 0;
+    for (int i = 0; i < func->num_params; i++) {
+        AnvilMOperand* param = (AnvilMOperand*)anvil_vec_get(&func->params, i);
+        if (param->is_fp) {
+            if (fp_idx < abi->num_arg_regs_float) {
+                fp_param_prealloc[num_fp_prealloc++] = param->vreg.id;
+                fp_param_prealloc[num_fp_prealloc++] = abi->arg_regs_float[fp_idx];
+            }
+            fp_idx++;
+        } else {
+            if (int_idx < abi->num_arg_regs_int) {
+                param_prealloc[num_prealloc++] = param->vreg.id;
+                param_prealloc[num_prealloc++] = abi->arg_regs_int[int_idx];
+            }
+            int_idx++;
+        }
     }
     
     AnvilRegAllocConfig config = {
         .available_regs = available_regs,
         .num_available_regs = sizeof(available_regs) / sizeof(available_regs[0]),
+        .available_fp_regs = available_fp_regs,
+        .num_available_fp_regs = sizeof(available_fp_regs) / sizeof(available_fp_regs[0]),
         .callee_saved = abi->callee_saved_regs,
         .num_callee_saved = abi->num_callee_saved,
         .stack_slot_size = 8,
         .prealloc = param_prealloc,
         .num_prealloc = num_prealloc / 2,
+        .prealloc_fp = fp_param_prealloc,
+        .num_prealloc_fp = num_fp_prealloc / 2,
     };
     
     AnvilRegAllocResult* result = anvil_regalloc_linear_scan(func, &config);

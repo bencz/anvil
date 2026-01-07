@@ -18,6 +18,12 @@ typedef enum AnvilInstKind {
     ANVIL_INST_MOD,
     ANVIL_INST_NEG,
     
+    ANVIL_INST_FADD,
+    ANVIL_INST_FSUB,
+    ANVIL_INST_FMUL,
+    ANVIL_INST_FDIV,
+    ANVIL_INST_FNEG,
+    
     ANVIL_INST_AND,
     ANVIL_INST_OR,
     ANVIL_INST_XOR,

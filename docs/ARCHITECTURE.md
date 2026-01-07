@@ -453,6 +453,33 @@ int main(void) {
 }
 ```
 
+## Floating Point Support
+
+All backends support IEEE 754 floating point operations:
+
+### MIR Floating Point Instructions
+- `ANVIL_MIR_FADD` - Floating point addition
+- `ANVIL_MIR_FSUB` - Floating point subtraction
+- `ANVIL_MIR_FMUL` - Floating point multiplication
+- `ANVIL_MIR_FDIV` - Floating point division
+- `ANVIL_MIR_FNEG` - Floating point negation
+- `ANVIL_MIR_FCMP` - Floating point comparison
+- `ANVIL_MIR_MOVSS` - Move single-precision float
+- `ANVIL_MIR_MOVSD` - Move double-precision float
+- `ANVIL_MIR_CVTSI2SS` - Convert signed int to single float
+- `ANVIL_MIR_CVTSI2SD` - Convert signed int to double float
+- `ANVIL_MIR_CVTSS2SI` - Convert single float to signed int
+- `ANVIL_MIR_CVTSD2SI` - Convert double float to signed int
+- `ANVIL_MIR_CVTSS2SD` - Convert single to double
+- `ANVIL_MIR_CVTSD2SS` - Convert double to single
+
+### Backend Implementation
+| Backend | Single Precision | Double Precision | Registers |
+|---------|-----------------|------------------|-----------|
+| x86_64  | SSE (xmm0-15)   | SSE (xmm0-15)    | xmm0-xmm15 |
+| ARM64   | NEON (s0-31)    | NEON (d0-31)     | v0-v31 |
+| PPC64   | FPU (f0-31)     | FPU (f0-31)      | f0-f31 |
+
 ## Supported Targets
 
 | Architecture | OS      | ABI      | Endianness | Status |

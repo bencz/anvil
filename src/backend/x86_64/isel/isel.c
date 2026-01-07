@@ -143,6 +143,49 @@ static void emit_mod_power_of_2(AnvilISelContext* ctx, AnvilISelMatch* match, An
     match->inst->operands[1] = anvil_mop_imm(val - 1, match->inst->operands[1].size);
 }
 
+static bool match_mov_fp(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    (void)match;
+    if (inst->num_operands < 2) return false;
+    return inst->operands[0].is_fp && inst->operands[1].is_fp;
+}
+
+static void emit_mov_fp(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    if (match->inst->operands[0].size == 4) {
+        match->inst->kind = ANVIL_MIR_MOVSS;
+    } else {
+        match->inst->kind = ANVIL_MIR_MOVSD;
+    }
+}
+
+static bool match_call_indirect(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    (void)match;
+    if (inst->num_operands < 1) return false;
+    return inst->operands[0].kind == ANVIL_MOP_PREG || inst->operands[0].kind == ANVIL_MOP_VREG;
+}
+
+static void emit_call_indirect(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_CALL_INDIRECT;
+}
+
+static bool match_tail_call(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    (void)match;
+    if (inst->num_operands < 1) return false;
+    return inst->is_tail_call;
+}
+
+static void emit_tail_call(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_TAIL_CALL;
+}
+
 static const AnvilISelRule x86_64_rules[] = {
     { "mul_by_2", ANVIL_MIR_MUL, match_mul_by_2, emit_mul_by_2, NULL, 1 },
     { "mul_by_3_5_9", ANVIL_MIR_MUL, match_mul_by_3_5_9, emit_mul_by_3_5_9, NULL, 2 },
@@ -151,7 +194,10 @@ static const AnvilISelRule x86_64_rules[] = {
     { "mod_power_of_2", ANVIL_MIR_MOD, match_mod_power_of_2, emit_mod_power_of_2, NULL, 1 },
     { "add_to_lea", ANVIL_MIR_ADD, match_add_to_lea, emit_add_to_lea, NULL, 5 },
     { "mov_zero", ANVIL_MIR_MOV, match_mov_zero, emit_mov_zero, NULL, 1 },
+    { "mov_fp", ANVIL_MIR_MOV, match_mov_fp, emit_mov_fp, NULL, 10 },
     { "sub_neg_to_add", ANVIL_MIR_SUB, match_sub_to_neg, emit_sub_to_neg, NULL, 2 },
+    { "call_indirect", ANVIL_MIR_CALL, match_call_indirect, emit_call_indirect, NULL, 5 },
+    { "tail_call", ANVIL_MIR_CALL, match_tail_call, emit_tail_call, NULL, 10 },
 };
 
 const AnvilISelRuleSet x86_64_isel_ruleset = {

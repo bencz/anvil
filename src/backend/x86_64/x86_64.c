@@ -77,21 +77,49 @@ static void x86_64_regalloc(AnvilBackend* backend, AnvilMFunc* func, int os, con
         X86_64_RBX, X86_64_R12, X86_64_R13, X86_64_R14, X86_64_R15
     };
     
+    static const int available_fp_regs[] = {
+        X86_64_XMM0, X86_64_XMM1, X86_64_XMM2, X86_64_XMM3,
+        X86_64_XMM4, X86_64_XMM5, X86_64_XMM6, X86_64_XMM7,
+        X86_64_XMM8, X86_64_XMM9, X86_64_XMM10, X86_64_XMM11,
+        X86_64_XMM12, X86_64_XMM13, X86_64_XMM14, X86_64_XMM15
+    };
+    
     int param_prealloc[16];
     int num_prealloc = 0;
-    for (int i = 0; i < func->num_params && i < abi->num_arg_regs_int; i++) {
-        param_prealloc[num_prealloc++] = i + 1;
-        param_prealloc[num_prealloc++] = abi->arg_regs_int[i];
+    int fp_param_prealloc[16];
+    int num_fp_prealloc = 0;
+    
+    int int_idx = 0;
+    int fp_idx = 0;
+    for (int i = 0; i < func->num_params; i++) {
+        AnvilMOperand* param = (AnvilMOperand*)anvil_vec_get(&func->params, i);
+        if (param->is_fp) {
+            if (fp_idx < abi->num_arg_regs_float) {
+                fp_param_prealloc[num_fp_prealloc++] = param->vreg.id;
+                fp_param_prealloc[num_fp_prealloc++] = abi->arg_regs_float[fp_idx];
+            }
+            fp_idx++;
+        } else {
+            if (int_idx < abi->num_arg_regs_int) {
+                param_prealloc[num_prealloc++] = param->vreg.id;
+                param_prealloc[num_prealloc++] = abi->arg_regs_int[int_idx];
+            }
+            int_idx++;
+        }
     }
     
     AnvilRegAllocConfig config = {
         .available_regs = available_regs,
         .num_available_regs = sizeof(available_regs) / sizeof(available_regs[0]),
+        .available_fp_regs = available_fp_regs,
+        .num_available_fp_regs = sizeof(available_fp_regs) / sizeof(available_fp_regs[0]),
         .callee_saved = abi->callee_saved_regs,
         .num_callee_saved = abi->num_callee_saved,
         .stack_slot_size = 8,
         .prealloc = param_prealloc,
         .num_prealloc = num_prealloc / 2,
+        .prealloc_fp = fp_param_prealloc,
+        .num_prealloc_fp = num_fp_prealloc / 2,
     };
     
     AnvilRegAllocResult* result = anvil_regalloc_linear_scan(func, &config);
@@ -119,7 +147,45 @@ static void x86_64_schedule_instructions(AnvilBackend* backend, AnvilMBlock* blo
 
 static void x86_64_vectorize(AnvilBackend* backend, AnvilMFunc* func) {
     (void)backend;
-    (void)func;
+    if (!func) return;
+    
+    for (size_t bi = 0; bi < anvil_vec_len(&func->blocks); bi++) {
+        AnvilMBlock* block = *(AnvilMBlock**)anvil_vec_get(&func->blocks, bi);
+        if (!block) continue;
+        
+        AnvilMInst* fmul_start = NULL;
+        int consecutive_fmuls = 0;
+        AnvilMInst* fadd_start = NULL;
+        int consecutive_fadds = 0;
+        
+        for (AnvilMInst* inst = block->first; inst; inst = inst->next) {
+            if (inst->kind == ANVIL_MIR_FMUL && inst->operands[0].size == 8) {
+                if (consecutive_fmuls == 0) fmul_start = inst;
+                consecutive_fmuls++;
+                
+                if (consecutive_fmuls >= 2) {
+                    AnvilMInst* next = inst->next;
+                    if (next && next->kind == ANVIL_MIR_FADD && 
+                        next->operands[0].size == 8) {
+                    }
+                }
+            } else {
+                fmul_start = NULL;
+                consecutive_fmuls = 0;
+            }
+            
+            if (inst->kind == ANVIL_MIR_FADD && inst->operands[0].size == 8) {
+                if (consecutive_fadds == 0) fadd_start = inst;
+                consecutive_fadds++;
+            } else {
+                fadd_start = NULL;
+                consecutive_fadds = 0;
+            }
+        }
+        
+        (void)fmul_start;
+        (void)fadd_start;
+    }
 }
 
 static const char* x86_64_reg_name_for_size(AnvilBackend* backend, int reg_id, int size_bits) {

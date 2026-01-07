@@ -47,6 +47,9 @@ typedef enum AnvilMInstKind {
     
     ANVIL_MIR_CALL,
     ANVIL_MIR_CALL_INDIRECT,
+    ANVIL_MIR_CALL_PLT,
+    ANVIL_MIR_CALL_GOT,
+    ANVIL_MIR_TAIL_CALL,
     
     ANVIL_MIR_PUSH,
     ANVIL_MIR_POP,
@@ -101,6 +104,7 @@ typedef enum AnvilMOperandKind {
     ANVIL_MOP_VREG,
     ANVIL_MOP_PREG,
     ANVIL_MOP_IMM,
+    ANVIL_MOP_FIMM,
     ANVIL_MOP_MEM,
     ANVIL_MOP_LABEL,
     ANVIL_MOP_FUNC,
@@ -110,6 +114,7 @@ typedef enum AnvilMOperandKind {
 typedef struct AnvilMOperand {
     AnvilMOperandKind kind;
     int size;
+    bool is_fp;
     
     union {
         struct {
@@ -124,6 +129,10 @@ typedef struct AnvilMOperand {
         struct {
             int64_t value;
         } imm;
+        
+        struct {
+            double value;
+        } fimm;
         
         struct {
             int base_reg;
@@ -166,6 +175,7 @@ typedef struct AnvilMInst {
     
     bool is_variadic;
     int num_fixed_args;
+    bool is_tail_call;
     
     struct AnvilMFunc* func;
     
@@ -266,8 +276,11 @@ AnvilMInst* anvil_minst_label(AnvilArena* arena, const char* name);
 
 AnvilMOperand anvil_mop_none(void);
 AnvilMOperand anvil_mop_vreg(int id, int size);
+AnvilMOperand anvil_mop_vreg_fp(int id, int size);
 AnvilMOperand anvil_mop_preg(int id, int size);
+AnvilMOperand anvil_mop_preg_fp(int id, int size);
 AnvilMOperand anvil_mop_imm(int64_t value, int size);
+AnvilMOperand anvil_mop_fimm(double value, int size);
 AnvilMOperand anvil_mop_mem(int base, int64_t disp, int size);
 AnvilMOperand anvil_mop_mem_indexed(int base, int index, int scale, int64_t disp, int size);
 AnvilMOperand anvil_mop_label(const char* name, int id);

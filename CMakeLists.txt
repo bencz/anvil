@@ -111,6 +111,9 @@ if(ANVIL_BUILD_EXAMPLES)
     
     add_executable(isel_test examples/isel_test.c)
     target_link_libraries(isel_test anvil)
+    
+    add_executable(float_test examples/float_test.c)
+    target_link_libraries(float_test anvil)
 endif()
 
 if(ANVIL_BUILD_TESTS)

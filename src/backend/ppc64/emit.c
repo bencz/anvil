@@ -48,6 +48,9 @@ static void ppc64_emit_load_addr(AnvilAsmBuffer* out, const char* reg, const cha
 
 static const char* ppc64_get_reg(AnvilMOperand* op) {
     if (op->kind == ANVIL_MOP_PREG) {
+        if (op->is_fp) {
+            return ppc64_freg_name(op->preg.id);
+        }
         return ppc64_reg_name(op->preg.id);
     }
     return "r0";
@@ -99,6 +102,16 @@ void ppc64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
                 }
             } else if (inst->operands[1].kind == ANVIL_MOP_LABEL) {
                 ppc64_emit_load_addr(out, dst, inst->operands[1].label.name);
+            }
+            break;
+        }
+        
+        case ANVIL_MIR_MOVSS:
+        case ANVIL_MIR_MOVSD: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            if (strcmp(dst, src) != 0) {
+                anvil_asm_append(out, "\tfmr %s, %s\n", dst, src);
             }
             break;
         }
@@ -487,6 +500,92 @@ void ppc64_emit_instruction(AnvilBackend* backend, AnvilMInst* inst, AnvilAsmBuf
         }
             
         case ANVIL_MIR_TRUNC: {
+            break;
+        }
+            
+        case ANVIL_MIR_FADD: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            if (inst->operands[0].size == 4) {
+                anvil_asm_append(out, "\tfadds %s, %s, %s\n", dst, dst, src);
+            } else {
+                anvil_asm_append(out, "\tfadd %s, %s, %s\n", dst, dst, src);
+            }
+            break;
+        }
+            
+        case ANVIL_MIR_FSUB: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            if (inst->operands[0].size == 4) {
+                anvil_asm_append(out, "\tfsubs %s, %s, %s\n", dst, dst, src);
+            } else {
+                anvil_asm_append(out, "\tfsub %s, %s, %s\n", dst, dst, src);
+            }
+            break;
+        }
+            
+        case ANVIL_MIR_FMUL: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            if (inst->operands[0].size == 4) {
+                anvil_asm_append(out, "\tfmuls %s, %s, %s\n", dst, dst, src);
+            } else {
+                anvil_asm_append(out, "\tfmul %s, %s, %s\n", dst, dst, src);
+            }
+            break;
+        }
+            
+        case ANVIL_MIR_FDIV: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            if (inst->operands[0].size == 4) {
+                anvil_asm_append(out, "\tfdivs %s, %s, %s\n", dst, dst, src);
+            } else {
+                anvil_asm_append(out, "\tfdiv %s, %s, %s\n", dst, dst, src);
+            }
+            break;
+        }
+            
+        case ANVIL_MIR_FNEG: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            anvil_asm_append(out, "\tfneg %s, %s\n", dst, dst);
+            break;
+        }
+            
+        case ANVIL_MIR_FCMP: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\tfcmpu cr0, %s, %s\n", dst, src);
+            break;
+        }
+            
+        case ANVIL_MIR_CVTSI2SS:
+        case ANVIL_MIR_CVTSI2SD: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\t# cvtsi2s: store int, load float, convert\n");
+            anvil_asm_append(out, "\tstd %s, -8(r1)\n", src);
+            anvil_asm_append(out, "\tlfd %s, -8(r1)\n", dst);
+            anvil_asm_append(out, "\tfcfid %s, %s\n", dst, dst);
+            break;
+        }
+            
+        case ANVIL_MIR_CVTSS2SI:
+        case ANVIL_MIR_CVTSD2SI: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\tfctid %s, %s\n", dst, src);
+            anvil_asm_append(out, "\tstfd %s, -8(r1)\n", dst);
+            anvil_asm_append(out, "\tld %s, -8(r1)\n", dst);
+            break;
+        }
+            
+        case ANVIL_MIR_CVTSS2SD:
+        case ANVIL_MIR_CVTSD2SS: {
+            const char* dst = ppc64_get_reg(&inst->operands[0]);
+            const char* src = ppc64_get_reg(&inst->operands[1]);
+            anvil_asm_append(out, "\tfmr %s, %s\n", dst, src);
             break;
         }
             

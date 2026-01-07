@@ -9,6 +9,7 @@ typedef struct LiveInterval {
     int end;
     int preg;
     int spill_slot;
+    bool is_fp;
 } LiveInterval;
 
 static int compare_intervals(const void* a, const void* b) {
@@ -26,7 +27,20 @@ AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocC
         intervals[i].start = -1;
         intervals[i].end = -1;
         intervals[i].preg = -1;
+        intervals[i].is_fp = false;
         intervals[i].spill_slot = -1;
+    }
+    
+    for (int i = 0; i < func->num_params; i++) {
+        AnvilMOperand* param = (AnvilMOperand*)anvil_vec_get(&func->params, i);
+        if (param->kind == ANVIL_MOP_VREG) {
+            int vreg = param->vreg.id;
+            if (vreg >= 0 && vreg < max_vreg) {
+                intervals[vreg].start = 0;
+                intervals[vreg].end = 0;
+                intervals[vreg].is_fp = param->is_fp;
+            }
+        }
     }
     
     int inst_num = 0;
@@ -39,6 +53,7 @@ AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocC
                     if (vreg >= 0 && vreg < max_vreg) {
                         if (intervals[vreg].start < 0) intervals[vreg].start = inst_num;
                         intervals[vreg].end = inst_num;
+                        intervals[vreg].is_fp = inst->operands[i].is_fp;
                     }
                 }
             }
@@ -48,6 +63,7 @@ AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocC
                     if (vreg >= 0 && vreg < max_vreg) {
                         if (intervals[vreg].start < 0) intervals[vreg].start = inst_num;
                         intervals[vreg].end = inst_num;
+                        intervals[vreg].is_fp = inst->defs[i].is_fp;
                     }
                 }
             }
@@ -96,10 +112,61 @@ AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocC
         }
     }
     
+    int* fp_reg_end = NULL;
+    if (config->num_available_fp_regs > 0) {
+        fp_reg_end = (int*)malloc(sizeof(int) * config->num_available_fp_regs);
+        for (int i = 0; i < config->num_available_fp_regs; i++) {
+            fp_reg_end[i] = -1;
+        }
+    }
+    
+    for (int p = 0; p < config->num_prealloc_fp; p++) {
+        int vreg = config->prealloc_fp[p * 2];
+        int preg = config->prealloc_fp[p * 2 + 1];
+        for (int i = 0; i < num_live; i++) {
+            if (live_intervals[i].vreg == vreg && live_intervals[i].is_fp) {
+                live_intervals[i].preg = preg;
+                for (int r = 0; r < config->num_available_fp_regs; r++) {
+                    if (config->available_fp_regs[r] == preg) {
+                        if (fp_reg_end[r] < live_intervals[i].end) {
+                            fp_reg_end[r] = live_intervals[i].end;
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    
     for (int i = 0; i < num_live; i++) {
         LiveInterval* interval = &live_intervals[i];
         
         if (interval->preg >= 0) {
+            continue;
+        }
+        
+        if (interval->is_fp && config->num_available_fp_regs > 0) {
+            for (int r = 0; r < config->num_available_fp_regs; r++) {
+                if (fp_reg_end[r] >= 0 && fp_reg_end[r] < interval->start) {
+                    fp_reg_end[r] = -1;
+                }
+            }
+            
+            int best_reg = -1;
+            for (int r = 0; r < config->num_available_fp_regs; r++) {
+                if (fp_reg_end[r] < 0) {
+                    best_reg = r;
+                    break;
+                }
+            }
+            
+            if (best_reg >= 0) {
+                interval->preg = config->available_fp_regs[best_reg];
+                fp_reg_end[best_reg] = interval->end;
+            } else {
+                interval->spill_slot = next_spill++;
+            }
             continue;
         }
         
@@ -167,6 +234,7 @@ AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocC
     free(intervals);
     free(live_intervals);
     free(reg_end);
+    if (fp_reg_end) free(fp_reg_end);
     
     return result;
 }
@@ -175,8 +243,10 @@ static void replace_vreg_with_preg(AnvilMOperand* op, AnvilRegAllocResult* resul
     if (op->kind == ANVIL_MOP_VREG) {
         int vreg = op->vreg.id;
         if (vreg >= 0 && vreg < result->num_vregs && result->vreg_to_preg[vreg] >= 0) {
+            bool was_fp = op->is_fp;
             op->kind = ANVIL_MOP_PREG;
             op->preg.id = result->vreg_to_preg[vreg];
+            op->is_fp = was_fp;
         }
     }
 }

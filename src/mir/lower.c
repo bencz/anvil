@@ -18,8 +18,10 @@ static void ctx_init(AnvilLowerCtx* ctx, AnvilModule* mod) {
     anvil_hash_init(&ctx->value_map);
     anvil_hash_init(&ctx->block_map);
     ctx->next_vreg = 1;
+    ctx->next_vreg_fp = 1;
     ctx->abi = NULL;
     ctx->ret_reg_int = 0;
+    ctx->ret_reg_fp = 0;
 }
 
 static void ctx_free(AnvilLowerCtx* ctx) {
@@ -29,6 +31,10 @@ static void ctx_free(AnvilLowerCtx* ctx) {
 
 static void emit(AnvilLowerCtx* ctx, AnvilMInst* inst) {
     anvil_mblock_append(ctx->current_block, inst);
+}
+
+static bool is_fp_type(AnvilType* type) {
+    return type && (type->kind == ANVIL_TYPE_F32 || type->kind == ANVIL_TYPE_F64);
 }
 
 int anvil_lower_value(AnvilLowerCtx* ctx, AnvilValue* val) {
@@ -52,10 +58,9 @@ int anvil_lower_value(AnvilLowerCtx* ctx, AnvilValue* val) {
         emit(ctx, mov);
     } else if (val->kind == ANVIL_VALUE_CONST_FLOAT) {
         int size = get_type_size(val->type);
-        AnvilMOperand dst = anvil_mop_vreg(vreg, size);
-        union { double d; int64_t i; } u;
-        u.d = val->f64;
-        AnvilMInst* mov = anvil_minst_mov_imm(ctx->arena, dst, u.i, size);
+        AnvilMOperand dst = anvil_mop_vreg_fp(vreg, size);
+        AnvilMInst* mov = anvil_minst_mov_imm(ctx->arena, dst, 0, size);
+        mov->operands[0].is_fp = true;
         emit(ctx, mov);
     }
     
@@ -66,13 +71,14 @@ AnvilMOperand anvil_lower_to_operand(AnvilLowerCtx* ctx, AnvilValue* val) {
     if (!val) return anvil_mop_none();
     
     int size = get_type_size(val->type);
+    bool is_fp = is_fp_type(val->type);
     
     if (anvil_value_is_const_int(val)) {
         return anvil_mop_imm(val->i64, size);
     }
     
     int vreg = anvil_lower_value(ctx, val);
-    return anvil_mop_vreg(vreg, size);
+    return is_fp ? anvil_mop_vreg_fp(vreg, size) : anvil_mop_vreg(vreg, size);
 }
 
 static AnvilCondCode inst_to_cc(AnvilInstKind kind, bool is_signed) {
@@ -135,6 +141,54 @@ void anvil_lower_inst(AnvilLowerCtx* ctx, AnvilInst* inst) {
             break;
         }
         
+        case ANVIL_INST_FADD:
+        case ANVIL_INST_FSUB:
+        case ANVIL_INST_FMUL:
+        case ANVIL_INST_FDIV: {
+            switch (inst->kind) {
+                case ANVIL_INST_FADD: mir_kind = ANVIL_MIR_FADD; break;
+                case ANVIL_INST_FSUB: mir_kind = ANVIL_MIR_FSUB; break;
+                case ANVIL_INST_FMUL: mir_kind = ANVIL_MIR_FMUL; break;
+                case ANVIL_INST_FDIV: mir_kind = ANVIL_MIR_FDIV; break;
+                default: mir_kind = ANVIL_MIR_NOP; break;
+            }
+            
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand lhs = anvil_lower_to_operand(ctx, inst->operands[0]);
+            AnvilMOperand rhs = anvil_lower_to_operand(ctx, inst->operands[1]);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            
+            AnvilMInst* mov = anvil_minst_mov(ctx->arena, dst, lhs);
+            mov->operands[0].is_fp = true;
+            mov->operands[1].is_fp = true;
+            emit(ctx, mov);
+            
+            AnvilMInst* op = anvil_minst_binary(ctx->arena, mir_kind, dst, rhs);
+            op->operands[0].is_fp = true;
+            op->operands[1].is_fp = true;
+            emit(ctx, op);
+            break;
+        }
+        
+        case ANVIL_INST_FNEG: {
+            mir_kind = ANVIL_MIR_FNEG;
+            int dst_vreg = anvil_lower_value(ctx, inst->result);
+            AnvilMOperand src = anvil_lower_to_operand(ctx, inst->operands[0]);
+            int size = get_type_size(inst->result->type);
+            AnvilMOperand dst = anvil_mop_vreg_fp(dst_vreg, size);
+            
+            AnvilMInst* mov = anvil_minst_mov(ctx->arena, dst, src);
+            mov->operands[0].is_fp = true;
+            mov->operands[1].is_fp = true;
+            emit(ctx, mov);
+            
+            AnvilMInst* op = anvil_minst_unary(ctx->arena, mir_kind, dst);
+            op->operands[0].is_fp = true;
+            emit(ctx, op);
+            break;
+        }
+        
         case ANVIL_INST_NEG:
         case ANVIL_INST_NOT: {
             mir_kind = inst->kind == ANVIL_INST_NEG ? ANVIL_MIR_NEG : ANVIL_MIR_NOT;
@@ -192,14 +246,17 @@ void anvil_lower_inst(AnvilLowerCtx* ctx, AnvilInst* inst) {
         case ANVIL_INST_LOAD: {
             int dst_vreg = anvil_lower_value(ctx, inst->result);
             int size = get_type_size(inst->result->type);
-            AnvilMOperand dst = anvil_mop_vreg(dst_vreg, size);
+            bool load_is_fp = is_fp_type(inst->result->type);
+            AnvilMOperand dst = load_is_fp ? anvil_mop_vreg_fp(dst_vreg, size) : anvil_mop_vreg(dst_vreg, size);
             
             AnvilValue* src_val = inst->operands[0];
             if (src_val && (src_val->kind == ANVIL_VALUE_PARAM || 
                            (src_val->kind == ANVIL_VALUE_VAR && src_val->var.is_param))) {
                 int src_vreg = anvil_lower_value(ctx, src_val);
-                AnvilMOperand src = anvil_mop_vreg(src_vreg, size);
+                AnvilMOperand src = load_is_fp ? anvil_mop_vreg_fp(src_vreg, size) : anvil_mop_vreg(src_vreg, size);
                 AnvilMInst* mov = anvil_minst_mov(ctx->arena, dst, src);
+                mov->operands[0].is_fp = load_is_fp;
+                mov->operands[1].is_fp = load_is_fp;
                 emit(ctx, mov);
             } else {
                 int src_vreg = anvil_lower_value(ctx, src_val);
@@ -280,10 +337,20 @@ void anvil_lower_inst(AnvilLowerCtx* ctx, AnvilInst* inst) {
             if (inst->operands[0]) {
                 AnvilMOperand val = anvil_lower_to_operand(ctx, inst->operands[0]);
                 int size = get_type_size(inst->operands[0]->type);
-                int ret_preg = ctx->ret_reg_int;
-                AnvilMOperand ret_reg = anvil_mop_preg(ret_preg, size);
+                bool ret_is_fp = is_fp_type(inst->operands[0]->type);
+                
+                AnvilMOperand ret_reg;
+                if (ret_is_fp && ctx->ret_reg_fp >= 0) {
+                    ret_reg = anvil_mop_preg_fp(ctx->ret_reg_fp, size);
+                } else {
+                    ret_reg = anvil_mop_preg(ctx->ret_reg_int, size);
+                }
                 
                 AnvilMInst* mov = anvil_minst_mov(ctx->arena, ret_reg, val);
+                if (ret_is_fp) {
+                    mov->operands[0].is_fp = true;
+                    mov->operands[1].is_fp = true;
+                }
                 emit(ctx, mov);
             }
             emit(ctx, anvil_minst_ret(ctx->arena));
@@ -396,19 +463,22 @@ void anvil_lower_func(AnvilLowerCtx* ctx, AnvilFunc* func) {
     for (size_t i = 0; i < anvil_vec_len(&func->params); i++) {
         AnvilVar** var = (AnvilVar**)anvil_vec_get(&func->params, i);
         int size = get_type_size((*var)->type);
+        bool param_is_fp = is_fp_type((*var)->type);
+        
+        int vreg_id = ctx->next_vreg++;
         
         char key[32];
         snprintf(key, sizeof(key), "v%u", (*var)->value->id);
         anvil_hash_insert(&ctx->value_map, anvil_arena_strdup(ctx->arena, key), 
-                          (void*)(intptr_t)(i + 1));
+                          (void*)(intptr_t)vreg_id);
         
         AnvilMOperand* param = (AnvilMOperand*)anvil_vec_push(&ctx->current_func->params);
-        *param = anvil_mop_vreg((int)i + 1, size);
-        ctx->current_func->num_params++;
-        
-        if ((int)i + 1 >= ctx->next_vreg) {
-            ctx->next_vreg = (int)i + 2;
+        if (param_is_fp) {
+            *param = anvil_mop_vreg_fp(vreg_id, size);
+        } else {
+            *param = anvil_mop_vreg(vreg_id, size);
         }
+        ctx->current_func->num_params++;
     }
     
     ctx->current_block = ctx->current_func->entry;
@@ -437,6 +507,7 @@ AnvilMIR* anvil_lower_module_with_abi(AnvilModule* mod, const struct AnvilABI* a
     if (abi) {
         ctx.abi = abi;
         ctx.ret_reg_int = abi->ret_reg_int_lo;
+        ctx.ret_reg_fp = abi->ret_reg_float;
     }
     
     for (AnvilFunc* func = mod->first_func; func; func = func->next) {

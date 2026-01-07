@@ -46,6 +46,26 @@ AnvilValue* anvil_build_neg(AnvilFunc* fn, AnvilValue* val) {
     return build_unary(fn, ANVIL_INST_NEG, val);
 }
 
+AnvilValue* anvil_build_fadd(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return build_binary(fn, ANVIL_INST_FADD, lhs, rhs);
+}
+
+AnvilValue* anvil_build_fsub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return build_binary(fn, ANVIL_INST_FSUB, lhs, rhs);
+}
+
+AnvilValue* anvil_build_fmul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return build_binary(fn, ANVIL_INST_FMUL, lhs, rhs);
+}
+
+AnvilValue* anvil_build_fdiv(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return build_binary(fn, ANVIL_INST_FDIV, lhs, rhs);
+}
+
+AnvilValue* anvil_build_fneg(AnvilFunc* fn, AnvilValue* val) {
+    return build_unary(fn, ANVIL_INST_FNEG, val);
+}
+
 AnvilValue* anvil_build_and(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
     return build_binary(fn, ANVIL_INST_AND, lhs, rhs);
 }

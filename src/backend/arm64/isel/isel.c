@@ -99,12 +99,26 @@ static void emit_mul_by_neg_1(AnvilISelContext* ctx, AnvilISelMatch* match, Anvi
     match->inst->num_operands = 1;
 }
 
+static bool match_mov_fp(AnvilISelContext* ctx, AnvilMInst* inst, AnvilISelMatch* match) {
+    (void)ctx;
+    (void)match;
+    if (inst->num_operands < 2) return false;
+    return inst->operands[0].is_fp && inst->operands[1].is_fp;
+}
+
+static void emit_mov_fp(AnvilISelContext* ctx, AnvilISelMatch* match, AnvilVec* output) {
+    (void)ctx;
+    (void)output;
+    match->inst->kind = ANVIL_MIR_MOVSD;
+}
+
 static const AnvilISelRule arm64_rules[] = {
     { "mul_power_of_2", ANVIL_MIR_MUL, match_mul_power_of_2, emit_mul_power_of_2, NULL, 1 },
     { "mul_by_neg_1", ANVIL_MIR_MUL, match_mul_by_neg_1, emit_mul_by_neg_1, NULL, 1 },
     { "div_power_of_2", ANVIL_MIR_DIV, match_div_power_of_2, emit_div_power_of_2, NULL, 1 },
     { "mod_power_of_2", ANVIL_MIR_MOD, match_mod_power_of_2, emit_mod_power_of_2, NULL, 1 },
     { "mov_zero", ANVIL_MIR_MOV, match_mov_zero, emit_mov_zero, NULL, 1 },
+    { "mov_fp", ANVIL_MIR_MOV, match_mov_fp, emit_mov_fp, NULL, 10 },
     { "sub_neg_to_add", ANVIL_MIR_SUB, match_sub_neg_to_add, emit_sub_neg_to_add, NULL, 2 },
 };
 

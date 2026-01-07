@@ -211,3 +211,18 @@ ANVIL automatically optimizes common patterns:
 | `x * 8` | `x << 3` |
 | `x / 4` | `x >> 2` (unsigned) |
 | `x % 16` | `x & 15` |
+
+## Floating Point Support
+
+All backends support floating point operations:
+
+| Operation | x86_64 | ARM64 | PPC64 |
+|-----------|--------|-------|-------|
+| `fadd` | addss/addsd | fadd | fadds/fadd |
+| `fsub` | subss/subsd | fsub | fsubs/fsub |
+| `fmul` | mulss/mulsd | fmul | fmuls/fmul |
+| `fdiv` | divss/divsd | fdiv | fdivs/fdiv |
+| `fneg` | xorps | fneg | fneg |
+| `fcmp` | ucomiss/ucomisd | fcmp | fcmpu |
+| `cvtsi2ss/sd` | cvtsi2ss/sd | scvtf | fcfid |
+| `cvtss/sd2si` | cvtss/sd2si | fcvtzs | fctid |

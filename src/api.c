@@ -128,6 +128,26 @@ AnvilValue* anvil_neg(AnvilFunc* fn, AnvilValue* val) {
     return anvil_build_neg(fn, val);
 }
 
+AnvilValue* anvil_fadd(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return anvil_build_fadd(fn, lhs, rhs);
+}
+
+AnvilValue* anvil_fsub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return anvil_build_fsub(fn, lhs, rhs);
+}
+
+AnvilValue* anvil_fmul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return anvil_build_fmul(fn, lhs, rhs);
+}
+
+AnvilValue* anvil_fdiv(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
+    return anvil_build_fdiv(fn, lhs, rhs);
+}
+
+AnvilValue* anvil_fneg(AnvilFunc* fn, AnvilValue* val) {
+    return anvil_build_fneg(fn, val);
+}
+
 AnvilValue* anvil_and(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs) {
     return anvil_build_and(fn, lhs, rhs);
 }

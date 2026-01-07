@@ -16,6 +16,12 @@ AnvilValue* anvil_build_div(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_build_mod(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_build_neg(AnvilFunc* fn, AnvilValue* val);
 
+AnvilValue* anvil_build_fadd(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_build_fsub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_build_fmul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_build_fdiv(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_build_fneg(AnvilFunc* fn, AnvilValue* val);
+
 AnvilValue* anvil_build_and(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_build_or(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_build_xor(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);

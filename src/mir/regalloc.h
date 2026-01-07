@@ -18,11 +18,15 @@ typedef struct AnvilRegAllocResult {
 typedef struct AnvilRegAllocConfig {
     const int* available_regs;
     int num_available_regs;
+    const int* available_fp_regs;
+    int num_available_fp_regs;
     const int* callee_saved;
     int num_callee_saved;
     int stack_slot_size;
     const int* prealloc;
     int num_prealloc;
+    const int* prealloc_fp;
+    int num_prealloc_fp;
 } AnvilRegAllocConfig;
 
 AnvilRegAllocResult* anvil_regalloc_linear_scan(AnvilMFunc* func, AnvilRegAllocConfig* config);

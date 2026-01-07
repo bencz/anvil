@@ -34,18 +34,18 @@ AnvilValue* anvil_const_f64(AnvilFunc* fn, double val);
 AnvilValue* anvil_const_null(AnvilFunc* fn, AnvilType* ptr_type);
 AnvilValue* anvil_const_string(AnvilModule* mod, const char* str);
 
-AnvilValue* anvil_fadd(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
-AnvilValue* anvil_fsub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
-AnvilValue* anvil_fmul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
-AnvilValue* anvil_fdiv(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
-AnvilValue* anvil_fneg(AnvilFunc* fn, AnvilValue* val);
-
 AnvilValue* anvil_add(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_sub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_mul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_div(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_mod(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_neg(AnvilFunc* fn, AnvilValue* val);
+
+AnvilValue* anvil_fadd(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_fsub(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_fmul(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_fdiv(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
+AnvilValue* anvil_fneg(AnvilFunc* fn, AnvilValue* val);
 
 AnvilValue* anvil_and(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);
 AnvilValue* anvil_or(AnvilFunc* fn, AnvilValue* lhs, AnvilValue* rhs);

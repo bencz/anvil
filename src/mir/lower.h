@@ -22,9 +22,11 @@ typedef struct AnvilLowerCtx {
     AnvilHash block_map;
     
     int next_vreg;
+    int next_vreg_fp;
     
     const struct AnvilABI* abi;
     int ret_reg_int;
+    int ret_reg_fp;
 } AnvilLowerCtx;
 
 AnvilMIR* anvil_lower_module(AnvilModule* mod);
