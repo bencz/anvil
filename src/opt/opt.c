@@ -12,11 +12,30 @@ struct anvil_pass_manager {
     anvil_ctx_t *ctx;
     anvil_opt_level_t level;
     bool enabled[ANVIL_PASS_COUNT];
-    
+
     /* Custom passes */
     anvil_pass_info_t *custom_passes;
     size_t num_custom;
     size_t cap_custom;
+};
+
+/* Execution order of the built-in passes. The order here is independent of
+ * the enum values — run passes that expose opportunities first and let DCE
+ * sweep up at the end of each fixpoint iteration. Without this explicit
+ * ordering the passes ran alphabetically by enum, which meant strength
+ * reduction ran before copy propagation and missed pow-of-2 simplifications,
+ * and the dead-code sweep ran before the passes that create NOPs. */
+static const int pass_exec_order[ANVIL_PASS_COUNT] = {
+    ANVIL_PASS_COPY_PROP,          /* 1. Propagate copies — exposes constants */
+    ANVIL_PASS_CONST_FOLD,         /* 2. Fold with freshly propagated constants */
+    ANVIL_PASS_COMMON_SUBEXPR,     /* 3. CSE exposes further dead/copy patterns */
+    ANVIL_PASS_STRENGTH_REDUCE,    /* 4. Strength reduction sees post-fold consts */
+    ANVIL_PASS_STORE_LOAD_PROP,    /* 5. Memory passes — do them together */
+    ANVIL_PASS_DEAD_STORE,
+    ANVIL_PASS_LOAD_ELIM,
+    ANVIL_PASS_LOOP_UNROLL,        /* 6. (disabled — run=NULL) */
+    ANVIL_PASS_SIMPLIFY_CFG,       /* 7. Clean up CFG after the rewrites */
+    ANVIL_PASS_DCE,                /* 8. DCE mops up everything NOP'd above */
 };
 
 /* Built-in pass definitions
@@ -179,8 +198,9 @@ bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func)
     do {
         any_changed = false;
         
-        /* Run built-in passes */
-        for (int i = 0; i < ANVIL_PASS_COUNT; i++) {
+        /* Run built-in passes in the explicit ordering above. */
+        for (int idx = 0; idx < ANVIL_PASS_COUNT; idx++) {
+            int i = pass_exec_order[idx];
             if (pm->enabled[i] && builtin_passes[i].run) {
                 if (builtin_passes[i].run(func)) {
                     any_changed = true;

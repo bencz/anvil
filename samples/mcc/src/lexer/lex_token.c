@@ -75,6 +75,8 @@ static const char *token_names[] = {
     [TOK_BOOL]          = "bool",
     [TOK_STATIC_ASSERT] = "static_assert",
     [TOK_THREAD_LOCAL]  = "thread_local",
+    [TOK_ATTRIBUTE]     = "__attribute__",
+    [TOK_ASM]           = "asm",
     
     [TOK_PLUS]          = "+",
     [TOK_MINUS]         = "-",

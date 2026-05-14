@@ -141,12 +141,19 @@ static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void 
     int exponent;
     
     switch (op) {
-        case BINOP_MUL:
-            /* x * 2^n -> x << n */
+        case BINOP_MUL: {
+            /* x * 2^n -> x << n. Left-shift of a signed value that would
+             * overflow is undefined behaviour in C (C99 §6.5.7), so we only
+             * do this when the operand or the result type is unsigned. */
+            bool is_unsigned = is_unsigned_expr(lhs) || is_unsigned_expr(rhs);
+            if (!is_unsigned && node->type) {
+                is_unsigned = node->type->is_unsigned;
+            }
+            if (!is_unsigned) break;
+
             if (rhs->kind == AST_INT_LIT) {
                 const_val = rhs->data.int_lit.value;
                 if (is_power_of_2(const_val, &exponent)) {
-                    /* Transform to left shift */
                     node->data.binary_expr.op = BINOP_LSHIFT;
                     rhs->data.int_lit.value = exponent;
                     srd->changes++;
@@ -156,7 +163,6 @@ static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void 
             else if (lhs->kind == AST_INT_LIT) {
                 const_val = lhs->data.int_lit.value;
                 if (is_power_of_2(const_val, &exponent)) {
-                    /* Swap and transform to left shift */
                     node->data.binary_expr.lhs = rhs;
                     node->data.binary_expr.rhs = lhs;
                     node->data.binary_expr.op = BINOP_LSHIFT;
@@ -165,6 +171,7 @@ static bool strength_red_visitor(mcc_ast_opt_t *opt, mcc_ast_node_t *node, void 
                 }
             }
             break;
+        }
             
         case BINOP_DIV:
             /* x / 2^n -> x >> n (only for unsigned) */

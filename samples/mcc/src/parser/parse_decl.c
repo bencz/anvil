@@ -95,148 +95,6 @@ mcc_ast_node_t *parse_initializer(mcc_parser_t *p)
  * Function Declaration/Definition
  * ============================================================ */
 
-mcc_ast_node_t *parse_function_decl(mcc_parser_t *p, mcc_type_t *base_type,
-                                     const char *name, mcc_storage_class_t storage,
-                                     mcc_location_t loc)
-{
-    parse_advance(p); /* consume '(' */
-    
-    /* Parse parameters */
-    mcc_ast_node_t **params = NULL;
-    size_t num_params = 0;
-    size_t cap_params = 0;
-    bool is_variadic = false;
-    
-    if (!parse_check(p, TOK_RPAREN)) {
-        /* Check for void parameter */
-        if (parse_check(p, TOK_VOID)) {
-            mcc_token_t *void_tok = p->peek;
-            parse_advance(p);
-            if (parse_check(p, TOK_RPAREN)) {
-                /* void means no parameters */
-                goto end_params;
-            } else {
-                /* void* or similar - need to handle as type */
-                /* Put back and parse as regular parameter */
-                /* This is a simplification - proper handling would need lookahead */
-                mcc_type_t *param_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                param_type->kind = TYPE_VOID;
-                
-                /* Parse pointer */
-                while (parse_match(p, TOK_STAR)) {
-                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    ptr->kind = TYPE_POINTER;
-                    ptr->data.pointer.pointee = param_type;
-                    param_type = ptr;
-                }
-                
-                const char *param_name = NULL;
-                if (parse_check(p, TOK_IDENT)) {
-                    param_name = mcc_strdup(p->ctx, p->peek->text);
-                    parse_advance(p);
-                }
-                
-                mcc_ast_node_t *param = mcc_ast_create(p->ctx, AST_PARAM_DECL, void_tok->location);
-                param->data.param_decl.name = param_name;
-                param->data.param_decl.param_type = param_type;
-                
-                if (num_params >= cap_params) {
-                    cap_params = cap_params ? cap_params * 2 : 4;
-                    params = mcc_realloc(p->ctx, params,
-                                         num_params * sizeof(mcc_ast_node_t*),
-                                         cap_params * sizeof(mcc_ast_node_t*));
-                }
-                params[num_params++] = param;
-                
-                if (!parse_match(p, TOK_COMMA)) {
-                    goto end_params;
-                }
-            }
-        }
-        
-        do {
-            /* Check for ellipsis */
-            if (parse_match(p, TOK_ELLIPSIS)) {
-                is_variadic = true;
-                break;
-            }
-            
-            mcc_type_t *param_type = parse_type_specifier(p);
-            const char *param_name = NULL;
-            
-            if (parse_check(p, TOK_IDENT)) {
-                param_name = mcc_strdup(p->ctx, p->peek->text);
-                parse_advance(p);
-            }
-            
-            /* Parse array brackets (decay to pointer) */
-            while (parse_match(p, TOK_LBRACKET)) {
-                /* C99: VLA in parameter */
-                if (parse_check(p, TOK_STAR)) {
-                    if (!parse_has_vla(p)) {
-                        mcc_warning_at(p->ctx, p->peek->location,
-                            "variable length arrays are a C99 extension");
-                    }
-                    parse_advance(p);
-                } else if (!parse_check(p, TOK_RBRACKET)) {
-                    parse_expression(p);
-                }
-                parse_expect(p, TOK_RBRACKET, "]");
-                
-                /* Array decays to pointer in parameter */
-                mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                ptr->kind = TYPE_POINTER;
-                ptr->data.pointer.pointee = param_type;
-                param_type = ptr;
-            }
-            
-            mcc_ast_node_t *param = mcc_ast_create(p->ctx, AST_PARAM_DECL, loc);
-            param->data.param_decl.name = param_name;
-            param->data.param_decl.param_type = param_type;
-            
-            if (num_params >= cap_params) {
-                cap_params = cap_params ? cap_params * 2 : 4;
-                params = mcc_realloc(p->ctx, params,
-                                     num_params * sizeof(mcc_ast_node_t*),
-                                     cap_params * sizeof(mcc_ast_node_t*));
-            }
-            params[num_params++] = param;
-            
-        } while (parse_match(p, TOK_COMMA) && !parse_check(p, TOK_ELLIPSIS));
-        
-        /* Check for trailing ellipsis */
-        if (parse_match(p, TOK_ELLIPSIS)) {
-            is_variadic = true;
-        }
-    }
-    
-end_params:
-    parse_expect(p, TOK_RPAREN, ")");
-    
-    /* Check for function body or declaration */
-    mcc_ast_node_t *body = NULL;
-    bool is_definition = false;
-    
-    if (parse_check(p, TOK_LBRACE)) {
-        body = parse_compound_stmt(p);
-        is_definition = true;
-    } else {
-        parse_expect(p, TOK_SEMICOLON, ";");
-    }
-    
-    mcc_ast_node_t *func = mcc_ast_create(p->ctx, AST_FUNC_DECL, loc);
-    func->data.func_decl.name = name;
-    func->data.func_decl.func_type = base_type;
-    func->data.func_decl.params = params;
-    func->data.func_decl.num_params = num_params;
-    func->data.func_decl.body = body;
-    func->data.func_decl.is_definition = is_definition;
-    func->data.func_decl.is_static = (storage == STORAGE_STATIC);
-    func->data.func_decl.is_variadic = is_variadic;
-    func->data.func_decl.is_inline = base_type->is_inline;
-    func->data.func_decl.is_noreturn = base_type->is_noreturn;
-    return func;
-}
 
 /* ============================================================
  * Variable Declaration
@@ -264,13 +122,15 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
     
     /* Handle typedef - register the name */
     if (is_typedef) {
-        /* Register first typedef name */
+        /* Register first typedef name at the current block depth so it can
+         * be popped when the enclosing block closes. */
         mcc_typedef_entry_t *entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
         entry->name = name;
         entry->type = decl_type;
+        entry->depth = p->typedef_depth;
         entry->next = p->typedefs;
         p->typedefs = entry;
-        
+
         /* Handle multiple typedef names: typedef int A, *B, **C; */
         while (parse_match(p, TOK_COMMA)) {
             /* Parse the next declarator - need to get base type from original */
@@ -282,12 +142,13 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
             while (base && base->kind == TYPE_ARRAY) {
                 base = base->data.array.element;
             }
-            
+
             parse_declarator_result_t next_decl = parse_declarator(p, base, false);
             if (next_decl.name) {
                 mcc_typedef_entry_t *next_entry = mcc_alloc(p->ctx, sizeof(mcc_typedef_entry_t));
                 next_entry->name = next_decl.name;
                 next_entry->type = next_decl.type;
+                next_entry->depth = p->typedef_depth;
                 next_entry->next = p->typedefs;
                 p->typedefs = next_entry;
             }
@@ -302,11 +163,18 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
         return td;
     }
     
+    /* GNU: asm label and/or trailing attributes before initializer. */
+    parse_gnu_asm_label(p);
+    parse_gnu_attributes(p);
+
     /* Parse initializer for variable */
     mcc_ast_node_t *init = NULL;
     if (parse_match(p, TOK_ASSIGN)) {
         init = parse_initializer(p);
     }
+
+    /* GNU attributes can also appear after the initializer. */
+    parse_gnu_attributes(p);
     
     /* Create first variable declaration */
     mcc_ast_node_t *var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
@@ -347,14 +215,19 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
     
     /* Parse additional declarations */
     while (parse_match(p, TOK_COMMA)) {
+        /* GNU attributes can precede each declarator too. */
+        parse_gnu_attributes(p);
         /* Parse next declarator */
         parse_declarator_result_t next_decl = parse_declarator(p, base, false);
-        
+        parse_gnu_asm_label(p);
+        parse_gnu_attributes(p);
+
         /* Parse initializer for this variable */
         mcc_ast_node_t *next_init = NULL;
         if (parse_match(p, TOK_ASSIGN)) {
             next_init = parse_initializer(p);
         }
+        parse_gnu_attributes(p);
         
         /* Create variable declaration node */
         mcc_ast_node_t *next_var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
@@ -466,9 +339,16 @@ static void parse_skip_attributes(mcc_parser_t *p)
 mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
 {
     mcc_location_t loc = p->peek->location;
-    
+
+    /* GNU: consume any leading __attribute__((...)) — tolerant, currently a no-op */
+    parse_gnu_attributes(p);
+
     /* C23: Parse attributes [[...]] */
     mcc_attribute_t *attrs = parse_attributes(p);
+
+    /* GNU attributes can also appear between the C23 attribute list and
+     * the declaration specifiers. */
+    parse_gnu_attributes(p);
     
     /* C11: _Static_assert */
     if (parse_check(p, TOK__STATIC_ASSERT) || parse_check(p, TOK_STATIC_ASSERT)) {
@@ -646,13 +526,18 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     parse_declarator_result_t decl_result = parse_declarator(p, base_type, false);
     const char *name = decl_result.name;
     mcc_type_t *decl_type = decl_result.type;
-    
+
+    /* GNU: declarator may be followed by __attribute__((...)) and/or
+     * asm("label") — consume and ignore tolerantly. */
+    parse_gnu_asm_label(p);
+    parse_gnu_attributes(p);
+
     /* Check if this is a function type (function declaration/definition) */
     if (decl_type->kind == TYPE_FUNCTION) {
         /* Function declaration - body may follow */
         mcc_ast_node_t *body = NULL;
         bool is_definition = false;
-        
+
         if (parse_check(p, TOK_LBRACE)) {
             body = parse_compound_stmt(p);
             is_definition = true;

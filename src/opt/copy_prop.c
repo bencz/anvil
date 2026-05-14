@@ -17,6 +17,7 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,25 +68,6 @@ static anvil_value_t *get_copy_source(anvil_instr_t *instr)
     return instr->operands[0];
 }
 
-/* Replace all uses of old_val with new_val in the function */
-static int replace_uses(anvil_func_t *func, anvil_value_t *old_val, anvil_value_t *new_val)
-{
-    int count = 0;
-    
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
-        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            for (size_t i = 0; i < instr->num_operands; i++) {
-                if (instr->operands[i] == old_val) {
-                    instr->operands[i] = new_val;
-                    count++;
-                }
-            }
-        }
-    }
-    
-    return count;
-}
-
 /* Main copy propagation pass */
 bool anvil_pass_copy_prop(anvil_func_t *func)
 {
@@ -105,7 +87,7 @@ bool anvil_pass_copy_prop(anvil_func_t *func)
             if (src == dst) continue;  /* Self-copy, skip */
             
             /* Replace all uses of dst with src */
-            int replaced = replace_uses(func, dst, src);
+            int replaced = anvil_opt_replace_uses_in_func(func, dst, src);
             if (replaced > 0) {
                 changed = true;
             }

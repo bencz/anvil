@@ -104,7 +104,12 @@ struct mcc_type {
             size_t length;      /* 0 for incomplete array */
             bool is_vla;        /* Variable length array (C99) */
             bool is_flexible;   /* Flexible array member (C99) */
+            /* For VLAs, the codegen needs the runtime expression to pass
+             * as `count` to anvil_build_alloca_dyn. Null for non-VLAs. */
+            struct mcc_ast_node *length_expr;
         } array;
+        /* Union-fields below. Anything that needs a per-mcc_type cache
+         * (e.g., the codegen's Anvil type) lives here to avoid recomputing. */
         
         /* Function type */
         struct {
@@ -140,6 +145,11 @@ struct mcc_type {
     
     /* For type caching */
     struct mcc_type *next;
+
+    /* Codegen-side cache: the Anvil type derived from this mcc_type_t.
+     * Opaque to the type system; only codegen_type() populates/reads it.
+     * Avoids recomputing struct field layouts on every access. */
+    void *anvil_cached;
 };
 
 /* Type context for caching */

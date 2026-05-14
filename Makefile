@@ -22,6 +22,7 @@ LIB_PATH = $(LIB_DIR)/$(LIB_NAME)
 # Source files
 CORE_SRCS = \
 	$(SRC_DIR)/core/context.c \
+	$(SRC_DIR)/core/cpu_table.c \
 	$(SRC_DIR)/core/types.c \
 	$(SRC_DIR)/core/module.c \
 	$(SRC_DIR)/core/function.c \
@@ -29,7 +30,6 @@ CORE_SRCS = \
 	$(SRC_DIR)/core/builder.c \
 	$(SRC_DIR)/core/strbuf.c \
 	$(SRC_DIR)/core/backend.c \
-	$(SRC_DIR)/core/memory.c \
 	$(SRC_DIR)/core/ir_dump.c
 
 BACKEND_SRCS = \
@@ -49,10 +49,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/arm64/arm64_emit.c \
 	$(SRC_DIR)/backend/arm64/opt/arm64_opt.c \
 	$(SRC_DIR)/backend/arm64/opt/arm64_peephole.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_dead_store.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_load_elim.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_branch.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_immediate.c
+	$(SRC_DIR)/backend/arm64/opt/arm64_branch.c
 
 OPT_SRCS = \
 	$(SRC_DIR)/opt/opt.c \
@@ -64,7 +61,6 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/dead_store.c \
 	$(SRC_DIR)/opt/load_elim.c \
 	$(SRC_DIR)/opt/cse.c \
-	$(SRC_DIR)/opt/loop_unroll.c \
 	$(SRC_DIR)/opt/ctx_opt.c \
 	$(SRC_DIR)/opt/store_load_prop.c
 

@@ -259,24 +259,33 @@ static void pp_process_undef(mcc_preprocessor_t *pp)
     pp_skip_line(pp);
 }
 
-/* Process #error directive */
-static void pp_process_error(mcc_preprocessor_t *pp, mcc_location_t loc)
+/* Collect the rest of the current line into `buf` (space-separated tokens).
+ * Shared by #error and #warning so the two directives stay in sync. */
+static size_t pp_collect_line_message(mcc_preprocessor_t *pp, char *buf, size_t cap)
 {
-    char buf[256];
     size_t len = 0;
     mcc_token_t *tok;
-    
     while ((tok = mcc_lexer_next(pp->lexer))->type != TOK_NEWLINE &&
            tok->type != TOK_EOF) {
-        if (tok->has_space && len > 0) buf[len++] = ' ';
+        if (tok->has_space && len > 0 && len < cap - 1) {
+            buf[len++] = ' ';
+        }
         const char *text = mcc_token_to_string(tok);
         size_t tlen = strlen(text);
-        if (len + tlen < sizeof(buf) - 1) {
+        if (len + tlen < cap - 1) {
             memcpy(buf + len, text, tlen);
             len += tlen;
         }
     }
     buf[len] = '\0';
+    return len;
+}
+
+/* Process #error directive */
+static void pp_process_error(mcc_preprocessor_t *pp, mcc_location_t loc)
+{
+    char buf[256];
+    pp_collect_line_message(pp, buf, sizeof(buf));
     mcc_error_at(pp->ctx, loc, "#error %s", buf);
 }
 
@@ -286,22 +295,8 @@ static void pp_process_warning(mcc_preprocessor_t *pp, mcc_location_t loc)
     if (!pp_has_warning_directive(pp)) {
         mcc_warning(pp->ctx, "#warning is a GNU extension");
     }
-    
     char buf[256];
-    size_t len = 0;
-    mcc_token_t *tok;
-    
-    while ((tok = mcc_lexer_next(pp->lexer))->type != TOK_NEWLINE &&
-           tok->type != TOK_EOF) {
-        if (tok->has_space && len > 0) buf[len++] = ' ';
-        const char *text = mcc_token_to_string(tok);
-        size_t tlen = strlen(text);
-        if (len + tlen < sizeof(buf) - 1) {
-            memcpy(buf + len, text, tlen);
-            len += tlen;
-        }
-    }
-    buf[len] = '\0';
+    pp_collect_line_message(pp, buf, sizeof(buf));
     mcc_warning_at(pp->ctx, loc, "#warning %s", buf);
 }
 
@@ -328,8 +323,9 @@ static void pp_process_pragma(mcc_preprocessor_t *pp)
     
     if (tok->type == TOK_IDENT) {
         if (strcmp(tok->text, "once") == 0) {
-            /* #pragma once - mark file as include-once */
-            /* TODO: Implement include guard tracking */
+            /* Remember the path so a subsequent #include of the same file
+             * is suppressed (see pp_mark_pragma_once / pp_process_include). */
+            pp_mark_pragma_once(pp);
             mcc_lexer_next(pp->lexer);
         }
         /* Other pragmas can be added here */

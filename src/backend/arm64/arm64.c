@@ -44,8 +44,9 @@ static anvil_error_t arm64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
     
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
+    anvil_slot_map_init(&priv->slot_map);
     priv->ctx = ctx;
-    
+
     be->priv = priv;
     return ANVIL_OK;
 }
@@ -57,6 +58,7 @@ static void arm64_cleanup(anvil_backend_t *be)
     arm64_backend_t *priv = be->priv;
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
+    anvil_slot_map_free(&priv->slot_map);
     free(priv->strings);
     free(priv->stack_slots);
     free(priv->value_locs);
@@ -70,9 +72,10 @@ static void arm64_reset(anvil_backend_t *be)
     
     arm64_backend_t *priv = be->priv;
     
-    /* Clear stack slots */
+    /* Clear stack slots (keep allocations, just forget entries) */
     priv->num_stack_slots = 0;
     priv->next_stack_offset = 0;
+    anvil_slot_map_reset(&priv->slot_map);
     
     /* Clear string table */
     priv->num_strings = 0;
@@ -122,19 +125,23 @@ static void arm64_emit_block(arm64_backend_t *be, anvil_block_t *block)
 static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
 {
     if (!func || func->is_declaration) return;
-    
+
     be->current_func = func;
     be->num_stack_slots = 0;
     be->next_stack_offset = 0;
-    be->is_leaf_func = true;  /* Assume leaf until we find a call */
-    
-    /* First pass: allocate stack slots for allocas and instruction results,
-     * and detect if this is a leaf function */
+    /* Re-analyse per function — is_leaf_func and the frame layout live on
+     * the shared backend struct, so prepare_ir's loop leaves those fields
+     * holding the *last* function's values. Without this call, a module
+     * whose final function happens to be a leaf would emit every non-leaf
+     * function with a leaf prologue (no x30 save) and crash on first bl. */
+    arm64_analyze_function(be, func);
+
+    /* First pass: allocate stack slots for allocas and instruction results. */
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             if (instr->op == ANVIL_OP_ALLOCA) {
                 int size = 8;
-                if (instr->result && instr->result->type && 
+                if (instr->result && instr->result->type &&
                     instr->result->type->kind == ANVIL_TYPE_PTR &&
                     instr->result->type->data.pointee) {
                     size = arm64_type_size(instr->result->type->data.pointee);
@@ -143,11 +150,6 @@ static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
             } else if (instr->result) {
                 int size = instr->result->type ? arm64_type_size(instr->result->type) : 8;
                 arm64_alloc_stack_slot(be, instr->result, size);
-            }
-            
-            /* Detect calls - not a leaf function */
-            if (instr->op == ANVIL_OP_CALL) {
-                be->is_leaf_func = false;
             }
         }
     }
@@ -337,10 +339,12 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
                                           char **output, size_t *len)
 {
     if (!be || !mod || !output) return ANVIL_ERR_INVALID_ARG;
-    
+
     arm64_backend_t *priv = be->priv;
-    
-    /* Reset state */
+
+    /* Reset state. arm64_analyze_function already ran inside prepare_ir
+     * and populated is_leaf_func / frame layout per function. We only need
+     * to clear per-module scratch state here. */
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
     anvil_strbuf_init(&priv->code);

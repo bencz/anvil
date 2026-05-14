@@ -14,24 +14,11 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if two pointer values are definitely the same */
-static bool same_pointer(anvil_value_t *p1, anvil_value_t *p2)
-{
-    if (!p1 || !p2) return false;
-    if (p1 == p2) return true;
-    
-    /* Same alloca result */
-    if (p1->kind == ANVIL_VAL_INSTR && p2->kind == ANVIL_VAL_INSTR) {
-        anvil_instr_t *i1 = p1->data.instr;
-        anvil_instr_t *i2 = p2->data.instr;
-        if (i1 == i2) return true;
-    }
-    
-    return false;
-}
+#define same_pointer anvil_opt_same_pointer
 
 /* Check if instruction may read from pointer p */
 static bool may_read_ptr(anvil_instr_t *instr, anvil_value_t *ptr)

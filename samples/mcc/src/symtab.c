@@ -112,8 +112,24 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
     /* Check for redefinition in current scope */
     mcc_symbol_t *existing = mcc_symtab_lookup_current(symtab, name);
     if (existing) {
-        /* Allow function redeclaration */
+        /* Allow function redeclaration only when the signatures are
+         * compatible (C11 §6.7 allows redeclaration; §6.2.7 defines
+         * compatibility). A mismatched redecl, e.g.
+         *   int f(int);
+         *   void f(char *);
+         * is a hard error. */
         if (kind == SYM_FUNC && existing->kind == SYM_FUNC) {
+            if (type && existing->type &&
+                !mcc_type_is_compatible(type, existing->type)) {
+                mcc_error_at(symtab->ctx, loc,
+                    "Conflicting types for '%s': '%s' vs previous '%s'",
+                    name,
+                    mcc_type_to_string(type),
+                    mcc_type_to_string(existing->type));
+                mcc_note(symtab->ctx, "Previous declaration at %s:%d",
+                         existing->location.filename, existing->location.line);
+                return NULL;
+            }
             return existing;
         }
         mcc_error_at(symtab->ctx, loc, "Redefinition of '%s'", name);

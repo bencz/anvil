@@ -11,7 +11,35 @@ anvil_type_t *anvil_type_create(anvil_ctx_t *ctx, anvil_type_kind_t kind)
     anvil_type_t *type = calloc(1, sizeof(anvil_type_t));
     if (!type) return NULL;
     type->kind = kind;
+
+    /* Register with the context so anvil_ctx_destroy can reclaim it. */
+    if (ctx) {
+        type->ctx_next = ctx->types;
+        ctx->types = type;
+    }
     return type;
+}
+
+/* Free a single type's owned allocations (strings, child arrays) but not the
+ * type struct itself nor any referenced types. Used during anvil_ctx_destroy
+ * where every type is walked exactly once. */
+void anvil_type_free(anvil_type_t *type)
+{
+    if (!type) return;
+
+    switch (type->kind) {
+        case ANVIL_TYPE_STRUCT:
+            free(type->data.struc.name);
+            free(type->data.struc.fields);
+            free(type->data.struc.offsets);
+            break;
+        case ANVIL_TYPE_FUNC:
+            free(type->data.func.params);
+            break;
+        default:
+            break;
+    }
+    free(type);
 }
 
 void anvil_type_init_sizes(anvil_ctx_t *ctx)
@@ -105,6 +133,23 @@ void anvil_type_init_sizes(anvil_ctx_t *ctx)
         ctx->type_f64->size = 8;
         ctx->type_f64->align = 8;
     }
+
+    /* Cache i8* and void* pointer types — they dominate composite usage
+     * (every string constant, every alloca-derived address, every byte
+     * buffer). Caching avoids a calloc+free cycle per call and eliminates
+     * what used to be the biggest composite-type leak. */
+    if (!ctx->type_ptr_i8) {
+        ctx->type_ptr_i8 = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        ctx->type_ptr_i8->size = ptr_size;
+        ctx->type_ptr_i8->align = ptr_size;
+        ctx->type_ptr_i8->data.pointee = ctx->type_i8;
+    }
+    if (!ctx->type_ptr_void) {
+        ctx->type_ptr_void = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        ctx->type_ptr_void->size = ptr_size;
+        ctx->type_ptr_void->align = ptr_size;
+        ctx->type_ptr_void->data.pointee = ctx->type_void;
+    }
 }
 
 anvil_type_t *anvil_type_void(anvil_ctx_t *ctx)
@@ -165,15 +210,19 @@ anvil_type_t *anvil_type_f64(anvil_ctx_t *ctx)
 anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee)
 {
     if (!ctx) return NULL;
-    
+
+    /* Fast path: return the cached pointer type for the common cases. */
+    if (pointee == ctx->type_i8   && ctx->type_ptr_i8)   return ctx->type_ptr_i8;
+    if (pointee == ctx->type_void && ctx->type_ptr_void) return ctx->type_ptr_void;
+
     anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_PTR);
     if (!type) return NULL;
-    
+
     const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
     type->size = arch ? arch->ptr_size : 8;
     type->align = type->size;
     type->data.pointee = pointee;
-    
+
     return type;
 }
 

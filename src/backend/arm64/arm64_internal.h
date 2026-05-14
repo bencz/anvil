@@ -8,6 +8,7 @@
 #define ARM64_INTERNAL_H
 
 #include "anvil/anvil_internal.h"
+#include "../common/anvil_slot_map.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -184,6 +185,10 @@ typedef struct {
     size_t num_stack_slots;
     size_t stack_slots_cap;
     int next_stack_offset;
+
+    /* Accelerated value→offset lookup (O(1) via value->id). Kept in sync
+     * with the stack_slots[] bookkeeping array. */
+    anvil_slot_map_t slot_map;
     
     /* Register state */
     arm64_reg_state_t gpr[ARM64_NUM_GPR];

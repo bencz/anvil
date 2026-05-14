@@ -39,17 +39,19 @@ void anvil_module_destroy(anvil_module_t *mod)
         }
     }
     
-    /* First pass: collect ALL unique constants from ALL functions */
-    #define MAX_CONSTS 4096
-    anvil_value_t *all_consts[MAX_CONSTS];
+    /* First pass: collect ALL unique constants from ALL functions.
+     * Uses a dynamically grown array; previously a fixed 4096-slot stack
+     * VLA silently dropped extras and leaked them. */
+    anvil_value_t **all_consts = NULL;
     size_t num_all_consts = 0;
-    
+    size_t consts_cap = 0;
+
     for (anvil_func_t *f = mod->funcs; f; f = f->next) {
         for (anvil_block_t *b = f->blocks; b; b = b->next) {
             for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
                 for (size_t i = 0; i < instr->num_operands; i++) {
                     anvil_value_t *op = instr->operands[i];
-                    if (op && (op->kind == ANVIL_VAL_CONST_INT || 
+                    if (op && (op->kind == ANVIL_VAL_CONST_INT ||
                                op->kind == ANVIL_VAL_CONST_FLOAT ||
                                op->kind == ANVIL_VAL_CONST_NULL ||
                                op->kind == ANVIL_VAL_CONST_STRING ||
@@ -59,7 +61,20 @@ void anvil_module_destroy(anvil_module_t *mod)
                         for (size_t j = 0; j < num_all_consts; j++) {
                             if (all_consts[j] == op) { found = true; break; }
                         }
-                        if (!found && num_all_consts < MAX_CONSTS) {
+                        if (!found) {
+                            if (num_all_consts >= consts_cap) {
+                                size_t new_cap = consts_cap ? consts_cap * 2 : 64;
+                                anvil_value_t **grown = realloc(all_consts,
+                                    new_cap * sizeof(*grown));
+                                if (!grown) {
+                                    /* Out of memory: best-effort, stop tracking
+                                     * further constants — they'll leak but the
+                                     * destroy continues. */
+                                    break;
+                                }
+                                all_consts = grown;
+                                consts_cap = new_cap;
+                            }
                             all_consts[num_all_consts++] = op;
                         }
                     }
@@ -68,7 +83,7 @@ void anvil_module_destroy(anvil_module_t *mod)
             }
         }
     }
-    
+
     /* Free all collected constants */
     for (size_t i = 0; i < num_all_consts; i++) {
         anvil_value_t *op = all_consts[i];
@@ -80,7 +95,7 @@ void anvil_module_destroy(anvil_module_t *mod)
         free(op->name);
         free(op);
     }
-    #undef MAX_CONSTS
+    free(all_consts);
     
     /* Destroy functions */
     anvil_func_t *func = mod->funcs;

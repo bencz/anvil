@@ -1,13 +1,53 @@
 /*
  * ANVIL - IR Dump/Debug Module
- * 
+ *
  * Provides functions to print IR for debugging purposes.
  * Outputs human-readable representation of modules, functions, blocks, and instructions.
  */
 
 #include "anvil/anvil_internal.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* open_memstream is a POSIX.1-2008 extension. It's present on Linux and macOS
+ * but not on Windows/MSVC. Fall back to tmpfile() where it's missing. */
+#if defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
+#  define ANVIL_HAVE_OPEN_MEMSTREAM 1
+#endif
+
+/* Capture whatever `dump_fn(stream, obj)` writes and return it as a malloc'd
+ * NUL-terminated string. Caller frees. */
+typedef void (*anvil_dump_stream_fn)(FILE *stream, void *obj);
+
+static char *dump_to_string(anvil_dump_stream_fn dump_fn, void *obj)
+{
+    if (!dump_fn || !obj) return NULL;
+
+#ifdef ANVIL_HAVE_OPEN_MEMSTREAM
+    char *result = NULL;
+    size_t size = 0;
+    FILE *stream = open_memstream(&result, &size);
+    if (!stream) return NULL;
+    dump_fn(stream, obj);
+    fclose(stream);
+    return result;
+#else
+    FILE *tmp = tmpfile();
+    if (!tmp) return NULL;
+    dump_fn(tmp, obj);
+    long size = ftell(tmp);
+    if (size < 0) { fclose(tmp); return NULL; }
+    rewind(tmp);
+
+    char *result = malloc((size_t)size + 1);
+    if (!result) { fclose(tmp); return NULL; }
+    size_t read = fread(result, 1, (size_t)size, tmp);
+    result[read] = '\0';
+    fclose(tmp);
+    return result;
+#endif
+}
 
 /* Get operation name as string */
 static const char *op_name(anvil_op_t op)
@@ -135,21 +175,14 @@ static void print_escaped_string(FILE *out, const char *str)
     }
 }
 
-/* Get value kind name as string */
-static const char *value_kind_name(anvil_val_kind_t kind)
+/* Print linkage keyword to file */
+static void dump_linkage(FILE *out, anvil_linkage_t linkage)
 {
-    switch (kind) {
-        case ANVIL_VAL_CONST_INT: return "const_int";
-        case ANVIL_VAL_CONST_FLOAT: return "const_float";
-        case ANVIL_VAL_CONST_NULL: return "const_null";
-        case ANVIL_VAL_CONST_STRING: return "const_string";
-        case ANVIL_VAL_CONST_ARRAY: return "const_array";
-        case ANVIL_VAL_GLOBAL: return "global";
-        case ANVIL_VAL_FUNC: return "func";
-        case ANVIL_VAL_PARAM: return "param";
-        case ANVIL_VAL_INSTR: return "instr";
-        case ANVIL_VAL_BLOCK: return "block";
-        default: return "?";
+    switch (linkage) {
+        case ANVIL_LINK_INTERNAL: fprintf(out, "internal "); break;
+        case ANVIL_LINK_EXTERNAL: fprintf(out, "external "); break;
+        case ANVIL_LINK_WEAK:     fprintf(out, "weak ");     break;
+        case ANVIL_LINK_COMMON:   fprintf(out, "common ");   break;
     }
 }
 
@@ -384,13 +417,8 @@ void anvil_dump_func(FILE *out, anvil_func_t *func)
     }
     
     /* Linkage */
-    switch (func->linkage) {
-        case ANVIL_LINK_INTERNAL: fprintf(out, "internal "); break;
-        case ANVIL_LINK_EXTERNAL: fprintf(out, "external "); break;
-        case ANVIL_LINK_WEAK: fprintf(out, "weak "); break;
-        case ANVIL_LINK_COMMON: fprintf(out, "common "); break;
-    }
-    
+    dump_linkage(out, func->linkage);
+
     /* Return type */
     if (func->type && func->type->kind == ANVIL_TYPE_FUNC) {
         anvil_dump_type(out, func->type->data.func.ret);
@@ -445,15 +473,10 @@ void anvil_dump_global(FILE *out, anvil_global_t *global)
     anvil_value_t *val = global->value;
     
     fprintf(out, "@%s = ", val->name ? val->name : "?");
-    
+
     /* Linkage */
-    switch (val->data.global.linkage) {
-        case ANVIL_LINK_INTERNAL: fprintf(out, "internal "); break;
-        case ANVIL_LINK_EXTERNAL: fprintf(out, "external "); break;
-        case ANVIL_LINK_WEAK: fprintf(out, "weak "); break;
-        case ANVIL_LINK_COMMON: fprintf(out, "common "); break;
-    }
-    
+    dump_linkage(out, val->data.global.linkage);
+
     fprintf(out, "global ");
     anvil_dump_type(out, val->type);
     
@@ -509,35 +532,22 @@ void anvil_print_instr(anvil_instr_t *instr)
     anvil_dump_instr(stdout, instr);
 }
 
-/* Dump module to string */
-char *anvil_module_to_string(anvil_module_t *mod)
+static void dump_module_adapter(FILE *stream, void *obj)
 {
-    if (!mod) return NULL;
-    
-    /* Use a temporary file to capture output */
-    char *result = NULL;
-    size_t size = 0;
-    FILE *stream = open_memstream(&result, &size);
-    if (!stream) return NULL;
-    
-    anvil_dump_module(stream, mod);
-    fclose(stream);
-    
-    return result;
+    anvil_dump_module(stream, (anvil_module_t *)obj);
 }
 
-/* Dump function to string */
+static void dump_func_adapter(FILE *stream, void *obj)
+{
+    anvil_dump_func(stream, (anvil_func_t *)obj);
+}
+
+char *anvil_module_to_string(anvil_module_t *mod)
+{
+    return dump_to_string(dump_module_adapter, mod);
+}
+
 char *anvil_func_to_string(anvil_func_t *func)
 {
-    if (!func) return NULL;
-    
-    char *result = NULL;
-    size_t size = 0;
-    FILE *stream = open_memstream(&result, &size);
-    if (!stream) return NULL;
-    
-    anvil_dump_func(stream, func);
-    fclose(stream);
-    
-    return result;
+    return dump_to_string(dump_func_adapter, func);
 }

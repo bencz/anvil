@@ -11,6 +11,12 @@
 /* Forward declarations for recursive descent parser */
 static int64_t pp_eval_ternary(mcc_preprocessor_t *pp);
 
+/* When > 0, the evaluator is walking tokens but the result is not used —
+ * suppress arithmetic errors (division by zero, etc.) so `#if 0 && 1/0`
+ * matches C short-circuit semantics. */
+static int pp_eval_skip_depth = 0;
+#define PP_IN_SKIP() (pp_eval_skip_depth > 0)
+
 /* ============================================================
  * Primary Expressions
  * ============================================================ */
@@ -45,6 +51,74 @@ static int64_t pp_eval_primary(mcc_preprocessor_t *pp)
             if (has_paren) {
                 mcc_lexer_expect(pp->lexer, TOK_RPAREN, ")");
             }
+            return result;
+        }
+
+        /* C23 / GNU: __has_include("hdr") or __has_include(<hdr>) returns 1
+         * if the header can be located on the include path. */
+        if (strcmp(tok->text, "__has_include") == 0) {
+            mcc_lexer_expect(pp->lexer, TOK_LPAREN, "(");
+            mcc_token_t *name_tok = mcc_lexer_next(pp->lexer);
+            const char *filename = NULL;
+            bool is_system = false;
+            char buf[256];
+            if (name_tok->type == TOK_STRING_LIT) {
+                filename = name_tok->literal.string_val.value;
+            } else if (name_tok->type == TOK_LT) {
+                is_system = true;
+                size_t len = 0;
+                mcc_token_t *t;
+                while ((t = mcc_lexer_next(pp->lexer))->type != TOK_GT &&
+                       t->type != TOK_NEWLINE && t->type != TOK_EOF) {
+                    const char *s = mcc_token_to_string(t);
+                    size_t sl = strlen(s);
+                    if (len + sl < sizeof(buf) - 1) {
+                        memcpy(buf + len, s, sl);
+                        len += sl;
+                    }
+                }
+                buf[len] = '\0';
+                filename = buf;
+            } else {
+                mcc_error(pp->ctx, "Expected header name in __has_include");
+                return 0;
+            }
+            mcc_lexer_expect(pp->lexer, TOK_RPAREN, ")");
+
+            char path[1024];
+            FILE *f = pp_find_include_file(pp, filename, is_system, path, sizeof(path));
+            if (f) { fclose(f); return 1; }
+            return 0;
+        }
+
+        /* C23: __has_c_attribute(attr) returns the standardisation date of
+         * the attribute or 0 if unknown. */
+        if (strcmp(tok->text, "__has_c_attribute") == 0) {
+            mcc_lexer_expect(pp->lexer, TOK_LPAREN, "(");
+            mcc_token_t *name_tok = mcc_lexer_next(pp->lexer);
+            /* Optional `std::attr` — consume '::' if present. */
+            if (mcc_lexer_peek(pp->lexer)->type == TOK_COLON) {
+                mcc_lexer_next(pp->lexer);
+                if (mcc_lexer_peek(pp->lexer)->type == TOK_COLON) {
+                    mcc_lexer_next(pp->lexer);
+                    name_tok = mcc_lexer_next(pp->lexer);
+                }
+            }
+            int result = 0;
+            if (name_tok && name_tok->type == TOK_IDENT) {
+                const char *n = name_tok->text;
+                /* Dates correspond to when the attribute was standardised,
+                 * matching gcc/clang conventions. */
+                if (strcmp(n, "deprecated")    == 0) result = 201904;
+                else if (strcmp(n, "fallthrough")   == 0) result = 201904;
+                else if (strcmp(n, "maybe_unused")  == 0) result = 201904;
+                else if (strcmp(n, "nodiscard")     == 0) result = 202003;
+                else if (strcmp(n, "noreturn")      == 0) result = 202202;
+                else if (strcmp(n, "_Noreturn")     == 0) result = 202202;
+                else if (strcmp(n, "reproducible")  == 0) result = 202207;
+                else if (strcmp(n, "unsequenced")   == 0) result = 202207;
+            }
+            mcc_lexer_expect(pp->lexer, TOK_RPAREN, ")");
             return result;
         }
         
@@ -133,7 +207,9 @@ static int64_t pp_eval_multiplicative(mcc_preprocessor_t *pp)
             mcc_lexer_next(pp->lexer);
             int64_t right = pp_eval_primary(pp);
             if (right == 0) {
-                mcc_error(pp->ctx, "Division by zero in preprocessor expression");
+                if (!PP_IN_SKIP()) {
+                    mcc_error(pp->ctx, "Division by zero in preprocessor expression");
+                }
                 return 0;
             }
             left /= right;
@@ -141,7 +217,9 @@ static int64_t pp_eval_multiplicative(mcc_preprocessor_t *pp)
             mcc_lexer_next(pp->lexer);
             int64_t right = pp_eval_primary(pp);
             if (right == 0) {
-                mcc_error(pp->ctx, "Division by zero in preprocessor expression");
+                if (!PP_IN_SKIP()) {
+                    mcc_error(pp->ctx, "Division by zero in preprocessor expression");
+                }
                 return 0;
             }
             left %= right;
@@ -278,28 +356,36 @@ static int64_t pp_eval_bitor(mcc_preprocessor_t *pp)
 static int64_t pp_eval_logand(mcc_preprocessor_t *pp)
 {
     int64_t left = pp_eval_bitor(pp);
-    
+
     while (mcc_lexer_peek(pp->lexer)->type == TOK_AND) {
         mcc_lexer_next(pp->lexer);
-        /* Must evaluate right side to consume tokens, even if left is false */
+        /* Standard C short-circuit: the right side is still consumed (for
+         * token stream correctness), but when `left` is already false we
+         * enter skip mode so any divide-by-zero or other error on the RHS
+         * is silenced. */
+        bool was_false = !left;
+        if (was_false) pp_eval_skip_depth++;
         int64_t right = pp_eval_bitor(pp);
+        if (was_false) pp_eval_skip_depth--;
         left = left && right;
     }
-    
+
     return left;
 }
 
 static int64_t pp_eval_logor(mcc_preprocessor_t *pp)
 {
     int64_t left = pp_eval_logand(pp);
-    
+
     while (mcc_lexer_peek(pp->lexer)->type == TOK_OR) {
         mcc_lexer_next(pp->lexer);
-        /* Must evaluate right side to consume tokens, even if left is true */
+        bool was_true = !!left;
+        if (was_true) pp_eval_skip_depth++;
         int64_t right = pp_eval_logand(pp);
+        if (was_true) pp_eval_skip_depth--;
         left = left || right;
     }
-    
+
     return left;
 }
 

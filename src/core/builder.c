@@ -42,15 +42,31 @@ static anvil_value_t *build_cmp(anvil_ctx_t *ctx, anvil_op_t op,
                                  anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
 {
     if (!ctx || !lhs || !rhs) return NULL;
-    
+
     /* Comparison result is always i8 (boolean) */
     anvil_instr_t *instr = anvil_instr_create(ctx, op, ctx->type_i8, name);
     if (!instr) return NULL;
-    
+
     anvil_instr_add_operand(instr, lhs);
     anvil_instr_add_operand(instr, rhs);
     anvil_instr_insert(ctx, instr);
-    
+
+    return instr->result;
+}
+
+/* Helper to create a one-operand, result-typed instruction (trunc/zext/sext/
+ * fp convert/bitcast/ptr-int cast). */
+static anvil_value_t *build_cast(anvil_ctx_t *ctx, anvil_op_t op,
+                                  anvil_value_t *val, anvil_type_t *type, const char *name)
+{
+    if (!ctx || !val || !type) return NULL;
+
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, name);
+    if (!instr) return NULL;
+
+    anvil_instr_add_operand(instr, val);
+    anvil_instr_insert(ctx, instr);
+
     return instr->result;
 }
 
@@ -186,11 +202,31 @@ anvil_value_t *anvil_build_cmp_uge(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_v
 anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type, const char *name)
 {
     if (!ctx || !type) return NULL;
-    
+
     anvil_type_t *ptr_type = anvil_type_ptr(ctx, type);
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_ALLOCA, ptr_type, name);
     if (!instr) return NULL;
-    
+
+    anvil_instr_insert(ctx, instr);
+    return instr->result;
+}
+
+/* Dynamic alloca: stack-allocate `count` elements of `type`. The size is
+ * computed at runtime as count * sizeof(type), rounded to the target's
+ * stack alignment. Returns a pointer to the allocated region. Backends
+ * distinguish this from the static form by checking num_operands > 0. */
+anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
+                                       anvil_value_t *count, const char *name)
+{
+    if (!ctx || !type || !count) return NULL;
+
+    anvil_type_t *ptr_type = anvil_type_ptr(ctx, type);
+    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_ALLOCA, ptr_type, name);
+    if (!instr) return NULL;
+
+    anvil_instr_add_operand(instr, count);
+    /* aux_type carries the element type so the backend knows element size. */
+    instr->aux_type = type;
     anvil_instr_insert(ctx, instr);
     return instr->result;
 }
@@ -340,161 +376,65 @@ anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx)
     return anvil_build_ret(ctx, NULL);
 }
 
-/* Type conversions */
+/* Type conversions — all reduce to build_cast(op, val, type, name). */
 anvil_value_t *anvil_build_trunc(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_TRUNC, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_TRUNC, val, type, name);
 }
 
 anvil_value_t *anvil_build_zext(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_ZEXT, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_ZEXT, val, type, name);
 }
 
 anvil_value_t *anvil_build_sext(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_SEXT, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_SEXT, val, type, name);
 }
 
 anvil_value_t *anvil_build_bitcast(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_BITCAST, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_BITCAST, val, type, name);
 }
 
 anvil_value_t *anvil_build_ptrtoint(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_PTRTOINT, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_PTRTOINT, val, type, name);
 }
 
 anvil_value_t *anvil_build_inttoptr(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_INTTOPTR, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_INTTOPTR, val, type, name);
 }
 
 anvil_value_t *anvil_build_fptrunc(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_FPTRUNC, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_FPTRUNC, val, type, name);
 }
 
 anvil_value_t *anvil_build_fpext(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_FPEXT, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_FPEXT, val, type, name);
 }
 
 anvil_value_t *anvil_build_fptosi(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_FPTOSI, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_FPTOSI, val, type, name);
 }
 
 anvil_value_t *anvil_build_fptoui(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_FPTOUI, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_FPTOUI, val, type, name);
 }
 
 anvil_value_t *anvil_build_sitofp(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_SITOFP, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_SITOFP, val, type, name);
 }
 
 anvil_value_t *anvil_build_uitofp(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name)
 {
-    if (!ctx || !val || !type) return NULL;
-    
-    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_UITOFP, type, name);
-    if (!instr) return NULL;
-    
-    anvil_instr_add_operand(instr, val);
-    anvil_instr_insert(ctx, instr);
-    
-    return instr->result;
+    return build_cast(ctx, ANVIL_OP_UITOFP, val, type, name);
 }
 
 /* Floating-point operations */

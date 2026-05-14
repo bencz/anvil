@@ -77,6 +77,11 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym);
 /* Convert MCC type to ANVIL type */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type);
 
+/* Build an integer constant whose Anvil type matches `anvil_type`.
+ * Used for inc/dec and codegen_to_bool so the generated IR has matched
+ * operand widths instead of constant-folding to i32 always. */
+anvil_value_t *codegen_const_int_for_type(mcc_codegen_t *cg, anvil_type_t *anvil_type, int64_t val);
+
 /* Get sizeof for a type using ANVIL arch info for pointer size */
 size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type);
 

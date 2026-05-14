@@ -83,9 +83,26 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
             
         case AST_VAR_DECL: {
             /* Local variable declaration */
-            anvil_type_t *type = codegen_type(cg, stmt->data.var_decl.var_type);
-            anvil_value_t *alloca_val = anvil_build_alloca(cg->anvil_ctx, type, stmt->data.var_decl.name);
-            
+            mcc_type_t *var_type = stmt->data.var_decl.var_type;
+            anvil_value_t *alloca_val;
+
+            /* VLA: dimensions use runtime expressions. Emit
+             * anvil_build_alloca_dyn with the count so the backend bumps
+             * sp at runtime. The alloca is typed with the element type
+             * — indexing still works because arrays decay to pointers
+             * and codegen_lvalue walks the stack slot directly. */
+            if (var_type->kind == TYPE_ARRAY && var_type->data.array.is_vla &&
+                var_type->data.array.length_expr) {
+                mcc_type_t *elem_type = var_type->data.array.element;
+                anvil_type_t *anvil_elem = codegen_type(cg, elem_type);
+                anvil_value_t *count = codegen_expr(cg, var_type->data.array.length_expr);
+                alloca_val = anvil_build_alloca_dyn(cg->anvil_ctx, anvil_elem,
+                                                    count, stmt->data.var_decl.name);
+            } else {
+                anvil_type_t *type = codegen_type(cg, var_type);
+                alloca_val = anvil_build_alloca(cg->anvil_ctx, type, stmt->data.var_decl.name);
+            }
+
             /* Add to locals by name */
             codegen_add_local(cg, stmt->data.var_decl.name, alloca_val);
             
@@ -400,8 +417,7 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         
         mcc_ast_node_t *case_node = cases[i];
         anvil_value_t *case_val = codegen_expr(cg, case_node->data.case_stmt.expr);
-        anvil_value_t *cmp = anvil_build_cmp_eq(cg->anvil_ctx, switch_val, case_val, "cmp");
-        
+
         anvil_block_t *next_block;
         if (i + 1 < num_cases) {
             next_block = cmp_blocks[i + 1];
@@ -410,8 +426,19 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         } else {
             next_block = end_block;
         }
-        
-        anvil_build_br_cond(cg->anvil_ctx, cmp, case_blocks[i], next_block);
+
+        if (case_node->data.case_stmt.end_expr) {
+            /* GNU case range: `case LO ... HI:` matches when
+             * switch_val >= LO && switch_val <= HI. */
+            anvil_value_t *hi_val = codegen_expr(cg, case_node->data.case_stmt.end_expr);
+            anvil_value_t *ge = anvil_build_cmp_ge(cg->anvil_ctx, switch_val, case_val, "ge");
+            anvil_value_t *le = anvil_build_cmp_le(cg->anvil_ctx, switch_val, hi_val, "le");
+            anvil_value_t *in_range = anvil_build_and(cg->anvil_ctx, ge, le, "range");
+            anvil_build_br_cond(cg->anvil_ctx, in_range, case_blocks[i], next_block);
+        } else {
+            anvil_value_t *cmp = anvil_build_cmp_eq(cg->anvil_ctx, switch_val, case_val, "cmp");
+            anvil_build_br_cond(cg->anvil_ctx, cmp, case_blocks[i], next_block);
+        }
     }
     free(cmp_blocks);
     

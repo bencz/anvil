@@ -84,6 +84,14 @@ struct mcc_preprocessor {
     /* Space tracking for macro expansion */
     bool next_has_space;            /* has_space for next emitted token */
     bool use_next_has_space;        /* Whether to use next_has_space */
+
+    /* #pragma once: set of files already included-once, stored as
+     * canonicalised absolute paths. Using a simple dynamic array since
+     * the count of #pragma-once headers in a typical translation unit is
+     * small. */
+    const char **pragma_once_files;
+    size_t num_pragma_once;
+    size_t cap_pragma_once;
 };
 
 /* Preprocessor lifecycle */

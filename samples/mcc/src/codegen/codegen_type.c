@@ -11,7 +11,7 @@
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
     if (!type) return anvil_type_i32(cg->anvil_ctx);
-    
+
     switch (type->kind) {
         case TYPE_VOID:
             return anvil_type_void(cg->anvil_ctx);
@@ -26,10 +26,19 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_ENUM:
             return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
                                      : anvil_type_i32(cg->anvil_ctx);
-        case TYPE_LONG:
-            /* 32-bit long for C89/ILP32, use is_unsigned */
+        case TYPE_LONG: {
+            /* `long` is LP64 on most modern Unix targets (64-bit) but
+             * ILP32 on Windows and 32-bit systems. Pick based on the
+             * target arch's pointer size. */
+            const anvil_arch_info_t *ai = anvil_ctx_get_arch_info(cg->anvil_ctx);
+            bool lp64 = ai && ai->ptr_size == 8;
+            if (lp64) {
+                return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
+                                         : anvil_type_i64(cg->anvil_ctx);
+            }
             return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
                                      : anvil_type_i32(cg->anvil_ctx);
+        }
         case TYPE_LONG_LONG:
             return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
                                      : anvil_type_i64(cg->anvil_ctx);
@@ -52,17 +61,17 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
             for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
                 if (f->name) num_named_fields++;
             }
-            
+
             anvil_type_t **field_types = mcc_alloc(cg->mcc_ctx,
                 (num_named_fields > 0 ? num_named_fields : 1) * sizeof(anvil_type_t*));
-            
+
             int i = 0;
             for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
                 if (f->name) {
                     field_types[i++] = codegen_type(cg, f->type);
                 }
             }
-            
+
             return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_named_fields);
         }
         case TYPE_FUNCTION: {
@@ -81,6 +90,24 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         }
         default:
             return anvil_type_i32(cg->anvil_ctx);
+    }
+}
+
+/* Build an integer constant whose width matches `anvil_type`. We use the
+ * public size/alignment API rather than peeking inside the opaque Anvil
+ * type struct. Signedness is inferred from the size: an i8/u8 etc. ends
+ * up with the signed variant, which the arithmetic operators treat as
+ * compatible anyway. */
+anvil_value_t *codegen_const_int_for_type(mcc_codegen_t *cg, anvil_type_t *anvil_type, int64_t val)
+{
+    if (!anvil_type) return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
+    size_t sz = anvil_type_size(anvil_type);
+    switch (sz) {
+        case 1: return anvil_const_i8 (cg->anvil_ctx, (int8_t)val);
+        case 2: return anvil_const_i16(cg->anvil_ctx, (int16_t)val);
+        case 4: return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
+        case 8: return anvil_const_i64(cg->anvil_ctx, val);
+        default: return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
     }
 }
 

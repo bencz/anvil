@@ -21,20 +21,24 @@ mcc_ast_node_t *parse_compound_stmt(mcc_parser_t *p)
 {
     mcc_location_t loc = p->peek->location;
     parse_expect(p, TOK_LBRACE, "{");
-    
+
+    /* Enter a new typedef scope. Any `typedef` inside this block will
+     * disappear when we hit the matching '}'. */
+    parse_typedef_scope_enter(p);
+
     mcc_ast_node_t **stmts = NULL;
     size_t num_stmts = 0;
     size_t cap_stmts = 0;
-    
+
     while (!parse_check(p, TOK_RBRACE) && !parse_check(p, TOK_EOF)) {
         mcc_ast_node_t *stmt = NULL;
-        
+
         if (parse_is_declaration_start(p)) {
             stmt = parse_declaration(p);
         } else {
             stmt = parse_statement(p);
         }
-        
+
         if (stmt) {
             if (num_stmts >= cap_stmts) {
                 cap_stmts = cap_stmts ? cap_stmts * 2 : 8;
@@ -44,13 +48,17 @@ mcc_ast_node_t *parse_compound_stmt(mcc_parser_t *p)
             }
             stmts[num_stmts++] = stmt;
         }
-        
+
         if (p->panic_mode) {
             parse_synchronize(p);
         }
     }
-    
+
     parse_expect(p, TOK_RBRACE, "}");
+
+    /* Leave the typedef scope: any typedef registered inside this block
+     * is popped off the list so later code doesn't see it. */
+    parse_typedef_scope_leave(p);
     
     mcc_ast_node_t *node = mcc_ast_create(p->ctx, AST_COMPOUND_STMT, loc);
     node->data.compound_stmt.stmts = stmts;
@@ -403,6 +411,28 @@ mcc_ast_node_t *parse_statement(mcc_parser_t *p)
         case TOK_SEMICOLON:
             /* Null statement */
             parse_advance(p);
+            return mcc_ast_create(p->ctx, AST_NULL_STMT, tok->location);
+
+        case TOK_ASM:
+            /* GNU inline asm statement: asm("...") or asm volatile("..." : outputs : inputs : clobbers);
+             * Parse tolerantly as a no-op — we consume tokens and emit a null
+             * statement so downstream passes don't trip. */
+            parse_advance(p);
+            /* Optional 'volatile', 'inline', 'goto' qualifiers */
+            if (parse_check(p, TOK_VOLATILE) || parse_check(p, TOK_INLINE) ||
+                parse_check(p, TOK_GOTO)) {
+                parse_advance(p);
+            }
+            if (parse_match(p, TOK_LPAREN)) {
+                int depth = 1;
+                while (depth > 0 && !parse_check(p, TOK_EOF)) {
+                    if (parse_check(p, TOK_LPAREN)) depth++;
+                    else if (parse_check(p, TOK_RPAREN)) { depth--; if (depth == 0) break; }
+                    parse_advance(p);
+                }
+                parse_match(p, TOK_RPAREN);
+            }
+            parse_match(p, TOK_SEMICOLON);
             return mcc_ast_create(p->ctx, AST_NULL_STMT, tok->location);
             
         case TOK_IDENT: {

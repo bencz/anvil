@@ -94,10 +94,12 @@ static mcc_type_t *analyze_ident_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
                            "__func__ is a C99 feature");
         }
         /* __func__ is equivalent to a static const char array */
-        /* containing the function name, decays to const char* */
+        /* containing the function name, decays to const char*.
+         * Never mutate the shared 'char' singleton — use
+         * mcc_type_qualified to get a fresh const-qualified copy. */
         mcc_type_t *char_type = mcc_type_char(sema->types);
-        char_type->qualifiers |= QUAL_CONST;
-        expr->type = mcc_type_pointer(sema->types, char_type);
+        mcc_type_t *const_char = mcc_type_qualified(sema->types, char_type, QUAL_CONST);
+        expr->type = mcc_type_pointer(sema->types, const_char);
         expr->data.ident_expr.is_func_name = true;
         return expr->type;
     }
@@ -504,13 +506,67 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
             
         case AST_SIZEOF_EXPR:
             return sema_analyze_sizeof_expr(sema, expr);
-            
+
         case AST_COMMA_EXPR:
             return sema_analyze_comma_expr(sema, expr);
-            
+
         case AST_INIT_LIST:
             return analyze_init_list(sema, expr);
-            
+
+        case AST_ALIGNOF_EXPR:
+            /* _Alignof(type) yields a size_t constant. If an expression
+             * form was used (GNU extension), analyse it first to pin down
+             * the type, then drop the expression. */
+            if (expr->data.alignof_expr.expr_arg) {
+                sema_analyze_expr(sema, expr->data.alignof_expr.expr_arg);
+            }
+            expr->type = mcc_type_ulong(sema->types);
+            return expr->type;
+
+        case AST_STMT_EXPR: {
+            /* GNU statement expression: ({ ... ; expr; }). Its type is the
+             * type of the last expression statement in the compound.
+             * Analyse the inner compound so labels/goto/variables are
+             * processed normally, then pluck the last expr's type. */
+            mcc_ast_node_t *stmt = expr->data.stmt_expr.stmt;
+            if (stmt) sema_analyze_stmt(sema, stmt);
+
+            mcc_type_t *last_type = mcc_type_void(sema->types);
+            if (stmt && stmt->kind == AST_COMPOUND_STMT &&
+                stmt->data.compound_stmt.num_stmts > 0) {
+                mcc_ast_node_t *last = stmt->data.compound_stmt.stmts[
+                    stmt->data.compound_stmt.num_stmts - 1];
+                if (last && last->kind == AST_EXPR_STMT &&
+                    last->data.expr_stmt.expr &&
+                    last->data.expr_stmt.expr->type) {
+                    last_type = last->data.expr_stmt.expr->type;
+                }
+            }
+            expr->type = last_type;
+            return last_type;
+        }
+
+        case AST_GENERIC_EXPR: {
+            /* _Generic(expr, T1: e1, T2: e2, default: ed).
+             * Type of the selection = type of the chosen association.
+             * We analyse the controlling expression, find a matching
+             * association by type, and fall back to default otherwise. */
+            mcc_type_t *ctrl = sema_analyze_expr(sema, expr->data.generic_expr.controlling_expr);
+            mcc_type_t *result = NULL;
+            mcc_generic_assoc_t *a = expr->data.generic_expr.associations;
+            for (; a; a = a->next) {
+                if (a->type && ctrl && mcc_type_is_compatible(a->type, ctrl)) {
+                    result = sema_analyze_expr(sema, a->expr);
+                    break;
+                }
+            }
+            if (!result && expr->data.generic_expr.default_expr) {
+                result = sema_analyze_expr(sema, expr->data.generic_expr.default_expr);
+            }
+            expr->type = result;
+            return result;
+        }
+
         default:
             return NULL;
     }

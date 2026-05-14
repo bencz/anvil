@@ -48,6 +48,20 @@ void pp_process_define(mcc_preprocessor_t *pp);
 /* Stringify a token list (for # operator) */
 mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens);
 
+/* Append `tok` to a singly-linked token list tracked by {head, tail}.
+ * Previously this idiom was duplicated in 6+ places — this inline helper
+ * keeps the semantics in one spot. Uses static inline so each caller
+ * inlines to the same code as before. */
+static inline void pp_token_list_append(mcc_token_t **head, mcc_token_t **tail,
+                                        mcc_token_t *tok)
+{
+    if (!tok) return;
+    tok->next = NULL;
+    if (!*head) *head = tok;
+    if (*tail) (*tail)->next = tok;
+    *tail = tok;
+}
+
 /* ---- New Expansion API (pp_expand.c) ---- */
 
 /* Expand macros in a token list and return the result */
@@ -85,6 +99,15 @@ void pp_update_skip_mode(mcc_preprocessor_t *pp);
 
 /* Process #include directive */
 void pp_process_include(mcc_preprocessor_t *pp);
+
+/* Register the current file as #pragma once */
+void pp_mark_pragma_once(mcc_preprocessor_t *pp);
+
+/* Locate an include file on the search path. Returns FILE* (open) and
+ * writes the resolved path into path_out. Exposed so __has_include can
+ * probe without fully including the file. */
+FILE *pp_find_include_file(mcc_preprocessor_t *pp, const char *filename,
+                           bool is_system, char *path_out, size_t path_sz);
 
 /* Save current lexer state to include stack */
 void pp_push_include(mcc_preprocessor_t *pp);

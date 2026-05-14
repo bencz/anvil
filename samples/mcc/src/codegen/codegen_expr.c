@@ -332,7 +332,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     anvil_value_t *ptr = codegen_lvalue(cg, expr->data.unary_expr.operand);
                     anvil_type_t *type = codegen_type(cg, expr->data.unary_expr.operand->type);
                     anvil_value_t *val = anvil_build_load(cg->anvil_ctx, type, ptr, "val");
-                    anvil_value_t *one = anvil_const_i32(cg->anvil_ctx, 1);
+                    anvil_value_t *one = codegen_const_int_for_type(cg, type, 1);
                     anvil_value_t *result = (op == UNOP_PRE_INC) ?
                         anvil_build_add(cg->anvil_ctx, val, one, "inc") :
                         anvil_build_sub(cg->anvil_ctx, val, one, "dec");
@@ -344,7 +344,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     anvil_value_t *ptr = codegen_lvalue(cg, expr->data.unary_expr.operand);
                     anvil_type_t *type = codegen_type(cg, expr->data.unary_expr.operand->type);
                     anvil_value_t *val = anvil_build_load(cg->anvil_ctx, type, ptr, "val");
-                    anvil_value_t *one = anvil_const_i32(cg->anvil_ctx, 1);
+                    anvil_value_t *one = codegen_const_int_for_type(cg, type, 1);
                     anvil_value_t *result = (op == UNOP_POST_INC) ?
                         anvil_build_add(cg->anvil_ctx, val, one, "inc") :
                         anvil_build_sub(cg->anvil_ctx, val, one, "dec");
@@ -490,7 +490,30 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         case AST_COMMA_EXPR:
             codegen_expr(cg, expr->data.comma_expr.left);
             return codegen_expr(cg, expr->data.comma_expr.right);
-            
+
+        case AST_STMT_EXPR: {
+            /* GNU statement expression: evaluate each inner statement as
+             * usual, then return the value of the last expression statement.
+             * Non-expression last statements (and empty bodies) yield a
+             * void/null result, matching GCC/Clang. */
+            mcc_ast_node_t *stmt = expr->data.stmt_expr.stmt;
+            if (!stmt || stmt->kind != AST_COMPOUND_STMT) return NULL;
+
+            size_t n = stmt->data.compound_stmt.num_stmts;
+            anvil_value_t *last_val = NULL;
+            for (size_t i = 0; i < n; i++) {
+                mcc_ast_node_t *s = stmt->data.compound_stmt.stmts[i];
+                bool is_last = (i + 1 == n);
+                if (is_last && s && s->kind == AST_EXPR_STMT &&
+                    s->data.expr_stmt.expr) {
+                    last_val = codegen_expr(cg, s->data.expr_stmt.expr);
+                } else {
+                    codegen_stmt(cg, s);
+                }
+            }
+            return last_val;
+        }
+
         default:
             return NULL;
     }
@@ -529,7 +552,7 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             /* For array subscript, we need to calculate the address correctly */
             mcc_ast_node_t *array_expr = expr->data.subscript_expr.array;
             mcc_type_t *array_type = array_expr->type;
-            
+
             anvil_value_t *base;
             /* If the array expression is itself an array type, get its lvalue (address) */
             if (array_type && array_type->kind == TYPE_ARRAY) {
@@ -538,13 +561,13 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 /* Otherwise it's a pointer, get its value */
                 base = codegen_expr(cg, array_expr);
             }
-            
+
             anvil_value_t *index = codegen_expr(cg, expr->data.subscript_expr.index);
-            
+
             /* Calculate element size for proper scaling */
             mcc_type_t *elem_type_mcc = expr->type;
             int elem_size = elem_type_mcc ? codegen_sizeof(cg, elem_type_mcc) : 4;
-            
+
             /* Scale index by element size */
             anvil_value_t *offset;
             if (elem_size > 1) {
@@ -553,8 +576,9 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             } else {
                 offset = index;
             }
-            
-            /* Add offset to base */
+
+            /* Add offset to base. Note: GEP would be cleaner but backends
+             * currently lower the manual mul+add path more reliably. */
             return anvil_build_add(cg->anvil_ctx, base, offset, "arr.idx");
         }
         
@@ -601,13 +625,15 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 anvil_value_t *codegen_to_bool(mcc_codegen_t *cg, anvil_value_t *val)
 {
     if (!val) return NULL;
-    
+
     /* Check if value is already boolean (comparison result) */
     if (anvil_value_is_bool(val)) {
         return val;
     }
-    
-    /* Not a boolean, need to compare with zero */
-    anvil_value_t *zero = anvil_const_i32(cg->anvil_ctx, 0);
+
+    /* Not a boolean — compare with zero of the same Anvil type so the
+     * backend isn't handed a cmp_ne(i64, i32) or cmp_ne(ptr, i32). */
+    anvil_type_t *t = anvil_value_get_type(val);
+    anvil_value_t *zero = codegen_const_int_for_type(cg, t, 0);
     return anvil_build_cmp_ne(cg->anvil_ctx, val, zero, "tobool");
 }

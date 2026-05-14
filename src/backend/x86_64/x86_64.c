@@ -7,6 +7,7 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include "../common/anvil_slot_map.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -81,12 +82,15 @@ typedef struct {
     x64_stack_slot_t *stack_slots;
     size_t num_stack_slots;
     size_t stack_slots_cap;
-    
+
+    /* O(1) value→offset lookup. */
+    anvil_slot_map_t slot_map;
+
     /* String table */
     x64_string_entry_t *strings;
     size_t num_strings;
     size_t strings_cap;
-    
+
     /* Current function being generated */
     anvil_func_t *current_func;
 } x64_backend_t;
@@ -112,8 +116,9 @@ static anvil_error_t x64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
     
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
+    anvil_slot_map_init(&priv->slot_map);
     priv->syntax = ctx->syntax == ANVIL_SYNTAX_DEFAULT ? ANVIL_SYNTAX_GAS : ctx->syntax;
-    
+
     be->priv = priv;
     return ANVIL_OK;
 }
@@ -121,10 +126,11 @@ static anvil_error_t x64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 static void x64_cleanup(anvil_backend_t *be)
 {
     if (!be || !be->priv) return;
-    
+
     x64_backend_t *priv = be->priv;
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
+    anvil_slot_map_free(&priv->slot_map);
     free(priv->strings);
     free(priv->stack_slots);
     free(priv);
@@ -134,13 +140,14 @@ static void x64_cleanup(anvil_backend_t *be)
 static void x64_reset(anvil_backend_t *be)
 {
     if (!be || !be->priv) return;
-    
+
     x64_backend_t *priv = be->priv;
-    
+
     /* Clear stack slots (contain pointers to anvil_value_t) */
     priv->num_stack_slots = 0;
     priv->next_stack_offset = 0;
     priv->stack_offset = 0;
+    anvil_slot_map_reset(&priv->slot_map);
     
     /* Clear string table (contain pointers to string data) */
     priv->num_strings = 0;
@@ -162,27 +169,24 @@ static int x64_add_stack_slot(x64_backend_t *be, anvil_value_t *val)
         be->stack_slots = new_slots;
         be->stack_slots_cap = new_cap;
     }
-    
+
     /* x86-64 stack grows down, allocate 8 bytes per slot */
     be->next_stack_offset += 8;
     int offset = be->next_stack_offset;
-    
+
     be->stack_slots[be->num_stack_slots].value = val;
     be->stack_slots[be->num_stack_slots].offset = offset;
     be->num_stack_slots++;
-    
+
+    anvil_slot_map_set(&be->slot_map, val, offset);
+
     return offset;
 }
 
 /* Get stack slot offset for a value */
 static int x64_get_stack_slot(x64_backend_t *be, anvil_value_t *val)
 {
-    for (size_t i = 0; i < be->num_stack_slots; i++) {
-        if (be->stack_slots[i].value == val) {
-            return be->stack_slots[i].offset;
-        }
-    }
-    return -1;
+    return anvil_slot_map_get(&be->slot_map, val);
 }
 
 static const anvil_arch_info_t *x64_get_arch_info(anvil_backend_t *be)

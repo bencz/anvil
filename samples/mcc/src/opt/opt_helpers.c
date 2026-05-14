@@ -342,186 +342,202 @@ bool opt_exprs_equal(mcc_ast_node_t *a, mcc_ast_node_t *b)
  * AST Traversal
  * ============================================================ */
 
-void opt_visit_preorder(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
-                        opt_visit_fn fn, void *data)
+/* Forward declaration for mutual recursion via visit_children. */
+static void visit_node(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
+                       opt_visit_fn fn, void *data, bool post);
+
+/* Recurse into every child of `ast` using `visit_node`. Centralising the
+ * dispatch here used to live inline in both opt_visit_preorder and
+ * opt_visit_postorder (~90 lines each, identical except for when `fn` ran).
+ * This version also covers the kinds that the old table ignored:
+ *   do/switch/case/default, var_decl, for_stmt.init_decl, member,
+ *   subscript, ternary, comma, sizeof, alignof, generic, init_list.
+ * Passes that rely on the walker now see those subtrees too. */
+static void visit_children(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
+                           opt_visit_fn fn, void *data, bool post)
 {
-    if (!ast || !fn) return;
-    
-    /* Visit this node first */
-    if (!fn(opt, ast, data)) return;
-    
-    /* Then visit children based on node kind */
     switch (ast->kind) {
         case AST_TRANSLATION_UNIT:
             for (size_t i = 0; i < ast->data.translation_unit.num_decls; i++) {
-                opt_visit_preorder(opt, ast->data.translation_unit.decls[i], fn, data);
+                visit_node(opt, ast->data.translation_unit.decls[i], fn, data, post);
             }
             break;
-            
+
         case AST_FUNC_DECL:
             if (ast->data.func_decl.body) {
-                opt_visit_preorder(opt, ast->data.func_decl.body, fn, data);
+                visit_node(opt, ast->data.func_decl.body, fn, data, post);
             }
             break;
-            
+
+        case AST_VAR_DECL:
+            if (ast->data.var_decl.init) {
+                visit_node(opt, ast->data.var_decl.init, fn, data, post);
+            }
+            break;
+
+        case AST_DECL_LIST:
+            for (size_t i = 0; i < ast->data.decl_list.num_decls; i++) {
+                visit_node(opt, ast->data.decl_list.decls[i], fn, data, post);
+            }
+            break;
+
         case AST_COMPOUND_STMT:
             for (size_t i = 0; i < ast->data.compound_stmt.num_stmts; i++) {
-                opt_visit_preorder(opt, ast->data.compound_stmt.stmts[i], fn, data);
+                visit_node(opt, ast->data.compound_stmt.stmts[i], fn, data, post);
             }
             break;
-            
+
         case AST_IF_STMT:
-            opt_visit_preorder(opt, ast->data.if_stmt.cond, fn, data);
-            opt_visit_preorder(opt, ast->data.if_stmt.then_stmt, fn, data);
+            visit_node(opt, ast->data.if_stmt.cond, fn, data, post);
+            visit_node(opt, ast->data.if_stmt.then_stmt, fn, data, post);
             if (ast->data.if_stmt.else_stmt) {
-                opt_visit_preorder(opt, ast->data.if_stmt.else_stmt, fn, data);
+                visit_node(opt, ast->data.if_stmt.else_stmt, fn, data, post);
             }
             break;
-            
+
         case AST_WHILE_STMT:
-            opt_visit_preorder(opt, ast->data.while_stmt.cond, fn, data);
-            opt_visit_preorder(opt, ast->data.while_stmt.body, fn, data);
+            visit_node(opt, ast->data.while_stmt.cond, fn, data, post);
+            visit_node(opt, ast->data.while_stmt.body, fn, data, post);
             break;
-            
+
+        case AST_DO_STMT:
+            visit_node(opt, ast->data.do_stmt.body, fn, data, post);
+            visit_node(opt, ast->data.do_stmt.cond, fn, data, post);
+            break;
+
         case AST_FOR_STMT:
             if (ast->data.for_stmt.init) {
-                opt_visit_preorder(opt, ast->data.for_stmt.init, fn, data);
+                visit_node(opt, ast->data.for_stmt.init, fn, data, post);
+            }
+            if (ast->data.for_stmt.init_decl) {
+                visit_node(opt, ast->data.for_stmt.init_decl, fn, data, post);
             }
             if (ast->data.for_stmt.cond) {
-                opt_visit_preorder(opt, ast->data.for_stmt.cond, fn, data);
+                visit_node(opt, ast->data.for_stmt.cond, fn, data, post);
             }
             if (ast->data.for_stmt.incr) {
-                opt_visit_preorder(opt, ast->data.for_stmt.incr, fn, data);
+                visit_node(opt, ast->data.for_stmt.incr, fn, data, post);
             }
-            opt_visit_preorder(opt, ast->data.for_stmt.body, fn, data);
+            visit_node(opt, ast->data.for_stmt.body, fn, data, post);
             break;
-            
+
+        case AST_SWITCH_STMT:
+            visit_node(opt, ast->data.switch_stmt.expr, fn, data, post);
+            visit_node(opt, ast->data.switch_stmt.body, fn, data, post);
+            break;
+
+        case AST_CASE_STMT:
+            if (ast->data.case_stmt.expr) {
+                visit_node(opt, ast->data.case_stmt.expr, fn, data, post);
+            }
+            if (ast->data.case_stmt.stmt) {
+                visit_node(opt, ast->data.case_stmt.stmt, fn, data, post);
+            }
+            break;
+
+        case AST_DEFAULT_STMT:
+            if (ast->data.default_stmt.stmt) {
+                visit_node(opt, ast->data.default_stmt.stmt, fn, data, post);
+            }
+            break;
+
+        case AST_LABEL_STMT:
+            if (ast->data.label_stmt.stmt) {
+                visit_node(opt, ast->data.label_stmt.stmt, fn, data, post);
+            }
+            break;
+
         case AST_RETURN_STMT:
             if (ast->data.return_stmt.expr) {
-                opt_visit_preorder(opt, ast->data.return_stmt.expr, fn, data);
+                visit_node(opt, ast->data.return_stmt.expr, fn, data, post);
             }
             break;
-            
+
         case AST_EXPR_STMT:
             if (ast->data.expr_stmt.expr) {
-                opt_visit_preorder(opt, ast->data.expr_stmt.expr, fn, data);
+                visit_node(opt, ast->data.expr_stmt.expr, fn, data, post);
             }
             break;
-            
+
         case AST_BINARY_EXPR:
-            opt_visit_preorder(opt, ast->data.binary_expr.lhs, fn, data);
-            opt_visit_preorder(opt, ast->data.binary_expr.rhs, fn, data);
+            visit_node(opt, ast->data.binary_expr.lhs, fn, data, post);
+            visit_node(opt, ast->data.binary_expr.rhs, fn, data, post);
             break;
-            
+
         case AST_UNARY_EXPR:
-            opt_visit_preorder(opt, ast->data.unary_expr.operand, fn, data);
+            visit_node(opt, ast->data.unary_expr.operand, fn, data, post);
             break;
-            
+
+        case AST_TERNARY_EXPR:
+            visit_node(opt, ast->data.ternary_expr.cond, fn, data, post);
+            visit_node(opt, ast->data.ternary_expr.then_expr, fn, data, post);
+            visit_node(opt, ast->data.ternary_expr.else_expr, fn, data, post);
+            break;
+
         case AST_CAST_EXPR:
-            opt_visit_preorder(opt, ast->data.cast_expr.expr, fn, data);
+            visit_node(opt, ast->data.cast_expr.expr, fn, data, post);
             break;
-            
+
         case AST_CALL_EXPR:
-            opt_visit_preorder(opt, ast->data.call_expr.func, fn, data);
+            visit_node(opt, ast->data.call_expr.func, fn, data, post);
             for (size_t i = 0; i < ast->data.call_expr.num_args; i++) {
-                opt_visit_preorder(opt, ast->data.call_expr.args[i], fn, data);
+                visit_node(opt, ast->data.call_expr.args[i], fn, data, post);
             }
             break;
-            
+
+        case AST_SUBSCRIPT_EXPR:
+            visit_node(opt, ast->data.subscript_expr.array, fn, data, post);
+            visit_node(opt, ast->data.subscript_expr.index, fn, data, post);
+            break;
+
+        case AST_MEMBER_EXPR:
+            visit_node(opt, ast->data.member_expr.object, fn, data, post);
+            break;
+
+        case AST_COMMA_EXPR:
+            visit_node(opt, ast->data.comma_expr.left, fn, data, post);
+            visit_node(opt, ast->data.comma_expr.right, fn, data, post);
+            break;
+
+        case AST_SIZEOF_EXPR:
+            if (ast->data.sizeof_expr.expr_arg) {
+                visit_node(opt, ast->data.sizeof_expr.expr_arg, fn, data, post);
+            }
+            break;
+
+        case AST_INIT_LIST:
+            for (size_t i = 0; i < ast->data.init_list.num_exprs; i++) {
+                visit_node(opt, ast->data.init_list.exprs[i], fn, data, post);
+            }
+            break;
+
         default:
-            /* Leaf nodes or unhandled - nothing to traverse */
+            /* Leaves and unknown nodes have no children. */
             break;
     }
+}
+
+static void visit_node(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
+                       opt_visit_fn fn, void *data, bool post)
+{
+    if (!ast || !fn) return;
+    if (!post) {
+        if (!fn(opt, ast, data)) return; /* preorder: abort subtree */
+        visit_children(opt, ast, fn, data, post);
+    } else {
+        visit_children(opt, ast, fn, data, post);
+        fn(opt, ast, data);
+    }
+}
+
+void opt_visit_preorder(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
+                        opt_visit_fn fn, void *data)
+{
+    visit_node(opt, ast, fn, data, false);
 }
 
 void opt_visit_postorder(mcc_ast_opt_t *opt, mcc_ast_node_t *ast,
                          opt_visit_fn fn, void *data)
 {
-    if (!ast || !fn) return;
-    
-    /* Visit children first based on node kind */
-    switch (ast->kind) {
-        case AST_TRANSLATION_UNIT:
-            for (size_t i = 0; i < ast->data.translation_unit.num_decls; i++) {
-                opt_visit_postorder(opt, ast->data.translation_unit.decls[i], fn, data);
-            }
-            break;
-            
-        case AST_FUNC_DECL:
-            if (ast->data.func_decl.body) {
-                opt_visit_postorder(opt, ast->data.func_decl.body, fn, data);
-            }
-            break;
-            
-        case AST_COMPOUND_STMT:
-            for (size_t i = 0; i < ast->data.compound_stmt.num_stmts; i++) {
-                opt_visit_postorder(opt, ast->data.compound_stmt.stmts[i], fn, data);
-            }
-            break;
-            
-        case AST_IF_STMT:
-            opt_visit_postorder(opt, ast->data.if_stmt.cond, fn, data);
-            opt_visit_postorder(opt, ast->data.if_stmt.then_stmt, fn, data);
-            if (ast->data.if_stmt.else_stmt) {
-                opt_visit_postorder(opt, ast->data.if_stmt.else_stmt, fn, data);
-            }
-            break;
-            
-        case AST_WHILE_STMT:
-            opt_visit_postorder(opt, ast->data.while_stmt.cond, fn, data);
-            opt_visit_postorder(opt, ast->data.while_stmt.body, fn, data);
-            break;
-            
-        case AST_FOR_STMT:
-            if (ast->data.for_stmt.init) {
-                opt_visit_postorder(opt, ast->data.for_stmt.init, fn, data);
-            }
-            if (ast->data.for_stmt.cond) {
-                opt_visit_postorder(opt, ast->data.for_stmt.cond, fn, data);
-            }
-            if (ast->data.for_stmt.incr) {
-                opt_visit_postorder(opt, ast->data.for_stmt.incr, fn, data);
-            }
-            opt_visit_postorder(opt, ast->data.for_stmt.body, fn, data);
-            break;
-            
-        case AST_RETURN_STMT:
-            if (ast->data.return_stmt.expr) {
-                opt_visit_postorder(opt, ast->data.return_stmt.expr, fn, data);
-            }
-            break;
-            
-        case AST_EXPR_STMT:
-            if (ast->data.expr_stmt.expr) {
-                opt_visit_postorder(opt, ast->data.expr_stmt.expr, fn, data);
-            }
-            break;
-            
-        case AST_BINARY_EXPR:
-            opt_visit_postorder(opt, ast->data.binary_expr.lhs, fn, data);
-            opt_visit_postorder(opt, ast->data.binary_expr.rhs, fn, data);
-            break;
-            
-        case AST_UNARY_EXPR:
-            opt_visit_postorder(opt, ast->data.unary_expr.operand, fn, data);
-            break;
-            
-        case AST_CAST_EXPR:
-            opt_visit_postorder(opt, ast->data.cast_expr.expr, fn, data);
-            break;
-            
-        case AST_CALL_EXPR:
-            opt_visit_postorder(opt, ast->data.call_expr.func, fn, data);
-            for (size_t i = 0; i < ast->data.call_expr.num_args; i++) {
-                opt_visit_postorder(opt, ast->data.call_expr.args[i], fn, data);
-            }
-            break;
-            
-        default:
-            /* Leaf nodes or unhandled - nothing to traverse */
-            break;
-    }
-    
-    /* Then visit this node */
-    fn(opt, ast, data);
+    visit_node(opt, ast, fn, data, true);
 }

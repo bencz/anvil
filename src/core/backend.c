@@ -3,22 +3,24 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Maximum number of registered backends */
 #define MAX_BACKENDS 32
 
-/* Registered backends */
+/* Registered backends. Accessed concurrently when multiple threads create
+ * contexts simultaneously; protected with pthread_once during the built-in
+ * registration and an explicit mutex for any later anvil_register_backend()
+ * calls. */
 static const anvil_backend_ops_t *registered_backends[MAX_BACKENDS];
 static size_t num_backends = 0;
-static bool backends_initialized = false;
+static pthread_once_t backends_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t backends_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void anvil_init_backends(void)
+static void register_builtin_backends(void)
 {
-    if (backends_initialized) return;
-    
-    /* Register built-in backends */
     anvil_register_backend(&anvil_backend_x86);
     anvil_register_backend(&anvil_backend_x86_64);
     anvil_register_backend(&anvil_backend_s370);
@@ -29,16 +31,24 @@ void anvil_init_backends(void)
     anvil_register_backend(&anvil_backend_ppc64);
     anvil_register_backend(&anvil_backend_ppc64le);
     anvil_register_backend(&anvil_backend_arm64);
-    
-    backends_initialized = true;
+}
+
+void anvil_init_backends(void)
+{
+    pthread_once(&backends_once, register_builtin_backends);
 }
 
 anvil_error_t anvil_register_backend(const anvil_backend_ops_t *ops)
 {
     if (!ops) return ANVIL_ERR_INVALID_ARG;
-    if (num_backends >= MAX_BACKENDS) return ANVIL_ERR_NOMEM;
-    
+
+    pthread_mutex_lock(&backends_mutex);
+    if (num_backends >= MAX_BACKENDS) {
+        pthread_mutex_unlock(&backends_mutex);
+        return ANVIL_ERR_NOMEM;
+    }
     registered_backends[num_backends++] = ops;
+    pthread_mutex_unlock(&backends_mutex);
     return ANVIL_OK;
 }
 

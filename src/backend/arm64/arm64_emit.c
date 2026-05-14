@@ -181,9 +181,10 @@ void arm64_save_result(arm64_backend_t *be, anvil_instr_t *instr)
 void arm64_emit_load_fp_value(arm64_backend_t *be, anvil_value_t *val, int target_dreg)
 {
     if (!val) return;
-    
-    const char *dreg = target_dreg == 0 ? "d0" : (target_dreg == 1 ? "d1" : "d2");
-    const char *sreg = target_dreg == 0 ? "s0" : (target_dreg == 1 ? "s1" : "s2");
+    if (target_dreg < 0 || target_dreg >= 32) return;
+
+    const char *dreg = arm64_dreg_names[target_dreg];
+    const char *sreg = arm64_sreg_names[target_dreg];
     
     switch (val->kind) {
         case ANVIL_VAL_CONST_FLOAT:
@@ -198,15 +199,17 @@ void arm64_emit_load_fp_value(arm64_backend_t *be, anvil_value_t *val, int targe
             
         case ANVIL_VAL_INSTR:
             if (target_dreg != 0) {
-                anvil_strbuf_appendf(&be->code, "\tfmov %s, d0\n", dreg);
+                anvil_strbuf_appendf(&be->code, "\tfmov %s, %s\n",
+                    dreg, arm64_dreg_names[0]);
             }
             break;
-            
+
         case ANVIL_VAL_PARAM:
             {
                 size_t idx = val->data.param.index;
                 if (idx < 8 && target_dreg != (int)idx) {
-                    anvil_strbuf_appendf(&be->code, "\tfmov %s, d%zu\n", dreg, idx);
+                    anvil_strbuf_appendf(&be->code, "\tfmov %s, %s\n",
+                        dreg, arm64_dreg_names[idx]);
                 }
             }
             break;
@@ -395,9 +398,26 @@ void arm64_emit_instr(arm64_backend_t *be, anvil_instr_t *instr)
             break;
             
         case ANVIL_OP_ALLOCA:
-            /* Stack slots are pre-allocated in arm64_emit_func first pass.
-             * No need to zero-initialize here - the C code will initialize
-             * the variable with an explicit store instruction. */
+            if (instr->num_operands >= 1 && instr->operands[0]) {
+                /* Dynamic alloca: subtract count*elem_size (rounded up to
+                 * 16) from sp and hand the resulting pointer to the
+                 * instruction result's stack slot. This is how VLAs are
+                 * implemented in the MCC codegen. */
+                int elem_size = instr->aux_type
+                    ? arm64_type_size(instr->aux_type) : 8;
+                arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
+                anvil_strbuf_appendf(&be->code, "\tmov x10, #%d\n", elem_size);
+                anvil_strbuf_append(&be->code, "\tmul x9, x9, x10\n");
+                /* Round up to 16 (ARM64 sp alignment). */
+                anvil_strbuf_append(&be->code, "\tadd x9, x9, #15\n");
+                anvil_strbuf_append(&be->code, "\tand x9, x9, #-16\n");
+                /* Bump sp and capture the new sp as the pointer result. */
+                anvil_strbuf_append(&be->code, "\tsub sp, sp, x9\n");
+                anvil_strbuf_append(&be->code, "\tmov x0, sp\n");
+                arm64_save_result(be, instr);
+            }
+            /* Static alloca: stack slots are pre-allocated in arm64_emit_func's
+             * first pass, nothing to emit here. */
             break;
             
         /* Arithmetic */
@@ -761,9 +781,9 @@ void arm64_emit_store(arm64_backend_t *be, anvil_instr_t *instr)
             /* Optimization: use wzr/xzr for storing zero */
             anvil_value_t *src = instr->operands[0];
             if (src && src->kind == ANVIL_VAL_CONST_INT && src->data.i == 0) {
-                /* Store zero using zero register */
-                int zr = (size <= 4) ? ARM64_XZR : ARM64_XZR;
-                arm64_emit_store_to_stack(be, zr, offset, size);
+                /* Store zero using zero register; arm64_emit_store_to_stack
+                 * selects wzr/xzr based on size. */
+                arm64_emit_store_to_stack(be, ARM64_XZR, offset, size);
                 return;
             }
             arm64_emit_load_value(be, instr->operands[0], ARM64_X9);
@@ -1103,24 +1123,27 @@ void arm64_emit_call(arm64_backend_t *be, anvil_instr_t *instr)
             anvil_strbuf_appendf(&be->code, "\tadd sp, sp, #%zu\n", stack_size);
         }
     } else {
-        /* Non-variadic call or Linux - use registers */
+        /* Non-variadic call or Linux - use registers.
+         *
+         * Load arguments directly into x0..x7 instead of the previous
+         * "load-to-x9+i then mov x_i, x_9+i" two-pass sequence. The register
+         * cache was cleared above, arm64_emit_load_value always materialises
+         * param/instr values from their stack slots (stack slots for every
+         * result are allocated in arm64_emit_func's first pass), and
+         * constants don't depend on any GPR — so emitting the load for
+         * argument i into x_i cannot overwrite the source of a later
+         * argument. */
         size_t reg_args = num_args;
         if (reg_args > ARM64_NUM_ARG_REGS) reg_args = ARM64_NUM_ARG_REGS;
-        
-        /* Load arguments into temporaries */
+
         for (size_t i = 0; i < reg_args; i++) {
-            arm64_emit_load_value(be, instr->operands[i + 1], ARM64_X9 + (int)i);
+            arm64_emit_load_value(be, instr->operands[i + 1], (int)i);
         }
-        
-        /* Move to argument registers */
-        for (size_t i = 0; i < reg_args; i++) {
-            anvil_strbuf_appendf(&be->code, "\tmov x%zu, x%d\n", i, ARM64_X9 + (int)i);
-        }
-        
+
         /* Call function */
         const char *prefix = arm64_symbol_prefix(be);
         if (callee->kind == ANVIL_VAL_FUNC ||
-            (callee->kind == ANVIL_VAL_GLOBAL && callee->type && 
+            (callee->kind == ANVIL_VAL_GLOBAL && callee->type &&
              callee->type->kind == ANVIL_TYPE_FUNC)) {
             anvil_strbuf_appendf(&be->code, "\tbl %s%s\n", prefix, callee->name);
         } else {
@@ -1257,6 +1280,10 @@ void arm64_emit_fp(arm64_backend_t *be, anvil_instr_t *instr)
             break;
             
         case ANVIL_OP_FCMP:
+            /* The IR exposes a single FCMP opcode with no predicate, so this
+             * lowers to "ordered equality". For other FP comparisons, callers
+             * must emit explicit sequences or extend the IR with fcmp_*
+             * variants. */
             arm64_emit_load_fp_value(be, instr->operands[0], 0);
             arm64_emit_load_fp_value(be, instr->operands[1], 1);
             anvil_strbuf_appendf(&be->code, "\tfcmp %s0, %s1\n", reg, reg);

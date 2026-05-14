@@ -83,9 +83,23 @@ bool sema_analyze_func_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
         }
         
         sema_analyze_stmt(sema, decl->data.func_decl.body);
-        
-        /* TODO: Check that all labels referenced by goto are defined */
-        
+
+        /* Before popping the function scope, walk the label namespace and
+         * flag any label that was referenced by goto but never defined. */
+        mcc_scope_t *fn_scope = mcc_symtab_current_scope(sema->symtab);
+        while (fn_scope && !fn_scope->is_function_scope) {
+            fn_scope = fn_scope->parent;
+        }
+        if (fn_scope && fn_scope->labels) {
+            for (size_t i = 0; i < fn_scope->num_labels; i++) {
+                mcc_symbol_t *lbl = fn_scope->labels[i];
+                if (lbl && !lbl->is_defined) {
+                    mcc_error_at(sema->ctx, lbl->location,
+                        "label '%s' used but not defined", lbl->name);
+                }
+            }
+        }
+
         mcc_symtab_pop_scope(sema->symtab);
         
         sema->current_func = NULL;
@@ -103,10 +117,17 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
     mcc_type_t *var_type = decl->data.var_decl.var_type;
     
-    /* Check for complete type */
+    /* Check for complete type. Exemptions:
+     *  - an array with an initializer: the size is inferred from the init.
+     *  - a VLA: the "length is 0" at compile time is expected; the size
+     *    is determined at runtime by the length_expr. */
     if (!sema_check_complete_type(sema, var_type, decl->location)) {
-        /* Allow incomplete array with initializer */
-        if (!mcc_type_is_array(var_type) || !decl->data.var_decl.init) {
+        bool exempt = false;
+        if (mcc_type_is_array(var_type)) {
+            if (decl->data.var_decl.init) exempt = true;
+            if (var_type->data.array.is_vla) exempt = true;
+        }
+        if (!exempt) {
             mcc_error_at(sema->ctx, decl->location,
                          "variable has incomplete type");
         }

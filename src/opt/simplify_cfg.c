@@ -32,24 +32,53 @@ static void mark_reachable(anvil_block_t *block, bool *reachable, size_t num_blo
     }
 }
 
-/* Count predecessors of a block */
-static size_t count_preds(anvil_func_t *func, anvil_block_t *target)
+/* Walk the function once and populate block->preds for every block. We
+ * refresh this cache at the top of each do-while iteration; count_preds
+ * below then runs in O(1) instead of O(n) per call. */
+static void recompute_preds(anvil_func_t *func)
 {
-    size_t count = 0;
-    
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        block->num_preds = 0;
+    }
+    /* First pass: count to size the arrays. */
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         anvil_instr_t *term = block->last;
         if (!term) continue;
-        
-        if (term->op == ANVIL_OP_BR && term->true_block == target) {
-            count++;
+        if (term->op == ANVIL_OP_BR && term->true_block) {
+            term->true_block->num_preds++;
         } else if (term->op == ANVIL_OP_BR_COND) {
-            if (term->true_block == target) count++;
-            if (term->false_block == target) count++;
+            if (term->true_block)  term->true_block->num_preds++;
+            if (term->false_block) term->false_block->num_preds++;
         }
     }
-    
-    return count;
+    /* Allocate per-block pred arrays. */
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        free(block->preds);
+        block->preds = block->num_preds
+            ? calloc(block->num_preds, sizeof(anvil_block_t *))
+            : NULL;
+        block->num_preds = 0; /* re-use as write index in the next pass */
+    }
+    /* Second pass: fill. */
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        anvil_instr_t *term = block->last;
+        if (!term) continue;
+        if (term->op == ANVIL_OP_BR && term->true_block && term->true_block->preds) {
+            term->true_block->preds[term->true_block->num_preds++] = block;
+        } else if (term->op == ANVIL_OP_BR_COND) {
+            if (term->true_block && term->true_block->preds)
+                term->true_block->preds[term->true_block->num_preds++] = block;
+            if (term->false_block && term->false_block->preds)
+                term->false_block->preds[term->false_block->num_preds++] = block;
+        }
+    }
+}
+
+/* Count predecessors of a block (O(1) after recompute_preds). */
+static size_t count_preds(anvil_func_t *func, anvil_block_t *target)
+{
+    (void)func;
+    return target ? target->num_preds : 0;
 }
 
 /* Check if block has only one instruction (the terminator) */
@@ -95,7 +124,8 @@ static void replace_branch_target(anvil_func_t *func,
     }
 }
 
-/* Remove a block from the function */
+/* Remove a block from the function. Also refreshes func->last_block if the
+ * removed block was at the tail. */
 static void remove_block(anvil_func_t *func, anvil_block_t *block)
 {
     anvil_block_t **pp = &func->blocks;
@@ -103,6 +133,13 @@ static void remove_block(anvil_func_t *func, anvil_block_t *block)
         if (*pp == block) {
             *pp = block->next;
             func->num_blocks--;
+            if (func->last_block == block) {
+                anvil_block_t *new_last = func->blocks;
+                if (new_last) {
+                    while (new_last->next) new_last = new_last->next;
+                }
+                func->last_block = new_last;
+            }
             return;
         }
         pp = &(*pp)->next;
@@ -121,13 +158,16 @@ static bool simplify_const_branch(anvil_func_t *func, anvil_block_t *block)
     
     int64_t val = cond->data.i;
     anvil_block_t *target = val ? term->true_block : term->false_block;
-    
-    /* Convert to unconditional branch */
+
+    /* Convert to unconditional branch. Free the condition operand array
+     * so the BR_COND's allocation doesn't leak. */
     term->op = ANVIL_OP_BR;
     term->true_block = target;
     term->false_block = NULL;
+    free(term->operands);
+    term->operands = NULL;
     term->num_operands = 0;
-    
+
     return true;
 }
 
@@ -193,7 +233,10 @@ bool anvil_pass_simplify_cfg(anvil_func_t *func)
     
     do {
         any_changed = false;
-        
+
+        /* Refresh predecessor cache before any per-block queries. */
+        recompute_preds(func);
+
         /* Simplify constant conditional branches */
         for (anvil_block_t *block = func->blocks; block; block = block->next) {
             if (simplify_const_branch(func, block)) {

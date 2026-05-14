@@ -473,6 +473,9 @@ anvil_value_t *anvil_build_cmp_uge(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_v
 
 /* Memory operations */
 anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type, const char *name);
+/* Dynamic-size alloca: stack area sized to `count` * sizeof(type). */
+anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
+                                       anvil_value_t *count, const char *name);
 anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr, const char *name);
 anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr);
 anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr,

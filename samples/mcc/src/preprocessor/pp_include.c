@@ -61,7 +61,7 @@ static FILE *pp_try_open_file(const char *path)
 }
 
 /* Search for include file in various locations */
-static FILE *pp_find_include_file(mcc_preprocessor_t *pp, const char *filename,
+FILE *pp_find_include_file(mcc_preprocessor_t *pp, const char *filename,
                                    bool is_system, char *resolved_path, size_t path_size)
 {
     FILE *f = NULL;
@@ -148,27 +148,63 @@ void pp_process_include(mcc_preprocessor_t *pp)
     /* Find and open file */
     char path[1024];
     FILE *f = pp_find_include_file(pp, filename, is_system, path, sizeof(path));
-    
+
     if (!f) {
         mcc_error(pp->ctx, "Cannot find include file: %s", filename);
         return;
     }
-    
+
+    /* #pragma once tracking: if this path has already been include-once'd,
+     * skip the body entirely. pp_find_include_file resolved the full path
+     * to `path`, so comparisons work regardless of the spelling in the
+     * #include directive. */
+    for (size_t i = 0; i < pp->num_pragma_once; i++) {
+        if (strcmp(pp->pragma_once_files[i], path) == 0) {
+            fclose(f);
+            return;
+        }
+    }
+
     /* Read file contents */
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+
     char *content = mcc_alloc(pp->ctx, size + 1);
-    fread(content, 1, size, f);
+    if (fread(content, 1, size, f) != (size_t)size) {
+        mcc_error(pp->ctx, "Failed to read include file: %s", path);
+        fclose(f);
+        return;
+    }
     content[size] = '\0';
     fclose(f);
-    
+
     /* Save current lexer state */
     pp_push_include(pp);
-    
+
     /* Initialize lexer with new file */
     mcc_lexer_init_string(pp->lexer, content, mcc_strdup(pp->ctx, path));
+}
+
+/* Register the current file as #pragma once. Called from pp_process_pragma. */
+void pp_mark_pragma_once(mcc_preprocessor_t *pp)
+{
+    const char *path = pp->lexer ? pp->lexer->filename : NULL;
+    if (!path) return;
+
+    /* Already registered? */
+    for (size_t i = 0; i < pp->num_pragma_once; i++) {
+        if (strcmp(pp->pragma_once_files[i], path) == 0) return;
+    }
+
+    if (pp->num_pragma_once >= pp->cap_pragma_once) {
+        size_t ncap = pp->cap_pragma_once ? pp->cap_pragma_once * 2 : 8;
+        pp->pragma_once_files = mcc_realloc(pp->ctx, pp->pragma_once_files,
+            pp->cap_pragma_once * sizeof(*pp->pragma_once_files),
+            ncap * sizeof(*pp->pragma_once_files));
+        pp->cap_pragma_once = ncap;
+    }
+    pp->pragma_once_files[pp->num_pragma_once++] = mcc_strdup(pp->ctx, path);
 }
 
 /* ============================================================

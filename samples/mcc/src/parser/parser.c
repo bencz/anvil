@@ -26,6 +26,7 @@ mcc_parser_t *mcc_parser_create(mcc_context_t *ctx, mcc_preprocessor_t *pp)
     p->symtab = NULL;
     p->struct_types = NULL;
     p->typedefs = NULL;
+    p->typedef_depth = 0;
     p->panic_mode = false;
     p->sync_depth = 0;
     return p;
@@ -171,6 +172,13 @@ mcc_ast_node_t *mcc_parser_parse(mcc_parser_t *p)
     size_t cap_decls = 0;
     
     while (!parse_check(p, TOK_EOF)) {
+        /* Safety valve: stop if we've accumulated enough errors that continuing
+         * is counter-productive (each spurious error risks feeding an infinite
+         * loop when parse_synchronize can't find a recovery anchor). */
+        if (p->ctx->error_count >= MCC_MAX_ERRORS) {
+            break;
+        }
+
         mcc_ast_node_t *decl = parse_declaration(p);
         
         if (decl) {

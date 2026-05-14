@@ -72,6 +72,16 @@ static const lex_keyword_entry_t keywords[] = {
     {"constexpr",     TOK_CONSTEXPR,     MCC_FEAT_CONSTEXPR},
     {"typeof",        TOK_TYPEOF,        MCC_FEAT_TYPEOF},
     {"typeof_unqual", TOK_TYPEOF_UNQUAL, MCC_FEAT_TYPEOF_UNQUAL},
+    /* GNU: __typeof__ is the same as typeof but available in all dialects
+     * under the GNU extension guard. Map to the same TOK_TYPEOF the parser
+     * already handles. */
+    {"__typeof__",    TOK_TYPEOF,        MCC_FEAT_GNU_TYPEOF},
+    {"__typeof",      TOK_TYPEOF,        MCC_FEAT_GNU_TYPEOF},
+    {"__attribute__", TOK_ATTRIBUTE,     MCC_FEAT_GNU_ATTR},
+    {"__attribute",   TOK_ATTRIBUTE,     MCC_FEAT_GNU_ATTR},
+    {"__asm__",       TOK_ASM,           MCC_FEAT_GNU_ASM},
+    {"__asm",         TOK_ASM,           MCC_FEAT_GNU_ASM},
+    {"asm",           TOK_ASM,           MCC_FEAT_GNU_ASM},
     
     /* C23 alternative spellings (without underscore) - use BOOL_KEYWORD for bool */
     {"alignas",       TOK_ALIGNAS,       MCC_FEAT_ALIGNAS},

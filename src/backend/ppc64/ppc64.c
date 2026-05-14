@@ -82,9 +82,10 @@ static anvil_error_t ppc64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
     
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
+    anvil_slot_map_init(&priv->slot_map);
     priv->label_counter = 0;
     priv->ctx = ctx;
-    
+
     be->priv = priv;
     return ANVIL_OK;
 }
@@ -92,10 +93,11 @@ static anvil_error_t ppc64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 static void ppc64_cleanup(anvil_backend_t *be)
 {
     if (!be || !be->priv) return;
-    
+
     ppc64_backend_t *priv = be->priv;
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
+    anvil_slot_map_free(&priv->slot_map);
     free(priv->strings);
     free(priv->stack_slots);
     free(priv);
@@ -105,14 +107,15 @@ static void ppc64_cleanup(anvil_backend_t *be)
 static void ppc64_reset(anvil_backend_t *be)
 {
     if (!be || !be->priv) return;
-    
+
     ppc64_backend_t *priv = be->priv;
-    
+
     /* Clear stack slots (contain pointers to anvil_value_t) */
     priv->num_stack_slots = 0;
     priv->next_stack_offset = 0;
     priv->stack_offset = 0;
     priv->local_offset = 0;
+    anvil_slot_map_reset(&priv->slot_map);
     
     /* Clear string table (contain pointers to string data) */
     priv->num_strings = 0;
@@ -138,25 +141,22 @@ int ppc64_add_stack_slot(ppc64_backend_t *be, anvil_value_t *val)
         be->stack_slots = new_slots;
         be->stack_slots_cap = new_cap;
     }
-    
+
     be->next_stack_offset += 8;
     int offset = be->next_stack_offset;
-    
+
     be->stack_slots[be->num_stack_slots].value = val;
     be->stack_slots[be->num_stack_slots].offset = offset;
     be->num_stack_slots++;
-    
+
+    anvil_slot_map_set(&be->slot_map, val, offset);
+
     return offset;
 }
 
 int ppc64_get_stack_slot(ppc64_backend_t *be, anvil_value_t *val)
 {
-    for (size_t i = 0; i < be->num_stack_slots; i++) {
-        if (be->stack_slots[i].value == val) {
-            return be->stack_slots[i].offset;
-        }
-    }
-    return -1;
+    return anvil_slot_map_get(&be->slot_map, val);
 }
 
 const char *ppc64_add_string(ppc64_backend_t *be, const char *str)

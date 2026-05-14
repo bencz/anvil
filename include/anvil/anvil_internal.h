@@ -13,14 +13,6 @@
 extern "C" {
 #endif
 
-/* Memory pool for efficient allocation */
-typedef struct anvil_pool {
-    void *blocks;
-    size_t block_size;
-    size_t used;
-    struct anvil_pool *next;
-} anvil_pool_t;
-
 /* String buffer for code generation */
 typedef struct anvil_strbuf {
     char *data;
@@ -99,17 +91,23 @@ struct anvil_type {
     size_t size;           /* Size in bytes (target-dependent) */
     size_t align;          /* Alignment in bytes */
     bool is_signed;
-    
+
+    /* Linked list used by the context to track every type it owns so they
+     * can be freed in anvil_ctx_destroy. Previously composite types (ptr,
+     * struct, array, func) leaked on every call because nothing tracked
+     * them. */
+    struct anvil_type *ctx_next;
+
     union {
         /* Pointer type */
         anvil_type_t *pointee;
-        
+
         /* Array type */
         struct {
             anvil_type_t *elem;
             size_t count;
         } array;
-        
+
         /* Struct type */
         struct {
             char *name;
@@ -118,7 +116,7 @@ struct anvil_type {
             size_t num_fields;
             bool packed;
         } struc;
-        
+
         /* Function type */
         struct {
             anvil_type_t *ret;
@@ -158,6 +156,7 @@ struct anvil_func {
     
     anvil_block_t *entry;
     anvil_block_t *blocks;
+    anvil_block_t *last_block;  /* Tail of singly-linked blocks list, for O(1) append. */
     size_t num_blocks;
     
     struct anvil_func *next;
@@ -241,9 +240,12 @@ struct anvil_ctx {
     anvil_type_t *type_u64;
     anvil_type_t *type_f32;
     anvil_type_t *type_f64;
-    
-    /* Memory pool */
-    anvil_pool_t *pool;
+    anvil_type_t *type_ptr_i8;   /* Cached i8* — most common composite type. */
+    anvil_type_t *type_ptr_void; /* Cached void*. */
+
+    /* Head of the linked list of all types owned by this context.
+     * Populated by anvil_type_create; freed by anvil_ctx_destroy. */
+    anvil_type_t *types;
     
     /* Modules */
     anvil_module_t *modules;
@@ -266,13 +268,6 @@ struct anvil_ctx {
  * Internal utility functions
  * ============================================================================ */
 
-/* Memory management */
-void *anvil_alloc(anvil_ctx_t *ctx, size_t size);
-void *anvil_realloc(anvil_ctx_t *ctx, void *ptr, size_t old_size, size_t new_size);
-char *anvil_strdup(anvil_ctx_t *ctx, const char *str);
-void anvil_pool_init(anvil_pool_t *pool, size_t block_size);
-void anvil_pool_destroy(anvil_pool_t *pool);
-
 /* String buffer */
 void anvil_strbuf_init(anvil_strbuf_t *sb);
 void anvil_strbuf_destroy(anvil_strbuf_t *sb);
@@ -294,6 +289,13 @@ void anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr);
 /* Type utilities */
 void anvil_type_init_sizes(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_create(anvil_ctx_t *ctx, anvil_type_kind_t kind);
+void anvil_type_free(anvil_type_t *type);
+
+/* CPU catalogue (implemented in cpu_table.c) */
+void anvil_update_cpu_features(anvil_ctx_t *ctx);
+const void *anvil_cpu_table_find(anvil_cpu_model_t model);
+const char *anvil_cpu_table_info_name(const void *opaque);
+anvil_arch_t anvil_cpu_table_info_arch(const void *opaque);
 
 /* Error handling */
 void anvil_set_error(anvil_ctx_t *ctx, anvil_error_t err, const char *fmt, ...);

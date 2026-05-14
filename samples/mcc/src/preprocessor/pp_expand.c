@@ -413,6 +413,72 @@ static mcc_token_t *substitute(mcc_preprocessor_t *pp, mcc_macro_t *macro,
                 continue;
             }
             
+            /* Check for __VA_OPT__(content): expands to `content` when
+             * the call has extra variadic arguments, otherwise to nothing.
+             * Introduced in C23 — we implement it here so the new
+             * expansion path works the same as the legacy pp_macro.c
+             * implementation. */
+            if (macro->is_variadic && strcmp(body->text, "__VA_OPT__") == 0) {
+                mcc_token_t *after = body->next;
+                if (after && after->type == TOK_LPAREN) {
+                    /* Collect balanced content up to matching ')'. */
+                    mcc_token_t *content_head = NULL, *content_tail = NULL;
+                    int depth = 1;
+                    mcc_token_t *scan = after->next;
+                    while (scan && depth > 0) {
+                        if (scan->type == TOK_LPAREN) depth++;
+                        else if (scan->type == TOK_RPAREN) {
+                            depth--;
+                            if (depth == 0) break;
+                        }
+                        mcc_token_t *copy = mcc_token_copy(pp->ctx, scan);
+                        copy->next = NULL;
+                        if (!content_head) content_head = copy;
+                        if (content_tail) content_tail->next = copy;
+                        content_tail = copy;
+                        scan = scan->next;
+                    }
+
+                    bool has_va_args = (num_args > macro->num_params);
+                    if (has_va_args && content_head) {
+                        /* Re-run the body-substitution logic on the
+                         * collected content. For our tests we only need
+                         * to handle a single comma inside __VA_OPT__,
+                         * but we still walk through to honour __VA_ARGS__
+                         * if present. */
+                        for (mcc_token_t *ct = content_head; ct; ct = ct->next) {
+                            if (ct->type == TOK_IDENT &&
+                                strcmp(ct->text, "__VA_ARGS__") == 0) {
+                                for (int i = macro->num_params; i < num_args; i++) {
+                                    if (i > macro->num_params) {
+                                        mcc_token_t *comma = mcc_token_create(pp->ctx);
+                                        comma->type = TOK_COMMA;
+                                        comma->text = ",";
+                                        comma->next = NULL;
+                                        APPEND_RESULT(comma);
+                                    }
+                                    mcc_token_t *al = expanded_args ? expanded_args[i] : args[i];
+                                    for (mcc_token_t *a = al; a; a = a->next) {
+                                        mcc_token_t *c = mcc_token_copy(pp->ctx, a);
+                                        c->next = NULL;
+                                        APPEND_RESULT(c);
+                                    }
+                                }
+                            } else {
+                                mcc_token_t *c = mcc_token_copy(pp->ctx, ct);
+                                c->next = NULL;
+                                APPEND_RESULT(c);
+                            }
+                        }
+                    }
+
+                    /* Advance body past the closing ')' so the main loop
+                     * doesn't re-emit __VA_OPT__ / its content. */
+                    body = scan; /* now points at ')' or NULL */
+                    continue;
+                }
+            }
+
             /* Check for __VA_ARGS__ */
             if (macro->is_variadic && strcmp(body->text, "__VA_ARGS__") == 0) {
                 bool first = true;

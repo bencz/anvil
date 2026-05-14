@@ -11,100 +11,25 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if a value is a constant integer */
-static bool is_const_int(anvil_value_t *val)
-{
-    return val && val->kind == ANVIL_VAL_CONST_INT;
-}
-
-/* Check if a value is a constant float */
-static bool is_const_float(anvil_value_t *val)
-{
-    return val && val->kind == ANVIL_VAL_CONST_FLOAT;
-}
-
-/* Get integer constant value */
-static int64_t get_const_int(anvil_value_t *val)
-{
-    return val->data.i;
-}
-
-/* Get float constant value */
-static double get_const_float(anvil_value_t *val)
-{
-    return val->data.f;
-}
-
-/* Check if constant is zero */
-static bool is_zero(anvil_value_t *val)
-{
-    if (is_const_int(val)) return get_const_int(val) == 0;
-    if (is_const_float(val)) return get_const_float(val) == 0.0;
-    return false;
-}
-
-/* Check if constant is one */
-static bool is_one(anvil_value_t *val)
-{
-    if (is_const_int(val)) return get_const_int(val) == 1;
-    if (is_const_float(val)) return get_const_float(val) == 1.0;
-    return false;
-}
-
-/* Check if constant is all ones (for bitwise ops) */
-static bool is_all_ones(anvil_value_t *val)
-{
-    if (!is_const_int(val)) return false;
-    int64_t v = get_const_int(val);
-    return v == -1 || v == (int64_t)0xFFFFFFFFFFFFFFFFLL;
-}
-
-/* Replace all uses of old_val with new_val in the function */
-static void replace_uses(anvil_func_t *func, anvil_value_t *old_val, anvil_value_t *new_val)
-{
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
-        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            for (size_t i = 0; i < instr->num_operands; i++) {
-                if (instr->operands[i] == old_val) {
-                    instr->operands[i] = new_val;
-                }
-            }
-        }
-    }
-}
+/* Local aliases to keep existing call sites readable. */
+#define is_const_int      anvil_opt_is_const_int
+#define is_const_float    anvil_opt_is_const_float
+#define get_const_int     anvil_opt_get_const_int
+#define get_const_float   anvil_opt_get_const_float
+#define is_zero           anvil_opt_is_zero
+#define is_one            anvil_opt_is_one
+#define is_all_ones       anvil_opt_is_all_ones
+#define make_const_int    anvil_opt_make_const_int
+#define make_const_float  anvil_opt_make_const_float
 
 /* Mark instruction for deletion by setting op to NOP */
 static void mark_dead(anvil_instr_t *instr)
 {
     instr->op = ANVIL_OP_NOP;
-}
-
-/* Create a constant value with the same type */
-static anvil_value_t *make_const_int(anvil_ctx_t *ctx, anvil_type_t *type, int64_t val)
-{
-    switch (type->kind) {
-        case ANVIL_TYPE_I8:  return anvil_const_i8(ctx, (int8_t)val);
-        case ANVIL_TYPE_I16: return anvil_const_i16(ctx, (int16_t)val);
-        case ANVIL_TYPE_I32: return anvil_const_i32(ctx, (int32_t)val);
-        case ANVIL_TYPE_I64: return anvil_const_i64(ctx, val);
-        case ANVIL_TYPE_U8:  return anvil_const_u8(ctx, (uint8_t)val);
-        case ANVIL_TYPE_U16: return anvil_const_u16(ctx, (uint16_t)val);
-        case ANVIL_TYPE_U32: return anvil_const_u32(ctx, (uint32_t)val);
-        case ANVIL_TYPE_U64: return anvil_const_u64(ctx, (uint64_t)val);
-        default: return NULL;
-    }
-}
-
-static anvil_value_t *make_const_float(anvil_ctx_t *ctx, anvil_type_t *type, double val)
-{
-    switch (type->kind) {
-        case ANVIL_TYPE_F32: return anvil_const_f32(ctx, (float)val);
-        case ANVIL_TYPE_F64: return anvil_const_f64(ctx, val);
-        default: return NULL;
-    }
 }
 
 /* Try to fold a binary integer operation */
@@ -434,7 +359,7 @@ bool anvil_pass_const_fold(anvil_func_t *func)
             
             /* Replace uses if we folded something */
             if (folded) {
-                replace_uses(func, instr->result, folded);
+                anvil_opt_replace_uses_in_func(func, instr->result, folded);
                 mark_dead(instr);
                 changed = true;
             }

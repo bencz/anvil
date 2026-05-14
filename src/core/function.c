@@ -145,16 +145,15 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
     block->parent = func;
     block->id = func->parent->ctx->next_block_id++;
     
-    /* Add to function's block list */
+    /* Append to function's block list in O(1) using the cached tail. */
     if (!func->blocks) {
         func->blocks = block;
     } else {
-        anvil_block_t *last = func->blocks;
-        while (last->next) last = last->next;
-        last->next = block;
+        func->last_block->next = block;
     }
+    func->last_block = block;
     func->num_blocks++;
-    
+
     return block;
 }
 

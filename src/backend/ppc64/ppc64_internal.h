@@ -8,6 +8,7 @@
 #define PPC64_INTERNAL_H
 
 #include "anvil/anvil_internal.h"
+#include "../common/anvil_slot_map.h"
 
 /* PowerPC 64-bit register names */
 extern const char *ppc64_gpr_names[];
@@ -68,6 +69,9 @@ typedef struct {
     size_t num_stack_slots;
     size_t stack_slots_cap;
     int next_stack_offset;
+
+    /* O(1) value→offset lookup (parallel to stack_slots[] bookkeeping). */
+    anvil_slot_map_t slot_map;
     
     /* String table */
     ppc64_string_entry_t *strings;
@@ -96,6 +100,7 @@ const char *ppc64_add_string(ppc64_backend_t *be, const char *str);
 void ppc64_emit_prologue(ppc64_backend_t *be, anvil_func_t *func);
 void ppc64_emit_epilogue(ppc64_backend_t *be, anvil_func_t *func);
 void ppc64_emit_load_value(ppc64_backend_t *be, anvil_value_t *val, int reg, anvil_func_t *func);
+void ppc64_emit_load_fp_value(ppc64_backend_t *be, anvil_value_t *val, int fpr, anvil_func_t *func);
 void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *func);
 void ppc64_emit_block(ppc64_backend_t *be, anvil_block_t *block, anvil_func_t *func);
 void ppc64_emit_func(ppc64_backend_t *be, anvil_func_t *func);

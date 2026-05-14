@@ -17,10 +17,12 @@ typedef struct mcc_struct_entry {
     struct mcc_struct_entry *next;
 } mcc_struct_entry_t;
 
-/* Typedef entry */
+/* Typedef entry — linked-list LIFO with a depth so we can pop entries
+ * registered inside a block when the block closes. */
 typedef struct mcc_typedef_entry {
     const char *name;
     struct mcc_type *type;
+    int depth;                  /* 0 = file scope, >0 = nested block scope */
     struct mcc_typedef_entry *next;
 } mcc_typedef_entry_t;
 
@@ -28,20 +30,21 @@ typedef struct mcc_typedef_entry {
 struct mcc_parser {
     mcc_context_t *ctx;
     mcc_preprocessor_t *pp;     /* Token source */
-    
+
     /* Current and lookahead tokens */
     mcc_token_t *current;
     mcc_token_t *peek;
-    
+
     /* Scope tracking for typedef names */
     struct mcc_symtab *symtab;
-    
+
     /* Struct/union type table */
     mcc_struct_entry_t *struct_types;
-    
-    /* Typedef table */
+
+    /* Typedef table (LIFO, head is innermost) + current block depth. */
     mcc_typedef_entry_t *typedefs;
-    
+    int typedef_depth;
+
     /* Error recovery */
     bool panic_mode;
     int sync_depth;

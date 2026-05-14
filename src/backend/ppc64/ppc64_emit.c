@@ -179,6 +179,71 @@ void ppc64_emit_load_value(ppc64_backend_t *be, anvil_value_t *val, int reg, anv
     (void)func;
 }
 
+/* Load a floating-point value into the given FPR.
+ * Uses a scratch stack slot at 0(r1) (red zone) to transfer between GPR and FPR. */
+void ppc64_emit_load_fp_value(ppc64_backend_t *be, anvil_value_t *val, int fpr, anvil_func_t *func)
+{
+    if (!val) return;
+
+    bool is_f32 = val->type && val->type->kind == ANVIL_TYPE_F32;
+    const char *lfd = is_f32 ? "lfs" : "lfd";
+
+    switch (val->kind) {
+        case ANVIL_VAL_CONST_FLOAT: {
+            /* Materialise constant: load bit pattern into GPR, store to red zone, load back into FPR. */
+            uint64_t bits;
+            if (is_f32) {
+                float f = (float)val->data.f;
+                uint32_t b32;
+                memcpy(&b32, &f, sizeof(b32));
+                bits = (uint64_t)b32;
+            } else {
+                memcpy(&bits, &val->data.f, sizeof(bits));
+            }
+            anvil_strbuf_appendf(&be->code, "\tlis r0, 0x%llx\n",
+                (unsigned long long)((bits >> 48) & 0xFFFF));
+            anvil_strbuf_appendf(&be->code, "\tori r0, r0, 0x%llx\n",
+                (unsigned long long)((bits >> 32) & 0xFFFF));
+            anvil_strbuf_append(&be->code, "\tsldi r0, r0, 32\n");
+            anvil_strbuf_appendf(&be->code, "\toris r0, r0, 0x%llx\n",
+                (unsigned long long)((bits >> 16) & 0xFFFF));
+            anvil_strbuf_appendf(&be->code, "\tori r0, r0, 0x%llx\n",
+                (unsigned long long)(bits & 0xFFFF));
+            anvil_strbuf_append(&be->code, "\tstd r0, -8(r1)\n");
+            anvil_strbuf_appendf(&be->code, "\t%s f%d, -8(r1)\n", lfd, fpr);
+            break;
+        }
+
+        case ANVIL_VAL_PARAM: {
+            size_t idx = val->data.param.index;
+            /* FP args go in f1..f13 on ELFv1 */
+            if (idx < 13 && (int)(idx + 1) != fpr) {
+                anvil_strbuf_appendf(&be->code, "\tfmr f%d, f%zu\n", fpr, idx + 1);
+            }
+            break;
+        }
+
+        case ANVIL_VAL_INSTR:
+            if (val->data.instr && val->data.instr->op == ANVIL_OP_ALLOCA) {
+                int offset = ppc64_get_stack_slot(be, val);
+                if (offset >= 0) {
+                    anvil_strbuf_appendf(&be->code, "\t%s f%d, -%d(r31)\n",
+                        lfd, fpr, PPC64_MIN_FRAME_SIZE + offset);
+                }
+            } else if (fpr != 1) {
+                /* Previous result lives in f1 by convention */
+                anvil_strbuf_appendf(&be->code, "\tfmr f%d, f1\n", fpr);
+            }
+            break;
+
+        default:
+            anvil_strbuf_appendf(&be->code, "\t# unhandled fp value kind %d\n", val->kind);
+            break;
+    }
+
+    (void)func;
+}
+
 /* ============================================================================
  * Instruction Emission
  * ============================================================================ */
@@ -591,9 +656,11 @@ void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *f
             }
             break;
             
-        /* Floating-point operations (IEEE 754) */
+        /* Floating-point operations (IEEE 754). Operands arrive via
+         * ppc64_emit_load_fp_value; the result lives in f1 by convention. */
         case ANVIL_OP_FADD:
-            anvil_strbuf_append(&be->code, "\t# FP add - load operands to f1, f2\n");
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
+            ppc64_emit_load_fp_value(be, instr->operands[1], 2, func);
             if (instr->result && instr->result->type &&
                 instr->result->type->kind == ANVIL_TYPE_F32) {
                 anvil_strbuf_append(&be->code, "\tfadds f1, f1, f2\n");
@@ -601,9 +668,10 @@ void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *f
                 anvil_strbuf_append(&be->code, "\tfadd f1, f1, f2\n");
             }
             break;
-            
+
         case ANVIL_OP_FSUB:
-            anvil_strbuf_append(&be->code, "\t# FP sub - load operands to f1, f2\n");
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
+            ppc64_emit_load_fp_value(be, instr->operands[1], 2, func);
             if (instr->result && instr->result->type &&
                 instr->result->type->kind == ANVIL_TYPE_F32) {
                 anvil_strbuf_append(&be->code, "\tfsubs f1, f1, f2\n");
@@ -611,9 +679,10 @@ void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *f
                 anvil_strbuf_append(&be->code, "\tfsub f1, f1, f2\n");
             }
             break;
-            
+
         case ANVIL_OP_FMUL:
-            anvil_strbuf_append(&be->code, "\t# FP mul - load operands to f1, f2\n");
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
+            ppc64_emit_load_fp_value(be, instr->operands[1], 2, func);
             if (instr->result && instr->result->type &&
                 instr->result->type->kind == ANVIL_TYPE_F32) {
                 anvil_strbuf_append(&be->code, "\tfmuls f1, f1, f2\n");
@@ -621,9 +690,10 @@ void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *f
                 anvil_strbuf_append(&be->code, "\tfmul f1, f1, f2\n");
             }
             break;
-            
+
         case ANVIL_OP_FDIV:
-            anvil_strbuf_append(&be->code, "\t# FP div - load operands to f1, f2\n");
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
+            ppc64_emit_load_fp_value(be, instr->operands[1], 2, func);
             if (instr->result && instr->result->type &&
                 instr->result->type->kind == ANVIL_TYPE_F32) {
                 anvil_strbuf_append(&be->code, "\tfdivs f1, f1, f2\n");
@@ -631,16 +701,20 @@ void ppc64_emit_instr(ppc64_backend_t *be, anvil_instr_t *instr, anvil_func_t *f
                 anvil_strbuf_append(&be->code, "\tfdiv f1, f1, f2\n");
             }
             break;
-            
+
         case ANVIL_OP_FNEG:
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
             anvil_strbuf_append(&be->code, "\tfneg f1, f1\n");
             break;
-            
+
         case ANVIL_OP_FABS:
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
             anvil_strbuf_append(&be->code, "\tfabs f1, f1\n");
             break;
-            
+
         case ANVIL_OP_FCMP:
+            ppc64_emit_load_fp_value(be, instr->operands[0], 1, func);
+            ppc64_emit_load_fp_value(be, instr->operands[1], 2, func);
             anvil_strbuf_append(&be->code, "\tfcmpu cr0, f1, f2\n");
             anvil_strbuf_append(&be->code, "\tli r3, 1\n");
             {

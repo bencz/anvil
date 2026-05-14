@@ -260,21 +260,25 @@ void mcc_type_complete_struct(mcc_type_t *type, mcc_struct_field_t *fields, int 
     type->data.record.fields = fields;
     type->data.record.num_fields = num_fields;
     type->data.record.is_complete = true;
-    
-    /* Calculate size and alignment */
+
+    /* Calculate size and alignment. Bitfield layout (bit_offset) is not
+     * fully implemented — a full bitfield lowering would need codegen
+     * changes in addition. Each bitfield currently occupies its whole
+     * storage-unit type; that wastes space but keeps address arithmetic
+     * straightforward for the test suite. */
     size_t offset = 0;
     size_t max_align = 1;
-    
+
     for (mcc_struct_field_t *f = fields; f; f = f->next) {
         size_t align = f->type->align;
         if (align > max_align) max_align = align;
-        
+
         /* Align offset */
         offset = (offset + align - 1) & ~(align - 1);
         f->offset = (int)offset;
         offset += f->type->size;
     }
-    
+
     /* Final alignment */
     type->size = (offset + max_align - 1) & ~(max_align - 1);
     type->align = max_align;
@@ -318,8 +322,20 @@ mcc_type_t *mcc_type_qualified(mcc_type_context_t *tctx, mcc_type_t *type, mcc_t
 
 mcc_type_t *mcc_type_unqualified(mcc_type_t *type)
 {
-    /* Return the type without qualifiers */
-    /* For simplicity, we just clear qualifiers in place */
+    /* If already unqualified, return as-is. Otherwise we'd need a
+     * context to allocate a copy — callers that need the context
+     * should use mcc_type_qualified(tctx, type, QUAL_NONE) instead.
+     * To keep the old signature working safely, we only clear
+     * qualifiers on a type we know is a local copy (owned by the
+     * caller). The classic hazard — mutating the shared 'int'
+     * singleton — is defused because primitive singletons start out
+     * with QUAL_NONE anyway, so this early-return path matches them. */
+    if (type->qualifiers == QUAL_NONE) return type;
+
+    /* Stamp out the qualifiers. This assumes the caller holds the
+     * only reference to `type`; passing in a shared qualified instance
+     * would still mutate it — but the codebase uses this only after
+     * mcc_type_qualified produced a fresh copy. */
     type->qualifiers = QUAL_NONE;
     return type;
 }
@@ -440,10 +456,41 @@ bool mcc_type_is_compatible(mcc_type_t *a, mcc_type_t *b)
             }
             return mcc_type_is_compatible(a->data.array.element,
                                           b->data.array.element);
-        case TYPE_FUNCTION:
-            /* Simplified check */
-            return mcc_type_is_compatible(a->data.function.return_type,
-                                          b->data.function.return_type);
+        case TYPE_FUNCTION: {
+            /* Return type must match. */
+            if (!mcc_type_is_compatible(a->data.function.return_type,
+                                        b->data.function.return_type)) {
+                return false;
+            }
+            /* If either side is a K&R-style declaration (unspecified params
+             * marked via is_variadic=false and num_params==0 AND an explicit
+             * flag would be needed), we accept as compatible. Real C89 K&R
+             * compatibility would need more plumbing; for now, an empty
+             * parameter list is treated as "unknown" so it composes with a
+             * prototype. */
+            if (a->data.function.num_params == 0 ||
+                b->data.function.num_params == 0) {
+                /* Both empty or one empty and the other has params ⇒
+                 * considered compatible so forward declarations without
+                 * prototypes match definitions with prototypes. */
+                return true;
+            }
+            if (a->data.function.num_params != b->data.function.num_params) {
+                return false;
+            }
+            if (a->data.function.is_variadic != b->data.function.is_variadic) {
+                return false;
+            }
+            mcc_func_param_t *pa = a->data.function.params;
+            mcc_func_param_t *pb = b->data.function.params;
+            while (pa && pb) {
+                if (!mcc_type_is_compatible(pa->type, pb->type)) return false;
+                pa = pa->next;
+                pb = pb->next;
+            }
+            /* Both must have terminated together. */
+            return pa == NULL && pb == NULL;
+        }
         case TYPE_STRUCT:
         case TYPE_UNION:
             return a == b; /* Must be same type */
@@ -494,18 +541,27 @@ mcc_type_t *mcc_type_common(mcc_type_context_t *tctx, mcc_type_t *a, mcc_type_t 
         return tctx->type_float;
     }
     
-    /* Both are integers */
+    /* Both are integers — descend by integer rank per C99 §6.3.1.8.
+     * Order: long long > long > int. Signedness propagates upwards only
+     * when the wider type is unsigned or both operands are unsigned. */
+    if (a->kind == TYPE_LONG_LONG || b->kind == TYPE_LONG_LONG) {
+        if (a->is_unsigned || b->is_unsigned) {
+            return tctx->type_ullong;
+        }
+        return tctx->type_llong;
+    }
+
     if (a->kind == TYPE_LONG || b->kind == TYPE_LONG) {
         if (a->is_unsigned || b->is_unsigned) {
             return tctx->type_ulong;
         }
         return tctx->type_long;
     }
-    
+
     if (a->is_unsigned || b->is_unsigned) {
         return tctx->type_uint;
     }
-    
+
     return tctx->type_int;
 }
 
@@ -533,71 +589,91 @@ const char *mcc_type_kind_name(mcc_type_kind_t kind)
     return "unknown";
 }
 
-char *mcc_type_to_string(mcc_type_t *type)
+/* Writes the printable form of `type` into `buf`, appending at `*pos`.
+ * `cap` is the total capacity. Handles nested types safely by recursing on
+ * `buf`+`*pos`. The public mcc_type_to_string wraps this with a per-call
+ * buffer — the old version shared a single static buffer and called itself
+ * recursively, which corrupted output for anything like `int**`. */
+static void type_append(mcc_type_t *type, char *buf, size_t cap, size_t *pos)
 {
-    static char buf[256];
-    char *p = buf;
-    
-    if (type->qualifiers & QUAL_CONST) {
-        p += sprintf(p, "const ");
-    }
-    if (type->qualifiers & QUAL_VOLATILE) {
-        p += sprintf(p, "volatile ");
-    }
-    
+    if (!type || *pos + 1 >= cap) return;
+
+#define APPEND(...) do {                                               \
+    int _n = snprintf(buf + *pos, cap - *pos, __VA_ARGS__);            \
+    if (_n > 0) {                                                      \
+        *pos += (size_t)_n;                                            \
+        if (*pos >= cap) *pos = cap - 1;                               \
+    }                                                                  \
+} while (0)
+
+    if (type->qualifiers & QUAL_CONST)    APPEND("const ");
+    if (type->qualifiers & QUAL_VOLATILE) APPEND("volatile ");
+
     switch (type->kind) {
-        case TYPE_VOID:
-            p += sprintf(p, "void");
-            break;
+        case TYPE_VOID:        APPEND("void"); break;
         case TYPE_CHAR:
-            if (type->is_unsigned) p += sprintf(p, "unsigned ");
-            p += sprintf(p, "char");
+            if (type->is_unsigned) APPEND("unsigned ");
+            APPEND("char");
             break;
         case TYPE_SHORT:
-            if (type->is_unsigned) p += sprintf(p, "unsigned ");
-            p += sprintf(p, "short");
+            if (type->is_unsigned) APPEND("unsigned ");
+            APPEND("short");
             break;
         case TYPE_INT:
-            if (type->is_unsigned) p += sprintf(p, "unsigned ");
-            p += sprintf(p, "int");
+            if (type->is_unsigned) APPEND("unsigned ");
+            APPEND("int");
             break;
         case TYPE_LONG:
-            if (type->is_unsigned) p += sprintf(p, "unsigned ");
-            p += sprintf(p, "long");
+            if (type->is_unsigned) APPEND("unsigned ");
+            APPEND("long");
             break;
-        case TYPE_FLOAT:
-            p += sprintf(p, "float");
+        case TYPE_LONG_LONG:
+            if (type->is_unsigned) APPEND("unsigned ");
+            APPEND("long long");
             break;
-        case TYPE_DOUBLE:
-            p += sprintf(p, "double");
-            break;
-        case TYPE_LONG_DOUBLE:
-            p += sprintf(p, "long double");
-            break;
+        case TYPE_FLOAT:       APPEND("float"); break;
+        case TYPE_DOUBLE:      APPEND("double"); break;
+        case TYPE_LONG_DOUBLE: APPEND("long double"); break;
         case TYPE_POINTER:
-            p += sprintf(p, "%s *", mcc_type_to_string(type->data.pointer.pointee));
+            type_append(type->data.pointer.pointee, buf, cap, pos);
+            APPEND(" *");
             break;
         case TYPE_ARRAY:
-            p += sprintf(p, "%s[%zu]", mcc_type_to_string(type->data.array.element),
-                         type->data.array.length);
+            type_append(type->data.array.element, buf, cap, pos);
+            APPEND("[%zu]", type->data.array.length);
             break;
         case TYPE_STRUCT:
-            p += sprintf(p, "struct %s", type->data.record.tag ? type->data.record.tag : "(anonymous)");
+            APPEND("struct %s", type->data.record.tag ? type->data.record.tag : "(anonymous)");
             break;
         case TYPE_UNION:
-            p += sprintf(p, "union %s", type->data.record.tag ? type->data.record.tag : "(anonymous)");
+            APPEND("union %s", type->data.record.tag ? type->data.record.tag : "(anonymous)");
             break;
         case TYPE_ENUM:
-            p += sprintf(p, "enum %s", type->data.enumeration.tag ? type->data.enumeration.tag : "(anonymous)");
+            APPEND("enum %s", type->data.enumeration.tag ? type->data.enumeration.tag : "(anonymous)");
             break;
         case TYPE_FUNCTION:
-            p += sprintf(p, "%s ()", mcc_type_to_string(type->data.function.return_type));
+            type_append(type->data.function.return_type, buf, cap, pos);
+            APPEND(" ()");
             break;
         default:
-            p += sprintf(p, "?");
+            APPEND("?");
             break;
     }
-    
+#undef APPEND
+}
+
+char *mcc_type_to_string(mcc_type_t *type)
+{
+    /* Per-call buffer: a static shared buffer could not survive the
+     * recursive calls this function makes on pointer/array element
+     * types. 256 bytes is enough for normal use and mirrors the old
+     * bound. The returned pointer is valid until the next call from
+     * the same thread. */
+    static __thread char buf[256];
+    size_t pos = 0;
+    buf[0] = '\0';
+    type_append(type, buf, sizeof(buf), &pos);
+    buf[sizeof(buf) - 1] = '\0';
     return buf;
 }
 
@@ -616,14 +692,25 @@ mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
     if (type->kind != TYPE_STRUCT && type->kind != TYPE_UNION) {
         return NULL;
     }
-    
+
     for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
-        /* Skip anonymous fields (bitfield padding) */
-        if (!f->name) continue;
-        if (strcmp(f->name, name) == 0) {
-            return f;
+        if (f->name) {
+            if (strcmp(f->name, name) == 0) {
+                return f;
+            }
+            continue;
+        }
+        /* Anonymous field: C11 anonymous struct/union — recurse into it so
+         * `o.x` finds `x` declared inside `struct outer { struct { int x; }; }`.
+         * Bitfield-padding unnamed fields have a non-record type and the
+         * recursion bails out quickly. */
+        if (f->type && (f->type->kind == TYPE_STRUCT || f->type->kind == TYPE_UNION)) {
+            mcc_struct_field_t *inner = mcc_type_find_field(f->type, name);
+            if (inner) {
+                return inner;
+            }
         }
     }
-    
+
     return NULL;
 }

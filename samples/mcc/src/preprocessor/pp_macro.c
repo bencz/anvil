@@ -665,12 +665,49 @@ void pp_process_define(mcc_preprocessor_t *pp)
     }
     
     macro->body = body_head;
-    
-    /* Check for redefinition */
+
+    /* Check for redefinition. C99 §6.10.3 requires that a redefinition be
+     * "identical" (same parameters and body tokens) or it's a warning.
+     * Repeating an identical #define across headers is extremely common
+     * (include guards etc.) so we stay quiet in that case. */
     mcc_macro_t *existing = pp_lookup_macro(pp, name);
     if (existing) {
-        /* TODO: Check if definitions are identical */
-        mcc_warning(pp->ctx, "Macro '%s' redefined", name);
+        bool identical = (existing->is_function_like == macro->is_function_like) &&
+                         (existing->is_variadic == macro->is_variadic) &&
+                         (existing->num_params == macro->num_params);
+        if (identical) {
+            /* Compare parameter names walking the linked lists. */
+            mcc_macro_param_t *pa = existing->params;
+            mcc_macro_param_t *pb = macro->params;
+            while (pa && pb) {
+                if (!pa->name || !pb->name || strcmp(pa->name, pb->name) != 0) {
+                    identical = false;
+                    break;
+                }
+                pa = pa->next;
+                pb = pb->next;
+            }
+            if (pa || pb) identical = false;
+        }
+        if (identical) {
+            /* Compare body tokens spelled-out form. */
+            mcc_token_t *a = existing->body;
+            mcc_token_t *b = macro->body;
+            while (a && b) {
+                const char *ta = a->text ? a->text : mcc_token_to_string(a);
+                const char *tb = b->text ? b->text : mcc_token_to_string(b);
+                if (!ta || !tb || strcmp(ta, tb) != 0) {
+                    identical = false;
+                    break;
+                }
+                a = a->next;
+                b = b->next;
+            }
+            if (a != b) identical = false; /* one ended early */
+        }
+        if (!identical) {
+            mcc_warning(pp->ctx, "Macro '%s' redefined", name);
+        }
     }
     
     /* Insert into hash table */

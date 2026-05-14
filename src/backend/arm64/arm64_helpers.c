@@ -189,32 +189,31 @@ int arm64_alloc_stack_slot(arm64_backend_t *be, anvil_value_t *val, int size)
         be->stack_slots = new_slots;
         be->stack_slots_cap = new_cap;
     }
-    
+
     /* Align size to 8 bytes minimum */
     int aligned_size = (size + 7) & ~7;
-    
+
     /* Allocate slot (stack grows down, offsets are negative from FP) */
     be->next_stack_offset += aligned_size;
     int offset = be->next_stack_offset;
-    
+
     arm64_stack_slot_t *slot = &be->stack_slots[be->num_stack_slots++];
     slot->value = val;
     slot->offset = offset;
     slot->size = size;
     slot->is_param = false;
     slot->is_alloca = false;
-    
+
+    /* Mirror in the O(1) lookup map so arm64_get_stack_slot avoids a
+     * linear scan. */
+    anvil_slot_map_set(&be->slot_map, val, offset);
+
     return offset;
 }
 
 int arm64_get_stack_slot(arm64_backend_t *be, anvil_value_t *val)
 {
-    for (size_t i = 0; i < be->num_stack_slots; i++) {
-        if (be->stack_slots[i].value == val) {
-            return be->stack_slots[i].offset;
-        }
-    }
-    return -1;
+    return anvil_slot_map_get(&be->slot_map, val);
 }
 
 int arm64_get_or_alloc_slot(arm64_backend_t *be, anvil_value_t *val)

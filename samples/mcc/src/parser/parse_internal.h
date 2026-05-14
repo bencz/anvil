@@ -42,6 +42,22 @@ bool parse_is_declaration_start(mcc_parser_t *p);
 /* Check if identifier is a typedef name */
 bool parse_is_typedef_name(mcc_parser_t *p, const char *name);
 
+/* Block-scope tracking for typedefs: enter increases depth, leave
+ * pops every typedef entry registered at the current depth. This is
+ * what lets `void f() { typedef int T; }` not leak `T` into callers. */
+static inline void parse_typedef_scope_enter(mcc_parser_t *p)
+{
+    p->typedef_depth++;
+}
+
+static inline void parse_typedef_scope_leave(mcc_parser_t *p)
+{
+    while (p->typedefs && p->typedefs->depth >= p->typedef_depth) {
+        p->typedefs = p->typedefs->next;
+    }
+    if (p->typedef_depth > 0) p->typedef_depth--;
+}
+
 /* Parse type specifier */
 mcc_type_t *parse_type_specifier(mcc_parser_t *p);
 
@@ -116,11 +132,6 @@ mcc_ast_node_t *parse_labeled_stmt(mcc_parser_t *p);
 
 /* Parse any declaration (variable, function, typedef, struct, etc.) */
 mcc_ast_node_t *parse_declaration(mcc_parser_t *p);
-
-/* Parse function declaration/definition */
-mcc_ast_node_t *parse_function_decl(mcc_parser_t *p, mcc_type_t *base_type, 
-                                     const char *name, mcc_storage_class_t storage,
-                                     mcc_location_t loc);
 
 /* Parse variable declaration */
 mcc_ast_node_t *parse_variable_decl(mcc_parser_t *p, mcc_type_t *base_type,
@@ -337,6 +348,46 @@ static inline bool parse_has_gnu_typeof(mcc_parser_t *p)
 static inline bool parse_has_gnu_attr(mcc_parser_t *p)
 {
     return parse_has_feature(p, MCC_FEAT_GNU_ATTR);
+}
+
+/* Consume any pending GNU attribute specifiers ``__attribute__((...))`` at the
+ * current parse position. Tolerant parser: we discard the body so downstream
+ * declarators see clean syntax. Attributes aren't enforced but code using them
+ * compiles. */
+static inline void parse_gnu_attributes(mcc_parser_t *p)
+{
+    while (parse_check(p, TOK_ATTRIBUTE)) {
+        parse_advance(p);  /* consume __attribute__ */
+        /* Expect (( ... )) — two parentheses deep. */
+        if (!parse_match(p, TOK_LPAREN)) break;
+        if (!parse_match(p, TOK_LPAREN)) break;
+        int depth = 2;
+        while (depth > 0 && !parse_check(p, TOK_EOF)) {
+            if (parse_check(p, TOK_LPAREN)) depth++;
+            else if (parse_check(p, TOK_RPAREN)) depth--;
+            if (depth == 0) break;
+            parse_advance(p);
+        }
+        parse_match(p, TOK_RPAREN);
+        parse_match(p, TOK_RPAREN);
+    }
+}
+
+/* GNU asm label / inline asm after a declarator, e.g. `int foo asm("bar");`
+ * or `__asm__("movq ...");` — consume and ignore tolerantly. */
+static inline void parse_gnu_asm_label(mcc_parser_t *p)
+{
+    while (parse_check(p, TOK_ASM)) {
+        parse_advance(p);
+        if (!parse_match(p, TOK_LPAREN)) break;
+        int depth = 1;
+        while (depth > 0 && !parse_check(p, TOK_EOF)) {
+            if (parse_check(p, TOK_LPAREN)) depth++;
+            else if (parse_check(p, TOK_RPAREN)) { depth--; if (depth == 0) break; }
+            parse_advance(p);
+        }
+        parse_match(p, TOK_RPAREN);
+    }
 }
 
 /* ============================================================

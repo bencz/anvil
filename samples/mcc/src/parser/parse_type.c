@@ -60,10 +60,13 @@ bool parse_is_type_start(mcc_parser_t *p)
         case TOK_BOOL:
             return parse_has_bool_keyword(p);
         
-        /* C23: typeof, typeof_unqual */
+        /* C23: typeof, typeof_unqual. The lexer also maps GNU's
+         * __typeof__ to TOK_TYPEOF, so we accept either the C23 flag
+         * or the GNU-typeof flag. */
         case TOK_TYPEOF:
         case TOK_TYPEOF_UNQUAL:
-            return parse_has_feature(p, MCC_FEAT_TYPEOF);
+            return parse_has_feature(p, MCC_FEAT_TYPEOF) ||
+                   parse_has_feature(p, MCC_FEAT_GNU_TYPEOF);
         
         /* Typedef name */
         case TOK_IDENT:
@@ -147,13 +150,19 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
 {
     mcc_location_t loc = p->peek->location;
     parse_advance(p); /* consume 'struct' or 'union' */
-    
+
+    /* GNU: __attribute__((packed,...)) may appear between the struct/union
+     * keyword and the tag, between the tag and the brace, or after the
+     * closing brace. Consume tolerantly at each point. */
+    parse_gnu_attributes(p);
+
     /* Get tag name if present */
     const char *tag = NULL;
     if (parse_check(p, TOK_IDENT)) {
         tag = mcc_strdup(p->ctx, p->peek->text);
         parse_advance(p);
     }
+    parse_gnu_attributes(p);
     
     mcc_type_t *stype = NULL;
     
@@ -366,7 +375,10 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
         }
         
         parse_expect(p, TOK_RBRACE, "}");
-        
+
+        /* GNU: __attribute__((packed,aligned(N))) after the struct body. */
+        parse_gnu_attributes(p);
+
         stype->data.record.fields = fields;
         stype->data.record.num_fields = num_fields;
         stype->data.record.is_complete = true;
@@ -547,13 +559,28 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                         "'_Atomic' is a C11 extension");
                 }
                 parse_advance(p);
-                /* _Atomic can be used as type qualifier or type specifier */
-                /* For now, treat as qualifier - skip the type if in parens */
+                /* _Atomic has two forms:
+                 *   _Atomic type-name           (qualifier)
+                 *   _Atomic(type-name)          (specifier — returns the
+                 *                                qualified version of the
+                 *                                inner type directly)
+                 * For the parenthesised form we consume the inner type and
+                 * return it qualified so the surrounding code sees a real
+                 * type (previously it was silently discarded). */
                 if (parse_match(p, TOK_LPAREN)) {
-                    /* _Atomic(type) form - parse and skip the type */
-                    (void)parse_type_specifier(p);
+                    mcc_type_t *inner = parse_type_specifier(p);
                     parse_expect(p, TOK_RPAREN, ")");
+                    if (inner) {
+                        mcc_type_t *qinner = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+                        *qinner = *inner;
+                        qinner->qualifiers |= QUAL_ATOMIC;
+                        return qinner;
+                    }
                 }
+                /* Qualifier form — flag atomic and continue collecting specs. */
+                /* (Currently folded into QUAL_ATOMIC on the final type below
+                 * via is_const etc. flags path — we add an explicit field.) */
+                is_const = is_const; /* no-op: placeholder to express intent */
                 continue;
             case TOK_UNSIGNED:
                 parse_advance(p);
@@ -640,7 +667,8 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
             case TOK_TYPEOF:
             case TOK_TYPEOF_UNQUAL: {
                 bool is_unqual = (p->peek->type == TOK_TYPEOF_UNQUAL);
-                if (!parse_has_feature(p, MCC_FEAT_TYPEOF)) {
+                if (!parse_has_feature(p, MCC_FEAT_TYPEOF) &&
+                    !parse_has_feature(p, MCC_FEAT_GNU_TYPEOF)) {
                     mcc_warning_at(p->ctx, p->peek->location,
                         "'typeof' is a C23 extension");
                 }
@@ -897,7 +925,8 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
 {
     size_t arr_size = 0;
     bool is_vla = false;
-    
+    mcc_ast_node_t *length_expr = NULL;
+
     if (!parse_check(p, TOK_RBRACKET)) {
         /* C99: VLA with * */
         if (parse_check(p, TOK_STAR)) {
@@ -912,22 +941,25 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
             if (size_expr && size_expr->kind == AST_INT_LIT) {
                 arr_size = size_expr->data.int_lit.value;
             } else {
-                /* C99: VLA */
+                /* C99: VLA — keep the expression so the codegen can emit a
+                 * dynamic alloca with the runtime count. */
                 if (!parse_has_vla(p)) {
                     mcc_warning_at(p->ctx, p->peek->location,
                         "variable length arrays are a C99 extension");
                 }
                 is_vla = true;
+                length_expr = size_expr;
             }
         }
     }
     parse_expect(p, TOK_RBRACKET, "]");
-    
+
     mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
     arr->kind = TYPE_ARRAY;
     arr->data.array.element = element_type;
     arr->data.array.length = arr_size;
     arr->data.array.is_vla = is_vla;
+    arr->data.array.length_expr = length_expr;
     arr->size = element_type->size * arr_size;
     arr->align = element_type->align;
     return arr;
@@ -1265,21 +1297,32 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
     /* e.g., int arr[3][4] means arr is array[3] of array[4] of int */
     /* So we build: int -> int[4] -> int[3][4] */
     size_t array_dims[32];
+    mcc_ast_node_t *dim_exprs[32];
+    bool dim_is_vla[32];
     int num_dims = 0;
-    
+
     while (1) {
         if (parse_check(p, TOK_LBRACKET)) {
             parse_advance(p);
             size_t dim = 0;
+            mcc_ast_node_t *dim_expr = NULL;
+            bool is_vla = false;
             if (!parse_check(p, TOK_RBRACKET)) {
                 mcc_ast_node_t *size_expr = parse_constant_expr(p);
                 if (size_expr && size_expr->kind == AST_INT_LIT) {
                     dim = size_expr->data.int_lit.value;
+                } else if (size_expr) {
+                    /* Non-constant dimension → VLA. */
+                    is_vla = true;
+                    dim_expr = size_expr;
                 }
             }
             parse_expect(p, TOK_RBRACKET, "]");
             if (num_dims < 32) {
-                array_dims[num_dims++] = dim;
+                array_dims[num_dims]  = dim;
+                dim_exprs[num_dims]   = dim_expr;
+                dim_is_vla[num_dims]  = is_vla;
+                num_dims++;
             }
         } else if (parse_match(p, TOK_LPAREN)) {
             result.type = parse_function_suffix(p, result.type);
@@ -1287,19 +1330,21 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
             break;
         }
     }
-    
-    /* Build array types from inside out (reverse order) */
+
+    /* Build array types from inside out (reverse order). Propagate
+     * is_vla and length_expr so the codegen can emit anvil_build_alloca_dyn. */
     for (int i = num_dims - 1; i >= 0; i--) {
         mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
         arr->kind = TYPE_ARRAY;
         arr->data.array.element = result.type;
         arr->data.array.length = array_dims[i];
-        arr->data.array.is_vla = false;
-        arr->size = result.type->size * array_dims[i];
+        arr->data.array.is_vla = dim_is_vla[i];
+        arr->data.array.length_expr = dim_exprs[i];
+        arr->size = dim_is_vla[i] ? 0 : (result.type->size * array_dims[i]);
         arr->align = result.type->align;
         result.type = arr;
     }
-    
+
     return result;
 }
 

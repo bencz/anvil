@@ -80,19 +80,73 @@ bool mcc_sema_check_assignment(mcc_sema_t *sema, mcc_type_t *lhs, mcc_type_t *rh
 bool mcc_sema_check_call(mcc_sema_t *sema, mcc_type_t *func_type,
                           mcc_ast_node_t **args, size_t num_args, mcc_location_t loc)
 {
-    (void)sema;
-    (void)func_type;
-    (void)args;
-    (void)num_args;
-    (void)loc;
+    if (!func_type) return false;
+
+    /* Peel any pointer-to-function indirection. */
+    mcc_type_t *ft = func_type;
+    if (ft->kind == TYPE_POINTER && ft->data.pointer.pointee &&
+        ft->data.pointer.pointee->kind == TYPE_FUNCTION) {
+        ft = ft->data.pointer.pointee;
+    }
+    if (ft->kind != TYPE_FUNCTION) {
+        mcc_error_at(sema->ctx, loc, "called object is not a function");
+        return false;
+    }
+
+    size_t expected = ft->data.function.num_params;
+    bool variadic = ft->data.function.is_variadic;
+
+    /* Old-style (no prototype) declaration — expected==0 and !variadic — is
+     * treated as "any number of args"; the parser records this via num_params=0. */
+    if (expected == 0 && !variadic) {
+        return true;
+    }
+
+    if (num_args < expected || (!variadic && num_args > expected)) {
+        mcc_error_at(sema->ctx, loc,
+            "call has %zu argument(s); expected %s%zu",
+            num_args, variadic ? "at least " : "", expected);
+        return false;
+    }
+
+    /* Check each argument is assignment-compatible with its parameter. */
+    mcc_func_param_t *param = ft->data.function.params;
+    for (size_t i = 0; i < expected && param; i++, param = param->next) {
+        mcc_ast_node_t *arg = args[i];
+        if (!arg || !arg->type) continue;
+        if (!sema_check_assignment_compat(sema, param->type, arg->type, loc)) {
+            return false;
+        }
+    }
     return true;
 }
 
 bool mcc_sema_check_return(mcc_sema_t *sema, mcc_type_t *expr_type, mcc_location_t loc)
 {
-    (void)sema;
-    (void)expr_type;
-    (void)loc;
+    mcc_type_t *want = sema->current_return_type;
+    if (!want) return true; /* no enclosing function context */
+
+    if (!expr_type) {
+        /* bare `return;` */
+        if (want->kind != TYPE_VOID) {
+            mcc_error_at(sema->ctx, loc,
+                "non-void function must return a value");
+            return false;
+        }
+        return true;
+    }
+
+    if (want->kind == TYPE_VOID) {
+        mcc_error_at(sema->ctx, loc, "void function should not return a value");
+        return false;
+    }
+
+    if (!mcc_type_is_compatible(want, expr_type) &&
+        !(mcc_type_is_arithmetic(want) && mcc_type_is_arithmetic(expr_type))) {
+        mcc_warning_at(sema->ctx, loc,
+            "incompatible return type: '%s' vs '%s'",
+            mcc_type_to_string(expr_type), mcc_type_to_string(want));
+    }
     return true;
 }
 

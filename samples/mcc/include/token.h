@@ -89,7 +89,11 @@ typedef enum {
     TOK_BOOL,           /* bool (C23 alternative to _Bool) */
     TOK_STATIC_ASSERT,  /* static_assert (C23 alternative to _Static_assert) */
     TOK_THREAD_LOCAL,   /* thread_local (C23 alternative to _Thread_local) */
-    
+
+    /* GNU extensions */
+    TOK_ATTRIBUTE,      /* __attribute__ */
+    TOK_ASM,            /* __asm__ / asm (stmt-level inline assembly) */
+
     /* Operators - Arithmetic */
     TOK_PLUS,           /* + */
     TOK_MINUS,          /* - */

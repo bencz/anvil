@@ -14,6 +14,7 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,22 +30,6 @@ static bool values_equal(anvil_value_t *a, anvil_value_t *b)
     }
     
     return false;
-}
-
-/* Replace all uses of old_val with new_val starting from instruction */
-static int replace_uses(anvil_value_t *old_val, anvil_value_t *new_val, anvil_instr_t *start)
-{
-    int count = 0;
-    for (anvil_instr_t *i = start; i; i = i->next) {
-        if (i->op == ANVIL_OP_NOP) continue;
-        for (size_t j = 0; j < i->num_operands; j++) {
-            if (i->operands[j] == old_val) {
-                i->operands[j] = new_val;
-                count++;
-            }
-        }
-    }
-    return count;
 }
 
 /*
@@ -68,8 +53,10 @@ static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
     anvil_value_t *stored_val = store->operands[0];
     anvil_value_t *load_result = load->result;
     
-    int replaced = replace_uses(load_result, stored_val, load->next);
-    
+    int replaced = load->next
+        ? anvil_opt_replace_uses_in_block_after(load, load_result, stored_val)
+        : 0;
+
     if (replaced > 0) {
         /* Eliminate the load */
         load->op = ANVIL_OP_NOP;
@@ -79,36 +66,29 @@ static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
     return false;
 }
 
-/* Main store-load propagation pass */
+/* Main store-load propagation pass.
+ * The pass manager runs a global fixpoint across all passes, so we only do one
+ * sweep here — the former internal do-while loop duplicated that work. */
 bool anvil_pass_store_load_prop(anvil_func_t *func)
 {
     if (!func || !func->blocks) return false;
-    
+
     bool changed = false;
-    bool any_changed;
-    int iterations = 0;
-    const int max_iterations = 10;
-    
-    do {
-        any_changed = false;
-        iterations++;
-        
-        for (anvil_block_t *block = func->blocks; block; block = block->next) {
-            for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-                if (instr->op == ANVIL_OP_NOP) continue;
-                if (instr->op != ANVIL_OP_STORE) continue;
-                
-                /* Find next non-NOP instruction */
-                anvil_instr_t *next = instr->next;
-                while (next && next->op == ANVIL_OP_NOP) next = next->next;
-                
-                if (next && opt_store_load_propagate(instr, next)) {
-                    any_changed = true;
-                    changed = true;
-                }
+
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
+            if (instr->op == ANVIL_OP_NOP) continue;
+            if (instr->op != ANVIL_OP_STORE) continue;
+
+            /* Find next non-NOP instruction */
+            anvil_instr_t *next = instr->next;
+            while (next && next->op == ANVIL_OP_NOP) next = next->next;
+
+            if (next && opt_store_load_propagate(instr, next)) {
+                changed = true;
             }
         }
-    } while (any_changed && iterations < max_iterations);
-    
+    }
+
     return changed;
 }
