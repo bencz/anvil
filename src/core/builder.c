@@ -334,6 +334,51 @@ anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
     return NULL;
 }
 
+anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
+                                  anvil_block_t *default_block)
+{
+    if (!ctx || !value || !default_block) return NULL;
+
+    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_SWITCH,
+                                              ctx->type_void, NULL);
+    if (!instr) return NULL;
+
+    anvil_instr_add_operand(instr, value);
+    instr->true_block = default_block;
+    anvil_instr_insert(ctx, instr);
+    return instr;
+}
+
+bool anvil_switch_add_case(anvil_instr_t *switch_instr,
+                           anvil_value_t *case_value,
+                           anvil_block_t *dest)
+{
+    if (!switch_instr || switch_instr->op != ANVIL_OP_SWITCH ||
+        !case_value || !dest || switch_instr->num_operands == 0) {
+        return false;
+    }
+
+    size_t new_num_operands = switch_instr->num_operands + 1;
+    anvil_value_t **new_operands =
+        realloc(switch_instr->operands,
+                new_num_operands * sizeof(*new_operands));
+    if (!new_operands) return false;
+    switch_instr->operands = new_operands;
+
+    size_t new_num_cases = switch_instr->num_switch_cases + 1;
+    anvil_block_t **new_blocks =
+        realloc(switch_instr->switch_blocks,
+                new_num_cases * sizeof(*new_blocks));
+    if (!new_blocks) return false;
+
+    switch_instr->switch_blocks = new_blocks;
+    switch_instr->operands[switch_instr->num_operands] = case_value;
+    switch_instr->num_operands = new_num_operands;
+    switch_instr->switch_blocks[switch_instr->num_switch_cases] = dest;
+    switch_instr->num_switch_cases = new_num_cases;
+    return true;
+}
+
 anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *callee,
                                  anvil_value_t **args, size_t num_args, const char *name)
 {

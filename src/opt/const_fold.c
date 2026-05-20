@@ -12,6 +12,7 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,96 @@ static void mark_dead(anvil_instr_t *instr)
     instr->op = ANVIL_OP_NOP;
 }
 
+static unsigned type_int_bits(const anvil_type_t *type)
+{
+    if (!type) return 64;
+
+    switch (type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_U8:
+            return 8;
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_U16:
+            return 16;
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_U32:
+            return 32;
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U64:
+            return 64;
+        default:
+            break;
+    }
+
+    size_t size = anvil_type_size((anvil_type_t *)type);
+    if (size == 0) return 64;
+    if (size > SIZE_MAX / 8) return 64;
+
+    size_t bits = size * 8;
+    if (bits == 0) return 64;
+    if (bits > 64) return 64;
+    return (unsigned)bits;
+}
+
+static uint64_t mask_for_bits(unsigned bits)
+{
+    return bits >= 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
+}
+
+static bool valid_shift_amount(int64_t amount, unsigned bits)
+{
+    return amount >= 0 && (uint64_t)amount < bits;
+}
+
+static int64_t signed_min_for_bits(unsigned bits)
+{
+    if (bits >= 64) return INT64_MIN;
+    return -(INT64_C(1) << (bits - 1));
+}
+
+static int64_t sign_extend_to_bits(uint64_t value, unsigned bits)
+{
+    uint64_t mask = mask_for_bits(bits);
+    value &= mask;
+    if (bits < 64 && (value & (UINT64_C(1) << (bits - 1)))) {
+        value |= ~mask;
+    }
+    return (int64_t)value;
+}
+
+static anvil_value_t *fold_shift(anvil_ctx_t *ctx, anvil_op_t op,
+                                 int64_t lhs, int64_t rhs,
+                                 anvil_type_t *type)
+{
+    unsigned bits = type_int_bits(type);
+    if (!valid_shift_amount(rhs, bits)) return NULL;
+
+    unsigned amount = (unsigned)rhs;
+    uint64_t mask = mask_for_bits(bits);
+    uint64_t value = ((uint64_t)lhs) & mask;
+    uint64_t result;
+
+    switch (op) {
+        case ANVIL_OP_SHL:
+            result = (value << amount) & mask;
+            break;
+        case ANVIL_OP_SHR:
+            result = value >> amount;
+            break;
+        case ANVIL_OP_SAR:
+            result = value >> amount;
+            if (amount > 0 && (value & (UINT64_C(1) << (bits - 1)))) {
+                result |= mask ^ (mask >> amount);
+            }
+            result &= mask;
+            break;
+        default:
+            return NULL;
+    }
+
+    return make_const_int(ctx, type, (int64_t)result);
+}
+
 /* Try to fold a binary integer operation */
 static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
                                           anvil_value_t *lhs, anvil_value_t *rhs,
@@ -42,21 +133,46 @@ static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
         int64_t a = get_const_int(lhs);
         int64_t b = get_const_int(rhs);
         int64_t result;
+        unsigned bits = type_int_bits(type);
+        uint64_t mask = mask_for_bits(bits);
         
         switch (op) {
-            case ANVIL_OP_ADD:  result = a + b; break;
-            case ANVIL_OP_SUB:  result = a - b; break;
-            case ANVIL_OP_MUL:  result = a * b; break;
-            case ANVIL_OP_SDIV: result = b ? a / b : 0; break;
-            case ANVIL_OP_UDIV: result = b ? (int64_t)((uint64_t)a / (uint64_t)b) : 0; break;
-            case ANVIL_OP_SMOD: result = b ? a % b : 0; break;
-            case ANVIL_OP_UMOD: result = b ? (int64_t)((uint64_t)a % (uint64_t)b) : 0; break;
+            case ANVIL_OP_ADD:
+                result = (int64_t)((((uint64_t)a) + ((uint64_t)b)) & mask);
+                break;
+            case ANVIL_OP_SUB:
+                result = (int64_t)((((uint64_t)a) - ((uint64_t)b)) & mask);
+                break;
+            case ANVIL_OP_MUL:
+                result = (int64_t)((((uint64_t)a) * ((uint64_t)b)) & mask);
+                break;
+            case ANVIL_OP_SDIV:
+                a = sign_extend_to_bits((uint64_t)a, bits);
+                b = sign_extend_to_bits((uint64_t)b, bits);
+                if (b == 0 || (a == signed_min_for_bits(bits) && b == -1)) return NULL;
+                result = a / b;
+                break;
+            case ANVIL_OP_UDIV:
+                if ((((uint64_t)b) & mask) == 0) return NULL;
+                result = (int64_t)((((uint64_t)a) & mask) / (((uint64_t)b) & mask));
+                break;
+            case ANVIL_OP_SMOD:
+                a = sign_extend_to_bits((uint64_t)a, bits);
+                b = sign_extend_to_bits((uint64_t)b, bits);
+                if (b == 0 || (a == signed_min_for_bits(bits) && b == -1)) return NULL;
+                result = a % b;
+                break;
+            case ANVIL_OP_UMOD:
+                if ((((uint64_t)b) & mask) == 0) return NULL;
+                result = (int64_t)((((uint64_t)a) & mask) % (((uint64_t)b) & mask));
+                break;
             case ANVIL_OP_AND:  result = a & b; break;
             case ANVIL_OP_OR:   result = a | b; break;
             case ANVIL_OP_XOR:  result = a ^ b; break;
-            case ANVIL_OP_SHL:  result = a << b; break;
-            case ANVIL_OP_SHR:  result = (int64_t)((uint64_t)a >> b); break;
-            case ANVIL_OP_SAR:  result = a >> b; break;
+            case ANVIL_OP_SHL:
+            case ANVIL_OP_SHR:
+            case ANVIL_OP_SAR:
+                return fold_shift(ctx, op, a, b, type);
             default: return NULL;
         }
         
@@ -90,16 +206,18 @@ static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
         case ANVIL_OP_UDIV:
             /* x / 1 = x */
             if (is_one(rhs)) return lhs;
-            /* 0 / x = 0 */
-            if (is_zero(lhs)) return make_const_int(ctx, type, 0);
+            /* 0 / x is only safe when x is known non-zero. */
+            if (is_zero(lhs) && is_const_int(rhs) && get_const_int(rhs) != 0)
+                return make_const_int(ctx, type, 0);
             break;
             
         case ANVIL_OP_SMOD:
         case ANVIL_OP_UMOD:
             /* x % 1 = 0 */
             if (is_one(rhs)) return make_const_int(ctx, type, 0);
-            /* 0 % x = 0 */
-            if (is_zero(lhs)) return make_const_int(ctx, type, 0);
+            /* 0 % x is only safe when x is known non-zero. */
+            if (is_zero(lhs) && is_const_int(rhs) && get_const_int(rhs) != 0)
+                return make_const_int(ctx, type, 0);
             break;
             
         case ANVIL_OP_AND:
@@ -136,8 +254,11 @@ static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
         case ANVIL_OP_SAR:
             /* x << 0 = x, x >> 0 = x */
             if (is_zero(rhs)) return lhs;
-            /* 0 << x = 0, 0 >> x = 0 */
-            if (is_zero(lhs)) return make_const_int(ctx, type, 0);
+            /* 0 << x = 0, 0 >> x = 0 only if the shift amount is valid. */
+            if (is_zero(lhs) && is_const_int(rhs) &&
+                valid_shift_amount(get_const_int(rhs), type_int_bits(type))) {
+                return make_const_int(ctx, type, 0);
+            }
             break;
             
         default:
@@ -162,7 +283,10 @@ static anvil_value_t *try_fold_binop_float(anvil_ctx_t *ctx, anvil_op_t op,
             case ANVIL_OP_FADD: result = a + b; break;
             case ANVIL_OP_FSUB: result = a - b; break;
             case ANVIL_OP_FMUL: result = a * b; break;
-            case ANVIL_OP_FDIV: result = b != 0.0 ? a / b : 0.0; break;
+            case ANVIL_OP_FDIV:
+                if (b == 0.0) return NULL;
+                result = a / b;
+                break;
             default: return NULL;
         }
         
@@ -172,8 +296,6 @@ static anvil_value_t *try_fold_binop_float(anvil_ctx_t *ctx, anvil_op_t op,
     /* Algebraic identities */
     switch (op) {
         case ANVIL_OP_FADD:
-            if (is_zero(rhs)) return lhs;
-            if (is_zero(lhs)) return rhs;
             break;
             
         case ANVIL_OP_FSUB:
@@ -181,14 +303,12 @@ static anvil_value_t *try_fold_binop_float(anvil_ctx_t *ctx, anvil_op_t op,
             break;
             
         case ANVIL_OP_FMUL:
-            if (is_zero(lhs) || is_zero(rhs)) return make_const_float(ctx, type, 0.0);
             if (is_one(rhs)) return lhs;
             if (is_one(lhs)) return rhs;
             break;
             
         case ANVIL_OP_FDIV:
             if (is_one(rhs)) return lhs;
-            if (is_zero(lhs)) return make_const_float(ctx, type, 0.0);
             break;
             
         default:

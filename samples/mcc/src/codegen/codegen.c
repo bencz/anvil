@@ -325,6 +325,8 @@ char *mcc_codegen_get_output(mcc_codegen_t *cg, size_t *len)
     char *output = NULL;
     anvil_error_t err = anvil_module_codegen(cg->anvil_mod, &output, len);
     if (err != ANVIL_OK) {
+        mcc_error(cg->mcc_ctx, "ANVIL code generation failed: %s",
+                  anvil_ctx_get_error(cg->anvil_ctx));
         *len = 0;
         return NULL;
     }

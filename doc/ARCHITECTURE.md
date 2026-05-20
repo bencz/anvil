@@ -470,7 +470,7 @@ src/
     ├── x86/
     │   └── x86.c      # x86 32-bit backend
     ├── x86_64/
-    │   └── x86_64.c   # x86-64 backend
+    │   └── x86_64.c   # legacy/incomplete direct x86-64 backend
     ├── s370/
     │   └── s370.c     # IBM S/370 backend (24-bit)
     ├── s370_xa/
@@ -485,8 +485,13 @@ src/
     │   └── ppc64.c    # PowerPC 64-bit backend (big-endian)
     ├── ppc64le/
     │   └── ppc64le.c  # PowerPC 64-bit backend (little-endian)
+    ├── ppc/
+    │   └── ppc_mir.c  # shared PowerPC MachineIR backend
+    ├── mainframe/
+    │   └── mainframe_mir.c # shared IBM mainframe MachineIR backend
     └── arm64/
-        └── arm64.c    # ARM64/AArch64 backend
+        ├── arm64.c
+        └── arm64_mir.c # reference MachineIR backend
 ```
 
 ## Supported Architectures
@@ -511,10 +516,11 @@ ANVIL supports the following target architectures:
 **x86/x86-64:**
 - Multiple syntax options: GAS (AT&T), NASM, MASM
 - System V and Windows ABIs supported
-- Full floating-point support via SSE/SSE2
+- Older direct source-IR emitters; incomplete and not the reference path for new work
 
 **IBM Mainframe (S/370, S/390, z/Architecture):**
 - HLASM syntax output
+- Shared MachineIR backend with target descriptors for S/370, S/370-XA, S/390, and z/Architecture
 - GCCMVS compatibility mode
 - Hexadecimal Floating Point (HFP) and IEEE 754 support
 - Chained save areas for stack management
@@ -522,16 +528,16 @@ ANVIL supports the following target architectures:
 
 **PowerPC:**
 - Big-endian (PPC32, PPC64) and little-endian (PPC64LE) variants
+- Shared MachineIR backend with PPC32/PPC64/PPC64LE target descriptors
 - ELFv1 ABI (PPC64 BE): Function descriptors in `.opd` section, 112-byte minimum frame
 - ELFv2 ABI (PPC64 LE): Local entry points via `.localentry`, 32-byte minimum frame
 - System V ABI (PPC32): Standard 32-bit calling convention
 - Full IEEE 754 floating-point support
 - GAS syntax output
-- Stack slot allocation for local variables
-- String table management for string literals
-- Global variable emission with proper alignment
+- Register allocation and spill materialization through shared MachineIR
 
 **ARM64:**
+- Stable reference implementation for the MachineIR/regalloc backend path
 - AAPCS64 calling convention
 - Linux (ELF) and macOS (Darwin/Mach-O) support
 - Different symbol naming conventions per OS
@@ -588,7 +594,7 @@ struct anvil_pass_manager {
 | Constant Folding | Evaluate constant expressions | O1 |
 | DCE | Remove unused instructions | O1 |
 | Copy Propagation | Replace uses of copied values | O1 |
-| CFG Simplification | Merge blocks, remove unreachable | O2 |
+| CFG Simplification | Merge blocks, remove unreachable code, preserve `switch` edges | O2 |
 | Strength Reduction | Replace expensive ops | O2 |
 | Dead Store Elimination | Remove overwritten stores | O2 |
 | Load Elimination | Reuse loaded values | O2 |
@@ -647,7 +653,7 @@ struct anvil_pass_manager {
 | `src/opt/opt.c` | Pass manager implementation |
 | `src/opt/const_fold.c` | Constant folding pass |
 | `src/opt/dce.c` | Dead code elimination |
-| `src/opt/simplify_cfg.c` | CFG simplification |
+| `src/opt/simplify_cfg.c` | CFG simplification, including `switch` reachability and target rewrites |
 | `src/opt/strength_reduce.c` | Strength reduction |
 | `src/opt/ctx_opt.c` | Context integration |
 

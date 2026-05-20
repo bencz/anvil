@@ -7,9 +7,19 @@
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
+# Keep MCC linked against the current ANVIL library. The recursive make owns
+# the full dependency graph for libanvil.a, including backend source files.
+.PHONY: FORCE
+FORCE:
+
+$(ANVIL_LIB): FORCE
+	$(MAKE) -C $(ANVIL_ROOT) lib
+
 # Link
-$(TARGET): $(ALL_OBJS)
-	$(CC) $(ALL_OBJS) -o $@ $(LDFLAGS)
+$(TARGET): $(ALL_OBJS) $(ANVIL_LIB)
+	$(CC) $(ALL_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(ALL_OBJS): $(ANVIL_HEADERS)
 
 # Compile main source files
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)

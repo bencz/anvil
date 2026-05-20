@@ -3,6 +3,7 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_opt.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,6 +47,32 @@ void anvil_module_destroy(anvil_module_t *mod)
     size_t num_all_consts = 0;
     size_t consts_cap = 0;
 
+    for (anvil_global_t *global = mod->globals; global; global = global->next) {
+        anvil_value_t *init = global->value ? global->value->data.global.init : NULL;
+        if (init && (init->kind == ANVIL_VAL_CONST_INT ||
+                     init->kind == ANVIL_VAL_CONST_FLOAT ||
+                     init->kind == ANVIL_VAL_CONST_DECIMAL ||
+                     init->kind == ANVIL_VAL_CONST_NULL ||
+                     init->kind == ANVIL_VAL_CONST_STRING ||
+                     init->kind == ANVIL_VAL_CONST_ARRAY)) {
+            bool found = false;
+            for (size_t j = 0; j < num_all_consts; j++) {
+                if (all_consts[j] == init) { found = true; break; }
+            }
+            if (!found) {
+                if (num_all_consts >= consts_cap) {
+                    size_t new_cap = consts_cap ? consts_cap * 2 : 64;
+                    anvil_value_t **grown = realloc(all_consts,
+                        new_cap * sizeof(*grown));
+                    if (!grown) break;
+                    all_consts = grown;
+                    consts_cap = new_cap;
+                }
+                all_consts[num_all_consts++] = init;
+            }
+        }
+    }
+
     for (anvil_func_t *f = mod->funcs; f; f = f->next) {
         for (anvil_block_t *b = f->blocks; b; b = b->next) {
             for (anvil_instr_t *instr = b->first; instr; instr = instr->next) {
@@ -53,6 +80,7 @@ void anvil_module_destroy(anvil_module_t *mod)
                     anvil_value_t *op = instr->operands[i];
                     if (op && (op->kind == ANVIL_VAL_CONST_INT ||
                                op->kind == ANVIL_VAL_CONST_FLOAT ||
+                               op->kind == ANVIL_VAL_CONST_DECIMAL ||
                                op->kind == ANVIL_VAL_CONST_NULL ||
                                op->kind == ANVIL_VAL_CONST_STRING ||
                                op->kind == ANVIL_VAL_CONST_ARRAY)) {
@@ -89,6 +117,8 @@ void anvil_module_destroy(anvil_module_t *mod)
         anvil_value_t *op = all_consts[i];
         if (op->kind == ANVIL_VAL_CONST_STRING && op->data.str) {
             free((void*)op->data.str);
+        } else if (op->kind == ANVIL_VAL_CONST_DECIMAL && op->data.decimal) {
+            free(op->data.decimal);
         } else if (op->kind == ANVIL_VAL_CONST_ARRAY && op->data.array.elements) {
             free(op->data.array.elements);
         }
@@ -124,6 +154,7 @@ void anvil_module_destroy(anvil_module_t *mod)
                 anvil_instr_t *inext = instr->next;
                 free(instr->operands);
                 free(instr->phi_blocks);
+                free(instr->switch_blocks);
                 free(instr);
                 instr = inext;
             }
@@ -204,18 +235,35 @@ anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
 anvil_value_t *anvil_module_add_extern(anvil_module_t *mod, const char *name,
                                         anvil_type_t *type)
 {
+    if (mod && type && type->kind == ANVIL_TYPE_FUNC) {
+        anvil_func_t *func = anvil_func_declare(mod, name, type);
+        return anvil_func_get_value(func);
+    }
     return anvil_module_add_global(mod, name, type, ANVIL_LINK_EXTERNAL);
 }
 
 anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *len)
 {
     if (!mod || !output) return ANVIL_ERR_INVALID_ARG;
+    if (len) *len = 0;
+    *output = NULL;
     
     anvil_ctx_t *ctx = mod->ctx;
     if (!ctx->backend) {
         anvil_set_error(ctx, ANVIL_ERR_NO_BACKEND, "No backend configured");
         return ANVIL_ERR_NO_BACKEND;
     }
+
+    char verify_error[256] = { 0 };
+    if (!anvil_module_verify(mod, verify_error, sizeof(verify_error))) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_OP,
+                        "IR verification failed: %s",
+                        verify_error[0] ? verify_error : "invalid source IR");
+        return ANVIL_ERR_INVALID_OP;
+    }
+
+    anvil_error_t opt_err = anvil_module_optimize(mod);
+    if (opt_err != ANVIL_OK) return opt_err;
     
     /* Call prepare_ir if the backend provides it */
     if (ctx->backend->ops->prepare_ir) {

@@ -29,6 +29,13 @@ static void mark_reachable(anvil_block_t *block, bool *reachable, size_t num_blo
     } else if (term->op == ANVIL_OP_BR_COND) {
         mark_reachable(term->true_block, reachable, num_blocks);
         mark_reachable(term->false_block, reachable, num_blocks);
+    } else if (term->op == ANVIL_OP_SWITCH) {
+        mark_reachable(term->true_block, reachable, num_blocks);
+        for (size_t i = 0; i < term->num_switch_cases; i++) {
+            if (term->switch_blocks) {
+                mark_reachable(term->switch_blocks[i], reachable, num_blocks);
+            }
+        }
     }
 }
 
@@ -49,6 +56,13 @@ static void recompute_preds(anvil_func_t *func)
         } else if (term->op == ANVIL_OP_BR_COND) {
             if (term->true_block)  term->true_block->num_preds++;
             if (term->false_block) term->false_block->num_preds++;
+        } else if (term->op == ANVIL_OP_SWITCH) {
+            if (term->true_block) term->true_block->num_preds++;
+            for (size_t i = 0; i < term->num_switch_cases; i++) {
+                if (term->switch_blocks && term->switch_blocks[i]) {
+                    term->switch_blocks[i]->num_preds++;
+                }
+            }
         }
     }
     /* Allocate per-block pred arrays. */
@@ -70,6 +84,17 @@ static void recompute_preds(anvil_func_t *func)
                 term->true_block->preds[term->true_block->num_preds++] = block;
             if (term->false_block && term->false_block->preds)
                 term->false_block->preds[term->false_block->num_preds++] = block;
+        } else if (term->op == ANVIL_OP_SWITCH) {
+            if (term->true_block && term->true_block->preds) {
+                term->true_block->preds[term->true_block->num_preds++] = block;
+            }
+            for (size_t i = 0; i < term->num_switch_cases; i++) {
+                if (term->switch_blocks && term->switch_blocks[i] &&
+                    term->switch_blocks[i]->preds) {
+                    term->switch_blocks[i]->preds[
+                        term->switch_blocks[i]->num_preds++] = block;
+                }
+            }
         }
     }
 }
@@ -109,17 +134,109 @@ static void replace_branch_target(anvil_func_t *func,
             if (term->false_block == old_block) {
                 term->false_block = new_block;
             }
-        }
-    }
-    
-    /* Update PHI nodes in new_block */
-    for (anvil_instr_t *instr = new_block->first; instr; instr = instr->next) {
-        if (instr->op == ANVIL_OP_PHI) {
-            for (size_t i = 0; i < instr->num_phi_incoming; i++) {
-                if (instr->phi_blocks[i] == old_block) {
-                    instr->phi_blocks[i] = new_block;
+        } else if (term->op == ANVIL_OP_SWITCH) {
+            if (term->true_block == old_block) {
+                term->true_block = new_block;
+            }
+            for (size_t i = 0; i < term->num_switch_cases; i++) {
+                if (term->switch_blocks && term->switch_blocks[i] == old_block) {
+                    term->switch_blocks[i] = new_block;
                 }
             }
+        }
+    }
+}
+
+static bool copy_block_preds(anvil_block_t *block,
+                             anvil_block_t ***out_preds,
+                             size_t *out_count)
+{
+    *out_preds = NULL;
+    *out_count = block ? block->num_preds : 0;
+    if (!block || block->num_preds == 0) return true;
+
+    anvil_block_t **preds = malloc(block->num_preds * sizeof(*preds));
+    if (!preds) return false;
+
+    memcpy(preds, block->preds, block->num_preds * sizeof(*preds));
+    *out_preds = preds;
+    return true;
+}
+
+static bool append_phi_incoming(anvil_instr_t *instr,
+                                anvil_value_t *value,
+                                anvil_block_t *block)
+{
+    size_t new_count = instr->num_phi_incoming + 1;
+    anvil_value_t **new_ops = malloc(new_count * sizeof(*new_ops));
+    anvil_block_t **new_blocks = malloc(new_count * sizeof(*new_blocks));
+    if (!new_ops || !new_blocks) {
+        free(new_ops);
+        free(new_blocks);
+        return false;
+    }
+
+    if (instr->num_phi_incoming > 0) {
+        memcpy(new_ops, instr->operands,
+               instr->num_phi_incoming * sizeof(*new_ops));
+        memcpy(new_blocks, instr->phi_blocks,
+               instr->num_phi_incoming * sizeof(*new_blocks));
+    }
+
+    new_ops[instr->num_phi_incoming] = value;
+    new_blocks[instr->num_phi_incoming] = block;
+
+    free(instr->operands);
+    free(instr->phi_blocks);
+    instr->operands = new_ops;
+    instr->phi_blocks = new_blocks;
+    instr->num_operands = new_count;
+    instr->num_phi_incoming = new_count;
+    return true;
+}
+
+static void remove_phi_incoming(anvil_instr_t *instr, size_t index)
+{
+    if (!instr || index >= instr->num_phi_incoming) return;
+
+    for (size_t i = index + 1; i < instr->num_phi_incoming; i++) {
+        instr->operands[i - 1] = instr->operands[i];
+        instr->phi_blocks[i - 1] = instr->phi_blocks[i];
+    }
+
+    instr->num_operands--;
+    instr->num_phi_incoming--;
+}
+
+static void rewrite_phi_predecessor(anvil_block_t *block,
+                                    anvil_block_t *old_pred,
+                                    anvil_block_t **new_preds,
+                                    size_t num_new_preds)
+{
+    if (!block) return;
+
+    for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
+        if (instr->op != ANVIL_OP_PHI) break;
+
+        for (size_t i = 0; i < instr->num_phi_incoming; ) {
+            if (instr->phi_blocks[i] != old_pred) {
+                i++;
+                continue;
+            }
+
+            if (num_new_preds == 0) {
+                remove_phi_incoming(instr, i);
+                continue;
+            }
+
+            anvil_value_t *incoming = instr->operands[i];
+            instr->phi_blocks[i] = new_preds[0];
+            for (size_t p = 1; p < num_new_preds; p++) {
+                if (!append_phi_incoming(instr, incoming, new_preds[p])) {
+                    break;
+                }
+            }
+            i++;
         }
     }
 }
@@ -147,7 +264,7 @@ static void remove_block(anvil_func_t *func, anvil_block_t *block)
 }
 
 /* Simplify conditional branch with constant condition */
-static bool simplify_const_branch(anvil_func_t *func, anvil_block_t *block)
+static bool simplify_const_branch(anvil_block_t *block)
 {
     anvil_instr_t *term = block->last;
     if (!term || term->op != ANVIL_OP_BR_COND) return false;
@@ -158,6 +275,11 @@ static bool simplify_const_branch(anvil_func_t *func, anvil_block_t *block)
     
     int64_t val = cond->data.i;
     anvil_block_t *target = val ? term->true_block : term->false_block;
+    anvil_block_t *dead_target = val ? term->false_block : term->true_block;
+
+    if (dead_target && dead_target != target) {
+        rewrite_phi_predecessor(dead_target, block, NULL, 0);
+    }
 
     /* Convert to unconditional branch. Free the condition operand array
      * so the BR_COND's allocation doesn't leak. */
@@ -239,11 +361,13 @@ bool anvil_pass_simplify_cfg(anvil_func_t *func)
 
         /* Simplify constant conditional branches */
         for (anvil_block_t *block = func->blocks; block; block = block->next) {
-            if (simplify_const_branch(func, block)) {
+            if (simplify_const_branch(block)) {
                 any_changed = true;
                 changed = true;
             }
         }
+
+        if (any_changed) continue;
         
         /* Remove empty blocks (blocks with just a branch) */
         for (anvil_block_t *block = func->blocks; block; block = block->next) {
@@ -253,7 +377,14 @@ bool anvil_pass_simplify_cfg(anvil_func_t *func)
             if (is_empty_block(block)) {
                 anvil_block_t *target = block->last->true_block;
                 if (target && target != block) {
+                    anvil_block_t **old_preds = NULL;
+                    size_t num_old_preds = 0;
+                    if (!copy_block_preds(block, &old_preds, &num_old_preds)) {
+                        continue;
+                    }
                     replace_branch_target(func, block, target);
+                    rewrite_phi_predecessor(target, block, old_preds, num_old_preds);
+                    free(old_preds);
                     /* Block will be removed as unreachable */
                     any_changed = true;
                     changed = true;

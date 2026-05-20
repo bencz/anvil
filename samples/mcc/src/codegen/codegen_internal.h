@@ -76,6 +76,8 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym);
 
 /* Convert MCC type to ANVIL type */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type);
+bool codegen_type_pass_by_reference(mcc_type_t *type);
+anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type);
 
 /* Build an integer constant whose Anvil type matches `anvil_type`.
  * Used for inc/dec and codegen_to_bool so the generated IR has matched
@@ -97,6 +99,13 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr);
 
 /* Convert value to boolean (avoids redundant CMP_NE if already boolean) */
 anvil_value_t *codegen_to_bool(mcc_codegen_t *cg, anvil_value_t *val);
+
+/* Convert a generated value to the exact ANVIL type implied by a C type. */
+anvil_value_t *codegen_convert_value(mcc_codegen_t *cg,
+                                     anvil_value_t *val,
+                                     mcc_type_t *from,
+                                     mcc_type_t *to,
+                                     const char *name);
 
 /* ============================================================
  * Statement Code Generation (codegen_stmt.c)

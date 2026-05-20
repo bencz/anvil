@@ -5,8 +5,12 @@
 
 # Compiler settings
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -g -I../../include -Iinclude -Isrc/preprocessor -Isrc/lexer -Isrc/parser -Isrc/sema -Isrc/codegen -Isrc/opt -Isrc/ast
-LDFLAGS = -L../../lib -lanvil
+ANVIL_ROOT = ../..
+ANVIL_LIB = $(ANVIL_ROOT)/lib/libanvil.a
+ANVIL_HEADERS = $(wildcard $(ANVIL_ROOT)/include/anvil/*.h)
+CFLAGS = -Wall -Wextra -std=c99 -g -I$(ANVIL_ROOT)/include -Iinclude -Isrc/preprocessor -Isrc/lexer -Isrc/parser -Isrc/sema -Isrc/codegen -Isrc/opt -Isrc/ast
+LDFLAGS =
+LDLIBS = $(ANVIL_LIB)
 
 # Directories
 SRCDIR = src

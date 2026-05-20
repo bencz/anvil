@@ -262,6 +262,13 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
     /* Get output */
     size_t output_len;
     char *output = mcc_codegen_get_output(cg, &output_len);
+    if (!output) {
+        mcc_codegen_destroy(cg);
+        mcc_sema_destroy(sema);
+        mcc_parser_destroy(parser);
+        mcc_preprocessor_destroy(pp);
+        return 1;
+    }
 
     /* Write output */
     FILE *out = stdout;
@@ -516,6 +523,18 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
     /* Get output */
     size_t output_len;
     char *output = mcc_codegen_get_output(cg, &output_len);
+    if (!output) {
+        mcc_codegen_destroy(cg);
+        mcc_sema_destroy(sema);
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 1;
+    }
     
     /* Write output */
     FILE *out = stdout;

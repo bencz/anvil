@@ -4,10 +4,10 @@ This document describes the internal architecture of the MCC (Micro C Compiler) 
 
 ## Overview
 
-MCC is a complete C89 compiler frontend that generates code through the ANVIL intermediate representation. The compiler follows a traditional multi-pass architecture:
+MCC is a C compiler frontend that generates code through ANVIL. It is intentionally frontend-oriented: MCC builds source IR, while ANVIL owns IR verification, target-independent optimization, backend dispatch, MachineIR/register allocation when a backend uses that path, and final assembly emission.
 
 ```
-Source Code → Preprocessor → Lexer → Parser → Semantic Analysis → AST Optimizer → Code Generation → Assembly
+Source Code → Preprocessor → Lexer → Parser → Semantic Analysis → AST Optimizer → ANVIL IR Codegen → ANVIL Backend → Assembly
 ```
 
 ### Multi-File Compilation
@@ -45,6 +45,11 @@ MCC supports compiling multiple source files into a single output. The compilati
                           ▼
                  ┌─────────────────┐
                  │ Shared Codegen  │  (single ANVIL module)
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │ ANVIL Pipeline  │  (verify, optimize, backend)
                  └────────┬────────┘
                           │
                           ▼
@@ -408,17 +413,24 @@ MCC uses ANVIL for code generation:
    - Create ANVIL function with type signature
    - Generate ANVIL IR for function body
    - Use ANVIL builder API for instructions
-3. Call `anvil_module_codegen()` to generate target assembly
+3. Call `anvil_module_codegen()`
+   - ANVIL verifies source IR invariants
+   - ANVIL runs the configured optimizer
+   - ANVIL dispatches to the selected backend
+   - The backend either emits directly or lowers through MachineIR/regalloc before emitting assembly
 
 Key ANVIL APIs used:
 - `anvil_build_alloca()`: Stack allocation
-- `anvil_build_load()`, `anvil_build_store()`: Memory access
+- `anvil_build_alloca_dyn()`: Runtime-sized local arrays/VLAs
+- `anvil_build_load(ctx, type, ptr, name)`, `anvil_build_store()`: Memory access
 - `anvil_build_add()`, `anvil_build_sub()`, etc.: Arithmetic
-- `anvil_build_icmp()`: Integer comparison
-- `anvil_build_br()`, `anvil_build_cond_br()`: Control flow
-- `anvil_build_call()`: Function calls
+- `anvil_build_cmp_eq()`, `anvil_build_cmp_lt()`, etc.: Integer comparison
+- `anvil_build_br()`, `anvil_build_br_cond()`: Control flow
+- `anvil_build_switch()`, `anvil_switch_add_case()`: Switch terminators
+- `anvil_build_call(ctx, func_type, callee, args, num_args, name)`: Direct and indirect function calls
 - `anvil_build_ret()`: Return
 - `anvil_build_struct_gep()`: Struct field access
+- `anvil_build_gep()`: Array indexing and pointer arithmetic
 
 ### Architecture-Specific Type Sizes
 

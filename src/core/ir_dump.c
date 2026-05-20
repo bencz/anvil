@@ -135,6 +135,7 @@ static const char *type_kind_name(anvil_type_kind_t kind)
         case ANVIL_TYPE_U64: return "u64";
         case ANVIL_TYPE_F32: return "f32";
         case ANVIL_TYPE_F64: return "f64";
+        case ANVIL_TYPE_DECIMAL: return "decimal";
         case ANVIL_TYPE_PTR: return "ptr";
         case ANVIL_TYPE_STRUCT: return "struct";
         case ANVIL_TYPE_ARRAY: return "array";
@@ -208,6 +209,14 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
         case ANVIL_TYPE_F64:
             fprintf(out, "%s", type_kind_name(type->kind));
             break;
+
+        case ANVIL_TYPE_DECIMAL:
+            fprintf(out, "decimal.%s(%u,%u)",
+                    type->data.decimal.encoding == ANVIL_DECIMAL_PACKED
+                        ? "packed" : "zoned",
+                    type->data.decimal.precision,
+                    type->data.decimal.scale);
+            break;
             
         case ANVIL_TYPE_PTR:
             fprintf(out, "ptr<");
@@ -268,6 +277,11 @@ void anvil_dump_value(FILE *out, anvil_value_t *val)
             
         case ANVIL_VAL_CONST_FLOAT:
             fprintf(out, "%g", val->data.f);
+            break;
+
+        case ANVIL_VAL_CONST_DECIMAL:
+            fprintf(out, "decimal'%s'",
+                    val->data.decimal ? val->data.decimal : "");
             break;
             
         case ANVIL_VAL_CONST_NULL:
@@ -333,6 +347,36 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
     
     /* Print operation */
     fprintf(out, "%s", op_name(instr->op));
+
+    if (instr->op == ANVIL_OP_SWITCH) {
+        anvil_value_t *selector =
+            instr->num_operands > 0 ? instr->operands[0] : NULL;
+        if (selector && selector->type) {
+            fprintf(out, " ");
+            anvil_dump_type(out, selector->type);
+        }
+        fprintf(out, " ");
+        anvil_dump_value(out, selector);
+        if (instr->true_block) {
+            fprintf(out, ", default label %%%s",
+                    instr->true_block->name ? instr->true_block->name : "?");
+        }
+        for (size_t i = 0; i < instr->num_switch_cases; i++) {
+            fprintf(out, ", case ");
+            if (i + 1 < instr->num_operands) {
+                anvil_dump_value(out, instr->operands[i + 1]);
+            } else {
+                fprintf(out, "?");
+            }
+            fprintf(out, " label %%%s",
+                    instr->switch_blocks && instr->switch_blocks[i] &&
+                    instr->switch_blocks[i]->name
+                        ? instr->switch_blocks[i]->name
+                        : "?");
+        }
+        fprintf(out, "\n");
+        return;
+    }
     
     /* Print result type for certain ops */
     if (instr->result && instr->result->type) {

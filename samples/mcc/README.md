@@ -1,10 +1,10 @@
 # MCC - Micro C Compiler
 
-A minimal C89 compiler implementation using ANVIL for code generation. MCC demonstrates how to build a complete compiler frontend that targets multiple architectures through the ANVIL intermediate representation.
+MCC is a small C compiler sample built on ANVIL. Its main purpose in this repository is to stress the generic ANVIL pipeline: frontend-generated source IR, source verification, target-independent optimization, backend selection, and final assembly generation.
 
 ## Features
 
-- **C89/ANSI C compliant** (with some extensions)
+- **C89/ANSI C baseline** with selected C99/C11/C23/GNU extensions
 - **Preprocessor** with full support for:
   - `#include` (local and system headers)
   - `#define` / `#undef` (object-like and function-like macros)
@@ -12,19 +12,21 @@ A minimal C89 compiler implementation using ANVIL for code generation. MCC demon
   - Conditional expressions with arithmetic and logical operators
   - `defined()` operator
   - `#pragma`, `#error`, `#warning`, `#line`
-- **Full C89 type system**:
-  - Basic types: `char`, `short`, `int`, `long`, `float`, `double`
+  - Stringification (`#`), token pasting (`##`), variadic macros, and `__VA_OPT__`
+- **C type system and semantic analysis**:
+  - Basic integer/floating types, including `_Bool` and `long long`
   - Type qualifiers: `const`, `volatile`
   - Storage classes: `auto`, `register`, `static`, `extern`, `typedef`
   - Derived types: pointers, arrays, structs, unions, enums, functions
   - `typedef` with multiple names (`typedef int INT, *PINT;`)
   - Nested structs and unions
-  - Arrays in struct fields (`int data[10]`)
+  - Arrays in struct fields (`int data[10]`) and local VLAs through ANVIL dynamic alloca
   - Struct/union with embedded anonymous unions/structs
-- **Code generation** via ANVIL IR for multiple architectures:
-  - IBM S/370, S/370-XA, S/390, z/Architecture (HLASM output)
-  - x86, x86-64 (AT&T syntax)
-  - PowerPC 32/64-bit
+- **Code generation through ANVIL**:
+  - MCC emits architecture-independent ANVIL source IR.
+  - ANVIL verifies and optimizes that IR before invoking a selected backend.
+  - Any registered ANVIL backend can be selected with `-arch=...`.
+  - The executable stress suite currently validates the most complete runtime path available on the host.
 
 ## Building
 
@@ -48,7 +50,7 @@ make clean && make
 # With verbose output to see progress
 ./mcc -v -o output.s file1.c file2.c file3.c
 
-# Specify target architecture
+# Specify target architecture through ANVIL
 ./mcc -arch=s370 -o output.asm input.c      # IBM S/370
 ./mcc -arch=s390 -o output.asm input.c      # IBM S/390
 ./mcc -arch=zarch -o output.asm input.c     # z/Architecture
@@ -68,6 +70,12 @@ make clean && make
 
 # Dump AST (for debugging)
 ./mcc -ast-dump input.c
+
+# Dump ANVIL IR before backend code generation
+./mcc -dump-ir -o output.s input.c
+
+# Compile, assemble/link, execute, and compare against the native compiler
+make test-exec
 ```
 
 ## Standard Library Headers
@@ -127,7 +135,13 @@ MCC includes a minimal set of C89 standard library headers in the `includes/` di
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Code Generator                            │
-│  (AST → ANVIL IR → Target Assembly)                         │
+│  (AST → ANVIL Source IR)                                    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                         ANVIL                                │
+│  (Verifier → Optimizer → selected backend → assembly)       │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -154,14 +168,15 @@ mcc/
 ├── src/                # Implementation files
 │   ├── main.c          # Entry point, command-line parsing
 │   ├── context.c       # Compiler context, memory management
-│   ├── lexer.c         # Lexer implementation (~500 lines)
-│   ├── preprocessor.c  # Preprocessor implementation (~1100 lines)
-│   ├── parser.c        # Recursive descent parser (~1200 lines)
-│   ├── ast.c           # AST utilities
-│   ├── types.c         # Type system implementation (~570 lines)
+│   ├── lexer/          # Modular lexer
+│   ├── preprocessor/   # Modular preprocessor
+│   ├── parser/         # Recursive descent parser
+│   ├── ast/            # AST utilities and dumps
+│   ├── types.c         # Type system implementation
 │   ├── symtab.c        # Symbol table implementation
-│   ├── sema.c          # Semantic analysis (~750 lines)
-│   └── codegen.c       # ANVIL code generator (~1100 lines)
+│   ├── sema/           # Modular semantic analysis
+│   ├── opt/            # AST optimizer
+│   └── codegen/        # ANVIL code generator
 ├── includes/           # C standard library headers
 │   ├── stdio.h, stdlib.h, string.h, ...
 ├── tests/              # Test programs
@@ -200,22 +215,15 @@ mcc/
 - Pointers and arrays
 - Type casts
 - Preprocessor directives (`#if`, `#elif`, `#else`, `#endif`, `#ifdef`, `#ifndef`, `#define`, `#include`)
-
-### Not Supported (C99+ features)
-
-- `//` comments (use `/* */`)
-- Variable-length arrays (VLA)
-- `_Bool`, `_Complex`, `_Imaginary`
-- Designated initializers
-- Compound literals
-- `inline` functions
-- `restrict` qualifier
-- `long long` type
+- Selected C99/C11/C23/GNU syntax used by the test suite, including `long long`, `_Bool`, C99 for-loop declarations, VLAs, `_Generic`, `_Static_assert`, `typeof`, and statement expressions
 
 ### Current Limitations
 
-- Bitfields
-- Stringification (`#`) and token pasting (`##`) in macros
+- Full `_Complex`/`_Imaginary` code generation
+- Designated initializers
+- Compound literals
+- Complete bitfield layout/codegen semantics
+- Full external C runtime implementation; bundled headers mostly provide declarations
 
 ## License
 

@@ -21,7 +21,7 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 ### Compilation Pipeline
 
 ```
-Source (.c) → Preprocessor → Lexer → Parser → Sema → AST Optimizer → Codegen → Assembly
+Source (.c) → Preprocessor → Lexer → Parser → Sema → AST Optimizer → ANVIL IR Codegen → ANVIL Backend → Assembly
 ```
 
 ### Multi-File Compilation
@@ -81,7 +81,7 @@ All files share:
 | `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
 | `src/opt/` | 10 files | Modular AST optimizer with multiple passes |
-| `src/codegen/` | 5 files | Modular code generator with ANVIL integration |
+| `src/codegen/` | 5 files | Modular code generator that emits ANVIL source IR |
 
 ### Test Suite
 
@@ -128,6 +128,8 @@ make test-all          # Run all tests (syntax + codegen + cross)
 # Help
 make help              # Show all available targets
 ```
+
+`make test-exec` is the runtime stress suite. It compiles MCC output, assembles/links it with the native toolchain, executes the generated binary, and compares output/exit status with the native compiler.
 
 **Execution Tests (`tests/exec/run_exec_tests.sh`):**
 
@@ -263,9 +265,10 @@ See [SEMA.md](SEMA.md) for detailed documentation of dump output.
 | z/Architecture | HLASM | MVS linkage |
 | x86 | AT&T | cdecl |
 | x86-64 | AT&T | System V AMD64 |
-| PowerPC | GAS | AIX/ELF |
-| ARM64 | GAS | AAPCS64 (Linux) |
-| ARM64 macOS | GAS | Darwin ABI (Apple Silicon) |
+| PowerPC 32/64 | GAS | AIX/ELF-style emitters |
+| PowerPC 64 LE | GAS | ELF little-endian |
+| ARM64 | GAS | AAPCS64 (Linux), currently the reference MachineIR backend path |
+| ARM64 macOS | GAS | Darwin ABI (Apple Silicon), currently the primary executable stress-test target on macOS |
 
 ## For Assistants
 
@@ -325,6 +328,7 @@ When working with MCC code:
 - Check `ctx->error_count` after each phase
 - Add debug prints in specific functions
 - Test with minimal C programs first
+- Use `make test-exec` when changing codegen/backend-sensitive behavior; it verifies generated binaries against the native compiler.
 
 **IR Dump example:**
 ```bash
@@ -381,6 +385,10 @@ When working with MCC code:
 - **Block Terminator Detection**: `codegen_block_has_terminator()` now correctly detects if a block has a terminator instruction using `anvil_block_has_terminator()`, eliminating dead code after `return` statements
 - **IR Dump Support**: `-dump-ir` flag generates ANVIL IR dump file (`.ir`) for debugging code generation
 - **Debug-Friendly Optimization (-Og)**: New optimization level for minimal IR cleanup while preserving debuggability
+- **ANVIL Verifier Integration**: `anvil_module_codegen()` now rejects invalid source IR before optimization and backend lowering
+- **MachineIR Backend Path**: ARM64 now exercises the generic MachineIR/regalloc/spill pipeline and serves as the reference backend for migrating other targets
+- **C Conversion Codegen**: Assignments, returns, initializers, fixed args, variadic args, comparisons, casts, `_Bool`, and `sizeof` now preserve target ANVIL types more accurately
+- **Function Pointer Calls**: Function values are emitted as callable `ptr<func>` values, and indirect calls flow through the same ANVIL call builder as direct calls
 - **AST Optimization System**: Modular pass manager with constant folding, constant propagation, copy propagation, dead code elimination, strength reduction, and algebraic simplifications
 - **Symbol-Based Variable Tracking**: Optimization passes use symbol pointers for unique variable identification, correctly handling shadowing in nested scopes
 - **Compound Assignment Handling**: Propagation passes correctly invalidate variables on compound assignments (`+=`, `-=`, etc.)

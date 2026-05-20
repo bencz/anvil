@@ -230,6 +230,17 @@ anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch)
 {
     if (!ctx) return ANVIL_ERR_INVALID_ARG;
     if (arch >= ANVIL_ARCH_COUNT) return ANVIL_ERR_INVALID_ARG;
+
+    if (ctx->backend) {
+        if (ctx->backend->ops && ctx->backend->ops->reset) {
+            ctx->backend->ops->reset(ctx->backend);
+        }
+        if (ctx->backend->ops && ctx->backend->ops->cleanup) {
+            ctx->backend->ops->cleanup(ctx->backend);
+        }
+        free(ctx->backend);
+        ctx->backend = NULL;
+    }
     
     ctx->arch = arch;
     

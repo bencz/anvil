@@ -4,7 +4,7 @@ This document describes the code generator component of MCC.
 
 ## Overview
 
-The code generator translates the AST into ANVIL IR, which is then lowered to target-specific assembly. This two-stage approach allows MCC to target multiple architectures without duplicating code generation logic.
+The code generator translates the MCC AST into ANVIL source IR. ANVIL then verifies the IR, runs the configured target-independent optimizer, and invokes the selected backend. This keeps MCC architecture-independent: target ABI details, MachineIR lowering, register allocation, spills, and final assembly emission live in ANVIL backends instead of in the C frontend.
 
 ## File Organization
 
@@ -55,9 +55,11 @@ The code generator is organized into modular files in `src/codegen/`:
 ## ANVIL Integration
 
 MCC uses the ANVIL library for:
-1. **IR construction**: Building SSA-form intermediate representation
+1. **IR construction**: Building typed source IR from C AST nodes
 2. **Type representation**: Mapping C types to ANVIL types
-3. **Code generation**: Lowering IR to target assembly
+3. **Verification**: Rejecting invalid IR before optimization/backend lowering
+4. **Optimization**: Running ANVIL's target-independent pass manager
+5. **Code generation**: Dispatching to the selected backend, either a direct emitter or a MachineIR/regalloc backend
 
 ### Supported Targets
 
@@ -71,8 +73,11 @@ MCC uses the ANVIL library for:
 | `ANVIL_ARCH_X86_64` | AT&T | x86-64 |
 | `ANVIL_ARCH_PPC32` | GAS | PowerPC 32-bit |
 | `ANVIL_ARCH_PPC64` | GAS | PowerPC 64-bit |
+| `ANVIL_ARCH_PPC64LE` | GAS | PowerPC 64-bit little-endian |
 | `ANVIL_ARCH_ARM64` | GAS | ARM64 (Linux) |
 | `ANVIL_ARCH_ARM64` + Darwin ABI | GAS | ARM64 (Apple Silicon/macOS) |
+
+ARM64 is currently the reference backend for the MachineIR/regalloc path. The other targets remain selectable through ANVIL and are planned migration targets for the shared MachineIR backend infrastructure.
 
 ## Code Generator API
 
@@ -81,16 +86,27 @@ MCC uses the ANVIL library for:
 ```c
 typedef struct mcc_codegen {
     mcc_context_t *mcc_ctx;
-    anvil_ctx_t *anvil_ctx;
-    anvil_module_t *module;
-    
-    /* Symbol tables */
     mcc_symtab_t *symtab;
     mcc_type_context_t *types;
+
+    /* ANVIL context and module */
+    anvil_ctx_t *anvil_ctx;
+    anvil_module_t *anvil_mod;
     
     /* Current function context */
     anvil_func_t *current_func;
     anvil_block_t *current_block;
+    const char *current_func_name;
+    mcc_type_t *current_return_type;
+
+    /* Control flow */
+    anvil_block_t *break_target;
+    anvil_block_t *continue_target;
+    struct {
+        anvil_block_t *default_block;
+        anvil_block_t *exit_block;
+        anvil_value_t *switch_value;
+    } switch_info;
     
     /* Local variable mapping (name -> anvil_value_t*) */
     struct {
@@ -99,20 +115,15 @@ typedef struct mcc_codegen {
     } *locals;
     size_t num_locals;
     size_t cap_locals;
-    
-    /* Function table for external references */
+
+    /* String literal pool and goto labels */
     struct {
-        mcc_symbol_t *sym;
-        anvil_func_t *func;
-    } *func_table;
-    size_t num_funcs;
-    size_t cap_funcs;
-    
-    /* Control flow for break/continue */
-    anvil_block_t *break_target;
-    anvil_block_t *continue_target;
-    
-    /* Label management */
+        const char *str;
+        anvil_value_t *value;
+    } *strings;
+    size_t num_strings;
+    size_t cap_strings;
+
     struct {
         const char *name;
         anvil_block_t *block;
@@ -120,9 +131,23 @@ typedef struct mcc_codegen {
     size_t num_labels;
     size_t cap_labels;
     
-    /* Target and optimization */
-    anvil_arch_t target_arch;
-    int opt_level;
+    /* Function and global caches */
+    struct {
+        mcc_symbol_t *sym;
+        anvil_func_t *func;
+    } *funcs;
+    size_t num_funcs;
+    size_t cap_funcs;
+
+    struct {
+        const char *name;
+        anvil_value_t *value;
+    } *globals;
+    size_t num_globals;
+    size_t cap_globals;
+    
+    int label_counter;
+    mcc_opt_level_t opt_level;
 } mcc_codegen_t;
 ```
 
@@ -136,8 +161,8 @@ mcc_codegen_t *mcc_codegen_create(mcc_context_t *ctx,
 void mcc_codegen_destroy(mcc_codegen_t *cg);
 
 /* Configuration */
-void mcc_codegen_set_target(mcc_codegen_t *cg, anvil_arch_t arch);
-void mcc_codegen_set_opt_level(mcc_codegen_t *cg, int level);
+void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch);
+void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level);
 
 /* Single-file code generation */
 bool mcc_codegen_generate(mcc_codegen_t *cg, mcc_ast_node_t *ast);
@@ -156,15 +181,20 @@ C types are mapped to ANVIL types:
 
 | C Type | ANVIL Type | Size |
 |--------|------------|------|
-| `char` | `anvil_type_i8` | 1 byte |
-| `short` | `anvil_type_i16` | 2 bytes |
-| `int` | `anvil_type_i32` | 4 bytes |
-| `long` | `anvil_type_i32` or `i64` | 4/8 bytes |
+| `char` | `anvil_type_i8` or `anvil_type_u8` | 1 byte |
+| `short` | `anvil_type_i16` or `anvil_type_u16` | 2 bytes |
+| `int`, `enum` | `anvil_type_i32` or `anvil_type_u32` | 4 bytes |
+| `long` | `anvil_type_i32/u32` or `i64/u64` | 4/8 bytes, target data-model dependent |
+| `long long` | `anvil_type_i64` or `anvil_type_u64` | 8 bytes |
+| `_Bool` | `anvil_type_u8` | 1 byte |
 | `float` | `anvil_type_f32` | 4 bytes |
 | `double` | `anvil_type_f64` | 8 bytes |
 | `void` | `anvil_type_void` | 0 bytes |
 | `T*` | `anvil_type_ptr` | 4/8 bytes |
-| `struct S` | `anvil_type_struct` | Sum of fields |
+| `T[N]` | `anvil_type_array` | `sizeof(T) * N` |
+| local VLA | `anvil_build_alloca_dyn` of element type | runtime count |
+| `struct S` / `union U` | `anvil_type_struct` | field layout from MCC type info |
+| function type | `anvil_type_func` and callable `ptr<func>` values | target pointer size |
 
 ```c
 /* In src/codegen/codegen_type.c */
@@ -174,10 +204,27 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
     
     switch (type->kind) {
         case TYPE_VOID:   return anvil_type_void(cg->anvil_ctx);
-        case TYPE_CHAR:   return anvil_type_i8(cg->anvil_ctx);
-        case TYPE_SHORT:  return anvil_type_i16(cg->anvil_ctx);
-        case TYPE_INT:    return anvil_type_i32(cg->anvil_ctx);
-        case TYPE_LONG:   return anvil_type_i32(cg->anvil_ctx);
+        case TYPE_CHAR:   return type->is_unsigned ? anvil_type_u8(cg->anvil_ctx)
+                                                    : anvil_type_i8(cg->anvil_ctx);
+        case TYPE_SHORT:  return type->is_unsigned ? anvil_type_u16(cg->anvil_ctx)
+                                                    : anvil_type_i16(cg->anvil_ctx);
+        case TYPE_INT:
+        case TYPE_ENUM:   return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
+                                                    : anvil_type_i32(cg->anvil_ctx);
+        case TYPE_LONG: {
+            const anvil_arch_info_t *ai = anvil_ctx_get_arch_info(cg->anvil_ctx);
+            bool lp64 = ai && ai->ptr_size == 8;
+            if (lp64) {
+                return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
+                                         : anvil_type_i64(cg->anvil_ctx);
+            }
+            return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
+                                     : anvil_type_i32(cg->anvil_ctx);
+        }
+        case TYPE_LONG_LONG:
+            return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
+                                     : anvil_type_i64(cg->anvil_ctx);
+        case TYPE_BOOL:   return anvil_type_u8(cg->anvil_ctx);
         case TYPE_FLOAT:  return anvil_type_f32(cg->anvil_ctx);
         case TYPE_DOUBLE: return anvil_type_f64(cg->anvil_ctx);
         case TYPE_POINTER:
@@ -241,10 +288,17 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         }
         
         case AST_CALL_EXPR: {
-            /* Generate arguments */
+            /* Generate the callee value. This may be a direct function value
+             * or a function pointer loaded from memory. */
+            anvil_value_t *callee = codegen_expr(cg, expr->data.call_expr.func);
+            mcc_type_t *callee_type = codegen_callee_function_type(expr->data.call_expr.func);
+            anvil_type_t *func_type = codegen_type(cg, callee_type);
+
+            /* Generate arguments and convert them to the fixed parameter type
+             * or to the default variadic argument type. */
             anvil_value_t **args = /* ... */;
-            anvil_func_t *func = codegen_get_or_declare_func(cg, /* ... */);
-            return anvil_build_call(cg->anvil_ctx, func, args, num_args, "call");
+            return anvil_build_call(cg->anvil_ctx, func_type, callee,
+                                    args, num_args, "call");
         }
         
         case AST_MEMBER_EXPR: {
@@ -298,25 +352,22 @@ case AST_IF_STMT: {
                             : NULL;
     anvil_block_t *end_bb = anvil_block_create(cg->anvil_ctx, "if.end");
     
-    anvil_build_cond_br(cg->anvil_ctx, cond, then_bb, 
+    anvil_build_br_cond(cg->anvil_ctx, cond, then_bb,
                         else_bb ? else_bb : end_bb);
     
     /* Generate then block */
-    anvil_func_append_block(cg->current_func, then_bb);
-    anvil_set_insert_point(cg->anvil_ctx, then_bb);
+    codegen_set_current_block(cg, then_bb);
     codegen_stmt(cg, stmt->data.if_stmt.then_stmt);
     anvil_build_br(cg->anvil_ctx, end_bb);
     
     /* Generate else block */
     if (else_bb) {
-        anvil_func_append_block(cg->current_func, else_bb);
-        anvil_set_insert_point(cg->anvil_ctx, else_bb);
+        codegen_set_current_block(cg, else_bb);
         codegen_stmt(cg, stmt->data.if_stmt.else_stmt);
         anvil_build_br(cg->anvil_ctx, end_bb);
     }
     
-    anvil_func_append_block(cg->current_func, end_bb);
-    anvil_set_insert_point(cg->anvil_ctx, end_bb);
+    codegen_set_current_block(cg, end_bb);
     break;
 }
 ```
@@ -339,20 +390,17 @@ case AST_WHILE_STMT: {
     anvil_build_br(cg->anvil_ctx, cond_bb);
     
     /* Condition */
-    anvil_func_append_block(cg->current_func, cond_bb);
-    anvil_set_insert_point(cg->anvil_ctx, cond_bb);
-    anvil_value_t *cond = mcc_codegen_expr(cg, stmt->data.while_stmt.cond);
-    anvil_build_cond_br(cg->anvil_ctx, cond, body_bb, end_bb);
+    codegen_set_current_block(cg, cond_bb);
+    anvil_value_t *cond = codegen_expr(cg, stmt->data.while_stmt.cond);
+    anvil_build_br_cond(cg->anvil_ctx, cond, body_bb, end_bb);
     
     /* Body */
-    anvil_func_append_block(cg->current_func, body_bb);
-    anvil_set_insert_point(cg->anvil_ctx, body_bb);
+    codegen_set_current_block(cg, body_bb);
     codegen_stmt(cg, stmt->data.while_stmt.body);
     anvil_build_br(cg->anvil_ctx, cond_bb);
     
     /* End */
-    anvil_func_append_block(cg->current_func, end_bb);
-    anvil_set_insert_point(cg->anvil_ctx, end_bb);
+    codegen_set_current_block(cg, end_bb);
     
     /* Restore break/continue targets */
     cg->break_target = old_break;
@@ -367,7 +415,7 @@ case AST_WHILE_STMT: {
 static void mcc_codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func_decl)
 {
     /* Create function type */
-    anvil_type_t *ret_type = mcc_codegen_type(cg, func_decl->data.func_decl.return_type);
+    anvil_type_t *ret_type = codegen_type(cg, func_decl->data.func_decl.return_type);
     anvil_type_t **param_types = /* ... */;
     anvil_type_t *func_type = anvil_type_func(cg->anvil_ctx, ret_type, 
                                                param_types, num_params, false);
@@ -392,7 +440,7 @@ static void mcc_codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func_decl)
         anvil_value_t *alloca = anvil_build_alloca(cg->anvil_ctx, type, 
                                                     param_names[i]);
         anvil_build_store(cg->anvil_ctx, param, alloca);
-        add_local(cg, param_names[i], alloca);
+        codegen_add_local(cg, param_names[i], alloca);
     }
     
     /* Generate function body */
@@ -424,7 +472,7 @@ static anvil_value_t *find_local(mcc_codegen_t *cg, const char *name)
     return NULL;
 }
 
-static void add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value)
+void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value)
 {
     if (cg->num_locals >= cg->cap_locals) {
         /* Grow array */
@@ -435,29 +483,29 @@ static void add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value)
 }
 ```
 
-## External Function Handling
+## Function Values and External Function Handling
 
-External functions (like `printf`) are declared on first use:
+External functions (like `printf`) are declared on first use. ANVIL stores the canonical signature as `ANVIL_TYPE_FUNC`, while `anvil_func_get_value()` exposes a callable `ptr<func>` value for direct calls and function-pointer expressions:
 
 ```c
-static anvil_func_t *get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym)
+static anvil_value_t *get_or_declare_func_value(mcc_codegen_t *cg, mcc_symbol_t *sym)
 {
     /* Check if already declared */
     for (size_t i = 0; i < cg->num_funcs; i++) {
         if (cg->func_table[i].sym == sym) {
-            return cg->func_table[i].func;
+            return anvil_func_get_value(cg->func_table[i].func);
         }
     }
     
     /* Declare new function */
-    anvil_type_t *func_type = mcc_codegen_type(cg, sym->type);
+    anvil_type_t *func_type = codegen_type(cg, sym->type);
     anvil_func_t *func = anvil_func_create(cg->module, sym->name,
                                             func_type, ANVIL_LINK_EXTERNAL);
     
     /* Add to table */
     /* ... */
     
-    return func;
+    return anvil_func_get_value(func);
 }
 ```
 
@@ -573,7 +621,7 @@ MCC supports optimization levels:
 | `-Og` | Debug | Debug-friendly: copy propagation, store-load propagation |
 | `-O1` | Basic | Og + constant folding, dead code elimination |
 | `-O2` | Standard | O1 + CFG simplification, strength reduction, memory opts, CSE |
-| `-O3` | Aggressive | O2 + loop unrolling |
+| `-O3` | Aggressive | O2 today; loop-unroll is reserved in ANVIL but disabled in the built-in pass table |
 
 Optimizations are performed by ANVIL on the IR before code generation.
 

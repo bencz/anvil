@@ -933,29 +933,29 @@ ret %result
 
 ARM64 Assembly (Linux):
 ```asm
-        ldr x9, [x29, #-16]     ; Load %a from stack
-        ldr x10, [x29, #-24]    ; Load %b from stack
-        add x0, x9, x10         ; Add
-        str x0, [x29, #-8]      ; Store result
-        ldr x0, [x29, #-8]      ; Load result for return
-        add sp, sp, #32         ; Restore stack
+        mov x19, x0             ; Copy ABI argument into allocated vreg
+        mov x20, x1             ; Copy ABI argument into allocated vreg
+        add x21, x19, x20       ; Add allocated MachineIR values
+        mov x0, x21             ; Move result to ABI return register
         ldp x29, x30, [sp], #16 ; Restore frame pointer and link register
         ret                     ; Return
 ```
 
 ARM64 Assembly (macOS/Darwin):
 ```asm
-        ldr x9, [x29, #-16]     ; Load %a from stack
-        ldr x10, [x29, #-24]    ; Load %b from stack
-        add x0, x9, x10         ; Add
-        str x0, [x29, #-8]      ; Store result
-        ldr x0, [x29, #-8]      ; Load result for return
-        add sp, sp, #32         ; Restore stack
+        mov x19, x0             ; Copy ABI argument into allocated vreg
+        mov x20, x1             ; Copy ABI argument into allocated vreg
+        add x21, x19, x20       ; Add allocated MachineIR values
+        mov x0, x21             ; Move result to ABI return register
         ldp x29, x30, [sp], #16 ; Restore frame pointer and link register
         ret                     ; Return
 ```
 
-**Note:** The ARM64 backend uses a stack-based approach where all SSA values are stored in stack slots. This simplifies register allocation but may generate more load/store instructions than necessary. Future optimizations may improve this.
+**Note:** ARM64 no longer uses the old stack-slot-for-every-SSA-value approach.
+It lowers source IR to MachineIR, applies fixed ABI register constraints,
+allocates virtual registers with the shared linear-scan allocator, materializes
+spills when needed, and emits assembly from allocated MachineIR. Exact physical
+register choices can vary with register allocation.
 
 ## IR Debug/Dump API
 

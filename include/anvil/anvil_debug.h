@@ -14,10 +14,7 @@
 extern "C" {
 #endif
 
-/* Forward declarations for internal types */
-struct anvil_instr;
-typedef struct anvil_instr anvil_instr_t;
-
+/* Forward declarations for internal types not exposed by anvil.h */
 struct anvil_global;
 typedef struct anvil_global anvil_global_t;
 

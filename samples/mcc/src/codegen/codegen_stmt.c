@@ -125,13 +125,22 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
                             anvil_elem_type, alloca_val, indices, 1, "elem");
                         
                         /* Generate element value */
-                        anvil_value_t *elem_val = codegen_expr(cg, init_node->data.init_list.exprs[i]);
+                        mcc_ast_node_t *elem_node = init_node->data.init_list.exprs[i];
+                        anvil_value_t *elem_val = codegen_expr(cg, elem_node);
+                        elem_val = codegen_convert_value(cg, elem_val,
+                                                         elem_node->type,
+                                                         elem_type,
+                                                         "init.cast");
                         if (elem_val) {
                             anvil_build_store(cg->anvil_ctx, elem_val, elem_ptr);
                         }
                     }
                 } else {
                     anvil_value_t *init = codegen_expr(cg, init_node);
+                    init = codegen_convert_value(cg, init,
+                                                 init_node->type,
+                                                 stmt->data.var_decl.var_type,
+                                                 "init.cast");
                     if (init) {
                         anvil_build_store(cg->anvil_ctx, init, alloca_val);
                     }
@@ -357,8 +366,16 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     snprintf(end_name, sizeof(end_name), "switch%d.end", id);
     
     /* Generate switch expression and store in a local variable so it persists across blocks */
+    mcc_type_t *switch_c_type = stmt->data.switch_stmt.expr->type;
+    if (switch_c_type && mcc_type_is_integer(switch_c_type)) {
+        switch_c_type = mcc_type_promote(cg->types, switch_c_type);
+    }
     anvil_value_t *switch_expr = codegen_expr(cg, stmt->data.switch_stmt.expr);
-    anvil_type_t *switch_type = codegen_type(cg, stmt->data.switch_stmt.expr->type);
+    switch_expr = codegen_convert_value(cg, switch_expr,
+                                        stmt->data.switch_stmt.expr->type,
+                                        switch_c_type,
+                                        "switch.cast");
+    anvil_type_t *switch_type = codegen_type(cg, switch_c_type);
     anvil_value_t *switch_ptr = anvil_build_alloca(cg->anvil_ctx, switch_type, "switch.val");
     anvil_build_store(cg->anvil_ctx, switch_expr, switch_ptr);
     
@@ -417,6 +434,10 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         
         mcc_ast_node_t *case_node = cases[i];
         anvil_value_t *case_val = codegen_expr(cg, case_node->data.case_stmt.expr);
+        case_val = codegen_convert_value(cg, case_val,
+                                         case_node->data.case_stmt.expr->type,
+                                         switch_c_type,
+                                         "case.cast");
 
         anvil_block_t *next_block;
         if (i + 1 < num_cases) {
@@ -431,6 +452,10 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
             /* GNU case range: `case LO ... HI:` matches when
              * switch_val >= LO && switch_val <= HI. */
             anvil_value_t *hi_val = codegen_expr(cg, case_node->data.case_stmt.end_expr);
+            hi_val = codegen_convert_value(cg, hi_val,
+                                           case_node->data.case_stmt.end_expr->type,
+                                           switch_c_type,
+                                           "case.cast");
             anvil_value_t *ge = anvil_build_cmp_ge(cg->anvil_ctx, switch_val, case_val, "ge");
             anvil_value_t *le = anvil_build_cmp_le(cg->anvil_ctx, switch_val, hi_val, "le");
             anvil_value_t *in_range = anvil_build_and(cg->anvil_ctx, ge, le, "range");
@@ -511,6 +536,10 @@ void codegen_return_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
     if (stmt->data.return_stmt.expr) {
         anvil_value_t *val = codegen_expr(cg, stmt->data.return_stmt.expr);
+        val = codegen_convert_value(cg, val,
+                                    stmt->data.return_stmt.expr->type,
+                                    cg->current_return_type,
+                                    "return.cast");
         anvil_build_ret(cg->anvil_ctx, val);
     } else {
         anvil_build_ret_void(cg->anvil_ctx);

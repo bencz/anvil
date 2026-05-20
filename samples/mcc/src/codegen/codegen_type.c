@@ -7,9 +7,33 @@
 
 #include "codegen_internal.h"
 
+static mcc_type_t *codegen_type_unwrap(mcc_type_t *type)
+{
+    while (type && type->kind == TYPE_TYPEDEF) {
+        type = type->data.typedef_ref.underlying;
+    }
+    return type;
+}
+
+bool codegen_type_pass_by_reference(mcc_type_t *type)
+{
+    type = codegen_type_unwrap(type);
+    return type && (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION);
+}
+
+anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type)
+{
+    anvil_type_t *value_type = codegen_type(cg, type);
+    if (codegen_type_pass_by_reference(type)) {
+        return anvil_type_ptr(cg->anvil_ctx, value_type);
+    }
+    return value_type;
+}
+
 /* Convert MCC type to ANVIL type */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
+    type = codegen_type_unwrap(type);
     if (!type) return anvil_type_i32(cg->anvil_ctx);
 
     switch (type->kind) {
@@ -47,6 +71,8 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_DOUBLE:
         case TYPE_LONG_DOUBLE:
             return anvil_type_f64(cg->anvil_ctx);
+        case TYPE_BOOL:
+            return anvil_type_u8(cg->anvil_ctx);
         case TYPE_POINTER:
             return anvil_type_ptr(cg->anvil_ctx,
                 codegen_type(cg, type->data.pointer.pointee));
@@ -82,7 +108,7 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
             
             int i = 0;
             for (mcc_func_param_t *p = type->data.function.params; p; p = p->next, i++) {
-                param_types[i] = codegen_type(cg, p->type);
+                param_types[i] = codegen_param_type(cg, p->type);
             }
             
             return anvil_type_func(cg->anvil_ctx, ret_type, param_types, num_params,
@@ -93,20 +119,31 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
     }
 }
 
-/* Build an integer constant whose width matches `anvil_type`. We use the
- * public size/alignment API rather than peeking inside the opaque Anvil
- * type struct. Signedness is inferred from the size: an i8/u8 etc. ends
- * up with the signed variant, which the arithmetic operators treat as
- * compatible anyway. */
+/* Build an integer constant whose width and signedness match `anvil_type`.
+ * Keep this aligned with the public ANVIL type API so verifier-visible
+ * constants have the exact type expected by comparisons and stores. */
 anvil_value_t *codegen_const_int_for_type(mcc_codegen_t *cg, anvil_type_t *anvil_type, int64_t val)
 {
     if (!anvil_type) return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
     size_t sz = anvil_type_size(anvil_type);
+    bool is_signed = anvil_type_is_signed(anvil_type);
     switch (sz) {
-        case 1: return anvil_const_i8 (cg->anvil_ctx, (int8_t)val);
-        case 2: return anvil_const_i16(cg->anvil_ctx, (int16_t)val);
-        case 4: return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
-        case 8: return anvil_const_i64(cg->anvil_ctx, val);
+        case 1:
+            return is_signed
+                ? anvil_const_i8(cg->anvil_ctx, (int8_t)val)
+                : anvil_const_u8(cg->anvil_ctx, (uint8_t)val);
+        case 2:
+            return is_signed
+                ? anvil_const_i16(cg->anvil_ctx, (int16_t)val)
+                : anvil_const_u16(cg->anvil_ctx, (uint16_t)val);
+        case 4:
+            return is_signed
+                ? anvil_const_i32(cg->anvil_ctx, (int32_t)val)
+                : anvil_const_u32(cg->anvil_ctx, (uint32_t)val);
+        case 8:
+            return is_signed
+                ? anvil_const_i64(cg->anvil_ctx, val)
+                : anvil_const_u64(cg->anvil_ctx, (uint64_t)val);
         default: return anvil_const_i32(cg->anvil_ctx, (int32_t)val);
     }
 }

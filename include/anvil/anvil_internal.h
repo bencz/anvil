@@ -24,6 +24,7 @@ typedef struct anvil_strbuf {
 typedef enum {
     ANVIL_VAL_CONST_INT,
     ANVIL_VAL_CONST_FLOAT,
+    ANVIL_VAL_CONST_DECIMAL,
     ANVIL_VAL_CONST_NULL,
     ANVIL_VAL_CONST_STRING,
     ANVIL_VAL_CONST_ARRAY,
@@ -51,6 +52,12 @@ typedef struct anvil_instr {
     /* For branch instructions */
     anvil_block_t *true_block;
     anvil_block_t *false_block;
+
+    /* For switch terminators. The selector is operands[0]; each case value is
+     * operands[1 + i], and switch_blocks[i] is its destination. true_block is
+     * the default destination. */
+    anvil_block_t **switch_blocks;
+    size_t num_switch_cases;
     
     /* For struct_gep - stores struct type for offset calculation */
     anvil_type_t *aux_type;
@@ -67,6 +74,7 @@ struct anvil_value {
         int64_t i;
         uint64_t u;
         double f;
+        char *decimal;
         const char *str;
         anvil_instr_t *instr;
         anvil_func_t *func;
@@ -116,6 +124,13 @@ struct anvil_type {
             size_t num_fields;
             bool packed;
         } struc;
+
+        /* Decimal type */
+        struct {
+            anvil_decimal_encoding_t encoding;
+            unsigned precision;
+            unsigned scale;
+        } decimal;
 
         /* Function type */
         struct {

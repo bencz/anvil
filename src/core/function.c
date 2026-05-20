@@ -62,8 +62,9 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
     /* Create entry block */
     func->entry = anvil_block_create(func, "entry");
     
-    /* Create value for function (for use in calls) */
-    func->value = anvil_value_create(mod->ctx, ANVIL_VAL_FUNC, type, name);
+    /* Function values are callable addresses, so their SSA type is ptr<func>. */
+    anvil_type_t *func_ptr_type = anvil_type_ptr(mod->ctx, type);
+    func->value = anvil_value_create(mod->ctx, ANVIL_VAL_FUNC, func_ptr_type, name);
     if (func->value) {
         func->value->data.func = func;
     }
@@ -99,8 +100,9 @@ anvil_func_t *anvil_func_declare(anvil_module_t *mod, const char *name,
     func->entry = NULL;
     func->blocks = NULL;
     
-    /* Create value for function (for use in calls) */
-    func->value = anvil_value_create(mod->ctx, ANVIL_VAL_FUNC, type, name);
+    /* Function values are callable addresses, so their SSA type is ptr<func>. */
+    anvil_type_t *func_ptr_type = anvil_type_ptr(mod->ctx, type);
+    func->value = anvil_value_create(mod->ctx, ANVIL_VAL_FUNC, func_ptr_type, name);
     if (func->value) {
         func->value->data.func = func;
     }
@@ -167,5 +169,8 @@ bool anvil_block_has_terminator(anvil_block_t *block)
     if (!block || !block->last) return false;
     
     anvil_op_t op = block->last->op;
-    return op == ANVIL_OP_RET || op == ANVIL_OP_BR || op == ANVIL_OP_BR_COND;
+    return op == ANVIL_OP_RET ||
+           op == ANVIL_OP_BR ||
+           op == ANVIL_OP_BR_COND ||
+           op == ANVIL_OP_SWITCH;
 }

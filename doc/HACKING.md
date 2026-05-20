@@ -54,14 +54,15 @@ anvil/
 │       ├── s370_xa/s370_xa.c
 │       ├── s390/s390.c
 │       ├── zarch/zarch.c
-│       ├── ppc32/ppc32.c
-│       ├── ppc64/              # Modular backend example
-│       │   ├── ppc64.c         # Main backend
-│       │   ├── ppc64_internal.h # Shared types
-│       │   ├── ppc64_emit.c    # Instruction emission
-│       │   └── ppc64_cpu.c     # CPU-specific optimizations
+│       ├── ppc/ppc_mir.c       # Shared PPC MachineIR backend
+│       ├── ppc32/ppc32.c       # PPC32 wrapper/descriptor entry
+│       ├── ppc64/ppc64.c       # PPC64 wrapper/descriptor entry
 │       ├── ppc64le/ppc64le.c
-│       └── arm64/arm64.c
+│       └── arm64/              # Reference MachineIR backend
+│           ├── arm64.c
+│           ├── arm64_helpers.c
+│           ├── arm64_internal.h
+│           └── arm64_mir.c
 ├── examples/                # Example programs
 ├── doc/                     # Documentation
 ├── Makefile

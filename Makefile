@@ -30,23 +30,24 @@ CORE_SRCS = \
 	$(SRC_DIR)/core/builder.c \
 	$(SRC_DIR)/core/strbuf.c \
 	$(SRC_DIR)/core/backend.c \
-	$(SRC_DIR)/core/ir_dump.c
+	$(SRC_DIR)/core/ir_dump.c \
+	$(SRC_DIR)/core/verify.c
 
 BACKEND_SRCS = \
 	$(SRC_DIR)/backend/x86/x86.c \
 	$(SRC_DIR)/backend/x86_64/x86_64.c \
+	$(SRC_DIR)/backend/mainframe/mainframe_mir.c \
 	$(SRC_DIR)/backend/s370/s370.c \
 	$(SRC_DIR)/backend/s370_xa/s370_xa.c \
 	$(SRC_DIR)/backend/s390/s390.c \
 	$(SRC_DIR)/backend/zarch/zarch.c \
+	$(SRC_DIR)/backend/ppc/ppc_mir.c \
 	$(SRC_DIR)/backend/ppc32/ppc32.c \
 	$(SRC_DIR)/backend/ppc64/ppc64.c \
-	$(SRC_DIR)/backend/ppc64/ppc64_emit.c \
-	$(SRC_DIR)/backend/ppc64/ppc64_cpu.c \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
-	$(SRC_DIR)/backend/arm64/arm64_emit.c \
+	$(SRC_DIR)/backend/arm64/arm64_mir.c \
 	$(SRC_DIR)/backend/arm64/opt/arm64_opt.c \
 	$(SRC_DIR)/backend/arm64/opt/arm64_peephole.c \
 	$(SRC_DIR)/backend/arm64/opt/arm64_branch.c
@@ -64,7 +65,11 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/ctx_opt.c \
 	$(SRC_DIR)/opt/store_load_prop.c
 
-ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS)
+MACHINE_SRCS = \
+	$(SRC_DIR)/machine/machine_ir.c \
+	$(SRC_DIR)/machine/regalloc.c
+
+ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS) $(MACHINE_SRCS)
 
 # Object files
 OBJS = $(ALL_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -87,7 +92,16 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/cpu_model_test \
 	$(BUILD_DIR)/examples/ir_dump_test
 
-.PHONY: all clean lib examples install examples-advanced test-examples-advanced clean-examples-advanced
+TESTS = \
+	$(BUILD_DIR)/tests/core_arm64_regression \
+	$(BUILD_DIR)/tests/ir_verifier_regression \
+	$(BUILD_DIR)/tests/optimizer_regression \
+	$(BUILD_DIR)/tests/machine_regalloc_regression \
+	$(BUILD_DIR)/tests/arm64_mir_lowering_regression \
+	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
+	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression
+
+.PHONY: all clean lib examples tests install examples-runtime test-examples clean-examples-runtime examples-advanced test-examples-advanced clean-examples-advanced
 
 all: lib examples
 
@@ -108,6 +122,27 @@ $(BUILD_DIR)/examples/%: $(EXAMPLES_DIR)/%.c $(LIB_PATH)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
+
+tests: lib $(TESTS)
+	@for test in $(TESTS); do \
+		echo "Running $$test"; \
+		$$test || exit 1; \
+	done
+
+$(BUILD_DIR)/tests/%: tests/%.c $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+# Runtime examples that generate assembly, assemble/link it, and execute it.
+examples-runtime: lib
+	$(MAKE) -C $(EXAMPLES_DIR)/basic_runtime
+
+test-examples: examples-runtime
+	$(MAKE) -C $(EXAMPLES_DIR)/basic_runtime test
+
+clean-examples-runtime:
+	$(MAKE) -C $(EXAMPLES_DIR)/basic_runtime clean
 
 # Advanced examples (in subdirectories with their own Makefiles)
 examples-advanced: lib
@@ -144,9 +179,15 @@ install: lib
 # Dependencies
 $(BUILD_DIR)/core/context.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/core/types.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
-$(BUILD_DIR)/core/module.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
+$(BUILD_DIR)/core/module.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_opt.h
 $(BUILD_DIR)/core/function.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/core/value.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/core/builder.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/core/strbuf.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/core/backend.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
+$(BUILD_DIR)/core/verify.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
+$(BUILD_DIR)/machine/machine_ir.o: $(INCLUDE_DIR)/anvil/anvil_machine.h src/machine/machine_internal.h
+$(BUILD_DIR)/machine/regalloc.o: $(INCLUDE_DIR)/anvil/anvil_machine.h src/machine/machine_internal.h
+$(BUILD_DIR)/backend/mainframe/mainframe_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_mainframe_mir.h
+$(BUILD_DIR)/backend/ppc/ppc_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_ppc_mir.h
+$(BUILD_DIR)/backend/arm64/arm64_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_arm64_mir.h

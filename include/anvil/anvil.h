@@ -2,7 +2,7 @@
  * ANVIL - Abstract Intermediate Representation Library
  * 
  * A portable IR library for compiler code generation
- * Supports multiple backends: x86, x86-64, S/370, S/390, z/Architecture
+ * Supports multiple backends through source IR and optional MachineIR lowering.
  * 
  */
 
@@ -33,6 +33,7 @@ typedef struct anvil_block anvil_block_t;
 typedef struct anvil_value anvil_value_t;
 typedef struct anvil_type anvil_type_t;
 typedef struct anvil_backend anvil_backend_t;
+typedef struct anvil_instr anvil_instr_t;
 
 /* Target architecture */
 typedef enum {
@@ -83,6 +84,12 @@ typedef enum {
     ANVIL_FP_HFP_IEEE        /* HFP with IEEE 754 support (z/Architecture, some S/390) */
 } anvil_fp_format_t;
 
+/* Decimal storage format */
+typedef enum {
+    ANVIL_DECIMAL_PACKED,    /* Packed decimal: two digits per byte plus sign nibble */
+    ANVIL_DECIMAL_ZONED      /* Zoned decimal: one digit per byte */
+} anvil_decimal_encoding_t;
+
 /* OS ABI / Platform variant */
 typedef enum {
     ANVIL_ABI_DEFAULT,       /* Default for architecture */
@@ -105,6 +112,7 @@ typedef enum {
     ANVIL_TYPE_U64,
     ANVIL_TYPE_F32,
     ANVIL_TYPE_F64,
+    ANVIL_TYPE_DECIMAL,
     ANVIL_TYPE_PTR,
     ANVIL_TYPE_STRUCT,
     ANVIL_TYPE_ARRAY,
@@ -329,6 +337,10 @@ anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *l
 /* Write generated code to file */
 anvil_error_t anvil_module_write(anvil_module_t *mod, const char *filename);
 
+/* Verify source-level IR invariants before optimization/code generation. */
+bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_len);
+bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len);
+
 /* ============================================================================
  * Type API
  * ============================================================================ */
@@ -345,6 +357,16 @@ anvil_type_t *anvil_type_u32(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_u64(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_f32(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_f64(anvil_ctx_t *ctx);
+anvil_type_t *anvil_type_decimal(anvil_ctx_t *ctx,
+                                  anvil_decimal_encoding_t encoding,
+                                  unsigned precision,
+                                  unsigned scale);
+anvil_type_t *anvil_type_decimal_packed(anvil_ctx_t *ctx,
+                                         unsigned precision,
+                                         unsigned scale);
+anvil_type_t *anvil_type_decimal_zoned(anvil_ctx_t *ctx,
+                                        unsigned precision,
+                                        unsigned scale);
 anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee);
 
 /* Create struct type */
@@ -364,8 +386,17 @@ size_t anvil_type_size(anvil_type_t *type);
 /* Get type alignment */
 size_t anvil_type_align(anvil_type_t *type);
 
+/* Decimal type metadata */
+anvil_decimal_encoding_t anvil_type_decimal_encoding(anvil_type_t *type);
+unsigned anvil_type_decimal_precision(anvil_type_t *type);
+unsigned anvil_type_decimal_scale(anvil_type_t *type);
+
 /* Check if type is boolean (i1) */
 bool anvil_type_is_bool(anvil_type_t *type);
+bool anvil_type_is_integer(anvil_type_t *type);
+bool anvil_type_is_floating(anvil_type_t *type);
+bool anvil_type_is_signed(anvil_type_t *type);
+bool anvil_type_is_pointer(anvil_type_t *type);
 
 /* ============================================================================
  * Value API
@@ -376,6 +407,11 @@ anvil_type_t *anvil_value_get_type(anvil_value_t *val);
 
 /* Check if value is a comparison result (boolean) */
 bool anvil_value_is_bool(anvil_value_t *val);
+bool anvil_value_is_const_int(anvil_value_t *val);
+bool anvil_value_is_const_float(anvil_value_t *val);
+int64_t anvil_const_int_signed_value(anvil_value_t *val);
+uint64_t anvil_const_int_unsigned_value(anvil_value_t *val);
+double anvil_const_float_value(anvil_value_t *val);
 
 /* ============================================================================
  * Function API
@@ -411,7 +447,7 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name);
 /* Get block name */
 const char *anvil_block_get_name(anvil_block_t *block);
 
-/* Check if block has a terminator instruction (ret, br, br_cond) */
+/* Check if block has a terminator instruction (ret, br, br_cond, switch) */
 bool anvil_block_has_terminator(anvil_block_t *block);
 
 /* ============================================================================
@@ -432,6 +468,9 @@ anvil_value_t *anvil_const_u32(anvil_ctx_t *ctx, uint32_t val);
 anvil_value_t *anvil_const_u64(anvil_ctx_t *ctx, uint64_t val);
 anvil_value_t *anvil_const_f32(anvil_ctx_t *ctx, float val);
 anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val);
+anvil_value_t *anvil_const_decimal(anvil_ctx_t *ctx, anvil_type_t *type,
+                                    const char *digits);
+const char *anvil_const_decimal_digits(anvil_value_t *value);
 anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
@@ -487,6 +526,11 @@ anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_typ
 anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
 anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
                                     anvil_block_t *then_block, anvil_block_t *else_block);
+anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
+                                  anvil_block_t *default_block);
+bool anvil_switch_add_case(anvil_instr_t *switch_instr,
+                           anvil_value_t *case_value,
+                           anvil_block_t *dest);
 anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *callee,
                                  anvil_value_t **args, size_t num_args, const char *name);
 anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);

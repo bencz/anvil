@@ -24,7 +24,7 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
         param_types = mcc_alloc(cg->mcc_ctx, num_params * sizeof(anvil_type_t*));
         for (int i = 0; i < num_params; i++) {
             mcc_ast_node_t *p = func->data.func_decl.params[i];
-            param_types[i] = codegen_type(cg, p->data.param_decl.param_type);
+            param_types[i] = codegen_param_type(cg, p->data.param_decl.param_type);
         }
     }
     
@@ -37,6 +37,7 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
     cg->current_func = anvil_func_create(cg->anvil_mod, func->data.func_decl.name, 
                                           func_type, linkage);
     cg->current_func_name = func->data.func_decl.name;  /* For __func__ (C99) */
+    cg->current_return_type = func->data.func_decl.func_type;
     
     /* Register function in mapping */
     mcc_symbol_t *func_sym = mcc_symtab_lookup(cg->symtab, func->data.func_decl.name);
@@ -57,6 +58,10 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
         mcc_ast_node_t *p = func->data.func_decl.params[i];
         if (p->data.param_decl.name) {
             anvil_value_t *param = anvil_func_get_param(cg->current_func, i);
+            if (codegen_type_pass_by_reference(p->data.param_decl.param_type)) {
+                codegen_add_local(cg, p->data.param_decl.name, param);
+                continue;
+            }
             anvil_value_t *alloca_val = anvil_build_alloca(cg->anvil_ctx, param_types[i], 
                                                            p->data.param_decl.name);
             anvil_build_store(cg->anvil_ctx, param, alloca_val);
@@ -81,6 +86,7 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
     
     cg->current_func = NULL;
     cg->current_block = NULL;
+    cg->current_return_type = NULL;
 }
 
 /* Generate code for global variable */

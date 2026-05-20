@@ -8,10 +8,12 @@ ANVIL (Abstract Intermediate Representation Library) is a C library for compiler
 
 1. [Architecture](#architecture)
 2. [Core Concepts](#core-concepts)
-3. [API Reference](#api-reference)
-4. [Backend Implementation](#backend-implementation)
-5. [Target Architectures](#target-architectures)
-6. [Code Generation Examples](#code-generation-examples)
+3. [MachineIR and Register Allocation](#machineir-and-register-allocation)
+4. [Optimization](#optimization)
+5. [API Reference](#api-reference)
+6. [Backend Implementation](#backend-implementation)
+7. [Target Architectures](#target-architectures)
+8. [Code Generation Examples](#code-generation-examples)
 
 ## Architecture
 
@@ -25,6 +27,8 @@ anvil/
 │       ├── anvil_internal.h  # Internal structures
 │       ├── anvil_cpu.h       # CPU model system
 │       ├── anvil_debug.h     # IR debug/dump API
+│       ├── anvil_machine.h   # MachineIR/regalloc API
+│       ├── anvil_arm64_mir.h # ARM64 reference MachineIR helper API
 │       └── anvil_opt.h       # Optimization API
 ├── src/
 │   ├── core/
@@ -36,45 +40,44 @@ anvil/
 │   │   ├── builder.c         # IR builder
 │   │   ├── strbuf.c          # String buffer utilities
 │   │   ├── backend.c         # Backend registry
-│   │   ├── memory.c          # Memory management
-│   │   └── ir_dump.c         # IR debug/dump implementation
+│   │   ├── ir_dump.c         # IR debug/dump implementation
+│   │   └── verify.c          # Source IR verifier
 │   ├── opt/                  # Optimization passes
 │   │   ├── opt.c             # Pass manager
 │   │   ├── const_fold.c      # Constant folding
 │   │   ├── dce.c             # Dead code elimination
 │   │   └── ...               # Other passes
+│   ├── machine/
+│   │   ├── machine_ir.c      # MachineIR construction, verification, spills
+│   │   ├── regalloc.c        # Linear-scan register allocation
+│   │   └── machine_internal.h
 │   └── backend/
 │       ├── x86/x86.c         # x86 32-bit backend
-│       ├── x86_64/x86_64.c   # x86-64 backend
+│       ├── x86_64/x86_64.c   # Legacy/incomplete direct x86-64 backend
 │       ├── s370/s370.c       # IBM S/370 backend
 │       ├── s370_xa/s370_xa.c # IBM S/370-XA backend
 │       ├── s390/s390.c       # IBM S/390 backend
 │       ├── zarch/zarch.c     # IBM z/Architecture backend
-│       ├── ppc32/ppc32.c     # PowerPC 32-bit backend
-│       ├── ppc64/             # PowerPC 64-bit BE backend
-│       │   ├── ppc64.c
-│       │   ├── ppc64_emit.c
-│       │   └── ppc64_cpu.c
-│       ├── ppc64le/ppc64le.c # PowerPC 64-bit LE backend
+│       ├── ppc/ppc_mir.c     # Shared PPC32/PPC64/PPC64LE MachineIR backend
+│       ├── ppc32/ppc32.c     # PowerPC 32-bit descriptor wrapper
+│       ├── ppc64/ppc64.c     # PowerPC 64-bit BE ELFv1 descriptor wrapper
+│       ├── ppc64le/ppc64le.c # PowerPC 64-bit LE ELFv2 descriptor wrapper
 │       └── arm64/             # ARM64/AArch64 backend (modular)
-│           ├── arm64.c        # Main backend (lifecycle, codegen)
+│           ├── arm64.c        # Main backend (lifecycle, MIR codegen entry)
 │           ├── arm64_internal.h # Definitions and structures
 │           ├── arm64_helpers.c  # Helper functions
-│           ├── arm64_emit.c     # Instruction emission
+│           ├── arm64_mir.c      # Source IR -> MachineIR -> ARM64 emission
 │           └── opt/           # ARM64-specific optimizations
 │               ├── arm64_opt.h      # Optimization interface
 │               ├── arm64_opt.c      # Pass manager
 │               ├── arm64_peephole.c # Peephole optimizations
-│               ├── arm64_dead_store.c # Dead store elimination
-│               ├── arm64_load_elim.c  # Redundant load elimination
-│               ├── arm64_branch.c     # Branch optimization
-│               └── arm64_immediate.c  # Immediate optimization
+│               └── arm64_branch.c    # Branch optimization hooks
 ├── examples/
 │   ├── simple.c              # Basic usage example
 │   ├── multiarch.c           # Multi-architecture example
 │   ├── ir_dump_test.c        # IR dump/debug example
 │   └── ...                   # Other examples
-├── doc/                      # Documentation
+├── DOCUMENTATION.md          # API/reference documentation
 ├── Makefile
 └── README.md
 ```
@@ -100,6 +103,13 @@ anvil/
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
+│                  Verifier + Optimizer                        │
+│  Type/ownership checks, call checks, PHI/switch validation,  │
+│  const fold, CSE, memory opts, CFG simplification, DCE       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
 │                      Backend Registry                        │
 └─────────────────────────────────────────────────────────────┘
          │              │              │              │
@@ -109,9 +119,16 @@ anvil/
     └────────┘    └────────┘    └────────┘    └────────┘
          │              │              │              │
          ▼              ▼              ▼              ▼
-    ┌─────────────────────────────────────────────────────┐
-    │              Assembly Output (Text)                  │
-    └─────────────────────────────────────────────────────┘
+    ┌───────────────────────┐      ┌──────────────────────────────────┐
+    │ Legacy/bootstrap       │      │ MachineIR + Regalloc backends    │
+    │ x86, x86-64            │      │ ARM64 reference, PPC, mainframe  │
+    └───────────┬───────────┘      └────────────────┬─────────────────┘
+                │                                    │
+                └──────────────────┬─────────────────┘
+                                   ▼
+                    ┌─────────────────────────────────────┐
+                    │        Assembly Output (Text)        │
+                    └─────────────────────────────────────┘
 ```
 
 ## Core Concepts
@@ -131,10 +148,10 @@ The context is the root object that manages all ANVIL resources. It holds:
 anvil_ctx_t *ctx = anvil_ctx_create();
 
 // Set target architecture
-anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
 
 // Set OS ABI (optional - for platform-specific code generation)
-anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);  // For macOS ARM64
+anvil_ctx_set_abi(ctx, ANVIL_ABI_SYSV);
 
 // Set FP format (optional - for mainframes)
 anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754);
@@ -167,11 +184,21 @@ anvil_module_destroy(mod);
 
 When `anvil_module_codegen()` is called, the following steps occur:
 
-1. **IR Preparation** (`prepare_ir`): If the backend provides a `prepare_ir` callback, it is called first to perform architecture-specific IR analysis and lowering
-2. **Code Generation** (`codegen_module`): The backend generates assembly code from the prepared IR
+1. **Source IR verification** (`anvil_module_verify`): checks ownership, type compatibility, terminators, PHI incoming edges, switch cases, and call signatures before any lowering.
+2. **Optimization** (`anvil_module_optimize`): runs the context pass manager at the configured optimization level.
+3. **IR preparation** (`prepare_ir`): optional backend callback for architecture-specific preparation.
+4. **Code generation** (`codegen_module`): the backend generates assembly. A backend can emit directly from source IR or lower to MachineIR, run register allocation, materialize spills, and emit assembly from allocated MachineIR. ARM64 is the current reference implementation of the MachineIR path.
 
 ```
 anvil_module_codegen()
+    │
+    ├── anvil_module_verify()
+    │   ├── Validate values, types, blocks, calls, PHI nodes, and switch cases
+    │   └── Report errors through anvil_ctx_get_error()
+    │
+    ├── anvil_module_optimize()
+    │   ├── Run enabled target-independent passes
+    │   └── Iterate to a bounded fixpoint
     │
     ├── prepare_ir()        [optional - architecture-specific IR preparation]
     │   ├── Analyze functions (detect leaf functions, stack layout)
@@ -179,10 +206,14 @@ anvil_module_codegen()
     │   └── Perform target-specific optimizations
     │
     └── codegen_module()    [generate assembly output]
-        ├── Emit header/directives
-        ├── Emit functions
-        ├── Emit globals
-        └── Emit string literals
+        ├── direct backend:
+        │   ├── Emit functions/globals/string literals from source IR
+        │   └── Return assembly text
+        └── MachineIR backend:
+            ├── Lower source IR to MachineIR
+            ├── Coalesce copies, allocate registers, materialize spills
+            ├── Emit functions/globals/string literals from allocated MachineIR
+            └── Return assembly text
 ```
 
 ### Function (anvil_func_t)
@@ -204,6 +235,18 @@ anvil_block_t *entry = anvil_func_get_entry(func);
 // Get parameters
 anvil_value_t *param0 = anvil_func_get_param(func, 0);
 anvil_value_t *param1 = anvil_func_get_param(func, 1);
+```
+
+Function values are represented as callable addresses. `anvil_func_get_value(func)` returns an `anvil_value_t *` whose type is `ptr<func_type>`, while `func->type` remains the canonical function signature. This allows both direct calls and C-style function pointer storage/load/indirect calls:
+
+```c
+anvil_type_t *fn_ptr_type = anvil_type_ptr(ctx, func_type);
+anvil_value_t *slot = anvil_build_alloca(ctx, fn_ptr_type, "slot");
+anvil_build_store(ctx, anvil_func_get_value(func), slot);
+
+anvil_value_t *loaded = anvil_build_load(ctx, fn_ptr_type, slot, "loaded_fn");
+anvil_value_t *args[] = { param0, param1 };
+anvil_value_t *result = anvil_build_call(ctx, func_type, loaded, args, 2, "result");
 ```
 
 ### Basic Block (anvil_block_t)
@@ -264,6 +307,69 @@ ANVIL supports the following types:
 | Struct | { T1, T2, ... } | `anvil_type_struct(ctx, name, fields, n)` |
 | Function | T(T1, T2, ...) | `anvil_type_func(ctx, ret, params, n, va)` |
 
+## MachineIR and Register Allocation
+
+MachineIR is the target-independent backend layer. It models backend-level code after source IR lowering but before assembly emission, and is the intended shared path for future backend implementations.
+
+Core concepts:
+
+- `anvil_mir_func_t`: machine-level function with blocks, instructions, virtual registers, frame slots, spill slots, and string literals.
+- `anvil_mir_vreg_t`: typed virtual register with register class, size, signedness, and optional fixed physical register.
+- `anvil_mir_opcode_t`: machine operations such as arithmetic, casts, loads/stores, frame addresses, direct/indirect calls, branches, returns, spill loads, and spill stores.
+- `anvil_regalloc_linear_scan_classes()`: target-independent linear-scan allocator with per-class physical register lists.
+- `anvil_mir_materialize_spills()`: rewrites spilled uses/defs into explicit `SPILL_LOAD`/`SPILL_STORE` instructions using scratch registers.
+
+The generic MachineIR backend flow is:
+
+```
+source IR function
+    -> target lowerer builds anvil_mir_func_t
+    -> target/legal verifier checks MachineIR constraints
+    -> anvil_mir_coalesce_copies(mir)
+    -> anvil_regalloc_linear_scan_classes(mir, target_register_classes)
+    -> anvil_mir_materialize_spills(mir, target_scratch_registers)
+    -> target emitter writes final assembly
+```
+
+The current ARM64 reference flow is:
+
+```
+anvil_arm64_lower_func_to_mir(func)
+    -> anvil_arm64_verify_mir_legal(mir)
+    -> anvil_mir_coalesce_copies(mir)
+    -> anvil_regalloc_linear_scan_classes(mir, ...)
+    -> anvil_mir_materialize_spills(mir, ...)
+    -> anvil_arm64_emit_mir_abi(mir, abi, ...)
+```
+
+Direct calls in MachineIR carry a symbol. Indirect calls carry no symbol; the first call use is the target register. Each backend chooses how to legalize and emit those calls. The current ARM64 reference backend legalizes indirect call targets to fixed GPR `x16` and emits `blr x16`.
+
+## Optimization
+
+`anvil_module_codegen()` runs `anvil_module_optimize()` after verification. The pass manager can also be used directly through `anvil_ctx_get_pass_manager()`.
+
+Built-in pass ordering:
+
+1. copy propagation
+2. constant folding
+3. common subexpression elimination
+4. strength reduction
+5. store-load propagation
+6. dead store elimination
+7. load elimination
+8. CFG simplification
+9. dead code elimination
+
+Optimization levels:
+
+| Level | Enabled behavior |
+|-------|------------------|
+| `ANVIL_OPT_NONE` | No optimization |
+| `ANVIL_OPT_DEBUG` | Copy propagation and store-load propagation |
+| `ANVIL_OPT_BASIC` | Debug passes plus constant folding and DCE |
+| `ANVIL_OPT_STANDARD` | Basic passes plus CFG simplification, strength reduction, memory opts, and CSE |
+| `ANVIL_OPT_AGGRESSIVE` | Standard passes; loop unroll is reserved but disabled in the built-in table |
+
 ## API Reference
 
 ### Context Functions
@@ -275,7 +381,8 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx);
 
 // Target configuration
 anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch);
-anvil_arch_t anvil_ctx_get_target(anvil_ctx_t *ctx);
+anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi);
+anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx);
 
 // Set insertion point for IR building
 void anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
@@ -290,6 +397,7 @@ void anvil_module_destroy(anvil_module_t *mod);
 
 // Code generation
 anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *len);
+bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_len);
 
 // Global variables
 anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
@@ -423,13 +531,18 @@ anvil_value_t *anvil_build_cmp_uge(anvil_ctx_t *ctx, anvil_value_t *lhs,
 ```c
 anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type,
                                    const char *name);
-anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_value_t *ptr,
-                                 const char *name);
+anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
+                                       anvil_value_t *count, const char *name);
+anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type,
+                                 anvil_value_t *ptr, const char *name);
 anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
                                   anvil_value_t *ptr);
-anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_value_t *ptr,
-                                anvil_value_t **indices, size_t num_indices,
-                                const char *name);
+anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type,
+                                anvil_value_t *ptr, anvil_value_t **indices,
+                                size_t num_indices, const char *name);
+anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_type,
+                                       anvil_value_t *ptr, unsigned field_idx,
+                                       const char *name);
 ```
 
 #### Control Flow Operations
@@ -439,9 +552,14 @@ anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
 anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
                                     anvil_block_t *then_block,
                                     anvil_block_t *else_block);
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_value_t *func,
-                                 anvil_value_t **args, size_t num_args,
-                                 const char *name);
+anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
+                                  anvil_block_t *default_block);
+bool anvil_switch_add_case(anvil_instr_t *switch_instr,
+                           anvil_value_t *case_value,
+                           anvil_block_t *dest);
+anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type,
+                                 anvil_value_t *callee, anvil_value_t **args,
+                                 size_t num_args, const char *name);
 anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
 anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx);
 ```
@@ -498,12 +616,13 @@ void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 ```c
 typedef enum {
     ANVIL_OK = 0,
-    ANVIL_ERR_NOMEM,        // Out of memory
-    ANVIL_ERR_INVALID_ARG,  // Invalid argument
-    ANVIL_ERR_NOT_FOUND,    // Resource not found
-    ANVIL_ERR_TYPE_MISMATCH,// Type mismatch
-    ANVIL_ERR_NO_BACKEND,   // No backend for target
-    ANVIL_ERR_CODEGEN       // Code generation error
+    ANVIL_ERR_NOMEM,         // Out of memory
+    ANVIL_ERR_INVALID_ARG,   // Invalid argument
+    ANVIL_ERR_INVALID_TYPE,  // Invalid type
+    ANVIL_ERR_INVALID_OP,    // Invalid operation or verifier failure
+    ANVIL_ERR_NO_BACKEND,    // No backend for target
+    ANVIL_ERR_CODEGEN,       // Code generation error
+    ANVIL_ERR_IO             // File I/O error
 } anvil_error_t;
 ```
 
@@ -541,7 +660,6 @@ anvil_func_t *default_handler = anvil_func_create(mod, "handler", type, ANVIL_LI
 
 ```c
 typedef enum {
-    ANVIL_ARCH_UNKNOWN = 0,
     ANVIL_ARCH_X86,         // x86 32-bit
     ANVIL_ARCH_X86_64,      // x86-64
     ANVIL_ARCH_S370,        // IBM S/370 (24-bit)
@@ -948,11 +1066,13 @@ typedef struct {
     anvil_error_t (*init)(anvil_backend_t *be, anvil_ctx_t *ctx);
     void (*cleanup)(anvil_backend_t *be);
     void (*reset)(anvil_backend_t *be);  // Clear cached IR pointers (optional)
+    anvil_error_t (*prepare_ir)(anvil_backend_t *be, anvil_module_t *mod);
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
     anvil_error_t (*codegen_func)(anvil_backend_t *be, anvil_func_t *func,
                                    char **output, size_t *len);
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
+    void *priv;
 } anvil_backend_ops_t;
 ```
 
@@ -960,9 +1080,15 @@ typedef struct {
 - `init`: Initialize backend state (allocate private data, buffers)
 - `cleanup`: Free all backend resources (called during context destruction)
 - `reset`: Clear cached pointers to IR values (called before module destruction to prevent dangling pointers)
+- `prepare_ir`: Optional backend preparation/legalization step after target-independent optimization
 - `codegen_module`: Generate assembly for entire module
 - `codegen_func`: Generate assembly for single function
 - `get_arch_info`: Return architecture information
+
+Backends have two implementation choices:
+
+- **Direct source-IR emitter**: emit assembly directly from ANVIL source IR. This is the older bootstrap style used by the x86 and x86-64 backends; those backends are incomplete and should not guide new backend work.
+- **MachineIR backend**: lower source IR to `anvil_mir_func_t`, run copy coalescing, generic register allocation, spill materialization, then emit target assembly from allocated MachineIR. This is the preferred path for production-quality backends because register allocation, spill handling, and fixed ABI register constraints are shared. ARM64 is the stable reference implementation; PPC and mainframe use the same shared pattern with target descriptors.
 
 ### Architecture Info
 
@@ -977,6 +1103,8 @@ typedef struct {
     int num_fpr;            // Number of floating point registers
     anvil_endian_t endian;  // ANVIL_ENDIAN_LITTLE or ANVIL_ENDIAN_BIG
     anvil_stack_dir_t stack_dir; // ANVIL_STACK_DOWN or ANVIL_STACK_UP
+    anvil_fp_format_t fp_format;
+    anvil_abi_t abi;
     bool has_condition_codes;
     bool has_delay_slots;
 } anvil_arch_info_t;
@@ -984,10 +1112,13 @@ typedef struct {
 
 ### Creating a New Backend
 
-1. Create backend file `src/backend/<arch>/<arch>.c`
-2. Define architecture info
-3. Implement backend operations
-4. Register backend
+1. Create backend files under `src/backend/<arch>/`
+2. Define architecture info and ABI defaults
+3. Choose the lowering strategy:
+   - Direct source-IR emitter for a small bootstrap backend
+   - MachineIR lowering for production-quality backends
+4. Implement backend operations
+5. Register backend
 
 Example skeleton:
 
@@ -1009,6 +1140,8 @@ static const anvil_arch_info_t myarch_arch_info = {
     .num_fpr = 8,
     .endian = ANVIL_ENDIAN_LITTLE,
     .stack_dir = ANVIL_STACK_DOWN,
+    .fp_format = ANVIL_FP_IEEE754,
+    .abi = ANVIL_ABI_SYSV,
     .has_condition_codes = true,
     .has_delay_slots = false
 };
@@ -1060,6 +1193,7 @@ const anvil_backend_ops_t anvil_backend_myarch = {
     .init = myarch_init,
     .cleanup = myarch_cleanup,
     .reset = myarch_reset,
+    .prepare_ir = NULL,  /* Or myarch_prepare_ir if needed */
     .codegen_module = myarch_codegen_module,
     .codegen_func = myarch_codegen_func,
     .get_arch_info = myarch_get_arch_info
@@ -1499,14 +1633,14 @@ anvil_build_br(ctx, loop_cond);
 
 // Loop condition: while (i <= n)
 anvil_set_insert_point(ctx, loop_cond);
-anvil_value_t *i_val = anvil_build_load(ctx, i_ptr, "i_val");
+anvil_value_t *i_val = anvil_build_load(ctx, i32, i_ptr, "i_val");
 anvil_value_t *cmp = anvil_build_cmp_le(ctx, i_val, n, "cmp");
 anvil_build_br_cond(ctx, cmp, loop_body, loop_end);
 
 // Loop body: sum += i; i++;
 anvil_set_insert_point(ctx, loop_body);
-anvil_value_t *sum_val = anvil_build_load(ctx, sum_ptr, "sum_val");
-anvil_value_t *i_val2 = anvil_build_load(ctx, i_ptr, "i_val2");
+anvil_value_t *sum_val = anvil_build_load(ctx, i32, sum_ptr, "sum_val");
+anvil_value_t *i_val2 = anvil_build_load(ctx, i32, i_ptr, "i_val2");
 anvil_value_t *new_sum = anvil_build_add(ctx, sum_val, i_val2, "new_sum");
 anvil_build_store(ctx, new_sum, sum_ptr);
 anvil_value_t *new_i = anvil_build_add(ctx, i_val2, one, "new_i");
@@ -1515,7 +1649,7 @@ anvil_build_br(ctx, loop_cond);
 
 // Return sum
 anvil_set_insert_point(ctx, loop_end);
-anvil_value_t *result = anvil_build_load(ctx, sum_ptr, "result");
+anvil_value_t *result = anvil_build_load(ctx, i32, sum_ptr, "result");
 anvil_build_ret(ctx, result);
 ```
 
@@ -1832,12 +1966,12 @@ anvil_error_t anvil_module_optimize(anvil_module_t *mod);
 | `ANVIL_PASS_STORE_LOAD_PROP` | Store-Load Propagation | Replace load after store with stored value | Og |
 | `ANVIL_PASS_CONST_FOLD` | Constant Folding | Evaluate constant expressions | O1 |
 | `ANVIL_PASS_DCE` | Dead Code Elimination | Remove unused instructions | O1 |
-| `ANVIL_PASS_SIMPLIFY_CFG` | CFG Simplification | Merge blocks, remove unreachable | O2 |
+| `ANVIL_PASS_SIMPLIFY_CFG` | CFG Simplification | Merge blocks, remove unreachable code, preserve `switch` edges | O2 |
 | `ANVIL_PASS_STRENGTH_REDUCE` | Strength Reduction | Replace expensive ops | O2 |
 | `ANVIL_PASS_DEAD_STORE` | Dead Store Elimination | Remove overwritten stores | O2 |
 | `ANVIL_PASS_LOAD_ELIM` | Load Elimination | Reuse loaded values | O2 |
 | `ANVIL_PASS_COMMON_SUBEXPR` | CSE | Common subexpression elimination | O2 |
-| `ANVIL_PASS_LOOP_UNROLL` | Loop Unrolling | Unroll small loops (experimental) | O3 |
+| `ANVIL_PASS_LOOP_UNROLL` | Loop Unrolling | Reserved API entry; disabled in the built-in pass table | O3 |
 
 ### Built-in Pass Functions
 
@@ -1851,7 +1985,7 @@ bool anvil_pass_copy_prop(anvil_func_t *func);
 bool anvil_pass_store_load_prop(anvil_func_t *func);
 bool anvil_pass_dead_store(anvil_func_t *func);
 bool anvil_pass_load_elim(anvil_func_t *func);
-bool anvil_pass_loop_unroll(anvil_func_t *func);   // Experimental
+bool anvil_pass_loop_unroll(anvil_func_t *func);   // Reserved; not run by default
 bool anvil_pass_cse(anvil_func_t *func);
 ```
 
@@ -1939,7 +2073,9 @@ anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(ctx);
 anvil_pass_manager_register(pm, &my_pass);
 ```
 
-## ARM64 Backend Details
+## Reference MachineIR Backend Details: ARM64
+
+This section documents ARM64 because it is the current reference implementation of the generic MachineIR/regalloc backend path. The details here are target-specific examples of the shared design, not the architectural endpoint of ANVIL. Legacy direct emitters, especially x86 and x86-64, should be migrated by reusing the same source IR verifier, optimizer, MachineIR, register allocation, and spill-materialization infrastructure, then replacing only target lowering/legalization/emission details.
 
 The ARM64 backend supports both Linux (AAPCS64) and macOS (Darwin) ABIs.
 

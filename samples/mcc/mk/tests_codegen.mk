@@ -142,12 +142,22 @@ test-codegen-arm64: $(TARGET) | $(TEST_OUTPUT_DIR)
 test-codegen-arm64-macos: $(TARGET) | $(TEST_OUTPUT_DIR)
 	$(call run_arch_codegen_tests,arm64_macos,ARM64-macOS)
 
+# Test PowerPC code generation
+test-codegen-ppc32: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_arch_codegen_tests,ppc32,PPC32)
+
+test-codegen-ppc64: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_arch_codegen_tests,ppc64,PPC64)
+
+test-codegen-ppc64le: $(TARGET) | $(TEST_OUTPUT_DIR)
+	$(call run_arch_codegen_tests,ppc64le,PPC64LE)
+
 # Test S/370 code generation
 test-codegen-s370: $(TARGET) | $(TEST_OUTPUT_DIR)
 	$(call run_arch_codegen_tests,s370,S/370)
 
 # Test all architectures
-test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos test-codegen-s370
+test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos test-codegen-ppc32 test-codegen-ppc64 test-codegen-ppc64le test-codegen-s370
 	@echo ""
 	@echo "All architecture tests complete."
 

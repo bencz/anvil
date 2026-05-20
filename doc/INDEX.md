@@ -193,18 +193,18 @@ Example: `examples/cpu_model_test.c`
 **Modular Architecture:**
 - `arm64.c`: Main backend (lifecycle, codegen entry points)
 - `arm64_internal.h`: Definitions, structures, register constants
-- `arm64_helpers.c`: Helper functions (type size, stack slots, code emission)
-- `arm64_emit.c`: Instruction emission (arithmetic, memory, control flow, FP)
+- `arm64_helpers.c`: Helper functions (type size/alignment and register names)
+- `arm64_mir.c`: Source IR lowering, MachineIR legality checks, regalloc bridge, and assembly emission
 
 **Code Generation:**
-- **PHI node handling**: Correct SSA resolution with copies before branches
-- **External function calls**: Direct `bl` for C library functions (`malloc`, `free`, `memcpy`)
-- **SSA value preservation**: Results saved to stack slots via `arm64_save_result()`
-- **Large stack frames**: `arm64_emit_stack_load/store/addr()` for offsets >255 bytes
-- **Very large stack frames (>4095 bytes)**: Uses `mov x16, #offset` + `sub/add sp, sp, x16` sequence
+- **MachineIR path**: Source IR -> virtual registers -> linear-scan allocation -> spill materialization -> ARM64 assembly
+- **PHI node handling**: Edge-copy lowering, including parallel-copy cycles
+- **External function calls**: Direct `bl` for symbols and `blr x16` for function pointers
+- **Switch lowering**: Compare/branch chains with PHI-aware edge handling
+- **Large stack frames**: Uses scratch-register address materialization when ARM64 immediate ranges are exceeded
 - **Type-aware memory ops**: `ldr w0`/`str w9` for 32-bit, `ldrb`/`strb` for 8-bit
 - **Sign-extending loads**: `ldrsb`, `ldrsh`, `ldrsw` for signed types
-- **Parameter spilling**: Parameters saved at function entry for loop safety
+- **Parameter lowering**: ABI argument registers copied into allocatable MachineIR virtual registers
 - **String pointer arrays**: Proper `.quad .LCn` emission for global arrays of string pointers
 - **Variadic function calls (Darwin)**: Variadic args passed on stack as required by AAPCS64 on macOS
 - **Array initializers in globals**: Full support for emitting initialized arrays with correct element values

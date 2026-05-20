@@ -10,6 +10,7 @@
  */
 
 #include "arm64_internal.h"
+#include "anvil/anvil_arm64_mir.h"
 #include "opt/arm64_opt.h"
 #include <stdlib.h>
 #include <string.h>
@@ -44,7 +45,6 @@ static anvil_error_t arm64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
     
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
-    anvil_slot_map_init(&priv->slot_map);
     priv->ctx = ctx;
 
     be->priv = priv;
@@ -58,10 +58,7 @@ static void arm64_cleanup(anvil_backend_t *be)
     arm64_backend_t *priv = be->priv;
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
-    anvil_slot_map_free(&priv->slot_map);
     free(priv->strings);
-    free(priv->stack_slots);
-    free(priv->value_locs);
     free(priv);
     be->priv = NULL;
 }
@@ -72,29 +69,11 @@ static void arm64_reset(anvil_backend_t *be)
     
     arm64_backend_t *priv = be->priv;
     
-    /* Clear stack slots (keep allocations, just forget entries) */
-    priv->num_stack_slots = 0;
-    priv->next_stack_offset = 0;
-    anvil_slot_map_reset(&priv->slot_map);
-    
     /* Clear string table */
     priv->num_strings = 0;
     priv->string_counter = 0;
     
-    /* Reset frame layout */
-    memset(&priv->frame, 0, sizeof(priv->frame));
-    
-    /* Reset register state */
-    memset(priv->gpr, 0, sizeof(priv->gpr));
-    memset(priv->fpr, 0, sizeof(priv->fpr));
-    priv->used_callee_saved = 0;
-    
     /* Reset other state */
-    priv->label_counter = 0;
-    priv->current_func = NULL;
-    priv->total_instrs = 0;
-    priv->total_spills = 0;
-    priv->total_reloads = 0;
 }
 
 static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
@@ -104,88 +83,52 @@ static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
 }
 
 /* ============================================================================
- * Block and Function Emission
+ * Function Emission
  * ============================================================================ */
 
-static void arm64_emit_block(arm64_backend_t *be, anvil_block_t *block)
+static anvil_error_t arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
 {
-    if (!block) return;
-    
-    /* Emit label (skip for entry block) */
-    if (block != be->current_func->blocks) {
-        anvil_strbuf_appendf(&be->code, ".L%s_%s:\n",
-            be->current_func->name, block->name);
-    }
-    
-    for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-        arm64_emit_instr(be, instr);
-    }
-}
+    if (!be || !func) return ANVIL_ERR_INVALID_ARG;
+    if (func->is_declaration) return ANVIL_OK;
 
-static void arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
-{
-    if (!func || func->is_declaration) return;
+    if (!be->ctx ||
+        (be->ctx->abi != ANVIL_ABI_SYSV && be->ctx->abi != ANVIL_ABI_DARWIN)) {
+        if (be->ctx) {
+            anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
+                            "ARM64 MachineIR codegen supports SysV and Darwin ABIs");
+        }
+        return ANVIL_ERR_CODEGEN;
+    }
 
-    be->current_func = func;
-    be->num_stack_slots = 0;
-    be->next_stack_offset = 0;
-    /* Re-analyse per function — is_leaf_func and the frame layout live on
-     * the shared backend struct, so prepare_ir's loop leaves those fields
-     * holding the *last* function's values. Without this call, a module
-     * whose final function happens to be a leaf would emit every non-leaf
-     * function with a leaf prologue (no x30 save) and crash on first bl. */
-    arm64_analyze_function(be, func);
+    anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(func);
+    if (!mir) {
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
+                        "ARM64 MachineIR lowering failed for function %s",
+                        func->name ? func->name : "<anonymous>");
+        return ANVIL_ERR_CODEGEN;
+    }
 
-    /* First pass: allocate stack slots for allocas and instruction results. */
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
-        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            if (instr->op == ANVIL_OP_ALLOCA) {
-                int size = 8;
-                if (instr->result && instr->result->type &&
-                    instr->result->type->kind == ANVIL_TYPE_PTR &&
-                    instr->result->type->data.pointee) {
-                    size = arm64_type_size(instr->result->type->data.pointee);
-                }
-                arm64_alloc_stack_slot(be, instr->result, size);
-            } else if (instr->result) {
-                int size = instr->result->type ? arm64_type_size(instr->result->type) : 8;
-                arm64_alloc_stack_slot(be, instr->result, size);
-            }
-        }
+    bool ok = anvil_arm64_regalloc_mir(mir);
+    char *mir_text = NULL;
+    size_t mir_len = 0;
+    if (ok) {
+        ok = anvil_arm64_emit_mir_abi(mir, be->ctx->abi, &mir_text, &mir_len);
     }
-    
-    /* Allocate slots for parameters */
-    for (size_t i = 0; i < func->num_params && i < ARM64_NUM_ARG_REGS; i++) {
-        if (func->params[i]) {
-            int size = func->params[i]->type ? arm64_type_size(func->params[i]->type) : 8;
-            arm64_alloc_stack_slot(be, func->params[i], size);
-        }
+    anvil_mir_func_destroy(mir);
+
+    if (!ok || !mir_text) {
+        free(mir_text);
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
+                        "ARM64 MachineIR emission failed for function %s",
+                        func->name ? func->name : "<anonymous>");
+        return ANVIL_ERR_CODEGEN;
     }
-    
-    /* Emit prologue */
-    arm64_emit_prologue(be, func);
-    
-    /* Save parameters to stack */
-    for (size_t i = 0; i < func->num_params && i < ARM64_NUM_ARG_REGS; i++) {
-        if (func->params[i]) {
-            int offset = arm64_get_stack_slot(be, func->params[i]);
-            if (offset >= 0) {
-                int size = func->params[i]->type ? arm64_type_size(func->params[i]->type) : 8;
-                arm64_emit_store_to_stack(be, (int)i, offset, size);
-            }
-        }
-    }
-    
-    /* Emit blocks */
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
-        arm64_emit_block(be, block);
-    }
-    
-    /* Size directive (ELF only) */
-    if (!arm64_is_darwin(be)) {
-        anvil_strbuf_appendf(&be->code, "\t.size %s, .-%s\n", func->name, func->name);
-    }
+
+    (void)mir_len;
+    anvil_strbuf_append(&be->code, mir_text);
     anvil_strbuf_append(&be->code, "\n");
+    free(mir_text);
+    return ANVIL_OK;
 }
 
 /* ============================================================================
@@ -342,14 +285,10 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
 
     arm64_backend_t *priv = be->priv;
 
-    /* Reset state. arm64_analyze_function already ran inside prepare_ir
-     * and populated is_leaf_func / frame layout per function. We only need
-     * to clear per-module scratch state here. */
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
-    priv->label_counter = 0;
     priv->num_strings = 0;
     
     /* Emit header */
@@ -365,7 +304,8 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     
     /* Emit functions (prepare_ir already called by anvil_module_codegen) */
     for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        arm64_emit_func(priv, func);
+        anvil_error_t err = arm64_emit_func(priv, func);
+        if (err != ANVIL_OK) return err;
     }
     
     /* Emit globals and strings */
@@ -400,9 +340,8 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_init(&priv->code);
     
-    /* Analyze function before code generation */
-    arm64_analyze_function(priv, func);
-    arm64_emit_func(priv, func);
+    anvil_error_t err = arm64_emit_func(priv, func);
+    if (err != ANVIL_OK) return err;
     
     *output = anvil_strbuf_detach(&priv->code, len);
     return ANVIL_OK;
@@ -417,13 +356,6 @@ static anvil_error_t arm64_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
     if (!be || !mod) return ANVIL_ERR_INVALID_ARG;
     
     arm64_backend_t *priv = be->priv;
-    
-    /* Analyze all functions in the module */
-    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        if (!func->is_declaration) {
-            arm64_analyze_function(priv, func);
-        }
-    }
     
     /* Run ARM64-specific optimizations */
     arm64_opt_module(priv, mod);

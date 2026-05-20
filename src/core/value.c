@@ -144,6 +144,53 @@ anvil_value_t *anvil_const_f64(anvil_ctx_t *ctx, double val)
     return v;
 }
 
+static bool decimal_literal_is_valid(const char *digits, unsigned precision)
+{
+    if (!digits || !*digits) return false;
+
+    const char *p = digits;
+    if (*p == '+' || *p == '-') p++;
+
+    unsigned digit_count = 0;
+    bool saw_digit = false;
+    bool saw_dot = false;
+    for (; *p; p++) {
+        if (*p >= '0' && *p <= '9') {
+            saw_digit = true;
+            digit_count++;
+            if (digit_count > precision) return false;
+            continue;
+        }
+        if (*p == '.' && !saw_dot) {
+            saw_dot = true;
+            continue;
+        }
+        return false;
+    }
+
+    return saw_digit;
+}
+
+anvil_value_t *anvil_const_decimal(anvil_ctx_t *ctx, anvil_type_t *type,
+                                    const char *digits)
+{
+    if (!ctx || !type || type->kind != ANVIL_TYPE_DECIMAL) return NULL;
+    if (!decimal_literal_is_valid(digits, type->data.decimal.precision)) {
+        return NULL;
+    }
+
+    anvil_value_t *v = anvil_value_create(ctx, ANVIL_VAL_CONST_DECIMAL,
+                                          type, NULL);
+    if (v) v->data.decimal = strdup(digits);
+    return v;
+}
+
+const char *anvil_const_decimal_digits(anvil_value_t *value)
+{
+    if (!value || value->kind != ANVIL_VAL_CONST_DECIMAL) return NULL;
+    return value->data.decimal;
+}
+
 anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type)
 {
     anvil_value_t *v = anvil_value_create(ctx, ANVIL_VAL_CONST_NULL, ptr_type, NULL);
@@ -220,4 +267,34 @@ bool anvil_value_is_bool(anvil_value_t *val)
     }
     
     return false;
+}
+
+bool anvil_value_is_const_int(anvil_value_t *val)
+{
+    return val && val->kind == ANVIL_VAL_CONST_INT;
+}
+
+bool anvil_value_is_const_float(anvil_value_t *val)
+{
+    return val && val->kind == ANVIL_VAL_CONST_FLOAT;
+}
+
+int64_t anvil_const_int_signed_value(anvil_value_t *val)
+{
+    if (!anvil_value_is_const_int(val)) return 0;
+    return val->type && !val->type->is_signed ? (int64_t)val->data.u
+                                              : val->data.i;
+}
+
+uint64_t anvil_const_int_unsigned_value(anvil_value_t *val)
+{
+    if (!anvil_value_is_const_int(val)) return 0;
+    return val->type && !val->type->is_signed ? val->data.u
+                                              : (uint64_t)val->data.i;
+}
+
+double anvil_const_float_value(anvil_value_t *val)
+{
+    if (!anvil_value_is_const_float(val)) return 0.0;
+    return val->data.f;
 }

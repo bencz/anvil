@@ -184,10 +184,10 @@ void arm64_opt_branch(arm64_backend_t *be, anvil_func_t *func)
         }
     }
     
-    /* Note: Additional optimization of comparison/branch sequences
-     * is implemented in arm64_emit_br_cond() which:
-     * 1. Detects when BR_COND condition is a comparison result
-     * 2. Emits fused cmp + b.cond (or cbz/cbnz for zero comparisons)
+    /* Note: Additional comparison/branch selection now happens in the ARM64
+     * MachineIR lowering/emitter, which:
+     * 1. Preserves comparison results as typed MachineIR values
+     * 2. Emits target branches such as cbz/cbnz where legal
      * 
      * This optimization works at the backend level, independent of
      * the frontend that generates the ANVIL IR.

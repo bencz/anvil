@@ -140,12 +140,16 @@ void anvil_type_init_sizes(anvil_ctx_t *ctx)
      * what used to be the biggest composite-type leak. */
     if (!ctx->type_ptr_i8) {
         ctx->type_ptr_i8 = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+    }
+    if (ctx->type_ptr_i8) {
         ctx->type_ptr_i8->size = ptr_size;
         ctx->type_ptr_i8->align = ptr_size;
         ctx->type_ptr_i8->data.pointee = ctx->type_i8;
     }
     if (!ctx->type_ptr_void) {
         ctx->type_ptr_void = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+    }
+    if (ctx->type_ptr_void) {
         ctx->type_ptr_void->size = ptr_size;
         ctx->type_ptr_void->align = ptr_size;
         ctx->type_ptr_void->data.pointee = ctx->type_void;
@@ -205,6 +209,48 @@ anvil_type_t *anvil_type_f32(anvil_ctx_t *ctx)
 anvil_type_t *anvil_type_f64(anvil_ctx_t *ctx)
 {
     return ctx ? ctx->type_f64 : NULL;
+}
+
+anvil_type_t *anvil_type_decimal(anvil_ctx_t *ctx,
+                                  anvil_decimal_encoding_t encoding,
+                                  unsigned precision,
+                                  unsigned scale)
+{
+    if (!ctx || precision == 0 || scale > precision) return NULL;
+    if (encoding != ANVIL_DECIMAL_PACKED &&
+        encoding != ANVIL_DECIMAL_ZONED) {
+        return NULL;
+    }
+
+    anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_DECIMAL);
+    if (!type) return NULL;
+
+    type->align = 1;
+    type->data.decimal.encoding = encoding;
+    type->data.decimal.precision = precision;
+    type->data.decimal.scale = scale;
+
+    if (encoding == ANVIL_DECIMAL_PACKED) {
+        type->size = (precision + 2u) / 2u;
+    } else {
+        type->size = precision;
+    }
+
+    return type;
+}
+
+anvil_type_t *anvil_type_decimal_packed(anvil_ctx_t *ctx,
+                                         unsigned precision,
+                                         unsigned scale)
+{
+    return anvil_type_decimal(ctx, ANVIL_DECIMAL_PACKED, precision, scale);
+}
+
+anvil_type_t *anvil_type_decimal_zoned(anvil_ctx_t *ctx,
+                                        unsigned precision,
+                                        unsigned scale)
+{
+    return anvil_type_decimal(ctx, ANVIL_DECIMAL_ZONED, precision, scale);
 }
 
 anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee)
@@ -326,6 +372,26 @@ size_t anvil_type_align(anvil_type_t *type)
     return type ? type->align : 1;
 }
 
+anvil_decimal_encoding_t anvil_type_decimal_encoding(anvil_type_t *type)
+{
+    if (!type || type->kind != ANVIL_TYPE_DECIMAL) {
+        return ANVIL_DECIMAL_PACKED;
+    }
+    return type->data.decimal.encoding;
+}
+
+unsigned anvil_type_decimal_precision(anvil_type_t *type)
+{
+    if (!type || type->kind != ANVIL_TYPE_DECIMAL) return 0;
+    return type->data.decimal.precision;
+}
+
+unsigned anvil_type_decimal_scale(anvil_type_t *type)
+{
+    if (!type || type->kind != ANVIL_TYPE_DECIMAL) return 0;
+    return type->data.decimal.scale;
+}
+
 bool anvil_type_is_bool(anvil_type_t *type)
 {
     /* ANVIL doesn't have a dedicated i1/bool type.
@@ -333,4 +399,38 @@ bool anvil_type_is_bool(anvil_type_t *type)
      * This function returns false; use anvil_value_is_bool() instead. */
     (void)type;
     return false;
+}
+
+bool anvil_type_is_integer(anvil_type_t *type)
+{
+    if (!type) return false;
+    switch (type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U8:
+        case ANVIL_TYPE_U16:
+        case ANVIL_TYPE_U32:
+        case ANVIL_TYPE_U64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool anvil_type_is_floating(anvil_type_t *type)
+{
+    return type && (type->kind == ANVIL_TYPE_F32 ||
+                    type->kind == ANVIL_TYPE_F64);
+}
+
+bool anvil_type_is_signed(anvil_type_t *type)
+{
+    return type ? type->is_signed : false;
+}
+
+bool anvil_type_is_pointer(anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_PTR;
 }

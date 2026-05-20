@@ -82,6 +82,9 @@ help:
 	@echo "  test-codegen-x86_64    x86_64 code generation"
 	@echo "  test-codegen-arm64     ARM64 code generation"
 	@echo "  test-codegen-arm64-macos  ARM64 macOS code generation"
+	@echo "  test-codegen-ppc32     PowerPC 32-bit code generation"
+	@echo "  test-codegen-ppc64     PowerPC 64-bit code generation"
+	@echo "  test-codegen-ppc64le   PowerPC 64-bit little-endian code generation"
 	@echo "  test-codegen-s370      S/370 code generation"
 	@echo "  test-codegen-all-arch  All architecture tests"
 	@echo "  test-run         Compile and run tests (host only)"
@@ -97,5 +100,6 @@ help:
 .PHONY: test-syntax test-syntax-c89 test-syntax-c99 test-syntax-c11 test-syntax-c23 test-syntax-gnu test-syntax-legacy
 .PHONY: test-cross
 .PHONY: test-codegen test-codegen-basic test-codegen-multifile
-.PHONY: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos test-codegen-s370 test-codegen-all-arch
+.PHONY: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos
+.PHONY: test-codegen-ppc32 test-codegen-ppc64 test-codegen-ppc64le test-codegen-s370 test-codegen-all-arch
 .PHONY: test-run clean-tests

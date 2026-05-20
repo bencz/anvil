@@ -238,7 +238,15 @@ New `prepare_ir` callback in backend interface:
 [Lower addresses]
 ```
 
-## Future Improvements (Planned)
+## Historical Notes
+
+The items below describe limitations of the older direct ARM64 emitter. The
+current ARM64 backend uses `arm64_mir.c` as the stable MachineIR reference path:
+source IR is lowered to virtual registers, ABI constraints are modeled as fixed
+registers, the shared linear-scan allocator assigns physical registers, spills
+are materialized by MachineIR, and final assembly is emitted from allocated MIR.
+
+## Superseded Limitations From The Old Direct Emitter
 
 ### 1. Inefficient Register Usage
 - Only uses x0 for results, x9-x15 as temporaries
@@ -249,7 +257,7 @@ New `prepare_ir` callback in backend interface:
 - Stack size calculated in first pass but not optimized
 - No consideration for value liveness
 - All instruction results are saved even if never used again
-- No register allocation - pure stack-based approach
+- The old emitter had no register allocation and used a stack-only approach
 
 ### 3. Code Quality Issues
 - Redundant load/store sequences

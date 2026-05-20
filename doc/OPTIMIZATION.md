@@ -288,6 +288,11 @@ Simplifies the control flow graph.
 3. **Block Merging**: Merges a block with its single successor if the successor has only one predecessor
 4. **Unreachable Code Removal**: Removes blocks not reachable from the entry block
 
+The pass is aware of all source IR terminators: `br`, `br_cond`, and `switch`.
+Switch defaults and case targets are included in reachability analysis,
+predecessor cache reconstruction, and branch-target rewrites when an empty block
+is bypassed. This keeps switch-heavy CFGs valid after simplification.
+
 **Example:**
 
 ```
@@ -525,7 +530,7 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/opt.c` | Pass manager implementation |
 | `src/opt/const_fold.c` | Constant folding pass |
 | `src/opt/dce.c` | Dead code elimination pass |
-| `src/opt/simplify_cfg.c` | CFG simplification pass |
+| `src/opt/simplify_cfg.c` | CFG simplification pass, including `switch` reachability/target rewrites |
 | `src/opt/strength_reduce.c` | Strength reduction |
 | `src/opt/copy_prop.c` | Copy propagation |
 | `src/opt/store_load_prop.c` | Store-load propagation |

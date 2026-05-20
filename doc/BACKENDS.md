@@ -24,59 +24,48 @@ if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
 anvil_cpu_model_t cpu = anvil_ctx_get_cpu(ctx);
 ```
 
-**Example: PPC64 Backend Organization**
+**Example: Shared PowerPC Backend Organization**
 
-The PPC64 backend demonstrates a modular approach with CPU-specific code:
+PowerPC targets now share one MachineIR-backed implementation with
+target-specific descriptors for PPC32, PPC64 ELFv1, and PPC64LE ELFv2:
 
 ```
-src/backend/ppc64/
-├── ppc64.c           # Main backend (init, cleanup, codegen)
-├── ppc64_internal.h  # Shared types and declarations
-├── ppc64_emit.c      # Instruction emission
-└── ppc64_cpu.c       # CPU-specific optimizations
+src/backend/ppc/
+└── ppc_mir.c         # Source IR -> MachineIR -> PPC assembly
+
+src/backend/ppc32/ppc32.c
+src/backend/ppc64/ppc64.c
+src/backend/ppc64le/ppc64le.c
 ```
 
 **Example: ARM64 Backend Organization**
 
-The ARM64 backend uses a similar modular structure with architecture-specific optimizations:
+The ARM64 backend is the stable reference implementation for the MachineIR path:
 
 ```
 src/backend/arm64/
-├── arm64.c           # Main backend (lifecycle, codegen entry points)
-├── arm64_internal.h  # Definitions, structures, register constants
-├── arm64_helpers.c   # Helper functions (type size, stack slots, code emission)
-├── arm64_emit.c      # Instruction emission (arithmetic, memory, control flow, FP)
+├── arm64.c           # Backend lifecycle and codegen entry points
+├── arm64_internal.h  # Register constants and backend state
+├── arm64_helpers.c   # Type size/alignment and register names
+├── arm64_mir.c       # Source IR -> MachineIR -> ARM64 assembly
 └── opt/              # ARM64-specific optimizations
     ├── arm64_opt.h       # Optimization interface
     ├── arm64_opt.c       # Pass manager
     ├── arm64_peephole.c  # Peephole optimizations
-    ├── arm64_dead_store.c # Dead store elimination
-    ├── arm64_load_elim.c  # Redundant load elimination
-    ├── arm64_branch.c     # Branch optimization
-    └── arm64_immediate.c  # Immediate optimization
+    └── arm64_branch.c     # Branch optimization
 ```
 
 **Key ARM64 Components:**
-- **`arm64_internal.h`**: Defines `arm64_backend_t`, stack slot structures, frame layout, register constants
-- **`arm64_helpers.c`**: `arm64_type_size()`, `arm64_alloc_stack_slot()`, `arm64_emit_mov_imm()`, etc.
-- **`arm64_emit.c`**: `arm64_emit_instr()`, `arm64_emit_load()`, `arm64_emit_call()`, PHI handling
-- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, `arm64_codegen_module()`, `arm64_emit_func()`
+- **`arm64_mir.c`**: source IR lowering, ABI constraints, PHI edge copies, switch lowering, MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission
+- **`arm64_internal.h`**: backend state and ARM64 register constants
+- **`arm64_helpers.c`**: target type sizing/alignment helpers and register name tables
+- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, `arm64_prepare_ir()`, and module/function codegen entry points
 - **`opt/`**: Architecture-specific optimizations run during `prepare_ir` phase
 
-**CPU-Specific Code Generation (ppc64_cpu.c):**
-```c
-void ppc64_emit_popcnt(ppc64_backend_t *be, int dest_reg, int src_reg)
-{
-    if (ppc64_has_feature(be, ANVIL_FEATURE_PPC_POPCNTD)) {
-        // Use native popcntd instruction (POWER5+)
-        anvil_strbuf_appendf(&be->code, "\tpopcntd %s, %s\n",
-            ppc64_gpr_names[dest_reg], ppc64_gpr_names[src_reg]);
-    } else {
-        // Emulation for older CPUs
-        // ... bit manipulation sequence ...
-    }
-}
-```
+The x86 and x86-64 backends are older direct source-IR emitters. They are not
+complete and should be treated as legacy/bootstrap code. New backend work should
+follow ARM64's MachineIR structure unless there is a narrow reason to build a
+temporary direct emitter.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -650,25 +639,25 @@ Different architectures pass parameters differently:
 
 The ARM64 backend includes several important features for robust code generation:
 
-1. **SSA Value Preservation**: All instruction results are saved to stack slots via `arm64_save_result()` to prevent register clobbering when X0 is overwritten by function calls.
+1. **MachineIR Value Preservation**: Source IR values are lowered to typed MachineIR virtual registers. The shared allocator assigns physical registers and inserts spill loads/stores only when required.
 
-2. **Parameter Spilling**: Function parameters (X0-X7) are saved to stack slots at function entry for safe access in loops and after function calls.
+2. **ABI Constraints**: Function parameters and returns are represented as fixed MachineIR registers (`x0`-`x7`/`d0`-`d7` and `x0`/`d0`), then copied into allocatable local vregs.
 
-3. **Large Stack Offsets (>255 bytes)**: Uses X16 as scratch register:
+3. **Large Frame/Spill Offsets**: Uses scratch registers when an address is outside ARM64 immediate ranges:
    ```asm
    sub x16, x29, #512
    ldr x0, [x16]
    ```
 
-4. **Very Large Stack Frames (>4095 bytes)**: Uses two-instruction sequence:
+4. **Very Large Stack Frames (>4095 bytes)**: Materializes the frame size before adjusting `sp`:
    ```asm
-   mov x16, #5920          ; Load large offset
+   ldr x16, =5920          ; Load large frame size
    sub sp, sp, x16         ; Allocate stack space
    ```
 
-5. **String Pointer Arrays**: Global arrays of string pointers emit `.quad .LCn` directives referencing string constants.
+5. **PHI and Switch Lowering**: PHI nodes are lowered into edge copies, including parallel-copy cycle handling. `switch` terminators lower to compare/branch chains with PHI-aware edge blocks.
 
-6. **Type-Aware Load/Store**: Correct instruction selection based on type size (`ldr w0` for 32-bit, `ldrb w0` for 8-bit).
+6. **Type-Aware Load/Store**: Correct instruction selection based on type class and size (`ldr`, `ldrsb`, `ldrsh`, `ldrsw`, `strb`, `strh`, floating-point `ldr`/`str`).
 
 **PowerPC 32-bit (System V):**
 - First 8 integer args: R3-R10
@@ -908,49 +897,34 @@ void test_factorial(void) {
 
 The ARM64 backend has several important implementation details:
 
-### SSA Value Preservation
+### MachineIR Value Preservation
 
-ARM64 uses `x0` as the primary result register, but this causes issues when multiple instructions produce results that are used later. The solution is to save all instruction results to stack slots:
-
-```c
-static void arm64_save_result(arm64_backend_t *be, anvil_instr_t *instr)
-{
-    if (instr->result) {
-        int offset = arm64_get_or_create_slot(be, instr->result);
-        arm64_emit_stack_store(be, offset, ARM64_X0);
-    }
-}
-```
+ARM64 is the reference MachineIR backend. It does not use the old
+stack-slot-for-every-SSA-value strategy. Instead, lowering creates typed virtual
+registers, marks ABI registers as fixed where needed, runs shared copy
+coalescing and linear-scan allocation, and materializes spills only for values
+that cannot stay in physical registers.
 
 ### Large Stack Frame Support
 
-ARM64's `ldr`/`str` instructions with negative offset from frame pointer only support ±256 bytes. For larger offsets, use helper functions:
+ARM64 addressing has immediate range limits. For larger local, spill, incoming
+argument, or memory offsets, the emitter materializes an address through a
+scratch register:
 
 ```c
-static void arm64_emit_stack_load(arm64_backend_t *be, int offset, int target_reg)
-{
-    if (offset <= 255) {
-        // Direct addressing
-        emit("\tldr %s, [x29, #-%d]\n", reg_name, offset);
-    } else {
-        // Use x16 as scratch register
-        emit("\tsub x16, x29, #%d\n", offset);
-        emit("\tldr %s, [x16]\n", reg_name);
-    }
-}
+ldr x16, =8192
+sub x16, x29, x16
+ldr x19, [x16]
 ```
 
 ### External Function Calls
 
-External functions declared via `anvil_module_add_extern()` are stored as `ANVIL_VAL_GLOBAL` with function type. The backend must recognize these and emit direct `bl` calls:
+Direct calls carry a symbol in MachineIR and emit `bl`. Indirect calls carry a
+target register; ARM64 legalizes that target to fixed `x16` and emits `blr x16`:
 
-```c
-case ANVIL_OP_CALL:
-    if (callee->kind == ANVIL_VAL_GLOBAL && 
-        callee->type->kind == ANVIL_TYPE_FUNC) {
-        // Direct call to external function
-        emit("\tbl %s%s\n", prefix, callee->name);
-    }
+```asm
+bl puts
+blr x16
 ```
 
 ### Type-Aware Load/Store
@@ -964,16 +938,12 @@ Use correct instruction variants based on type size:
 | i32/u32/f32 | `ldr w0` | `str w9` |
 | i64/u64/f64/ptr | `ldr x0` | `str x9` |
 
-### Parameter Spilling
+### Parameter Lowering
 
-Function parameters must be saved to stack slots at entry to survive across function calls and loops:
-
-```c
-for (size_t i = 0; i < func->num_params; i++) {
-    int offset = arm64_get_stack_slot(be, func->params[i]);
-    arm64_emit_stack_store(be, offset, i);  // Save xi to stack
-}
-```
+Incoming register arguments are modeled as fixed MachineIR vregs and copied into
+normal local vregs before allocation. Additional arguments are represented with
+`ANVIL_MIR_OP_INCOMING_STACK_ARG`. Darwin variadic arguments after the fixed
+parameter list are forced to outgoing stack slots during call lowering.
 
 ### Array Stack Allocation
 
