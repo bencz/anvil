@@ -8,7 +8,7 @@ CC = gcc
 ANVIL_ROOT = ../..
 ANVIL_LIB = $(ANVIL_ROOT)/lib/libanvil.a
 ANVIL_HEADERS = $(wildcard $(ANVIL_ROOT)/include/anvil/*.h)
-CFLAGS = -Wall -Wextra -std=c99 -g -I$(ANVIL_ROOT)/include -Iinclude -Isrc/preprocessor -Isrc/lexer -Isrc/parser -Isrc/sema -Isrc/codegen -Isrc/opt -Isrc/ast
+CFLAGS = -Wall -Wextra -std=c99 -D_DEFAULT_SOURCE -g -I$(ANVIL_ROOT)/include -Iinclude -Isrc/preprocessor -Isrc/lexer -Isrc/parser -Isrc/sema -Isrc/codegen -Isrc/opt -Isrc/ast
 LDFLAGS =
 LDLIBS = $(ANVIL_LIB)
 

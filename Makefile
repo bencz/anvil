@@ -4,7 +4,7 @@
 
 CC = gcc
 AR = ar
-CFLAGS = -Wall -Wextra -std=c11 -I./include -g -O2
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O2
 LDFLAGS = -L./lib
 ARFLAGS = rcs
 
@@ -35,7 +35,11 @@ CORE_SRCS = \
 
 BACKEND_SRCS = \
 	$(SRC_DIR)/backend/x86/x86.c \
+	$(SRC_DIR)/backend/x86/x86_helpers.c \
+	$(SRC_DIR)/backend/x86/x86_mir.c \
 	$(SRC_DIR)/backend/x86_64/x86_64.c \
+	$(SRC_DIR)/backend/x86_64/x86_64_helpers.c \
+	$(SRC_DIR)/backend/x86_64/x86_64_mir.c \
 	$(SRC_DIR)/backend/mainframe/mainframe_mir.c \
 	$(SRC_DIR)/backend/s370/s370.c \
 	$(SRC_DIR)/backend/s370_xa/s370_xa.c \
@@ -98,6 +102,8 @@ TESTS = \
 	$(BUILD_DIR)/tests/optimizer_regression \
 	$(BUILD_DIR)/tests/machine_regalloc_regression \
 	$(BUILD_DIR)/tests/arm64_mir_lowering_regression \
+	$(BUILD_DIR)/tests/x86_64_mir_lowering_regression \
+	$(BUILD_DIR)/tests/x86_mir_lowering_regression \
 	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
 	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression
 
@@ -191,3 +197,9 @@ $(BUILD_DIR)/machine/regalloc.o: $(INCLUDE_DIR)/anvil/anvil_machine.h src/machin
 $(BUILD_DIR)/backend/mainframe/mainframe_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_mainframe_mir.h
 $(BUILD_DIR)/backend/ppc/ppc_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_ppc_mir.h
 $(BUILD_DIR)/backend/arm64/arm64_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_arm64_mir.h
+$(BUILD_DIR)/backend/x86/x86.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_mir.h src/backend/x86/x86_internal.h
+$(BUILD_DIR)/backend/x86/x86_helpers.o: src/backend/x86/x86_internal.h $(INCLUDE_DIR)/anvil/anvil_internal.h
+$(BUILD_DIR)/backend/x86/x86_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_mir.h src/backend/x86/x86_internal.h
+$(BUILD_DIR)/backend/x86_64/x86_64.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_64_mir.h src/backend/x86_64/x86_64_internal.h
+$(BUILD_DIR)/backend/x86_64/x86_64_helpers.o: src/backend/x86_64/x86_64_internal.h $(INCLUDE_DIR)/anvil/anvil_internal.h
+$(BUILD_DIR)/backend/x86_64/x86_64_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_64_mir.h src/backend/x86_64/x86_64_internal.h
