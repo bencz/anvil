@@ -2712,22 +2712,35 @@ static void x64_emit_gpr_binary(x64_mir_emit_t *emit,
                              info->op == ANVIL_MIR_OP_SMOD;
             bool is_mod = info->op == ANVIL_MIR_OP_SMOD ||
                           info->op == ANVIL_MIR_OP_UMOD;
+            const char *r11 = x64_gpr_name(X64_R11, size);
             anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%%s\n", suf, a, rax);
-            anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%r11%s\n",
-                                 suf, b, size <= 4 ? "d" : "");
-            if (is_signed) {
-                anvil_strbuf_append(&emit->code,
-                                    size <= 4 ? "\tcltd\n" : "\tcqto\n");
-                anvil_strbuf_appendf(&emit->code, "\tidiv%s %%r11%s\n",
-                                     suf, size <= 4 ? "d" : "");
+            anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%%s\n", suf, b, r11);
+            if (size == 1) {
+                if (is_signed) {
+                    anvil_strbuf_append(&emit->code, "\tcbtw\n");
+                    anvil_strbuf_appendf(&emit->code, "\tidivb %%%s\n", r11);
+                } else {
+                    anvil_strbuf_append(&emit->code, "\tmovzbw %al, %ax\n");
+                    anvil_strbuf_appendf(&emit->code, "\tdivb %%%s\n", r11);
+                }
+                if (is_mod) {
+                    anvil_strbuf_append(&emit->code, "\tshrw $8, %ax\n");
+                }
+                anvil_strbuf_appendf(&emit->code, "\tmovb %%al, %%%s\n", dst);
             } else {
-                anvil_strbuf_appendf(&emit->code, "\txor%s %%%s, %%%s\n",
-                                     suf, rdx, rdx);
-                anvil_strbuf_appendf(&emit->code, "\tdiv%s %%r11%s\n",
-                                     suf, size <= 4 ? "d" : "");
+                if (is_signed) {
+                    const char *ext = size == 2 ? "\tcwtd\n"
+                                    : size == 4 ? "\tcltd\n" : "\tcqto\n";
+                    anvil_strbuf_append(&emit->code, ext);
+                    anvil_strbuf_appendf(&emit->code, "\tidiv%s %%%s\n", suf, r11);
+                } else {
+                    anvil_strbuf_appendf(&emit->code, "\txor%s %%%s, %%%s\n",
+                                         suf, rdx, rdx);
+                    anvil_strbuf_appendf(&emit->code, "\tdiv%s %%%s\n", suf, r11);
+                }
+                anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%%s\n",
+                                     suf, is_mod ? rdx : rax, dst);
             }
-            anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%%s\n",
-                                 suf, is_mod ? rdx : rax, dst);
             break;
         }
         default:

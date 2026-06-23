@@ -7,6 +7,24 @@
 #include "mcc.h"
 
 #define ARENA_INITIAL_SIZE (1024 * 1024)  /* 1MB */
+#define ARENA_ALIGN 16
+
+struct mcc_arena_block {
+    struct mcc_arena_block *next;
+    size_t size;
+    size_t used;
+    char data[];
+};
+
+static struct mcc_arena_block *arena_block_new(size_t payload)
+{
+    struct mcc_arena_block *blk = malloc(sizeof(struct mcc_arena_block) + payload);
+    if (!blk) return NULL;
+    blk->next = NULL;
+    blk->size = payload;
+    blk->used = 0;
+    return blk;
+}
 
 /* Architecture names */
 static const char *arch_names[] = {
@@ -46,7 +64,7 @@ mcc_context_t *mcc_context_create(void)
     if (!ctx) return NULL;
     
     /* Initialize arena */
-    ctx->arena = malloc(ARENA_INITIAL_SIZE);
+    ctx->arena = arena_block_new(ARENA_INITIAL_SIZE);
     if (!ctx->arena) {
         free(ctx);
         return NULL;
@@ -76,8 +94,13 @@ void mcc_context_destroy(mcc_context_t *ctx)
     free(ctx->diagnostics);
     
     /* Free arena */
-    free(ctx->arena);
-    
+    struct mcc_arena_block *blk = ctx->arena;
+    while (blk) {
+        struct mcc_arena_block *next = blk->next;
+        free(blk);
+        blk = next;
+    }
+
     free(ctx);
 }
 
@@ -129,26 +152,30 @@ void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature)
 /* Memory allocation */
 void *mcc_alloc(mcc_context_t *ctx, size_t size)
 {
-    /* Align to 8 bytes */
-    size = (size + 7) & ~7;
-    
-    /* Check if we need to grow arena */
-    if (ctx->arena_used + size > ctx->arena_size) {
-        size_t new_size = ctx->arena_size * 2;
-        while (ctx->arena_used + size > new_size) {
-            new_size *= 2;
-        }
-        void *new_arena = realloc(ctx->arena, new_size);
-        if (!new_arena) {
+    /* Align to ARENA_ALIGN bytes */
+    size = (size + (ARENA_ALIGN - 1)) & ~((size_t)ARENA_ALIGN - 1);
+
+    struct mcc_arena_block *cur = ctx->arena;
+
+    /* Check if the current block can satisfy the request */
+    if (cur->used + size > cur->size) {
+        /* Oversized requests get a dedicated block; otherwise grow by a
+           fresh default-sized block. Existing blocks never move. */
+        size_t payload = size > ARENA_INITIAL_SIZE ? size : ARENA_INITIAL_SIZE;
+        struct mcc_arena_block *blk = arena_block_new(payload);
+        if (!blk) {
             mcc_fatal(ctx, "Out of memory");
             return NULL;
         }
-        ctx->arena = new_arena;
-        ctx->arena_size = new_size;
+        blk->next = cur;
+        ctx->arena = blk;
+        cur = blk;
     }
-    
-    void *ptr = (char*)ctx->arena + ctx->arena_used;
-    ctx->arena_used += size;
+
+    void *ptr = cur->data + cur->used;
+    cur->used += size;
+    ctx->arena_size = cur->size;
+    ctx->arena_used = cur->used;
     memset(ptr, 0, size);
     return ptr;
 }

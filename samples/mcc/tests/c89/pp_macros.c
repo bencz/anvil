@@ -45,6 +45,16 @@
 #define ADD3(a, b, c) ADD(ADD(a, b), c)
 #define ADD4(a, b, c, d) ADD(ADD(a, b), ADD(c, d))
 
+/* Recursive macros: the hide set ("blue paint") must stop these from
+ * expanding forever (without it these caused infinite expansion / crash).
+ * Each expands once; the residual identifier resolves to a real global so
+ * the expanded result still compiles cleanly. */
+int SELF_v, RX_v, MUT_v;
+#define SELF_v (SELF_v + 1)
+#define RX_v (4 + RX_v)
+#define MUT_v MUT_B
+#define MUT_B MUT_v
+
 int main(void)
 {
     int x = 5, y = 10, z;
@@ -80,6 +90,11 @@ int main(void)
     /* Test macros with no args */
     z = GET_ZERO();
     z = GET_ONE();
-    
+
+    /* Test recursive macros (must not loop forever) */
+    z = SELF_v;
+    z = RX_v;
+    z = MUT_v;
+
     return 0;
 }

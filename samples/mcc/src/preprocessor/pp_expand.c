@@ -529,13 +529,14 @@ static mcc_token_t *substitute(mcc_preprocessor_t *pp, mcc_macro_t *macro,
  * ============================================================ */
 
 /* Forward declaration */
-static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_t *tokens);
+static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_t *tokens, int depth);
 
 /* Expand a single macro invocation */
-static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp, 
+static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
                                                   mcc_macro_t *macro,
                                                   pp_token_info_t *macro_token,
-                                                  pp_token_info_t *after_name)
+                                                  pp_token_info_t *after_name,
+                                                  int depth)
 {
     pp_hide_set_t *hs = macro_token->hide_set;
     mcc_token_t **args = NULL;
@@ -591,7 +592,7 @@ static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
             expanded_args = mcc_alloc(pp->ctx, num_args * sizeof(mcc_token_t*));
             for (int i = 0; i < num_args; i++) {
                 pp_token_info_t *arg_info = token_list_to_info_list(pp, args[i], NULL);
-                pp_token_info_t *expanded_info = expand_token_list(pp, arg_info);
+                pp_token_info_t *expanded_info = expand_token_list(pp, arg_info, depth + 1);
                 expanded_args[i] = info_list_to_token_list(expanded_info);
             }
         }
@@ -616,16 +617,10 @@ static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
     if (!new_hs) new_hs = hide_set_create(pp);
     hide_set_add(pp, new_hs, macro->name);
     
-    /* Convert substituted tokens to info list
-     * Important: tokens from arguments should NOT inherit the macro's hide set
-     * because they were already pre-expanded. Only tokens from the macro body
-     * (not from argument substitution) should get the new hide set.
-     * 
-     * For simplicity, we use an empty hide set here and let the rescan
-     * handle the expansion. The macro name is already in the hide set
-     * of the original invocation context, so it won't cause infinite recursion.
-     */
-    pp_token_info_t *subst_info = token_list_to_info_list(pp, substituted, NULL);
+    /* Convert substituted tokens to info list, painting each body token with
+     * the new hide set (the invocation's hide set plus this macro's name) so
+     * that rescanning cannot re-expand this macro and recurse forever. */
+    pp_token_info_t *subst_info = token_list_to_info_list(pp, substituted, new_hs);
     
     /* Concatenate with remaining tokens */
     if (subst_info) {
@@ -637,15 +632,21 @@ static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
     }
     
     /* Rescan the concatenated list */
-    return expand_token_list(pp, subst_info);
+    return expand_token_list(pp, subst_info, depth);
 }
 
 /* Expand all macros in a token list */
-static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_t *tokens)
+static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_t *tokens, int depth)
 {
     pp_token_info_t *result_head = NULL, *result_tail = NULL;
     pp_token_info_t *cur = tokens;
-    
+
+    if (depth > PP_MAX_EXPAND_DEPTH) {
+        mcc_error(pp->ctx, "Macro expansion exceeded maximum depth (%d); possible recursive macro",
+                  PP_MAX_EXPAND_DEPTH);
+        return tokens;
+    }
+
     while (cur) {
         mcc_token_t *tok = cur->token;
         
@@ -655,7 +656,7 @@ static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_
             
             if (macro && !hide_set_contains(cur->hide_set, tok->text)) {
                 /* Expand this macro */
-                pp_token_info_t *expanded = expand_macro_invocation(pp, macro, cur, cur->next);
+                pp_token_info_t *expanded = expand_macro_invocation(pp, macro, cur, cur->next, depth + 1);
                 
                 /* Append expanded tokens to result */
                 if (!result_head) {
@@ -696,7 +697,7 @@ static pp_token_info_t *expand_token_list(mcc_preprocessor_t *pp, pp_token_info_
 mcc_token_t *pp_expand_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
 {
     pp_token_info_t *info = token_list_to_info_list(pp, tokens, NULL);
-    pp_token_info_t *expanded = expand_token_list(pp, info);
+    pp_token_info_t *expanded = expand_token_list(pp, info, 0);
     return info_list_to_token_list(expanded);
 }
 

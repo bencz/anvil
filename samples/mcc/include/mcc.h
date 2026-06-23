@@ -148,7 +148,7 @@ struct mcc_context {
     int current_column;
     
     /* Memory arena for allocations */
-    void *arena;
+    struct mcc_arena_block *arena;
     size_t arena_size;
     size_t arena_used;
 };
