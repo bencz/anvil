@@ -14,20 +14,52 @@ This guide is for developers who want to contribute to ANVIL or understand its i
 ### Building
 
 ```bash
-# Clone and build
+# Clone and build (builds the static lib + simple examples)
 git clone <repository>
 cd anvil
-make
+make                 # == make lib examples
 
-# Build with debug symbols
-make DEBUG=1
+# Just the library
+make lib             # produces lib/libanvil.a
 
-# Run tests
-make test
+# Build and run the regression test suite
+make tests
+
+# Runtime examples: generate asm, assemble/link, and execute it
+make examples-runtime
+make test-examples
+
+# Advanced examples (fp_math_lib, dynamic_array, base64_lib)
+make examples-advanced
+make test-examples-advanced
 
 # Clean build
 make clean && make
 ```
+
+**Build flags:** `CFLAGS` in the `Makefile` is
+
+```make
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O2
+```
+
+The `-D_GNU_SOURCE` define is **required**: ANVIL compiles with `-std=c11`, under
+which `strdup` (and a few other POSIX functions) are not declared by default. If you
+add a custom build invocation or a separate compile step, keep `-D_GNU_SOURCE` or you
+will get implicit-declaration warnings/errors for `strdup`.
+
+**Make targets:**
+
+| Target | Description |
+|--------|-------------|
+| `all` | `lib` + `examples` (default) |
+| `lib` | Build `lib/libanvil.a` |
+| `examples` | Build the simple example programs under `build/examples/` |
+| `tests` | Build and run the regression tests (see Testing) |
+| `examples-runtime` / `test-examples` | Build/run the executable examples in `examples/basic_runtime` |
+| `examples-advanced` / `test-examples-advanced` | Build/run `fp_math_lib`, `dynamic_array`, `base64_lib` |
+| `install` | Install headers + lib to `/usr/local` |
+| `clean` | Remove `build/` and `lib/` |
 
 ### Project Structure
 
@@ -35,10 +67,20 @@ make clean && make
 anvil/
 ├── include/anvil/
 │   ├── anvil.h              # Public API
-│   └── anvil_internal.h     # Internal structures
+│   ├── anvil_internal.h     # Internal structures
+│   ├── anvil_cpu.h          # CPU models + feature flags
+│   ├── anvil_debug.h        # IR dump/print API
+│   ├── anvil_opt.h          # Optimization API
+│   ├── anvil_machine.h      # MachineIR + register allocation API
+│   ├── anvil_arm64_mir.h    # ARM64 MIR lower/verify/regalloc/emit entry points
+│   ├── anvil_x86_64_mir.h   # x86-64 MIR entry points
+│   ├── anvil_x86_mir.h      # x86 MIR entry points
+│   ├── anvil_ppc_mir.h      # Shared PPC MIR entry points
+│   └── anvil_mainframe_mir.h# Shared mainframe MIR entry points
 ├── src/
 │   ├── core/                # Core library
 │   │   ├── context.c        # Context management
+│   │   ├── cpu_table.c      # CPU model/feature table
 │   │   ├── types.c          # Type system
 │   │   ├── module.c         # Module management
 │   │   ├── function.c       # Function management
@@ -46,23 +88,39 @@ anvil/
 │   │   ├── builder.c        # IR builder
 │   │   ├── strbuf.c         # String buffer
 │   │   ├── backend.c        # Backend registry
-│   │   └── memory.c         # Memory utilities
+│   │   ├── ir_dump.c        # IR dump/print
+│   │   └── verify.c         # Source-IR verifier
+│   ├── machine/             # Target-independent MachineIR infrastructure
+│   │   ├── machine_ir.c     # MachineIR builder/queries
+│   │   └── regalloc.c       # Linear-scan register allocation + spilling
+│   ├── opt/                 # IR optimization passes
 │   └── backend/             # Target backends
-│       ├── x86/x86.c
-│       ├── x86_64/x86_64.c
-│       ├── s370/s370.c
+│       ├── x86/             # x86 (32-bit) MachineIR backend
+│       │   ├── x86.c        #   thin backend_ops driver
+│       │   ├── x86_mir.c    #   source IR -> MachineIR -> asm
+│       │   ├── x86_helpers.c
+│       │   └── x86_internal.h
+│       ├── x86_64/          # x86-64 MachineIR backend (same layout)
+│       │   ├── x86_64.c
+│       │   ├── x86_64_mir.c
+│       │   ├── x86_64_helpers.c
+│       │   └── x86_64_internal.h
+│       ├── mainframe/mainframe_mir.c  # Shared S/370..z/Arch MachineIR backend
+│       ├── s370/s370.c                # mainframe descriptor entries
 │       ├── s370_xa/s370_xa.c
 │       ├── s390/s390.c
 │       ├── zarch/zarch.c
-│       ├── ppc/ppc_mir.c       # Shared PPC MachineIR backend
-│       ├── ppc32/ppc32.c       # PPC32 wrapper/descriptor entry
-│       ├── ppc64/ppc64.c       # PPC64 wrapper/descriptor entry
+│       ├── ppc/ppc_mir.c              # Shared PPC MachineIR backend
+│       ├── ppc32/ppc32.c             # PPC descriptor entries
+│       ├── ppc64/ppc64.c
 │       ├── ppc64le/ppc64le.c
-│       └── arm64/              # Reference MachineIR backend
-│           ├── arm64.c
+│       └── arm64/                     # Reference MachineIR backend
+│           ├── arm64.c               #   thin backend_ops driver
+│           ├── arm64_mir.c           #   source IR -> MachineIR -> asm
 │           ├── arm64_helpers.c
 │           ├── arm64_internal.h
-│           └── arm64_mir.c
+│           └── opt/                  # ARM64-specific peephole/branch passes
+├── tests/                   # Regression tests (see Testing)
 ├── examples/                # Example programs
 ├── doc/                     # Documentation
 ├── Makefile
@@ -235,6 +293,66 @@ if (bad_condition) {
 
 ## Backend Development
 
+### Adding a New Backend (recommended approach)
+
+New backends should lower through **MachineIR**, following the **ARM64 reference
+backend** (`src/backend/arm64/`). The x86_64 (`src/backend/x86_64/`) and x86
+(`src/backend/x86/`) backends are concrete, non-RISC examples of the same pattern.
+Do not write a monolithic `emit_instr` switch directly over source IR; instead split
+the backend into:
+
+| File | Role |
+|------|------|
+| `<arch>/<arch>.c` | Thin `anvil_backend_ops_t` driver. Implements `init`/`cleanup`/`reset`/`codegen_*` by calling the MIR pipeline below. |
+| `<arch>/<arch>_mir.c` | The real work: `anvil_<arch>_lower_func_to_mir`, `anvil_<arch>_verify_mir_legal`, `anvil_<arch>_regalloc_mir`, and `anvil_<arch>_emit_mir[_abi]`. |
+| `<arch>/<arch>_internal.h` | Internal structs/descriptor tables shared across the backend's `.c` files. |
+| `<arch>/<arch>_helpers.c` | Small shared helpers (register names, descriptor lookup, etc.). |
+| `include/anvil/anvil_<arch>_mir.h` | Public-ish entry points for the four pipeline stages (used by regression tests and the driver). |
+
+**The MachineIR pipeline** (see `anvil_<arch>_regalloc_mir` in any reference
+backend) runs, per function:
+
+```
+anvil_<arch>_lower_func_to_mir(func)      // source IR -> MachineIR (anvil_machine.h)
+  -> anvil_<arch>_verify_mir_legal(...)   // reject illegal/un-lowered MIR
+  -> anvil_mir_coalesce_copies(...)       // remove redundant COPY chains
+  -> anvil_<arch>_verify_mir_legal(...)
+  -> anvil_regalloc_linear_scan_classes(mir, configs, n)   // per-class allocation
+  -> anvil_mir_materialize_spills(mir, scratch_configs, n) // insert reload/spill code
+  -> anvil_<arch>_verify_mir_legal(...)
+// then anvil_<arch>_emit_mir[_abi](mir, ...) emits target assembly
+```
+
+All of these are declared in `include/anvil/anvil_machine.h`. The driver in
+`<arch>.c` simply calls `lower -> regalloc -> emit` and routes the result through
+`codegen_func`/`codegen_module`.
+
+**Register-pool / regalloc considerations** (these are the easiest things to get
+wrong):
+
+- The **allocatable pools** passed to `anvil_regalloc_linear_scan_classes` must be
+  **callee-saved registers only**. The allocator has *no call-clobber model* — it does
+  not know a `CALL` destroys caller-saved registers, so any value it places in a
+  caller-saved register that is live across a call would be corrupted. Reference
+  backends therefore hand the allocator only callee-saved GPR/FPR pools (see the
+  `alloc_gpr_regs`/`alloc_fpr_regs` arrays in the per-ABI descriptor tables).
+- The **scratch pools** passed to `anvil_mir_materialize_spills` must be **disjoint
+  from any fixed-register assignments** (ABI argument/return registers, etc.) and
+  **large enough for the worst-case number of simultaneous spill temporaries in a
+  single instruction**; otherwise spill materialization runs out of scratch registers.
+- The **ABI is expressed as fixed-register vregs plus a descriptor table**: argument,
+  return, and clobbered registers are modeled by creating vregs pinned to physical
+  registers (`anvil_mir_set_fixed_reg`), and per-ABI facts (which regs are
+  allocatable/scratch/fixed, decoration, stack alignment) live in a descriptor table
+  selected by `anvil_abi_t` / `anvil_cc_t`. The x86_64 backend selects SysV/Darwin/
+  Win64 descriptors this way, and the x86 backend selects cdecl/stdcall/fastcall
+  descriptors; `func->cc` (set via `anvil_func_set_cc`) is consumed to pick the
+  descriptor.
+
+For the full design rationale and instruction-level details, see
+[`BACKENDS.md`](BACKENDS.md) and [`ARM64_REFACTOR.md`](ARM64_REFACTOR.md) rather than
+duplicating backend internals here.
+
 ### Backend Checklist
 
 When implementing a new backend, ensure you handle:
@@ -252,47 +370,78 @@ When implementing a new backend, ensure you handle:
 - [ ] Global variables
 - [ ] Constants (integers, floats, null, strings)
 
-### Testing a Backend
+### Testing
+
+There are two complementary kinds of tests.
+
+**1. MIR-lowering regression tests** (`tests/*_mir_lowering_regression.c`). These are
+the primary way to test a MachineIR backend. Each is a standalone program that builds
+source IR, drives the backend's MIR pipeline, and asserts on the generated assembly
+text (or on MIR-level properties). Existing examples:
+
+```
+tests/arm64_mir_lowering_regression.c
+tests/x86_64_mir_lowering_regression.c
+tests/x86_mir_lowering_regression.c
+tests/ppc_mir_lowering_regression.c
+tests/mainframe_mir_lowering_regression.c
+```
+
+The full test list (also including `core_arm64_regression`, `ir_verifier_regression`,
+`optimizer_regression`, and `machine_regalloc_regression`) is wired into the `TESTS`
+variable in the `Makefile`. To add a new backend's regression test:
+
+1. Create `tests/<arch>_mir_lowering_regression.c` following the existing files.
+2. Add `$(BUILD_DIR)/tests/<arch>_mir_lowering_regression` to the `TESTS` list in the
+   `Makefile`. The generic rule `$(BUILD_DIR)/tests/%: tests/%.c $(LIB_PATH)` builds
+   and links each test against `lib/libanvil.a`.
+3. Run the suite:
+
+```bash
+make tests          # builds and runs every test in TESTS, stops on first failure
+```
+
+A minimal test skeleton:
 
 ```c
-// Create a test function
-void test_backend_add(void)
-{
+#include <anvil/anvil.h>
+#include <assert.h>
+#include <string.h>
+
+int main(void) {
     anvil_ctx_t *ctx = anvil_ctx_create();
     anvil_ctx_set_target(ctx, ANVIL_ARCH_YOUR_ARCH);
-    
     anvil_module_t *mod = anvil_module_create(ctx, "test");
-    
-    // Create: int add(int a, int b) { return a + b; }
+
+    /* Build: int add(int a, int b) { return a + b; } */
     anvil_type_t *i32 = anvil_type_i32(ctx);
     anvil_type_t *params[] = { i32, i32 };
-    anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 2, false);
-    
-    anvil_func_t *func = anvil_func_create(mod, "add", func_type,
-                                            ANVIL_LINK_EXTERNAL);
-    anvil_block_t *entry = anvil_func_get_entry(func);
-    anvil_set_insert_point(ctx, entry);
-    
-    anvil_value_t *a = anvil_func_get_param(func, 0);
-    anvil_value_t *b = anvil_func_get_param(func, 1);
-    anvil_value_t *result = anvil_build_add(ctx, a, b, "result");
-    anvil_build_ret(ctx, result);
-    
-    // Generate and verify
-    char *output = NULL;
-    size_t len = 0;
-    anvil_error_t err = anvil_module_codegen(mod, &output, &len);
-    
-    assert(err == ANVIL_OK);
-    assert(output != NULL);
-    
-    // Check for expected instructions
-    printf("Generated:\n%s\n", output);
-    
-    free(output);
+    anvil_type_t *fty = anvil_type_func(ctx, i32, params, 2, false);
+    anvil_func_t *fn = anvil_func_create(mod, "add", fty, ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_value_t *r = anvil_build_add(ctx,
+        anvil_func_get_param(fn, 0), anvil_func_get_param(fn, 1), "r");
+    anvil_build_ret(ctx, r);
+
+    char *asm_out = NULL; size_t len = 0;
+    assert(anvil_module_codegen(mod, &asm_out, &len) == ANVIL_OK);
+    assert(asm_out && strstr(asm_out, "add"));  /* assert on expected instructions */
+
+    free(asm_out);
     anvil_module_destroy(mod);
     anvil_ctx_destroy(ctx);
+    return 0;
 }
+```
+
+**2. Execution tests** (`examples/basic_runtime`, via `test-examples`). These generate
+assembly, assemble and link it with a C driver, run the result, and check its exit
+status/output — i.e. they confirm the emitted code actually *runs* correctly on the
+host. Build/run them with:
+
+```bash
+make test-examples            # examples/basic_runtime
+make test-examples-advanced   # fp_math_lib, dynamic_array, base64_lib
 ```
 
 ### Debugging Backend Issues
@@ -523,12 +672,14 @@ Include:
 
 Areas that need development:
 
-1. **Register Allocation**: Currently uses fixed registers
-2. **Optimization Passes**: No IR optimization yet
-3. **Binary Output**: Currently text assembly only
-4. **Debug Info**: No DWARF support
-5. **More Architectures**: ARM, RISC-V, etc.
-6. **String/Array Support**: Limited aggregate type support
+1. **Register Allocation**: A target-independent linear-scan allocator now exists
+   (`src/machine/regalloc.c`, used by the MachineIR backends). It has no call-clobber
+   model yet, so allocatable pools must be callee-saved (see Backend Development).
+2. **Binary Output**: Currently text assembly only (`ANVIL_OUTPUT_BINARY` reserved).
+3. **Debug Info**: No DWARF support.
+4. **More Architectures**: RISC-V, etc. (x86, x86-64, ARM64, PowerPC, and the
+   mainframe family are implemented).
+5. **Aggregate Support**: Struct/array handling is still limited on some backends.
 
 ## Resources
 

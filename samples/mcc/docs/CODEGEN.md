@@ -59,25 +59,71 @@ MCC uses the ANVIL library for:
 2. **Type representation**: Mapping C types to ANVIL types
 3. **Verification**: Rejecting invalid IR before optimization/backend lowering
 4. **Optimization**: Running ANVIL's target-independent pass manager
-5. **Code generation**: Dispatching to the selected backend, either a direct emitter or a MachineIR/regalloc backend
+5. **Code generation**: Dispatching to the selected backend. The x86, x86-64, and ARM64 backends run ANVIL's MachineIR/regalloc pipeline; the choice of backend is transparent to MCC, which always emits the same target-independent IR
 
 ### Supported Targets
 
-| Architecture | Output Format | Description |
-|--------------|---------------|-------------|
-| `ANVIL_ARCH_S370` | HLASM | IBM S/370 |
-| `ANVIL_ARCH_S370_XA` | HLASM | IBM S/370-XA |
-| `ANVIL_ARCH_S390` | HLASM | IBM S/390 |
-| `ANVIL_ARCH_ZARCH` | HLASM | z/Architecture |
-| `ANVIL_ARCH_X86` | AT&T | x86 32-bit |
-| `ANVIL_ARCH_X86_64` | AT&T | x86-64 |
-| `ANVIL_ARCH_PPC32` | GAS | PowerPC 32-bit |
-| `ANVIL_ARCH_PPC64` | GAS | PowerPC 64-bit |
-| `ANVIL_ARCH_PPC64LE` | GAS | PowerPC 64-bit little-endian |
-| `ANVIL_ARCH_ARM64` | GAS | ARM64 (Linux) |
-| `ANVIL_ARCH_ARM64` + Darwin ABI | GAS | ARM64 (Apple Silicon/macOS) |
+Targets are selected with the `-arch=<name>` command-line flag. MCC parses the
+name (see `parse_arch()` in `src/main.c`), stores it as an `mcc_arch_t`, and
+maps it to an `ANVIL_ARCH_*` value via `mcc_arch_to_anvil()` in `src/context.c`.
+`mcc_codegen_set_target()` then calls `anvil_ctx_set_target()` (and, for the
+macOS variant, `anvil_ctx_set_abi(ANVIL_ABI_DARWIN)`). The default when no
+`-arch` is given is `x86_64`.
 
-ARM64 is currently the reference backend for the MachineIR/regalloc path. The other targets remain selectable through ANVIL and are planned migration targets for the shared MachineIR backend infrastructure.
+| `-arch=` value(s) | `mcc_arch_t` | ANVIL target | Output Format | Description |
+|-------------------|--------------|--------------|---------------|-------------|
+| `x86` | `MCC_ARCH_X86` | `ANVIL_ARCH_X86` | AT&T | x86 32-bit |
+| `x86_64`, `x64` | `MCC_ARCH_X86_64` | `ANVIL_ARCH_X86_64` | AT&T | x86-64 |
+| `s370` | `MCC_ARCH_S370` | `ANVIL_ARCH_S370` | HLASM | IBM S/370 |
+| `s370_xa`, `s370xa` | `MCC_ARCH_S370_XA` | `ANVIL_ARCH_S370_XA` | HLASM | IBM S/370-XA |
+| `s390` | `MCC_ARCH_S390` | `ANVIL_ARCH_S390` | HLASM | IBM S/390 |
+| `zarch`, `z` | `MCC_ARCH_ZARCH` | `ANVIL_ARCH_ZARCH` | HLASM | z/Architecture |
+| `ppc32`, `ppc` | `MCC_ARCH_PPC32` | `ANVIL_ARCH_PPC32` | GAS | PowerPC 32-bit |
+| `ppc64` | `MCC_ARCH_PPC64` | `ANVIL_ARCH_PPC64` | GAS | PowerPC 64-bit |
+| `ppc64le` | `MCC_ARCH_PPC64LE` | `ANVIL_ARCH_PPC64LE` | GAS | PowerPC 64-bit little-endian |
+| `arm64`, `aarch64` | `MCC_ARCH_ARM64` | `ANVIL_ARCH_ARM64` | GAS | ARM64 (Linux/AAPCS64) |
+| `arm64_macos`, `macos` | `MCC_ARCH_ARM64_MACOS` | `ANVIL_ARCH_ARM64` + Darwin ABI | GAS | ARM64 (Apple Silicon/macOS) |
+
+#### Backend maturity and the MachineIR pipeline
+
+The ANVIL x86 (32-bit), x86-64, and ARM64 backends that MCC targets are all
+built on ANVIL's MachineIR pipeline (MachineIR lowering, register allocation,
+spill/reload, then assembly emission). Because MCC only emits target-independent
+ANVIL IR, picking up these backends is purely a matter of selecting the target.
+
+These backends are multi-ABI inside ANVIL:
+
+- **x86-64**: System V (Linux), Darwin (macOS), and Win64.
+- **x86 (32-bit)**: cdecl, stdcall, and fastcall.
+- **ARM64**: AAPCS64 (Linux) and Darwin (selected by `arm64_macos`).
+
+Validation status for the targets MCC drives directly:
+
+- **x86-64**: validated by execution. `make test-exec` runs the 58 programs in
+  `tests/exec/` through MCC and compares their runtime output against the same
+  programs built with the native compiler (gcc/clang); all 58 pass on a 64-bit
+  host.
+- **x86 (32-bit)**: validated by building MCC output with `gcc -m32` and running
+  it, with the exception noted below.
+- **arm64 / ppc / mainframe (s370/s390/zarch)**: selectable and emit assembly
+  for their respective ABIs.
+
+For backend internals (MachineIR, register allocation, per-ABI calling
+conventions, instruction selection) see ANVIL's `doc/BACKENDS.md`; CODEGEN.md
+covers only the MCC-side IR construction.
+
+#### Known limitation: 64-bit integer arithmetic on 32-bit x86
+
+On the 32-bit `x86` target, ANVIL's backend legalizes 64-bit integers
+(`long long`, `i64`/`u64`) into lo/hi register pairs, but only a subset of
+operations is implemented for those pairs: loads, stores, comparisons,
+bitwise `AND`/`OR`/`XOR`, and integer constants. Runtime 64-bit *arithmetic*
+(`add`, `sub`, `mul`, and the shifts `shl`/`shr`/`sar`, as well as
+divide/modulo) is **not** supported for the i64 register pairs and causes
+lowering to fail. As a result, programs that perform runtime 64-bit math do not
+build on `-arch=x86`; this is why the `longlong_arith` execution test (which
+multiplies two `long long` values) is excluded on 32-bit. The same code works
+on `-arch=x86_64` and the other 64-bit targets.
 
 ## Code Generator API
 
@@ -188,18 +234,20 @@ C types are mapped to ANVIL types:
 | `long long` | `anvil_type_i64` or `anvil_type_u64` | 8 bytes |
 | `_Bool` | `anvil_type_u8` | 1 byte |
 | `float` | `anvil_type_f32` | 4 bytes |
-| `double` | `anvil_type_f64` | 8 bytes |
+| `double`, `long double` | `anvil_type_f64` | 8 bytes (`long double` is treated as `double`) |
 | `void` | `anvil_type_void` | 0 bytes |
 | `T*` | `anvil_type_ptr` | 4/8 bytes |
 | `T[N]` | `anvil_type_array` | `sizeof(T) * N` |
 | local VLA | `anvil_build_alloca_dyn` of element type | runtime count |
-| `struct S` / `union U` | `anvil_type_struct` | field layout from MCC type info |
+| `struct S` / `union U` | `anvil_type_struct` (anonymous bitfield padding fields skipped) | field layout from MCC type info |
 | function type | `anvil_type_func` and callable `ptr<func>` values | target pointer size |
+| `typedef` | unwrapped to its underlying type (`codegen_type_unwrap`) | per underlying type |
 
 ```c
 /* In src/codegen/codegen_type.c */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
+    type = codegen_type_unwrap(type);   /* resolve typedefs */
     if (!type) return anvil_type_i32(cg->anvil_ctx);
     
     switch (type->kind) {
@@ -412,42 +460,51 @@ case AST_WHILE_STMT: {
 ### Function Generation
 
 ```c
-static void mcc_codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func_decl)
+/* In src/codegen/codegen_decl.c */
+void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
 {
-    /* Create function type */
-    anvil_type_t *ret_type = codegen_type(cg, func_decl->data.func_decl.return_type);
-    anvil_type_t **param_types = /* ... */;
-    anvil_type_t *func_type = anvil_type_func(cg->anvil_ctx, ret_type, 
+    if (!func->data.func_decl.is_definition) return;  /* prototype only */
+
+    /* Build the function type (params, including struct/union by reference) */
+    anvil_type_t *ret_type = codegen_type(cg, func->data.func_decl.func_type);
+    anvil_type_t **param_types = /* codegen_param_type() per param ... */;
+    anvil_type_t *func_type = anvil_type_func(cg->anvil_ctx, ret_type,
                                                param_types, num_params, false);
-    
-    /* Create function */
-    anvil_func_t *func = anvil_func_create(cg->module, 
-                                            func_decl->data.func_decl.name,
-                                            func_type, ANVIL_LINK_EXTERNAL);
-    cg->current_func = func;
-    
-    /* Reset locals */
+
+    /* Create function; linkage follows the C `static` keyword */
+    anvil_linkage_t linkage = func->data.func_decl.is_static ?
+        ANVIL_LINK_INTERNAL : ANVIL_LINK_EXTERNAL;
+    cg->current_func = anvil_func_create(cg->anvil_mod, func->data.func_decl.name,
+                                          func_type, linkage);
+    cg->current_func_name = func->data.func_decl.name;  /* for __func__ */
+    cg->current_return_type = func->data.func_decl.func_type;
+
+    /* Make the entry block current */
+    anvil_block_t *entry = anvil_func_get_entry(cg->current_func);
+    codegen_set_current_block(cg, entry);
+
     cg->num_locals = 0;
-    
-    /* Create entry block */
-    anvil_block_t *entry = anvil_func_get_entry(func);
-    anvil_set_insert_point(cg->anvil_ctx, entry);
-    
-    /* Allocate and store parameters */
+    cg->num_labels = 0;
+
+    /* Materialize parameters as locals */
     for (int i = 0; i < num_params; i++) {
-        anvil_value_t *param = anvil_func_get_param(func, i);
-        anvil_type_t *type = param_types[i];
-        anvil_value_t *alloca = anvil_build_alloca(cg->anvil_ctx, type, 
-                                                    param_names[i]);
-        anvil_build_store(cg->anvil_ctx, param, alloca);
-        codegen_add_local(cg, param_names[i], alloca);
+        anvil_value_t *param = anvil_func_get_param(cg->current_func, i);
+        if (codegen_type_pass_by_reference(param_mcc_type)) {
+            /* struct/union args arrive as a pointer; use it directly */
+            codegen_add_local(cg, name, param);
+            continue;
+        }
+        /* Scalars get a stack slot so their address can be taken */
+        anvil_value_t *slot = anvil_build_alloca(cg->anvil_ctx, param_types[i], name);
+        anvil_build_store(cg->anvil_ctx, param, slot);
+        codegen_add_local(cg, name, slot);
     }
-    
+
     /* Generate function body */
-    codegen_stmt(cg, func_decl->data.func_decl.body);
-    
-    /* Add implicit return if needed */
-    if (!anvil_block_has_terminator(cg->current_block)) {
+    codegen_stmt(cg, func->data.func_decl.body);
+
+    /* Add implicit return if the last block has no terminator */
+    if (!codegen_block_has_terminator(cg)) {
         if (ret_type == anvil_type_void(cg->anvil_ctx)) {
             anvil_build_ret_void(cg->anvil_ctx);
         } else {
@@ -456,6 +513,10 @@ static void mcc_codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func_decl)
     }
 }
 ```
+
+Struct and union parameters are passed by reference: `codegen_param_type()`
+wraps them in `anvil_type_ptr`, and the incoming pointer value is registered
+directly as the local (no extra `alloca`/`store`).
 
 ## Local Variable Management
 
@@ -485,29 +546,26 @@ void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value
 
 ## Function Values and External Function Handling
 
-External functions (like `printf`) are declared on first use. ANVIL stores the canonical signature as `ANVIL_TYPE_FUNC`, while `anvil_func_get_value()` exposes a callable `ptr<func>` value for direct calls and function-pointer expressions:
+External functions (like `printf`) are declared on first use. ANVIL stores the canonical signature as `ANVIL_TYPE_FUNC`, while `anvil_func_get_value()` exposes a callable `ptr<func>` value for direct calls and function-pointer expressions. The cache lives in `cg->funcs` (keyed by `mcc_symbol_t*`), and declarations are created with `anvil_func_declare()`:
 
 ```c
-static anvil_value_t *get_or_declare_func_value(mcc_codegen_t *cg, mcc_symbol_t *sym)
+/* In src/codegen/codegen.c */
+anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym)
 {
-    /* Check if already declared */
-    for (size_t i = 0; i < cg->num_funcs; i++) {
-        if (cg->func_table[i].sym == sym) {
-            return anvil_func_get_value(cg->func_table[i].func);
-        }
-    }
-    
-    /* Declare new function */
+    /* Check if already declared/defined */
+    anvil_func_t *func = codegen_find_func(cg, sym);   /* scans cg->funcs */
+    if (func) return func;
+
+    /* Declare the function from its C type signature */
     anvil_type_t *func_type = codegen_type(cg, sym->type);
-    anvil_func_t *func = anvil_func_create(cg->module, sym->name,
-                                            func_type, ANVIL_LINK_EXTERNAL);
-    
-    /* Add to table */
-    /* ... */
-    
-    return anvil_func_get_value(func);
+    func = anvil_func_declare(cg->anvil_mod, sym->name, func_type);
+    codegen_add_func(cg, sym, func);   /* add to cg->funcs cache */
+
+    return func;
 }
 ```
+
+The callable value used at a call site or for a function-pointer expression is then obtained with `anvil_func_get_value(func)` (see `codegen_expr.c`).
 
 ## Generated Assembly Example
 

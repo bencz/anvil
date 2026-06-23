@@ -18,6 +18,29 @@ This directory contains detailed documentation for the MCC (Micro C Compiler) pr
 
 ## Quick Reference
 
+### Building
+
+MCC links against the parent ANVIL static library and is built with the
+modular Makefile (`Makefile` + `mk/*.mk`):
+
+```bash
+make            # build ./mcc (default target)
+make clean      # remove build artifacts and test outputs
+make install    # copy ./mcc to ../../bin/
+make help       # list all build and test targets
+```
+
+Build configuration lives in `mk/config.mk`:
+- `CC = gcc`, links `LDLIBS = $(ANVIL_ROOT)/lib/libanvil.a`
+- `CFLAGS = -Wall -Wextra -std=c99 -D_DEFAULT_SOURCE -g ...`
+
+`-D_DEFAULT_SOURCE` is required: under `-std=c99` the POSIX `strdup`
+prototype is not exposed by glibc, and this macro re-enables it without
+pulling in C11-only declarations (e.g. the C11 `assert`/`static_assert`
+macro). Source dirs (`include`, `src/preprocessor`, `src/lexer`,
+`src/parser`, `src/sema`, `src/codegen`, `src/opt`, `src/ast`) are added to
+the include path so the modular subsystems can share internal headers.
+
 ### Compilation Pipeline
 
 ```
@@ -48,7 +71,7 @@ All files share:
 
 | Structure | File | Purpose |
 |-----------|------|---------|
-| `mcc_context_t` | mcc.h | Compiler context, memory management, effective features |
+| `mcc_context_t` | mcc.h | Compiler context, chunked arena memory, effective features |
 | `mcc_c_std_t` | c_std.h | C language standard enum (C89, C99, etc.) |
 | `mcc_c_features_t` | c_std.h | Scalable feature set (256 features) |
 | `mcc_feature_id_t` | c_std.h | Feature identifier enum |
@@ -68,7 +91,7 @@ All files share:
 | File | Lines | Description |
 |------|-------|-------------|
 | `c_std.c` | ~500 | C language standards and feature system |
-| `context.c` | ~320 | Compiler context, feature checking, `mcc_arch_to_anvil()` |
+| `context.c` | ~345 | Compiler context, non-relocating chunked arena, feature checking, `mcc_arch_to_anvil()` |
 | `types.c` | ~600 | Type system with architecture-specific sizes from ANVIL |
 
 **Modular Components:**
@@ -77,7 +100,7 @@ All files share:
 |-----------|-------|-----------|
 | `src/ast/` | 3 files | Modular AST utilities and dump functions |
 | `src/lexer/` | 9 files | Modular lexer with C standard support |
-| `src/preprocessor/` | 6 files | Modular preprocessor with C standard support |
+| `src/preprocessor/` | 7 files | Modular preprocessor with C standard support |
 | `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
 | `src/opt/` | 10 files | Modular AST optimizer with multiple passes |
@@ -269,6 +292,12 @@ See [SEMA.md](SEMA.md) for detailed documentation of dump output.
 | PowerPC 64 LE | GAS | ELF little-endian |
 | ARM64 | GAS | AAPCS64 (Linux), currently the reference MachineIR backend path |
 | ARM64 macOS | GAS | Darwin ABI (Apple Silicon), currently the primary executable stress-test target on macOS |
+
+The target is selected with `-arch=<name>`. The driver (`parse_arch()` in
+`src/main.c`) accepts these names (aliases in parentheses):
+`x86`, `x86_64` (`x64`), `s370`, `s370_xa` (`s370xa`), `s390`, `zarch` (`z`),
+`ppc32` (`ppc`), `ppc64`, `ppc64le`, `arm64` (`aarch64`), `arm64_macos`
+(`macos`). The default when no `-arch=` is given is `x86_64`.
 
 ## For Assistants
 

@@ -4,7 +4,11 @@ This document describes the internal architecture of the ANVIL library.
 
 ## Overview
 
-ANVIL follows a classic compiler backend design with these main components:
+ANVIL follows a classic compiler backend design with these main components.
+User code builds source IR; the IR is verified and optimized, then each backend
+lowers it through a shared, target-independent **MachineIR** layer (virtual
+registers, fixed/ABI registers, frame/spill slots) before register allocation,
+spill materialization, and assembly emission.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -47,6 +51,12 @@ ANVIL follows a classic compiler backend design with these main components:
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
+│                  Verifier (src/core/verify.c)                        │
+│         anvil_module_verify() validates source IR before codegen     │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
 │                   Pass Manager (anvil_pass_manager_t)                │
 │                                                                      │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
@@ -57,6 +67,7 @@ ANVIL follows a classic compiler backend design with these main components:
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      Backend (anvil_backend_t)                       │
+│            prepare_ir (lower) → codegen_module (emit)                │
 │                                                                      │
 │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐  │
 │  │ x86  │ │x86-64│ │S/370 │ │S/390 │ │z/Arch│ │ PPC  │ │ARM64 │  │
@@ -65,8 +76,28 @@ ANVIL follows a classic compiler backend design with these main components:
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
+│        MachineIR (src/machine: vregs, fixed/ABI regs, frame/spill)  │
+│        linear-scan regalloc → copy coalescing → spill materialize    │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
 │                      Assembly Output (Text)                          │
 └─────────────────────────────────────────────────────────────────────┘
+```
+
+### Compilation Pipeline
+
+`anvil_module_codegen()` (in `src/core/module.c`) drives the end-to-end flow:
+
+```
+source IR build                       (anvil_build_* functions)
+    → verify        (src/core/verify.c: anvil_module_verify)
+    → optimize      (src/opt: anvil_module_optimize / pass manager)
+    → backend prepare_ir / lower      (source IR → MachineIR)
+    → register allocation             (src/machine: linear-scan)
+    → spill materialization + copy coalescing
+    → emit          (codegen_module → target assembly text)
 ```
 
 ## Core Data Structures
@@ -290,31 +321,49 @@ char *anvil_strbuf_detach(anvil_strbuf_t *sb, size_t *len);
 
 ## Backend System
 
+ANVIL has a single, unified backend path. Every in-tree backend lowers source
+IR into the shared, target-independent **MachineIR** (`src/machine`), runs
+linear-scan register allocation and spill materialization, then emits assembly
+text. The architecture-specific details (calling conventions, register sets,
+syntax) live in `BACKENDS.md` and the per-architecture docs.
+
 ### Backend Interface
 
-Each backend implements the `anvil_backend_ops_t` interface:
+Each backend implements the `anvil_backend_ops_t` interface (defined in
+`include/anvil/anvil.h`):
 
 ```c
-typedef struct {
+typedef struct anvil_backend_ops {
     const char *name;              // Backend name
     anvil_arch_t arch;             // Target architecture
-    
+
     // Initialize backend
     anvil_error_t (*init)(anvil_backend_t *be, anvil_ctx_t *ctx);
-    
+
     // Cleanup backend
     void (*cleanup)(anvil_backend_t *be);
-    
+
+    // Reset backend state (clear cached pointers to IR values)
+    void (*reset)(anvil_backend_t *be);
+
+    // Prepare/lower IR for code generation (optional). Called before
+    // codegen_module for target-specific lowering, legalization, and the
+    // MachineIR lowering + register allocation step.
+    anvil_error_t (*prepare_ir)(anvil_backend_t *be, anvil_module_t *mod);
+
     // Generate code for entire module
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
-    
+
     // Generate code for single function
     anvil_error_t (*codegen_func)(anvil_backend_t *be, anvil_func_t *func,
                                    char **output, size_t *len);
-    
+
     // Get architecture info
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
+
+    // Backend-private static data
+    void *priv;
 } anvil_backend_ops_t;
 ```
 
@@ -324,103 +373,95 @@ typedef struct {
 struct anvil_backend {
     const anvil_backend_ops_t *ops; // Backend operations
     anvil_ctx_t *ctx;               // Parent context
-    void *priv;                     // Backend-private data
+    anvil_syntax_t syntax;          // Selected assembly syntax
+    void *priv;                     // Backend-private instance data
 };
 ```
 
 ### Backend Registration
 
-Backends are registered at library initialization:
+Built-in backends are registered once at first use via `pthread_once`
+(`src/core/backend.c`):
 
 ```c
-// In backend.c
-static const anvil_backend_ops_t *backends[] = {
-    &anvil_backend_x86,
-    &anvil_backend_x86_64,
-    &anvil_backend_s370,
-    &anvil_backend_s370_xa,
-    &anvil_backend_s390,
-    &anvil_backend_zarch,
-    &anvil_backend_ppc32,
-    &anvil_backend_ppc64,
-    &anvil_backend_ppc64le,
-    &anvil_backend_arm64,
-};
-
-const anvil_backend_ops_t *anvil_get_backend(anvil_arch_t arch) {
-    for (size_t i = 0; i < sizeof(backends)/sizeof(backends[0]); i++) {
-        if (backends[i]->arch == arch) {
-            return backends[i];
-        }
-    }
-    return NULL;
+static void register_builtin_backends(void) {
+    anvil_register_backend(&anvil_backend_x86);
+    anvil_register_backend(&anvil_backend_x86_64);
+    anvil_register_backend(&anvil_backend_s370);
+    anvil_register_backend(&anvil_backend_s370_xa);
+    anvil_register_backend(&anvil_backend_s390);
+    anvil_register_backend(&anvil_backend_zarch);
+    anvil_register_backend(&anvil_backend_ppc32);
+    anvil_register_backend(&anvil_backend_ppc64);
+    anvil_register_backend(&anvil_backend_ppc64le);
+    anvil_register_backend(&anvil_backend_arm64);
 }
 ```
+
+`anvil_register_backend()` appends to a registry (guarded by a mutex, so
+out-of-tree backends can be added). `anvil_get_backend(ctx, arch)` looks up the
+ops for an architecture and constructs an initialized `anvil_backend_t`
+instance.
 
 ## Code Generation Flow
 
 ### Module Code Generation
 
+`anvil_module_codegen()` verifies and optimizes the module, then runs the
+backend's two-stage path (`prepare_ir`/lower followed by `codegen_module`):
+
 ```
 anvil_module_codegen(mod, &output, &len)
     │
-    ├── Get backend from context
+    ├── anvil_module_verify(mod, ...)         (src/core/verify.c)
+    │       └── reject malformed source IR before any codegen
     │
-    ├── Call backend->ops->codegen_module(be, mod, &output, &len)
-    │       │
-    │       ├── Emit module header (CSECT, directives, etc.)
-    │       │
-    │       ├── For each function:
-    │       │       │
-    │       │       ├── Emit function prologue
-    │       │       │
-    │       │       ├── For each block:
-    │       │       │       │
-    │       │       │       ├── Emit block label
-    │       │       │       │
-    │       │       │       └── For each instruction:
-    │       │       │               │
-    │       │       │               └── Emit instruction
-    │       │       │
-    │       │       └── (Epilogue emitted by RET instruction)
-    │       │
-    │       ├── Emit data section (globals, save areas, etc.)
-    │       │
-    │       └── Emit footer (LTORG, END, etc.)
+    ├── anvil_module_optimize(mod)            (src/opt pass manager)
     │
-    └── Return output string
+    ├── backend->ops->prepare_ir(be, mod)     (optional, per backend)
+    │       └── lower source IR → MachineIR; legalize; regalloc; spill
+    │
+    └── backend->ops->codegen_module(be, mod, &output, &len)
+            │
+            ├── Emit module header (CSECT, directives, .text, etc.)
+            │
+            ├── For each function:
+            │       ├── Emit prologue (frame size from MachineIR slots)
+            │       ├── For each MachineIR block: emit label + instructions
+            │       │     using the register-allocator's assignments
+            │       └── Emit epilogue
+            │
+            ├── Emit data section (globals, string literals, save areas)
+            │
+            └── Emit footer (LTORG, END, etc.)
 ```
 
-### Instruction Emission
+### MachineIR Lowering and Emission
 
-Each backend has an `emit_instr` function that handles all IR operations:
+All in-tree backends share the MachineIR infrastructure in `src/machine`
+(`machine_ir.c`, `regalloc.c`; public API in
+`include/anvil/anvil_machine.h`). The backend-specific lowering file
+(`*_mir.c`) drives the per-function pipeline:
 
-```c
-static void backend_emit_instr(backend_t *be, anvil_instr_t *instr)
-{
-    switch (instr->op) {
-        case ANVIL_OP_ADD:
-            // Load operands to registers
-            emit_load_value(be, instr->operands[0], REG_A);
-            emit_load_value(be, instr->operands[1], REG_B);
-            // Emit add instruction
-            emit("ADD REG_A, REG_B");
-            // Result is in REG_A (or wherever convention dictates)
-            break;
-            
-        case ANVIL_OP_RET:
-            // Load return value to return register
-            if (instr->num_operands > 0) {
-                emit_load_value(be, instr->operands[0], REG_RETURN);
-            }
-            // Emit epilogue
-            emit_epilogue(be);
-            break;
-            
-        // ... other operations
-    }
-}
 ```
+For each source function:
+    1. Lower source IR ops to MachineIR ops over virtual registers
+       (anvil_mir_add_instr*, frame slots, string literals).
+    2. Pin ABI/fixed registers (params, returns, call args/results)
+       with anvil_mir_set_fixed_reg.
+    3. anvil_mir_coalesce_copies   - remove redundant copies.
+    4. anvil_regalloc_linear_scan_classes - per-class linear-scan
+       allocation (GPR/FPR), producing phys-reg or spill-slot assignments.
+    5. anvil_mir_materialize_spills - insert spill load/store using
+       scratch registers reserved per class.
+    6. Walk allocated MachineIR and emit target assembly text.
+```
+
+The vreg/op model is target-independent: `anvil_mir_vreg_info_t` carries a
+register class (GPR/FPR/FLAGS/SPECIAL), bit width, signedness, and an optional
+fixed physical register; instructions are SSA-like `(opcode, def, uses[],
+imm/symbol)` tuples. This is why adding a backend is largely a matter of
+writing a lowering + emission `*_mir.c` plus a target/ABI descriptor.
 
 ## SSA Form
 
@@ -456,43 +497,60 @@ merge:
 ```
 src/
 ├── core/
-│   ├── context.c      # Context management
+│   ├── context.c      # Context management, target/CPU/ABI selection
 │   ├── types.c        # Type system
-│   ├── module.c       # Module management
+│   ├── module.c       # Module management + codegen pipeline driver
 │   ├── function.c     # Function management
 │   ├── value.c        # Value/instruction creation
 │   ├── builder.c      # IR builder
+│   ├── verify.c       # Source IR verifier (run before codegen)
+│   ├── ir_dump.c      # IR debug/dump (anvil_print_module, etc.)
+│   ├── cpu_table.c    # CPU model / feature tables
 │   ├── strbuf.c       # String buffer utilities
-│   ├── backend.c      # Backend registry
-│   └── memory.c       # Memory management
+│   └── backend.c      # Backend registry
+│
+├── machine/           # Target-independent MachineIR + register allocation
+│   ├── machine_ir.c   # MachineIR container (vregs, blocks, slots, coalesce)
+│   ├── regalloc.c     # Linear-scan allocation + spill materialization
+│   └── machine_internal.h
+│
+├── opt/               # Optimization passes (see OPTIMIZATION.md)
+│   ├── opt.c          # Pass manager
+│   ├── const_fold.c, dce.c, copy_prop.c, cse.c,
+│   ├── dead_store.c, load_elim.c, store_load_prop.c,
+│   ├── simplify_cfg.c, strength_reduce.c, ctx_opt.c
 │
 └── backend/
-    ├── x86/
-    │   └── x86.c      # x86 32-bit backend
-    ├── x86_64/
-    │   └── x86_64.c   # legacy/incomplete direct x86-64 backend
-    ├── s370/
-    │   └── s370.c     # IBM S/370 backend (24-bit)
-    ├── s370_xa/
-    │   └── s370_xa.c  # IBM S/370-XA backend (31-bit)
-    ├── s390/
-    │   └── s390.c     # IBM S/390 backend (31-bit)
-    ├── zarch/
-    │   └── zarch.c    # IBM z/Architecture backend (64-bit)
-    ├── ppc32/
-    │   └── ppc32.c    # PowerPC 32-bit backend (big-endian)
-    ├── ppc64/
-    │   └── ppc64.c    # PowerPC 64-bit backend (big-endian)
-    ├── ppc64le/
-    │   └── ppc64le.c  # PowerPC 64-bit backend (little-endian)
+    ├── common/
+    │   └── anvil_slot_map.h    # shared slot-mapping helper
+    ├── x86/                    # x86 32-bit (MachineIR-based)
+    │   ├── x86.c               # backend ops / lifecycle
+    │   ├── x86_helpers.c, x86_internal.h
+    │   └── x86_mir.c           # source IR → MachineIR lowering + emit
+    ├── x86_64/                 # x86-64 (MachineIR-based)
+    │   ├── x86_64.c
+    │   ├── x86_64_helpers.c, x86_64_internal.h
+    │   └── x86_64_mir.c        # source IR → MachineIR lowering + emit
+    ├── s370/    s370.c         # IBM S/370 dispatcher → mainframe_mir
+    ├── s370_xa/ s370_xa.c      # IBM S/370-XA dispatcher → mainframe_mir
+    ├── s390/    s390.c         # IBM S/390 dispatcher → mainframe_mir
+    ├── zarch/   zarch.c        # IBM z/Architecture dispatcher → mainframe_mir
+    ├── ppc32/   ppc32.c        # PowerPC 32-bit dispatcher → ppc_mir
+    ├── ppc64/   ppc64.c        # PowerPC 64-bit BE dispatcher → ppc_mir
+    ├── ppc64le/ ppc64le.c      # PowerPC 64-bit LE dispatcher → ppc_mir
     ├── ppc/
-    │   └── ppc_mir.c  # shared PowerPC MachineIR backend
+    │   └── ppc_mir.c           # shared PowerPC MachineIR backend
     ├── mainframe/
-    │   └── mainframe_mir.c # shared IBM mainframe MachineIR backend
+    │   └── mainframe_mir.c     # shared IBM mainframe MachineIR backend
     └── arm64/
-        ├── arm64.c
-        └── arm64_mir.c # reference MachineIR backend
+        ├── arm64.c, arm64_helpers.c, arm64_internal.h
+        ├── arm64_mir.c         # reference MachineIR backend
+        └── opt/                # ARM64 peephole / branch opt passes
 ```
+
+The thin per-architecture `*.c` files (e.g. `s370.c`, `ppc32.c`, `x86.c`)
+provide the `anvil_backend_ops_t` and delegate the real lowering/emission to the
+shared or per-target `*_mir.c` translation units.
 
 ## Supported Architectures
 
@@ -514,9 +572,12 @@ ANVIL supports the following target architectures:
 ### Architecture-Specific Features
 
 **x86/x86-64:**
-- Multiple syntax options: GAS (AT&T), NASM, MASM
-- System V and Windows ABIs supported
-- Older direct source-IR emitters; incomplete and not the reference path for new work
+- Rewritten to lower through the shared MachineIR/regalloc path (no longer
+  legacy direct source-IR emitters); see `x86_mir.c` / `x86_64_mir.c`
+- x86 (32-bit): cdecl, stdcall, and fastcall calling conventions; 64-bit
+  integers legalized into lo/hi register pairs
+- x86-64: System V and Windows x64 ABIs via target/ABI descriptors
+- See `BACKENDS.md` for register sets, syntax, and ABI specifics
 
 **IBM Mainframe (S/370, S/390, z/Architecture):**
 - HLASM syntax output
@@ -558,12 +619,16 @@ ANVIL supports the following target architectures:
 3. **Register Allocation**: Simplifies liveness analysis
 4. **Industry Standard**: Similar to LLVM IR
 
-### Why Separate Backends?
+### Why a Shared MachineIR Path?
 
-1. **Modularity**: Each backend is self-contained
-2. **Extensibility**: Easy to add new architectures
-3. **Maintainability**: Changes to one backend don't affect others
-4. **Specialization**: Each backend can optimize for its target
+1. **Reuse**: Register allocation, spilling, and copy coalescing are written
+   once in `src/machine` and shared by every backend
+2. **Consistency**: All targets (x86, x86-64, PPC, mainframe, ARM64) follow the
+   same lower → allocate → emit flow
+3. **Extensibility**: A new architecture is mostly a lowering + emission
+   `*_mir.c` plus a target/ABI descriptor
+4. **Specialization**: Per-target descriptors and emission still let each
+   backend honor its own ABI, syntax, and instruction set
 
 ## Optimization Infrastructure
 
@@ -656,6 +721,18 @@ struct anvil_pass_manager {
 | `src/opt/simplify_cfg.c` | CFG simplification, including `switch` reachability and target rewrites |
 | `src/opt/strength_reduce.c` | Strength reduction |
 | `src/opt/ctx_opt.c` | Context integration |
+
+## Build Environment
+
+ANVIL builds with a C11 toolchain. The top-level `Makefile` compiles with:
+
+```
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O2
+```
+
+`-D_GNU_SOURCE` is required because the codebase uses `strdup()`, which is not
+exposed by the strict `-std=c11` (ISO C) feature set. See `HACKING.md` for the
+full build and test workflow.
 
 ## Thread Safety
 

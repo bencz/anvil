@@ -48,8 +48,8 @@ anvil_module_codegen(mod, &output, &len);
 
 | Architecture | Enum Value | Bits | Endian | Stack | FP Format | ABI |
 |--------------|------------|------|--------|-------|-----------|-----|
-| x86 | `ANVIL_ARCH_X86` | 32 | Little | Down | IEEE 754 | System V |
-| x86-64 | `ANVIL_ARCH_X86_64` | 64 | Little | Down | IEEE 754 | System V |
+| x86 | `ANVIL_ARCH_X86` | 32 | Little | Down | IEEE 754 | cdecl / stdcall / fastcall |
+| x86-64 | `ANVIL_ARCH_X86_64` | 64 | Little | Down | IEEE 754 | System V / Win64 |
 | S/370 | `ANVIL_ARCH_S370` | 24 | Big | Up | HFP | MVS |
 | S/370-XA | `ANVIL_ARCH_S370_XA` | 31 | Big | Up | HFP | MVS |
 | S/390 | `ANVIL_ARCH_S390` | 31 | Big | Up | HFP | MVS |
@@ -66,8 +66,16 @@ anvil_module_codegen(mod, &output, &len);
 
 **ABI Legend:**
 - **System V**: Standard Unix/Linux ABI (ELF)
+- **Win64**: Windows x64 ABI (x86-64) - use `anvil_ctx_set_abi(ctx, ANVIL_ABI_WIN64)`
+- **cdecl / stdcall / fastcall**: 32-bit x86 calling conventions
 - **Darwin**: macOS/Apple ABI (Mach-O, underscore prefix) - use `anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN)`
 - **MVS**: IBM z/OS ABI
+
+> **Code generation:** all backends (x86, x86-64, IBM mainframe, PowerPC, and
+> ARM64) share the target-independent MachineIR + linear-scan register
+> allocator in `src/machine`. The pipeline is: build source IR → verify →
+> optimize → backend lower to MachineIR → register allocation → emit assembly.
+> See [ARCHITECTURE.md](ARCHITECTURE.md) and [BACKENDS.md](BACKENDS.md).
 
 ### Type Quick Reference
 

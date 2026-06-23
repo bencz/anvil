@@ -30,18 +30,28 @@ The semantic analyzer is organized into modular files in `src/sema/`:
 ## Semantic Analyzer Structure
 
 ```c
-typedef struct mcc_sema {
+struct mcc_sema {
     mcc_context_t *ctx;
     mcc_symtab_t *symtab;
     mcc_type_context_t *types;
-    
+
     /* Current function context */
     mcc_symbol_t *current_func;
     mcc_type_t *current_return_type;
-    int loop_depth;             /* For break/continue validation */
-    int switch_depth;           /* For case/default validation */
-} mcc_sema_t;
+
+    /* Loop/switch nesting for break/continue/case validation */
+    int loop_depth;
+    int switch_depth;
+
+    /* Label tracking (forward goto resolution) */
+    mcc_symbol_t **pending_gotos;
+    size_t num_pending_gotos;
+};
 ```
+
+`break`/`continue` and `case`/`default` placement are validated against the
+`loop_depth`/`switch_depth` counters (incremented when entering loops/switches),
+not boolean flags.
 
 ## C Standard Feature Checks
 
@@ -76,70 +86,116 @@ The symbol table tracks all declared identifiers:
 
 ```c
 typedef enum {
-    SYM_VAR,        /* Variable */
-    SYM_FUNC,       /* Function */
-    SYM_TYPE,       /* typedef name */
-    SYM_ENUM_CONST, /* Enumeration constant */
-    SYM_LABEL       /* goto label */
-} mcc_symbol_kind_t;
+    SYM_VAR,            /* Variable */
+    SYM_FUNC,           /* Function */
+    SYM_PARAM,          /* Function parameter */
+    SYM_TYPEDEF,        /* Typedef name */
+    SYM_STRUCT,         /* Struct tag */
+    SYM_UNION,          /* Union tag */
+    SYM_ENUM,           /* Enum tag */
+    SYM_ENUM_CONST,     /* Enum constant */
+    SYM_LABEL,          /* Label (goto target) */
+    SYM_COUNT
+} mcc_sym_kind_t;
 
-typedef struct mcc_symbol {
+struct mcc_symbol {
+    mcc_sym_kind_t kind;
     const char *name;
     mcc_type_t *type;
-    mcc_symbol_kind_t kind;
+    mcc_location_t location;        /* Where the symbol was declared */
     mcc_storage_class_t storage;
-    int scope_level;
-    mcc_location_t def_loc;
-    struct mcc_symbol *next;    /* Hash chain */
-} mcc_symbol_t;
 
-typedef struct mcc_symtab {
+    /* Variables: stack offset or global name; enum constants: value */
+    union {
+        int stack_offset;
+        const char *global_name;
+        int enum_value;
+    } data;
+
+    bool is_defined;                /* Has a definition (vs just a declaration) */
+    bool is_used;                   /* Has been referenced */
+    bool is_parameter;              /* Is a function parameter */
+
+    mcc_ast_node_t *ast_node;       /* For functions with bodies */
+    mcc_symbol_t *next;             /* Hash chain */
+};
+```
+
+The symbol table is **scope-chain based**, not a single global hash table. Each scope
+owns three separate namespaces — ordinary symbols, tags (struct/union/enum), and labels:
+
+```c
+struct mcc_scope {
+    mcc_scope_t *parent;            /* Enclosing scope */
+
+    mcc_symbol_t **symbols;         /* Ordinary symbol hash table */
+    size_t table_size, num_symbols;
+
+    mcc_symbol_t **tags;            /* struct/union/enum tag namespace */
+    size_t tag_table_size, num_tags;
+
+    mcc_symbol_t **labels;          /* Label namespace (function scope only) */
+    size_t label_table_size, num_labels;
+
+    int depth;                      /* Nesting depth */
+    bool is_file_scope;             /* Global scope */
+    bool is_function_scope;         /* Function body scope */
+    bool is_block_scope;            /* Block scope */
+    int stack_offset;               /* Current stack offset for locals */
+};
+
+struct mcc_symtab {
     mcc_context_t *ctx;
-    mcc_symbol_t **buckets;
-    size_t num_buckets;
-    int current_scope;
-} mcc_symtab_t;
+    mcc_scope_t *current;           /* Current (innermost) scope */
+    mcc_scope_t *global;            /* Global/file scope */
+    mcc_type_context_t *types;
+};
 ```
 
 ## Scope Management
 
-Scopes are managed with a scope level counter:
+Scopes form a linked chain. Pushing a scope allocates a new `mcc_scope_t` whose
+`parent` points at the previous scope; popping restores the parent. Lookups walk the
+chain outward from the current scope.
 
 ```c
-void mcc_symtab_push_scope(mcc_symtab_t *tab)
-{
-    tab->current_scope++;
-}
+/* Enter a block scope / function-body scope; leave the current scope */
+void mcc_symtab_push_scope(mcc_symtab_t *symtab);
+void mcc_symtab_push_function_scope(mcc_symtab_t *symtab);  /* also enables the label namespace */
+void mcc_symtab_pop_scope(mcc_symtab_t *symtab);
 
-void mcc_symtab_pop_scope(mcc_symtab_t *tab)
-{
-    /* Remove all symbols at current scope */
-    for (size_t i = 0; i < tab->num_buckets; i++) {
-        mcc_symbol_t **pp = &tab->buckets[i];
-        while (*pp) {
-            if ((*pp)->scope_level == tab->current_scope) {
-                *pp = (*pp)->next;
-            } else {
-                pp = &(*pp)->next;
-            }
-        }
-    }
-    tab->current_scope--;
-}
+mcc_scope_t *mcc_symtab_current_scope(mcc_symtab_t *symtab);
+bool mcc_symtab_is_global_scope(mcc_symtab_t *symtab);
 ```
 
 ## Symbol Operations
 
 ```c
-/* Define a new symbol */
-mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *tab, const char *name,
-                                 mcc_type_t *type, mcc_symbol_kind_t kind);
+/* Define a new symbol in the current scope */
+mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
+                                 mcc_sym_kind_t kind, mcc_type_t *type,
+                                 mcc_location_t loc);
 
-/* Look up a symbol (searches all scopes) */
-mcc_symbol_t *mcc_symtab_lookup(mcc_symtab_t *tab, const char *name);
+/* Look up a symbol (searches the scope chain outward) */
+mcc_symbol_t *mcc_symtab_lookup(mcc_symtab_t *symtab, const char *name);
 
-/* Look up in current scope only */
-mcc_symbol_t *mcc_symtab_lookup_local(mcc_symtab_t *tab, const char *name);
+/* Look up in the current scope only */
+mcc_symbol_t *mcc_symtab_lookup_current(mcc_symtab_t *symtab, const char *name);
+
+/* Tag namespace (struct/union/enum) */
+mcc_symbol_t *mcc_symtab_define_tag(mcc_symtab_t *symtab, const char *name,
+                                     mcc_sym_kind_t kind, mcc_type_t *type,
+                                     mcc_location_t loc);
+mcc_symbol_t *mcc_symtab_lookup_tag(mcc_symtab_t *symtab, const char *name);
+mcc_symbol_t *mcc_symtab_lookup_tag_current(mcc_symtab_t *symtab, const char *name);
+
+/* Label namespace (function scope) */
+mcc_symbol_t *mcc_symtab_define_label(mcc_symtab_t *symtab, const char *name,
+                                       mcc_location_t loc);
+mcc_symbol_t *mcc_symtab_lookup_label(mcc_symtab_t *symtab, const char *name);
+
+/* Typedef check used by the parser */
+bool mcc_symtab_is_typedef(mcc_symtab_t *symtab, const char *name);
 ```
 
 ## Semantic Analysis API
@@ -294,10 +350,9 @@ static void analyze_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
                 mcc_error_at(sema->ctx, stmt->location,
                              "Condition must be scalar type");
             }
-            bool old_in_loop = sema->in_loop;
-            sema->in_loop = true;
+            sema->loop_depth++;
             analyze_stmt(sema, stmt->data.while_stmt.body);
-            sema->in_loop = old_in_loop;
+            sema->loop_depth--;
             break;
         }
         
@@ -319,16 +374,16 @@ static void analyze_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
         }
         
         case AST_BREAK_STMT:
-            if (!sema->in_loop && !sema->in_switch) {
+            if (sema->loop_depth == 0 && sema->switch_depth == 0) {
                 mcc_error_at(sema->ctx, stmt->location,
-                             "Break statement not within loop or switch");
+                             "break statement outside of loop or switch");
             }
             break;
             
         case AST_CONTINUE_STMT:
-            if (!sema->in_loop) {
+            if (sema->loop_depth == 0) {
                 mcc_error_at(sema->ctx, stmt->location,
-                             "Continue statement not within loop");
+                             "continue statement outside of loop");
             }
             break;
             
@@ -344,17 +399,15 @@ static void analyze_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
     switch (decl->kind) {
         case AST_VAR_DECL: {
-            /* Check for redefinition */
-            mcc_symbol_t *existing = mcc_symtab_lookup_local(sema->symtab,
-                                                              decl->data.var_decl.name);
-            if (existing) {
-                mcc_error_at(sema->ctx, decl->location,
-                             "Redefinition of '%s'", decl->data.var_decl.name);
-            }
-            
-            /* Define symbol */
+            /* Check for redefinition (current scope only); redefinition is
+               reported inside mcc_symtab_define itself */
+            mcc_symbol_t *existing = mcc_symtab_lookup_current(sema->symtab,
+                                                               decl->data.var_decl.name);
+            (void)existing;
+
+            /* Define symbol: (symtab, name, kind, type, location) */
             mcc_symtab_define(sema->symtab, decl->data.var_decl.name,
-                              decl->data.var_decl.var_type, SYM_VAR);
+                              SYM_VAR, decl->data.var_decl.var_type, decl->location);
             
             /* Analyze initializer */
             if (decl->data.var_decl.init) {
@@ -368,17 +421,18 @@ static void analyze_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
             /* Define function symbol */
             mcc_type_t *func_type = /* build function type */;
             mcc_symtab_define(sema->symtab, decl->data.func_decl.name,
-                              func_type, SYM_FUNC);
+                              SYM_FUNC, func_type, decl->location);
             
             if (decl->data.func_decl.body) {
-                /* Enter function scope */
-                mcc_symtab_push_scope(sema->symtab);
+                /* Enter function scope (enables the label namespace) */
+                mcc_symtab_push_function_scope(sema->symtab);
                 
                 /* Define parameters */
                 for (size_t i = 0; i < decl->data.func_decl.num_params; i++) {
                     mcc_ast_node_t *param = decl->data.func_decl.params[i];
                     mcc_symtab_define(sema->symtab, param->data.param_decl.name,
-                                      param->data.param_decl.param_type, SYM_VAR);
+                                      SYM_PARAM, param->data.param_decl.param_type,
+                                      param->location);
                 }
                 
                 /* Set return type context */
@@ -623,19 +677,24 @@ if (mcc_type_is_pointer(lhs) && rhs->kind == TYPE_FUNCTION) {
 }
 ```
 
-### Anonymous Bitfield Field Lookup
+### Anonymous Field Lookup
 
-The `mcc_type_find_field` function now skips anonymous bitfield padding fields:
+The `mcc_type_find_field` function skips anonymous bitfield padding but recurses into
+anonymous struct/union members (C11), so a member can be found through the outer type:
 
 ```c
 /* In types.c - mcc_type_find_field() */
 mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
 {
     for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
-        /* Skip anonymous fields (bitfield padding) */
-        if (!f->name) continue;
-        if (strcmp(f->name, name) == 0) {
-            return f;
+        if (f->name) {
+            if (strcmp(f->name, name) == 0) return f;
+            continue;
+        }
+        /* Anonymous struct/union member: recurse; bitfield padding bails out */
+        if (f->type && (f->type->kind == TYPE_STRUCT || f->type->kind == TYPE_UNION)) {
+            mcc_struct_field_t *inner = mcc_type_find_field(f->type, name);
+            if (inner) return inner;
         }
     }
     return NULL;
@@ -686,6 +745,9 @@ void mcc_sema_dump_verbose(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out);
 
 /* Symbol table only */
 void mcc_sema_dump_symtab(mcc_sema_t *sema, FILE *out);
+
+/* Global-scope symbols only */
+void mcc_sema_dump_globals(mcc_sema_t *sema, FILE *out);
 ```
 
 ### Information Dumped

@@ -7,14 +7,19 @@ This document describes the C language standards supported by MCC and their diff
 | Standard | Flag | Description | Aliases |
 |----------|------|-------------|---------|
 | C89 | `-std=c89` | ANSI C (X3.159-1989) | |
-| C90 | `-std=c90` | ISO C (ISO/IEC 9899:1990) | `iso9899:1990` |
-| C99 | `-std=c99` | ISO C99 (ISO/IEC 9899:1999) | `c9x`, `iso9899:1999` |
-| C11 | `-std=c11` | ISO C11 (ISO/IEC 9899:2011) | `c1x`, `iso9899:2011` |
-| C17 | `-std=c17` | ISO C17 (ISO/IEC 9899:2018) | `c18`, `iso9899:2017` |
+| C90 | `-std=c90` | ISO C (ISO/IEC 9899:1990) | `iso9899:1990`, `iso9899:199409` |
+| C99 | `-std=c99` | ISO C99 (ISO/IEC 9899:1999) | `iso9899:1999` |
+| C11 | `-std=c11` | ISO C11 (ISO/IEC 9899:2011) | `iso9899:2011` |
+| C17 | `-std=c17` | ISO C17 (ISO/IEC 9899:2018) | `c18`, `iso9899:2017`, `iso9899:2018` |
 | C23 | `-std=c23` | ISO C23 (ISO/IEC 9899:2024) | `c2x` |
 | GNU89 | `-std=gnu89` | GNU dialect of C89 | `gnu90` |
 | GNU99 | `-std=gnu99` | GNU dialect of C99 | `gnu9x` |
 | GNU11 | `-std=gnu11` | GNU dialect of C11 | `gnu1x` |
+
+The default when no `-std=` is given is **C89** (`MCC_STD_DEFAULT` resolves to C89).
+Standard-name matching is case-insensitive, and a leading `-std=` is accepted and
+stripped. Note the `mcc -help` text only advertises `c89, c90, c99, gnu89, gnu99`,
+but the full set above (including C11/C17/C23 and their GNU variants) is accepted.
 
 ## C89/C90 Features (Baseline)
 
@@ -150,6 +155,8 @@ __STDC_UTF_32__     /* 1 if char32_t is UTF-32 */
 __STDC__            /* Always 1 */
 __STDC_VERSION__    /* 201710L */
 __STDC_HOSTED__     /* 1 for hosted implementation */
+__STDC_UTF_16__     /* 1 */
+__STDC_UTF_32__     /* 1 */
 ```
 
 ### C23
@@ -157,6 +164,18 @@ __STDC_HOSTED__     /* 1 for hosted implementation */
 __STDC__            /* Always 1 */
 __STDC_VERSION__    /* 202311L */
 __STDC_HOSTED__     /* 1 for hosted implementation */
+__STDC_UTF_16__     /* 1 */
+__STDC_UTF_32__     /* 1 */
+```
+
+### GNU variants
+```c
+/* gnu89 */
+__STDC__            /* 1 */
+__GNUC__            /* 4 */
+__GNUC_MINOR__      /* 0 */
+
+/* gnu99 / gnu11 also define __STDC_VERSION__ (199901L) in addition to the above */
 ```
 
 ## Feature System
@@ -311,7 +330,7 @@ Features are organized into 4 words (256 total features):
 ### Check current standard
 ```bash
 ./mcc -v -std=c99 input.c
-# Output: Using C standard: c99 (ISO/IEC 9899:1999)
+# Output: C standard: c99 (ISO/IEC 9899:1999)
 ```
 
 ## Implementation Status
@@ -364,10 +383,28 @@ Features are organized into 4 words (256 total features):
 - [x] `true` / `false` keywords
 
 ### GNU Extensions - Partial
-- [x] `__attribute__` (parsing only)
-- [ ] Inline assembly
-- [ ] Statement expressions
-- [x] `__typeof__` (alias for typeof)
+- [x] `__attribute__` (parsed; tolerantly consumed)
+- [x] Case ranges (`case 1 ... 5:`) — parsed and compiled
+- [x] `__typeof__` (alias for `typeof`)
+- [x] Labels as values (`&&label`) / computed goto — parsed
+- [~] Statement expressions (`({ ... })`) — parsed, but not fully working in codegen
+- [ ] Inline assembly (`asm` is lexed/parsed; no real codegen)
+
+## Test Suite
+
+The `tests/` directory exercises the standards above. Coverage is organized per
+standard plus cross-standard and execution tests:
+
+| Directory | Focus |
+|-----------|-------|
+| `tests/c89/` | Baseline ANSI C: `types`, `operators`, `control_flow`, `functions`, `structs`, `typedef`, and preprocessor (`pp_macros`, `pp_include`, `pp_conditionals`, `pp_predefined`) |
+| `tests/c99/` | `//` `comments`, mixed/`declarations`, `literals` (long long, hex floats), variadic macros (`pp_variadic`), C99 `types` and `pp_predefined` |
+| `tests/c11/` | `_Generic` (`generic`, `generic_test`), `_Static_assert` (`static_assert`), `anonymous_structs`, C11 `keywords`, `pp_features`, `pp_predefined` |
+| `tests/c23/` | `[[attributes]]`, C23 `keywords` (`true`/`false`/`bool`/`nullptr`/`alignas`...), `literals` (binary, digit separators), `typeof`, `pp_features`, `pp_predefined` |
+| `tests/gnu/` | `extensions.c`: `__typeof__`, case ranges, labels as values, `__attribute__`, etc. |
+| `tests/cross/` | Newer features compiled under older standards (`c99_in_c89`, `c11_in_c89`, `c11_in_c99`, `c23_in_c89`, `c23_in_c11`) — exercises the cross-standard warning/error paths |
+| `tests/multi_file/` | Multi-translation-unit compilation and linking |
+| `tests/exec/` | Runtime execution tests (60+ programs) validating generated code end-to-end |
 
 ## Architecture
 
@@ -540,7 +577,7 @@ void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 | `_Noreturn` | ✅ Implemented | No-return function specifier |
 | `_Thread_local` | ✅ Implemented | Thread-local storage |
 | `_Atomic` | ✅ Implemented | Atomic type qualifier |
-| Anonymous structs/unions | ✅ Implemented | Unnamed struct/union members |
+| Anonymous structs/unions | ⚠️ Partial | Parsed and resolved (field lookup recurses into them); codegen still has issues |
 
 **C23 Features:**
 
@@ -566,11 +603,12 @@ void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature);
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Statement expressions | ⚠️ Pending | `({ ... })` |
-| Labels as values | ⚠️ Pending | `&&label` |
-| Case ranges | ⚠️ Pending | `case 'a' ... 'z':` |
-| `__typeof__` | ⚠️ Pending | GNU typeof |
-| `__attribute__` | ⚠️ Pending | GNU attributes |
+| `__attribute__` | ✅ Parsed | Tolerantly consumed on declarations |
+| Case ranges | ✅ Implemented | `case 'a' ... 'z':` |
+| `__typeof__` | ✅ Implemented | Alias for `typeof` |
+| Labels as values | ⚠️ Parsing only | `&&label`, computed `goto *expr` |
+| Statement expressions | ⚠️ Parsing only | `({ ... })` not fully working in codegen |
+| Inline assembly | ⚠️ Parsing only | `asm`/`__asm__` lexed and parsed |
 
 ### Cross-Standard Warnings
 
@@ -579,21 +617,25 @@ MCC emits warnings when features from newer standards are used in older modes:
 ```bash
 # Using C99 features in C89 mode
 ./mcc -std=c89 file.c
-# warning: 'inline' is a keyword in C99; treating as identifier
-# warning: '_Bool' is a C99 extension
-# warning: long long is a C99 feature
+# warning: 'long long' is a C99 extension
+# (keywords like _Bool that are not available in C89 are treated as identifiers,
+#  which typically leads to follow-on parse errors)
 
 # Using C11 features in C99 mode
 ./mcc -std=c99 file.c
 # error: '_Static_assert' requires C11 or later
-# warning: '_Noreturn' is a C11 extension
 
-# Using C23 features in C11 mode
+# Using C23 features in older modes
 ./mcc -std=c11 file.c
-# warning: 'typeof' is a keyword in C23; treating as identifier
 # warning: attribute syntax [[...]] is a C23 feature
 # warning: digit separators are a C23 feature
 ```
+
+Reserved-spelling keywords (those beginning with `_` such as `_Static_assert`,
+`_Alignas`, `_Atomic`) are still lexed as keywords so the parser can emit a precise
+"requires C\<n\> or later" diagnostic, whereas non-reserved newer keywords (e.g.
+`inline`, `restrict`, `true`, `typeof`) fall back to being treated as identifiers
+with a warning.
 
 ### Extending the Feature System
 

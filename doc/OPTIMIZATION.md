@@ -35,13 +35,20 @@ ANVIL includes a configurable optimization pass infrastructure that operates on 
 
 ## Optimization Levels
 
-| Level | Constant | Description |
-|-------|----------|-------------|
-| O0 | `ANVIL_OPT_NONE` | No optimization (default) |
-| Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
-| O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop unrolling (experimental) |
+A pass is enabled at a level when `level >= pass.min_level`, so each higher
+level is a strict superset of the one below it.
+
+| Level | Constant | Passes enabled (cumulative) |
+|-------|----------|-----------------------------|
+| O0 | `ANVIL_OPT_NONE` | None (default) |
+| Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
+| O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop_unroll (currently a no-op — the pass is disabled) |
+
+> At O3 the loop-unroll pass is *selected* but does nothing, because its `run`
+> function pointer is `NULL` in `builtin_passes[]`. O3 therefore produces the
+> same result as O2 today.
 
 ## Available Passes
 
@@ -243,16 +250,25 @@ result = a * a;
 - Local CSE within basic blocks
 - Invalidates expressions on stores and calls
 
-**Supported Operations:**
-- Arithmetic: `ADD`, `SUB`, `MUL`, `DIV`, `MOD`
+**Supported Operations** (from `src/opt/cse.c`):
+- Arithmetic: `ADD`, `SUB`, `MUL`, `SDIV`, `UDIV`, `SMOD`, `UMOD`
 - Bitwise: `AND`, `OR`, `XOR`, `SHL`, `SHR`, `SAR`
-- Comparisons: `EQ`, `NE`, `LT`, `LE`, `GT`, `GE`
+- Comparisons: `CMP_EQ`, `CMP_NE`, `CMP_LT`, `CMP_LE`, `CMP_GT`, `CMP_GE`,
+  `CMP_ULT`, `CMP_ULE`, `CMP_UGT`, `CMP_UGE`
+
+Commutative operations recognized for normalization: `ADD`, `MUL`, `AND`, `OR`,
+`XOR`, `CMP_EQ`, `CMP_NE`.
 
 ### Loop Unrolling (`ANVIL_PASS_LOOP_UNROLL`) - Experimental
 
 Unrolls small loops with known trip counts to reduce branch overhead.
 
-**Status:** Experimental - currently disabled by default. The infrastructure is in place but loop pattern detection needs refinement.
+**Status:** **Disabled / no-op.** The pass is registered (`ANVIL_PASS_LOOP_UNROLL`,
+enabled at O3) but its `run` pointer is `NULL` in `src/opt/opt.c`, so it performs
+no transformation. A `bool anvil_pass_loop_unroll(anvil_func_t *)` function is
+declared in `anvil_opt.h` and `src/opt/loop_unroll.c` exists, but it is not wired
+into the pipeline. The descriptions below reflect the *intended* design, not the
+current behavior.
 
 **Supported Loop Patterns:**
 - Simple counted loops with constant bounds
@@ -362,6 +378,12 @@ bool anvil_pass_const_fold(anvil_func_t *func);
 bool anvil_pass_dce(anvil_func_t *func);
 bool anvil_pass_simplify_cfg(anvil_func_t *func);
 bool anvil_pass_strength_reduce(anvil_func_t *func);
+bool anvil_pass_loop_unroll(anvil_func_t *func);   /* declared; not in pipeline */
+bool anvil_pass_copy_prop(anvil_func_t *func);
+bool anvil_pass_dead_store(anvil_func_t *func);
+bool anvil_pass_load_elim(anvil_func_t *func);
+bool anvil_pass_cse(anvil_func_t *func);
+bool anvil_pass_store_load_prop(anvil_func_t *func);
 ```
 
 ### Pass Information Structure
@@ -507,12 +529,26 @@ TEST_STRENGTH$ENTRY DS    0H
 
 ### Pass Execution Order
 
-Passes are executed in the following order:
-1. Constant Folding
-2. Dead Code Elimination
-3. CFG Simplification
-4. Strength Reduction
-5. Custom passes (in registration order)
+The pass manager runs enabled built-in passes in an explicit order (defined by
+`pass_exec_order[]` in `src/opt/opt.c`), independent of the enum/registration
+order. Opportunity-creating passes run first and DCE sweeps up at the end of each
+fixpoint iteration:
+
+1. Copy Propagation (`copy_prop`) — exposes constants
+2. Constant Folding (`const_fold`)
+3. Common Subexpression Elimination (`cse`)
+4. Strength Reduction (`strength_reduce`)
+5. Store-Load Propagation (`store_load_prop`)
+6. Dead Store Elimination (`dead_store`)
+7. Redundant Load Elimination (`load_elim`)
+8. Loop Unrolling (`loop_unroll`) — **disabled** (its `run` pointer is `NULL`)
+9. CFG Simplification (`simplify_cfg`)
+10. Dead Code Elimination (`dce`)
+11. Custom passes (in registration order)
+
+Only passes that are enabled for the current optimization level (or enabled
+individually) actually run; the order above is the sequence within each fixpoint
+iteration.
 
 ### Fixpoint Iteration
 
@@ -540,9 +576,18 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/ctx_opt.c` | Context integration |
 | `src/opt/cse.c` | Common subexpression elimination |
 
-## Future Work
+## Not Implemented
 
-- Loop-invariant code motion (LICM)
-- Inlining
-- Tail call optimization
-- Register promotion (mem2reg)
+The following are **not** present in the current optimizer. All implemented
+passes are local (single-basic-block) except CFG simplification and DCE, which
+work across the function. There is no SSA-construction / promotion step, so the
+"SSA" properties of the IR depend on how the front-end builds it:
+
+- **mem2reg / register promotion (SSA construction)** — alloca/load/store are not
+  promoted to SSA values; only the local memory passes (store-load propagation,
+  dead store, redundant load) clean up obvious cases.
+- **Global Value Numbering (GVN)** — only local CSE exists.
+- **Loop-Invariant Code Motion (LICM)**
+- **Loop unrolling** — present but disabled (no-op, see above).
+- **Inlining**
+- **Tail call optimization**

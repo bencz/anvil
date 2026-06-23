@@ -129,7 +129,7 @@ Sets the OS ABI for platform-specific code generation.
 
 **Parameters:**
 - `ctx`: Context
-- `abi`: ABI variant (`ANVIL_ABI_SYSV`, `ANVIL_ABI_DARWIN`, `ANVIL_ABI_MVS`)
+- `abi`: ABI variant (`ANVIL_ABI_DEFAULT`, `ANVIL_ABI_SYSV`, `ANVIL_ABI_DARWIN`, `ANVIL_ABI_WIN64`, `ANVIL_ABI_MVS`)
 
 **Returns:** `ANVIL_OK` on success, error code on failure.
 
@@ -141,6 +141,14 @@ anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);
 ```
 
 **Note:** This affects symbol naming (underscore prefix on Darwin), assembly directives, and section names.
+
+**Targets and ABIs:** The `x86` and `x86_64` backends now honor multiple ABIs. For
+`x86_64`, SysV, Darwin, and Win64 are all selected through the ABI/calling-convention
+descriptor table; for `x86`, the cdecl/stdcall/fastcall conventions are selected the
+same way. The per-function calling convention set with `anvil_func_set_cc()` is
+consumed by both the x86 and x86_64 backends (e.g. `ANVIL_CC_WIN64`/`ANVIL_CC_SYSV`
+on x86_64 select the matching ABI; cdecl/stdcall/fastcall on x86 select the matching
+descriptor).
 
 ### anvil_ctx_get_abi
 
@@ -585,6 +593,39 @@ anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 2, false);
 anvil_func_t *func = anvil_func_create(mod, "add", func_type, ANVIL_LINK_EXTERNAL);
 ```
 
+### anvil_func_declare
+
+```c
+anvil_func_t *anvil_func_declare(anvil_module_t *mod, const char *name,
+                                  anvil_type_t *type);
+```
+
+Declares an external function (no body, for linking/calling).
+
+**Returns:** Pointer to new function declaration, or NULL on failure.
+
+### anvil_func_get_value
+
+```c
+anvil_value_t *anvil_func_get_value(anvil_func_t *func);
+```
+
+Gets a function as a value, for use as the callee of `anvil_build_call`.
+
+### anvil_func_set_cc
+
+```c
+void anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
+```
+
+Sets the calling convention for a function (see `anvil_cc_t`). This is consumed by
+the x86 and x86_64 backends to select the matching ABI/descriptor (cdecl/stdcall/
+fastcall on x86; SysV/Win64 on x86_64).
+
+**Parameters:**
+- `func`: Function
+- `cc`: Calling convention
+
 ### anvil_func_get_entry
 
 ```c
@@ -970,10 +1011,16 @@ anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type,
 Allocates space on the stack. Returns a pointer to the allocated space.
 
 ```c
-anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_value_t *ptr,
-                                 const char *name);
+anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
+                                       anvil_value_t *count, const char *name);
 ```
-Loads a value from memory.
+Dynamic-size stack allocation. Reserves a stack area sized to `count * sizeof(type)`.
+
+```c
+anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type,
+                                 anvil_value_t *ptr, const char *name);
+```
+Loads a value of `type` from memory.
 
 ```c
 anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
@@ -982,11 +1029,19 @@ anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
 Stores a value to memory. Returns NULL (store has no result).
 
 ```c
-anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_value_t *ptr,
+anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type,
+                                anvil_value_t *ptr,
                                 anvil_value_t **indices, size_t num_indices,
                                 const char *name);
 ```
-Get Element Pointer. Computes address of a sub-element.
+Get Element Pointer. Computes address of a sub-element (`type` is the pointee/base type).
+
+```c
+anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_type,
+                                       anvil_value_t *ptr, unsigned field_idx,
+                                       const char *name);
+```
+Computes the address of struct field `field_idx` (fixed offset).
 
 **Example:**
 ```c
@@ -998,7 +1053,7 @@ anvil_value_t *val = anvil_const_i32(ctx, 42);
 anvil_build_store(ctx, val, ptr);
 
 // Load it back
-anvil_value_t *loaded = anvil_build_load(ctx, ptr, "loaded");
+anvil_value_t *loaded = anvil_build_load(ctx, anvil_type_i32(ctx), ptr, "loaded");
 ```
 
 ### Control Flow Operations
@@ -1016,11 +1071,22 @@ anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
 Conditional branch. If `cond` is true, branches to `then_block`, otherwise to `else_block`.
 
 ```c
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_value_t *func,
+anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type,
+                                 anvil_value_t *callee,
                                  anvil_value_t **args, size_t num_args,
                                  const char *name);
 ```
-Calls a function.
+Calls a function. `type` is the function type of the callee, `callee` is the
+function value (from `anvil_func_get_value`) or a function pointer.
+
+```c
+anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
+                                  anvil_block_t *default_block);
+bool anvil_switch_add_case(anvil_instr_t *switch_instr,
+                           anvil_value_t *case_value, anvil_block_t *dest);
+```
+Builds a multi-way switch on `value`, falling through to `default_block`; add cases
+with `anvil_switch_add_case`.
 
 ```c
 anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
@@ -1273,8 +1339,7 @@ COUNTER  DS    F                  Global variable
 
 ```c
 typedef enum {
-    ANVIL_ARCH_UNKNOWN = 0,
-    ANVIL_ARCH_X86,         // x86 32-bit
+    ANVIL_ARCH_X86,         // x86 32-bit (first enumerator, value 0)
     ANVIL_ARCH_X86_64,      // x86-64
     ANVIL_ARCH_S370,        // IBM S/370 (24-bit)
     ANVIL_ARCH_S370_XA,     // IBM S/370-XA (31-bit)
@@ -1288,6 +1353,10 @@ typedef enum {
 } anvil_arch_t;
 ```
 
+Both `ANVIL_ARCH_X86` and `ANVIL_ARCH_X86_64` are fully supported through the
+MachineIR backend pipeline and honor multiple ABIs/calling conventions (see
+`anvil_abi_t` and `anvil_cc_t`).
+
 ### anvil_error_t
 
 ```c
@@ -1295,10 +1364,11 @@ typedef enum {
     ANVIL_OK = 0,           // Success
     ANVIL_ERR_NOMEM,        // Out of memory
     ANVIL_ERR_INVALID_ARG,  // Invalid argument
-    ANVIL_ERR_NOT_FOUND,    // Resource not found
-    ANVIL_ERR_TYPE_MISMATCH,// Type mismatch
+    ANVIL_ERR_INVALID_TYPE, // Invalid/mismatched type
+    ANVIL_ERR_INVALID_OP,   // Invalid operation
     ANVIL_ERR_NO_BACKEND,   // No backend for target architecture
-    ANVIL_ERR_CODEGEN       // Code generation error
+    ANVIL_ERR_CODEGEN,      // Code generation error
+    ANVIL_ERR_IO            // I/O error (e.g. writing output file)
 } anvil_error_t;
 ```
 
@@ -1308,20 +1378,77 @@ typedef enum {
 typedef enum {
     ANVIL_LINK_INTERNAL,    // Static/internal linkage (not exported)
     ANVIL_LINK_EXTERNAL,    // External linkage (exported)
-    ANVIL_LINK_WEAK         // Weak linkage
+    ANVIL_LINK_WEAK,        // Weak linkage
+    ANVIL_LINK_COMMON       // Common linkage
 } anvil_linkage_t;
 ```
+
+### anvil_abi_t
+
+```c
+typedef enum {
+    ANVIL_ABI_DEFAULT,      // Default for architecture
+    ANVIL_ABI_SYSV,         // System V ABI (Linux, BSD)
+    ANVIL_ABI_DARWIN,       // Darwin/macOS (Mach-O, underscore prefix)
+    ANVIL_ABI_WIN64,        // Windows x64 ABI
+    ANVIL_ABI_MVS           // IBM MVS/z/OS
+} anvil_abi_t;
+```
+
+Set with `anvil_ctx_set_abi`. On x86_64 the SysV, Darwin, and Win64 variants are
+all honored by the backend.
+
+### anvil_cc_t
+
+```c
+typedef enum {
+    ANVIL_CC_DEFAULT,       // Default for target
+    ANVIL_CC_CDECL,         // C calling convention
+    ANVIL_CC_STDCALL,       // Windows stdcall
+    ANVIL_CC_FASTCALL,      // Fastcall
+    ANVIL_CC_SYSV,          // System V AMD64 ABI
+    ANVIL_CC_WIN64,         // Windows x64
+    ANVIL_CC_MVS,           // MVS linkage (mainframe)
+    ANVIL_CC_XPLINK         // z/OS XPLINK
+} anvil_cc_t;
+```
+
+Set per-function with `anvil_func_set_cc`. The x86 backend consumes
+cdecl/stdcall/fastcall; the x86_64 backend consumes SysV/Win64.
+
+### anvil_syntax_t
+
+```c
+typedef enum {
+    ANVIL_SYNTAX_DEFAULT,   // Default for architecture
+    ANVIL_SYNTAX_HLASM,     // IBM HLASM for mainframes
+    ANVIL_SYNTAX_GAS,       // GNU Assembler syntax
+    ANVIL_SYNTAX_NASM,      // NASM syntax for x86
+    ANVIL_SYNTAX_MASM       // Microsoft MASM syntax
+} anvil_syntax_t;
+```
+
+Set with `anvil_ctx_set_syntax`.
 
 ### anvil_type_kind_t
 
 ```c
 typedef enum {
     ANVIL_TYPE_VOID,
-    ANVIL_TYPE_INT,
-    ANVIL_TYPE_FLOAT,
+    ANVIL_TYPE_I8,
+    ANVIL_TYPE_I16,
+    ANVIL_TYPE_I32,
+    ANVIL_TYPE_I64,
+    ANVIL_TYPE_U8,
+    ANVIL_TYPE_U16,
+    ANVIL_TYPE_U32,
+    ANVIL_TYPE_U64,
+    ANVIL_TYPE_F32,
+    ANVIL_TYPE_F64,
+    ANVIL_TYPE_DECIMAL,
     ANVIL_TYPE_PTR,
-    ANVIL_TYPE_ARRAY,
     ANVIL_TYPE_STRUCT,
+    ANVIL_TYPE_ARRAY,
     ANVIL_TYPE_FUNC
 } anvil_type_kind_t;
 ```
@@ -1334,21 +1461,23 @@ typedef enum {
     ANVIL_OP_ADD,
     ANVIL_OP_SUB,
     ANVIL_OP_MUL,
-    ANVIL_OP_SDIV,
-    ANVIL_OP_UDIV,
-    ANVIL_OP_SMOD,
-    ANVIL_OP_UMOD,
+    ANVIL_OP_DIV,
+    ANVIL_OP_SDIV,           // Signed division
+    ANVIL_OP_UDIV,           // Unsigned division
+    ANVIL_OP_MOD,
+    ANVIL_OP_SMOD,           // Signed modulo
+    ANVIL_OP_UMOD,           // Unsigned modulo
     ANVIL_OP_NEG,
-    
+
     // Bitwise
     ANVIL_OP_AND,
     ANVIL_OP_OR,
     ANVIL_OP_XOR,
     ANVIL_OP_NOT,
     ANVIL_OP_SHL,
-    ANVIL_OP_SHR,
-    ANVIL_OP_SAR,
-    
+    ANVIL_OP_SHR,            // Logical shift right
+    ANVIL_OP_SAR,            // Arithmetic shift right
+
     // Comparison
     ANVIL_OP_CMP_EQ,
     ANVIL_OP_CMP_NE,
@@ -1360,30 +1489,50 @@ typedef enum {
     ANVIL_OP_CMP_ULE,
     ANVIL_OP_CMP_UGT,
     ANVIL_OP_CMP_UGE,
-    
+
     // Memory
-    ANVIL_OP_ALLOCA,
     ANVIL_OP_LOAD,
     ANVIL_OP_STORE,
-    ANVIL_OP_GEP,
-    
+    ANVIL_OP_ALLOCA,
+    ANVIL_OP_GEP,            // Get element pointer (array indexing)
+    ANVIL_OP_STRUCT_GEP,     // Get struct field pointer (fixed offset)
+
     // Control flow
     ANVIL_OP_BR,
     ANVIL_OP_BR_COND,
     ANVIL_OP_CALL,
     ANVIL_OP_RET,
-    
-    // Conversion
+    ANVIL_OP_SWITCH,
+
+    // Type conversion
     ANVIL_OP_TRUNC,
     ANVIL_OP_ZEXT,
     ANVIL_OP_SEXT,
-    ANVIL_OP_BITCAST,
+    ANVIL_OP_FPTRUNC,
+    ANVIL_OP_FPEXT,
+    ANVIL_OP_FPTOSI,
+    ANVIL_OP_FPTOUI,
+    ANVIL_OP_SITOFP,
+    ANVIL_OP_UITOFP,
     ANVIL_OP_PTRTOINT,
     ANVIL_OP_INTTOPTR,
-    
+    ANVIL_OP_BITCAST,
+
+    // Floating-point arithmetic
+    ANVIL_OP_FADD,
+    ANVIL_OP_FSUB,
+    ANVIL_OP_FMUL,
+    ANVIL_OP_FDIV,
+    ANVIL_OP_FNEG,
+    ANVIL_OP_FABS,
+    ANVIL_OP_FCMP,
+
     // Misc
     ANVIL_OP_PHI,
-    ANVIL_OP_SELECT
+    ANVIL_OP_SELECT,
+    ANVIL_OP_NOP,
+
+    ANVIL_OP_COUNT
 } anvil_op_t;
 ```
 
@@ -1659,6 +1808,8 @@ typedef struct {
     int num_fpr;            // Number of floating point registers
     anvil_endian_t endian;  // ANVIL_ENDIAN_LITTLE or ANVIL_ENDIAN_BIG
     anvil_stack_dir_t stack_dir; // ANVIL_STACK_DOWN or ANVIL_STACK_UP
+    anvil_fp_format_t fp_format; // Floating-point format
+    anvil_abi_t abi;        // OS ABI / platform variant
     bool has_condition_codes;
     bool has_delay_slots;
 } anvil_arch_info_t;
@@ -1667,18 +1818,20 @@ typedef struct {
 ### anvil_backend_ops_t
 
 ```c
-typedef struct {
+typedef struct anvil_backend_ops {
     const char *name;
     anvil_arch_t arch;
-    
+
     anvil_error_t (*init)(anvil_backend_t *be, anvil_ctx_t *ctx);
     void (*cleanup)(anvil_backend_t *be);
     void (*reset)(anvil_backend_t *be);  // Clear cached IR pointers (optional)
+    anvil_error_t (*prepare_ir)(anvil_backend_t *be, anvil_module_t *mod); // optional
     anvil_error_t (*codegen_module)(anvil_backend_t *be, anvil_module_t *mod,
                                      char **output, size_t *len);
     anvil_error_t (*codegen_func)(anvil_backend_t *be, anvil_func_t *func,
                                    char **output, size_t *len);
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
+    void *priv;             // Private backend data
 } anvil_backend_ops_t;
 ```
 
@@ -1690,8 +1843,10 @@ typedef struct {
 | `init` | Initialize backend state |
 | `cleanup` | Free all backend resources |
 | `reset` | Clear cached pointers to IR values (prevents dangling pointers) |
+| `prepare_ir` | Optional: lower/legalize/transform IR before codegen (NULL to skip) |
 | `codegen_module` | Generate assembly for entire module |
 | `codegen_func` | Generate assembly for single function |
 | `get_arch_info` | Return architecture information |
+| `priv` | Private backend data |
 
 **Note:** The `reset` function is called by `anvil_ctx_destroy()` before destroying modules. This ensures that any cached pointers to `anvil_value_t` in backend data structures (like stack slots or string tables) are cleared before the IR values are freed.

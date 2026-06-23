@@ -1,5 +1,30 @@
 # ARM64 Backend Refactoring Plan
 
+## Status: Reference MachineIR Backend
+
+ARM64 is the **reference implementation** of ANVIL's MachineIR pipeline. The
+shared contract it established is now followed by the x86, x86-64, and PowerPC
+backends as well:
+
+```
+lower source IR -> MachineIR
+  -> verify-legal
+  -> coalesce_copies            (anvil_mir_coalesce_copies)
+  -> verify-legal
+  -> linear-scan regalloc       (anvil_regalloc_linear_scan_classes)
+  -> materialize_spills         (anvil_mir_materialize_spills)
+  -> verify-legal
+  -> emit assembly
+```
+
+Each target provides its own `anvil_<arch>_lower_func_to_mir`,
+`anvil_<arch>_verify_mir_legal`, `anvil_<arch>_regalloc_mir`, and
+`anvil_<arch>_emit_mir_abi`; the coalescing, linear-scan allocation, and
+spill-materialization passes are target-independent and live in `src/machine/`
+(`machine_ir.c`, `regalloc.c`). ARM64 remains the canonical example of the
+contract — see `src/backend/x86_64/x86_64_mir.c` and `src/backend/x86/x86_mir.c`
+for the x86 implementations that mirror it.
+
 ## Recent Improvements (Implemented)
 
 The ARM64 backend has received significant improvements for correctness, robustness, and optimization:
@@ -211,10 +236,20 @@ New `prepare_ir` callback in backend interface:
 
 ## Current Architecture (Working)
 
-### Register Usage
-- **x0**: Primary result register
-- **x9-x15**: Temporary registers for operand loading
-- **x16**: Scratch register for large offsets (>255 bytes)
+### Register Usage (MachineIR allocator)
+
+The current backend (`arm64_mir.c`) lets the shared linear-scan allocator assign
+physical registers from callee-saved-only pools; the older fixed-register scheme
+below it has been removed.
+
+- **x19-x28 / v8-v15**: allocatable pools handed to
+  `anvil_regalloc_linear_scan_classes` (callee-saved only, so allocated values
+  survive calls — the allocator has no call-clobber model).
+- **x12-x15 / v16-v19**: scratch pools used by spill materialization.
+- **x0-x7 / v0-v7**: ABI argument/return registers, modeled as fixed MachineIR
+  vregs and copied into allocatable vregs before allocation.
+- **x16**: scratch register for large offsets and indirect-call targets
+  (legalized to `x16` -> `blr x16`).
 - **x29**: Frame pointer (FP)
 - **x30**: Link register (LR)
 - **sp**: Stack pointer
@@ -267,7 +302,15 @@ are materialized by MachineIR, and final assembly is emitted from allocated MIR.
 - No callee-saved register preservation when needed
 - Limited floating-point register usage
 
-## Proposed Architecture
+## Proposed Architecture (Historical — superseded)
+
+> **Note:** The sections below were the original refactoring plan. They have been
+> realized differently from the sketch: instead of an ARM64-private allocator with
+> the `arm64_value_loc_t` / `arm64_reg_state_t` structures shown here, ARM64 now
+> lowers to MachineIR and uses the **shared** linear-scan allocator
+> (`anvil_regalloc_linear_scan_classes`) and spill passes in `src/machine/`. The
+> data structures and per-phase plan are kept for historical context only and do
+> not match the current code.
 
 ### Phase 1: Better Stack Frame Management
 1. Pre-calculate exact stack requirements

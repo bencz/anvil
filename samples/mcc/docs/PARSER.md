@@ -73,25 +73,28 @@ typedef struct mcc_struct_entry {
     struct mcc_struct_entry *next;
 } mcc_struct_entry_t;
 
-/* Typedef registry */
+/* Typedef registry (LIFO list; entries carry the block depth at which they
+ * were registered, so block-scoped typedefs can be popped when a block closes) */
 typedef struct mcc_typedef_entry {
     const char *name;
     struct mcc_type *type;
+    int depth;                  /* 0 = file scope, >0 = nested block scope */
     struct mcc_typedef_entry *next;
 } mcc_typedef_entry_t;
 
 /* Parser state */
-typedef struct mcc_parser {
+struct mcc_parser {
     mcc_context_t *ctx;
     mcc_preprocessor_t *pp;     /* Token source */
     mcc_token_t *current;       /* Current token */
     mcc_token_t *peek;          /* Lookahead token */
     struct mcc_symtab *symtab;  /* For typedef names */
-    mcc_struct_entry_t *struct_types;  /* Struct registry */
-    mcc_typedef_entry_t *typedefs;     /* Typedef registry */
+    mcc_struct_entry_t *struct_types;  /* Struct/union type table */
+    mcc_typedef_entry_t *typedefs;     /* Typedef table (LIFO) */
+    int typedef_depth;          /* Current block depth */
     bool panic_mode;            /* Error recovery */
     int sync_depth;
-} mcc_parser_t;
+};
 ```
 
 ### Functions
@@ -104,11 +107,19 @@ void mcc_parser_destroy(mcc_parser_t *parser);
 /* Main entry point */
 mcc_ast_node_t *mcc_parser_parse(mcc_parser_t *parser);
 
+/* Granular entry points (useful for testing) */
+mcc_ast_node_t *mcc_parser_parse_expression(mcc_parser_t *parser);
+mcc_ast_node_t *mcc_parser_parse_statement(mcc_parser_t *parser);
+mcc_ast_node_t *mcc_parser_parse_declaration(mcc_parser_t *parser);
+
 /* Token operations */
 mcc_token_t *mcc_parser_advance(mcc_parser_t *parser);
 bool mcc_parser_check(mcc_parser_t *parser, mcc_token_type_t type);
 bool mcc_parser_match(mcc_parser_t *parser, mcc_token_type_t type);
 mcc_token_t *mcc_parser_expect(mcc_parser_t *parser, mcc_token_type_t type, const char *msg);
+
+/* Error recovery */
+void mcc_parser_synchronize(mcc_parser_t *parser);
 ```
 
 ## AST Node Types
@@ -117,7 +128,7 @@ mcc_token_t *mcc_parser_expect(mcc_parser_t *parser, mcc_token_type_t type, cons
 
 ```c
 /* Translation unit - root of AST */
-AST_TRANS_UNIT {
+AST_TRANSLATION_UNIT {
     mcc_ast_node_t **decls;
     size_t num_decls;
 }
@@ -219,9 +230,9 @@ AST_LABEL_STMT { const char *label; mcc_ast_node_t *stmt; }
 ### Expression Nodes
 
 ```c
-/* Literals */
-AST_INT_LIT { uint64_t value; bool is_unsigned; bool is_long; }
-AST_FLOAT_LIT { double value; bool is_float; }
+/* Literals (suffixes use the same enums as tokens) */
+AST_INT_LIT { uint64_t value; mcc_int_suffix_t suffix; }
+AST_FLOAT_LIT { double value; mcc_float_suffix_t suffix; }
 AST_CHAR_LIT { int value; }
 AST_STRING_LIT { const char *value; size_t length; }
 
@@ -290,27 +301,34 @@ AST_SIZEOF_EXPR {
 typedef enum {
     /* Arithmetic */
     BINOP_ADD, BINOP_SUB, BINOP_MUL, BINOP_DIV, BINOP_MOD,
-    
-    /* Bitwise */
-    BINOP_AND, BINOP_OR, BINOP_XOR, BINOP_LSHIFT, BINOP_RSHIFT,
-    
+
     /* Comparison */
     BINOP_EQ, BINOP_NE, BINOP_LT, BINOP_GT, BINOP_LE, BINOP_GE,
-    
+
     /* Logical */
-    BINOP_LOG_AND, BINOP_LOG_OR,
-    
+    BINOP_AND,          /* && */
+    BINOP_OR,           /* || */
+
+    /* Bitwise */
+    BINOP_BIT_AND,      /* & */
+    BINOP_BIT_OR,       /* | */
+    BINOP_BIT_XOR,      /* ^ */
+    BINOP_LSHIFT, BINOP_RSHIFT,
+
     /* Assignment */
     BINOP_ASSIGN,
     BINOP_ADD_ASSIGN, BINOP_SUB_ASSIGN, BINOP_MUL_ASSIGN,
     BINOP_DIV_ASSIGN, BINOP_MOD_ASSIGN,
     BINOP_AND_ASSIGN, BINOP_OR_ASSIGN, BINOP_XOR_ASSIGN,
     BINOP_LSHIFT_ASSIGN, BINOP_RSHIFT_ASSIGN,
-    
-    /* Other */
-    BINOP_COMMA
+
+    BINOP_COUNT
 } mcc_binop_t;
 ```
+
+Note: `BINOP_AND`/`BINOP_OR` denote the **logical** `&&`/`||` operators; the bitwise
+operators are `BINOP_BIT_AND`/`BINOP_BIT_OR`/`BINOP_BIT_XOR`. There is no `BINOP_COMMA` —
+the comma operator has its own node, `AST_COMMA_EXPR`.
 
 ## Unary Operators
 
@@ -325,7 +343,8 @@ typedef enum {
     UNOP_PRE_INC,   /* ++x */
     UNOP_PRE_DEC,   /* --x */
     UNOP_POST_INC,  /* x++ */
-    UNOP_POST_DEC   /* x-- */
+    UNOP_POST_DEC,  /* x-- */
+    UNOP_COUNT
 } mcc_unop_t;
 ```
 

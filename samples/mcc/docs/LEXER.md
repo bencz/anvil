@@ -69,11 +69,22 @@ volatile while
 | `constexpr` | Constant expression | `TOK_CONSTEXPR` |
 | `typeof` | Type query | `TOK_TYPEOF` |
 | `typeof_unqual` | Unqualified type query | `TOK_TYPEOF_UNQUAL` |
+| `_BitInt` | Bit-precise integer type | `TOK__BITINT` |
 | `alignas` | Alignment specifier (C23 spelling) | `TOK_ALIGNAS` |
 | `alignof` | Alignment query (C23 spelling) | `TOK_ALIGNOF` |
 | `bool` | Boolean type (C23 spelling) | `TOK_BOOL` |
 | `static_assert` | Static assertion (C23 spelling) | `TOK_STATIC_ASSERT` |
 | `thread_local` | Thread-local storage (C23 spelling) | `TOK_THREAD_LOCAL` |
+
+### GNU Extension Keywords
+
+Available under the GNU standards (`gnu89`/`gnu99`/`gnu11`):
+
+| Keyword(s) | Description | Token |
+|------------|-------------|-------|
+| `__attribute__`, `__attribute` | GNU attribute syntax | `TOK_ATTRIBUTE` |
+| `__typeof__`, `__typeof` | GNU `typeof` | `TOK_TYPEOF` |
+| `asm`, `__asm__`, `__asm` | Inline assembly | `TOK_ASM` |
 
 ### Identifiers
 
@@ -177,19 +188,28 @@ typedef struct mcc_lexer {
 /* Token */
 typedef struct mcc_token {
     mcc_token_type_t type;
-    const char *text;        /* Token text */
     mcc_location_t location;
-    bool at_bol;             /* At beginning of line? */
-    bool has_space;          /* Whitespace before? */
+
+    const char *text;        /* Token text (identifiers, literals) */
+    size_t text_len;
+    const char *raw_text;    /* Raw source slice incl. quotes (for pp output) */
+
     union {
-        struct { uint64_t value; bool is_unsigned; bool is_long; } int_val;
-        struct { double value; bool is_float; bool is_long; } float_val;
-        struct { int value; } char_val;
+        struct { uint64_t value; mcc_int_suffix_t suffix; } int_val;
+        struct { double value;   mcc_float_suffix_t suffix; } float_val;
+        struct { int value; } char_val;                       /* character code */
         struct { const char *value; size_t length; } string_val;
     } literal;
-    struct mcc_token *next;  /* For token lists */
+
+    bool at_bol;             /* At beginning of line? (for preprocessor) */
+    bool has_space;          /* Whitespace before this token? */
+    struct mcc_token *next;  /* Next token in list (for preprocessor) */
 } mcc_token_t;
 ```
+
+Integer and float literals record their suffix using the `mcc_int_suffix_t`
+(`INT_SUFFIX_NONE`/`U`/`L`/`UL`/`LL`/`ULL`) and `mcc_float_suffix_t`
+(`FLOAT_SUFFIX_NONE`/`F`/`L`) enums rather than individual boolean flags.
 
 ### Functions
 
@@ -210,7 +230,28 @@ mcc_token_t *mcc_lexer_peek(mcc_lexer_t *lex);   /* Peek at next token */
 bool mcc_lexer_match(mcc_lexer_t *lex, mcc_token_type_t type);
 bool mcc_lexer_check(mcc_lexer_t *lex, mcc_token_type_t type);
 mcc_token_t *mcc_lexer_expect(mcc_lexer_t *lex, mcc_token_type_t type, const char *msg);
+
+/* Current location */
+mcc_location_t mcc_lexer_location(mcc_lexer_t *lex);
+
+/* Token allocation (see "Token Allocation and Lifetime" below) */
+mcc_token_t *mcc_token_create(mcc_context_t *ctx);
+mcc_token_t *mcc_token_copy(mcc_context_t *ctx, mcc_token_t *tok);
+void mcc_token_list_free(mcc_token_t *list);
 ```
+
+### Token Allocation and Lifetime
+
+Tokens are allocated from the compiler context's **chunked, non-relocating arena**
+(via `mcc_alloc`), not with individual `malloc`/`free` calls. As a result:
+
+- Token pointers remain valid for the entire compilation; nothing moves or is
+  individually freed.
+- `lex_make_token()` and `mcc_token_create()` simply bump-allocate a token in the arena.
+- `mcc_token_copy()` arena-duplicates the token and its `text`/`raw_text` strings
+  (with `mcc_strdup`) and clears `next`.
+- `mcc_token_list_free()` is effectively a **no-op** — the arena owns the memory and
+  reclaims it all at once when the context is destroyed.
 
 ## Token Type Enumeration
 
@@ -235,6 +276,17 @@ typedef enum {
     TOK_SHORT, TOK_SIGNED, TOK_SIZEOF, TOK_STATIC, TOK_STRUCT,
     TOK_SWITCH, TOK_TYPEDEF, TOK_UNION, TOK_UNSIGNED, TOK_VOID,
     TOK_VOLATILE, TOK_WHILE,
+
+    /* C99/C11/C23 keywords */
+    TOK_INLINE, TOK_RESTRICT, TOK__BOOL, TOK__COMPLEX, TOK__IMAGINARY,
+    TOK__ALIGNAS, TOK__ALIGNOF, TOK__ATOMIC, TOK__GENERIC,
+    TOK__NORETURN, TOK__STATIC_ASSERT, TOK__THREAD_LOCAL,
+    TOK_TRUE, TOK_FALSE, TOK_NULLPTR, TOK_CONSTEXPR,
+    TOK_TYPEOF, TOK_TYPEOF_UNQUAL, TOK__BITINT,
+    TOK_ALIGNAS, TOK_ALIGNOF, TOK_BOOL, TOK_STATIC_ASSERT, TOK_THREAD_LOCAL,
+
+    /* GNU extensions */
+    TOK_ATTRIBUTE, TOK_ASM,
     
     /* Operators */
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT,
@@ -252,10 +304,12 @@ typedef enum {
     TOK_LBRACKET, TOK_RBRACKET,
     TOK_LBRACE, TOK_RBRACE,
     TOK_SEMICOLON, TOK_COMMA,
-    TOK_ELLIPSIS,
-    TOK_HASH,
-    
-    /* ... more token types */
+    TOK_HASH, TOK_HASH_HASH,    /* # and ## (preprocessor) */
+    TOK_ELLIPSIS,              /* ... */
+    TOK_NEWLINE,              /* used by the preprocessor */
+    TOK_LBRACKET2, TOK_RBRACKET2,  /* [[ and ]] (C23 attributes) */
+
+    TOK_COUNT
 } mcc_token_type_t;
 ```
 
@@ -371,7 +425,7 @@ static inline bool lex_has_hex_floats(mcc_lexer_t *lex)
 | `//` comments | ⚠️ | ✅ | ✅ | ✅ | ✅ |
 | `long long` suffix | ⚠️ | ✅ | ✅ | ✅ | ✅ |
 | Hex floats (`0x1.0p0`) | ⚠️ | ✅ | ✅ | ✅ | ✅ |
-| Binary literals (`0b`) | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
+| Binary literals (`0b`) | ⚠️ | ⚠️ | ⚠️ | ✅ | ⚠️ |
 | Universal char (`\u`) | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Digraphs (`<%`, `%>`) | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `inline` keyword | ❌ | ✅ | ✅ | ✅ | ✅ |

@@ -68,7 +68,6 @@ Module
 | Type | Description | Size (bytes) |
 |------|-------------|--------------|
 | void | No value | 0 |
-| i1 | Boolean | 1 |
 | i8 | 8-bit signed integer | 1 |
 | i16 | 16-bit signed integer | 2 |
 | i32 | 32-bit signed integer | 4 |
@@ -79,6 +78,31 @@ Module
 | u64 | 64-bit unsigned integer | 8 |
 | f32 | 32-bit IEEE float | 4 |
 | f64 | 64-bit IEEE double | 8 |
+
+**Note on booleans:** ANVIL has **no dedicated `i1`/boolean type** (`anvil_type_is_bool()`
+always returns `false`). Comparison instructions (`cmp_*`, `fcmp`) produce an `i8`
+result that is treated as boolean. Anywhere this document refers to a "boolean"
+value (e.g. the condition of `br_cond` or `select`), the type is `i8` (or `u8`);
+the verifier accepts either 8-bit integer type for these positions.
+
+### Decimal Types
+
+```
+decimal(packed, precision, scale)
+decimal(zoned,  precision, scale)
+```
+
+Fixed-point decimal types for mainframe-style arithmetic, created with
+`anvil_type_decimal()`, `anvil_type_decimal_packed()`, or
+`anvil_type_decimal_zoned()`.
+
+- **Packed** decimal stores two digits per byte plus a sign nibble; size is
+  `(precision + 2) / 2` bytes.
+- **Zoned** decimal stores one digit per byte; size is `precision` bytes.
+
+`scale` must not exceed `precision`. Decimal constants are created with
+`anvil_const_decimal()` and carry their digit string. Two decimal types are
+equal only when encoding, precision, and scale all match.
 
 ### Derived Types
 
@@ -219,6 +243,13 @@ Signed integer modulo (remainder).
 
 Unsigned integer modulo.
 
+> **Generic `div` / `mod`:** The opcodes `ANVIL_OP_DIV` and `ANVIL_OP_MOD`
+> exist in the `anvil_op_t` enum but are **not part of the supported source
+> IR**. The verifier explicitly rejects them ("unsupported source opcode") and
+> no backend lowers them. Front-ends must emit the signed/unsigned variants
+> (`sdiv`/`udiv`, `smod`/`umod`) instead. There are no `anvil_build_div` /
+> `anvil_build_mod` builder functions.
+
 #### neg
 
 ```
@@ -287,7 +318,10 @@ Arithmetic shift right. Shifts `%val` right by `%amount` bits, preserving sign.
 
 ### Comparison Instructions
 
-All comparison instructions return `i1` (boolean).
+All comparison instructions return `i8` (used as a boolean; ANVIL has no `i1`
+type). The verifier requires the result type to be `i8` or `u8` and the two
+operands to share a type that is integer or pointer (`cmp_*`) or floating-point
+(`fcmp`).
 
 #### cmp_eq
 
@@ -381,6 +415,14 @@ Allocates space for one value of type T on the stack. Returns a pointer to the a
 
 **Result:** `ptr<T>`
 
+A **dynamic-size** form (`anvil_build_alloca_dyn`) is also available: it takes an
+integer `count` operand and reserves space for `count` elements of type T. The
+verifier requires the single extra operand to be an integer.
+
+> **Backend limitation:** On the mainframe backends, dynamic alloca is currently
+> a stub — it returns a fixed pointer into the local stack area and does not
+> reserve `count`-sized storage. See `doc/MAINFRAME.md`.
+
 #### load
 
 ```
@@ -434,10 +476,15 @@ Computes the address of a sub-element of an aggregate type.
 
 Control flow instructions are **terminator instructions** - they end a basic block. Each basic block must end with exactly one terminator instruction.
 
-**Terminator Instructions:**
-- `br` - Unconditional branch
-- `br_cond` - Conditional branch
-- `ret` / `ret_void` - Return from function
+**Terminator Instructions** (per the verifier, `op_is_terminator`):
+- `br` - Unconditional branch (`ANVIL_OP_BR`)
+- `br_cond` - Conditional branch (`ANVIL_OP_BR_COND`)
+- `switch` - Multi-way branch (`ANVIL_OP_SWITCH`)
+- `ret` / `ret_void` - Return from function (both are `ANVIL_OP_RET`; `ret_void`
+  is simply a `ret` with no operand)
+
+`call` is **not** a terminator — a block may contain calls followed by more
+instructions and must still end with one of the terminators above.
 
 #### br
 
@@ -461,9 +508,28 @@ br_cond %cond, label %then, label %else
 Conditional branch. If `%cond` is true, branches to `%then`, otherwise to `%else`.
 
 **Operands:**
-- `%cond`: Condition (i1)
+- `%cond`: Condition (i8, used as boolean)
 - `%then`: True branch target
 - `%else`: False branch target
+
+**Result:** None (terminator)
+
+#### switch
+
+```
+switch %value, label %default [ %case_val, label %dest ]...
+```
+
+Multi-way branch on an integer selector. Built with `anvil_build_switch(value,
+default_block)` and populated with `anvil_switch_add_case(switch, case_value,
+dest)`. The default target is stored as the switch's primary successor; each case
+adds a `(constant value, target block)` pair.
+
+**Verifier rules:**
+- The selector must be an integer type.
+- Every case value must be a constant integer of the *same* type as the selector.
+- Case values must be unique (no duplicate constants).
+- The default and all case targets must be blocks of the same function.
 
 **Result:** None (terminator)
 
@@ -624,9 +690,9 @@ loop:
 Selects between two values based on a condition. Like the ternary operator (`cond ? then_val : else_val`).
 
 **Operands:**
-- `%cond`: Condition (i1)
+- `%cond`: Condition (i8, used as boolean)
 - `%then_val`: Value if true
-- `%else_val`: Value if false
+- `%else_val`: Value if false (must have the same type as `%then_val`)
 
 **Result:** Selected value
 
@@ -701,9 +767,8 @@ Floating-point absolute value.
 %result = fcmp %lhs, %rhs
 ```
 
-Floating-point comparison. Returns i1 (boolean).
-
-**Note:** Currently implements equality comparison. Future versions may add ordered/unordered comparisons.
+Floating-point comparison. Returns `i8` (used as boolean). The verifier requires
+both operands to be the same floating-point type and the result to be `i8`/`u8`.
 
 ### Conversions
 
@@ -1192,21 +1257,24 @@ ANVIL IR values can be one of several kinds:
 |------|-------------|---------|
 | `ANVIL_VAL_CONST_INT` | Integer constant | `42`, `-1` |
 | `ANVIL_VAL_CONST_FLOAT` | Float constant | `3.14`, `2.718` |
+| `ANVIL_VAL_CONST_DECIMAL` | Decimal constant | `"123.45"` |
 | `ANVIL_VAL_CONST_NULL` | Null pointer | `null` |
 | `ANVIL_VAL_CONST_STRING` | String constant | `"hello"` |
 | `ANVIL_VAL_CONST_ARRAY` | Array constant | `[1, 2, 3]` |
-| `ANVIL_VAL_PARAM` | Function parameter | `%arg0` |
-| `ANVIL_VAL_INSTR` | Instruction result | `%result` |
 | `ANVIL_VAL_GLOBAL` | Global variable | `@counter` |
 | `ANVIL_VAL_FUNC` | Function reference | `@factorial` |
+| `ANVIL_VAL_PARAM` | Function parameter | `%arg0` |
+| `ANVIL_VAL_INSTR` | Instruction result | `%result` |
+| `ANVIL_VAL_BLOCK` | Basic block reference | `label %loop` |
 
 ## Linkage Types
 
 | Linkage | Description |
 |---------|-------------|
-| `ANVIL_LINK_EXTERNAL` | Visible outside module (default) |
-| `ANVIL_LINK_INTERNAL` | Only visible within module |
-| `ANVIL_LINK_PRIVATE` | Not visible outside function |
+| `ANVIL_LINK_INTERNAL` | Internal/static linkage (only visible within module) |
+| `ANVIL_LINK_EXTERNAL` | External linkage (visible outside module) |
+| `ANVIL_LINK_WEAK` | Weak linkage |
+| `ANVIL_LINK_COMMON` | Common linkage |
 
 ## IR Operations Summary
 
@@ -1215,9 +1283,14 @@ ANVIL IR values can be one of several kinds:
 | **Arithmetic** | add, sub, mul, sdiv, udiv, smod, umod, neg |
 | **Bitwise** | and, or, xor, not, shl, shr, sar |
 | **Comparison** | cmp_eq, cmp_ne, cmp_lt, cmp_le, cmp_gt, cmp_ge, cmp_ult, cmp_ule, cmp_ugt, cmp_uge |
-| **Memory** | alloca, load, store, gep, struct_gep |
-| **Control Flow** | br, br_cond, call, ret, ret_void |
+| **Memory** | alloca (incl. dynamic), load, store, gep, struct_gep |
+| **Control Flow** | br, br_cond, switch, call, ret (ret_void is ret with no operand) |
 | **Type Conversion** | trunc, zext, sext, bitcast, ptrtoint, inttoptr |
 | **Floating-Point** | fadd, fsub, fmul, fdiv, fneg, fabs, fcmp |
 | **FP Conversion** | fptrunc, fpext, fptosi, fptoui, sitofp, uitofp |
-| **Miscellaneous** | phi, select |
+| **Miscellaneous** | phi, select, nop |
+
+The enum `anvil_op_t` also contains `ANVIL_OP_DIV` and `ANVIL_OP_MOD`, but these
+are rejected by the verifier and not lowered by any backend — use the signed /
+unsigned variants instead (see the note under [arithmetic instructions](#umod)).
+`ANVIL_OP_NOP` is a placeholder left by optimization passes and removed by DCE.

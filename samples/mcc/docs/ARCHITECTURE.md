@@ -75,6 +75,7 @@ The preprocessor is organized into modular files:
 | `pp_internal.h` | Internal header with structures and function declarations |
 | `preprocessor.c` | Main module - public API and preprocessing loop |
 | `pp_macro.c` | Macro definition, lookup, and expansion |
+| `pp_expand.c` | Macro expansion engine (rescanning, argument substitution) |
 | `pp_expr.c` | Preprocessor expression evaluation |
 | `pp_directive.c` | Directive processing (#if, #ifdef, etc.) |
 | `pp_include.c` | Include file processing and stack management |
@@ -298,21 +299,55 @@ The code generator translates AST to ANVIL IR:
 
 ## Memory Management
 
-MCC uses arena allocation for most data structures:
+MCC uses arena allocation for most data structures. The arena is a
+**non-relocating, chunked allocator**: a singly linked list of `malloc`'d
+blocks (see `src/context.c`). Each block bump-allocates from its own buffer,
+and existing blocks are never moved or resized.
 
 ```c
-typedef struct mcc_arena {
-    char *data;
-    size_t size;
-    size_t used;
-    struct mcc_arena *next;
-} mcc_arena_t;
+/* src/context.c */
+struct mcc_arena_block {
+    struct mcc_arena_block *next;
+    size_t size;        /* payload capacity */
+    size_t used;        /* bytes handed out */
+    char data[];        /* flexible array member */
+};
 ```
 
+The context holds a pointer to the current (head) block:
+
+```c
+/* include/mcc.h - struct mcc_context */
+struct mcc_arena_block *arena;   /* head of the block list */
+size_t arena_size;               /* current block capacity */
+size_t arena_used;               /* current block usage */
+```
+
+How allocation works (`mcc_alloc`):
+- The request is rounded up to `ARENA_ALIGN` (16 bytes).
+- If the current head block has room, it is bump-allocated from there.
+- Otherwise a new block is prepended to the list. Normal requests get a
+  fresh `ARENA_INITIAL_SIZE` (1 MB) block; an oversized request larger than
+  that gets a **dedicated block** sized exactly to the request. Either way the
+  new block becomes the head, and every previously returned pointer stays valid.
+- `mcc_realloc` does **not** resize in place: it allocates a new region and
+  copies the old contents (the old region is simply left in its block).
+- `mcc_context_destroy` walks the list and `free`s every block at once.
+
+Why chunked instead of a single growable buffer:
+- The previous arena was one buffer grown with `realloc`. When it filled, the
+  whole buffer could move, **invalidating every pointer already handed out**.
+  Because the compiler holds long-lived pointers into the arena (AST nodes,
+  types, symbols) across many later allocations, those dangling pointers led to
+  crashes/corruption.
+- The chunked arena guarantees that once a pointer is returned it remains valid
+  for the entire lifetime of the context, while preserving the arena benefits:
+
 Benefits:
-- Fast allocation (bump pointer)
+- Fast allocation (bump pointer within a block)
 - No individual frees needed
-- Entire arena freed at once at end of compilation
+- Returned pointers are stable for the context lifetime
+- All blocks freed at once at end of compilation
 
 ## Type System
 
