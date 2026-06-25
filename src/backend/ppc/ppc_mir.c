@@ -1443,15 +1443,20 @@ static anvil_mir_vreg_t lower_resize_gpr(ppc_mir_lower_t *lower,
     }
     if (src_info->size_bits == target_bits) return src;
 
+    /* Capture src fields before anvil_mir_add_vreg_typed: it may realloc the
+     * vreg array, invalidating src_info. */
+    uint16_t src_bits = src_info->size_bits;
+    bool src_signed = src_info->is_signed;
+
     anvil_mir_vreg_t resized =
         anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR,
-                                 target_bits, src_info->is_signed);
+                                 target_bits, src_signed);
     if (resized == ANVIL_MIR_NO_VREG) return ANVIL_MIR_NO_VREG;
 
     anvil_mir_vreg_t uses[] = { src };
     anvil_mir_opcode_t op = ANVIL_MIR_OP_TRUNC;
-    if (src_info->size_bits < target_bits) {
-        op = src_info->is_signed ? ANVIL_MIR_OP_SEXT : ANVIL_MIR_OP_ZEXT;
+    if (src_bits < target_bits) {
+        op = src_signed ? ANVIL_MIR_OP_SEXT : ANVIL_MIR_OP_ZEXT;
     }
     if (!anvil_mir_add_instr(lower->mir, op, resized, uses, 1)) {
         return ANVIL_MIR_NO_VREG;
@@ -1478,8 +1483,11 @@ static bool lower_match_binary_operand_sizes(ppc_mir_lower_t *lower,
         return true;
     }
 
-    *lhs = lower_resize_gpr(lower, *lhs, def_info->size_bits);
-    *rhs = lower_resize_gpr(lower, *rhs, def_info->size_bits);
+    /* Capture def size before resizing: lower_resize_gpr may realloc the vreg
+     * array, invalidating def_info. */
+    uint16_t def_bits = def_info->size_bits;
+    *lhs = lower_resize_gpr(lower, *lhs, def_bits);
+    *rhs = lower_resize_gpr(lower, *rhs, def_bits);
     return *lhs != ANVIL_MIR_NO_VREG && *rhs != ANVIL_MIR_NO_VREG;
 }
 
