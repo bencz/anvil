@@ -9,6 +9,7 @@
 /* Forward declarations */
 typedef struct mcc_parser mcc_parser_t;
 struct mcc_type;
+struct mcc_type_context;
 
 /* Struct/union type entry */
 typedef struct mcc_struct_entry {
@@ -30,6 +31,7 @@ typedef struct mcc_typedef_entry {
 struct mcc_parser {
     mcc_context_t *ctx;
     mcc_preprocessor_t *pp;     /* Token source */
+    struct mcc_type_context *types; /* Target-aware parse-time layout */
 
     /* Current and lookahead tokens */
     mcc_token_t *current;

@@ -271,6 +271,7 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             node->data.generic_expr.associations = assocs;
             node->data.generic_expr.num_associations = num_assocs;
             node->data.generic_expr.default_expr = default_assoc_expr;
+            node->data.generic_expr.selected_expr = NULL;
             return node;
         }
         

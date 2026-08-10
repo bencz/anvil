@@ -664,7 +664,6 @@ struct anvil_pass_manager {
 | Dead Store Elimination | Remove overwritten stores | O2 |
 | Load Elimination | Reuse loaded values | O2 |
 | CSE | Common subexpression elimination | O2 |
-| Loop Unrolling | Unroll small loops (experimental) | O3 |
 
 ### Pass Execution Flow
 
@@ -740,13 +739,13 @@ ANVIL is NOT thread-safe. Each thread should use its own context.
 
 ```c
 // WRONG: Sharing context between threads
-anvil_ctx_t *ctx = anvil_ctx_create();
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
 // Thread 1: anvil_build_add(ctx, ...);
 // Thread 2: anvil_build_sub(ctx, ...);  // RACE CONDITION!
 
 // CORRECT: Each thread has its own context
 void *thread_func(void *arg) {
-    anvil_ctx_t *ctx = anvil_ctx_create();
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
     // Use ctx only in this thread
     anvil_ctx_destroy(ctx);
     return NULL;

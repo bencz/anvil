@@ -35,8 +35,25 @@ typedef struct anvil_type anvil_type_t;
 typedef struct anvil_backend anvil_backend_t;
 typedef struct anvil_instr anvil_instr_t;
 
+/* Target data-layout entry. ABI alignment controls object layout; preferred
+ * alignment is the target's optimization preference and may be larger. */
+typedef struct {
+    size_t size;
+    size_t abi_align;
+    size_t preferred_align;
+} anvil_layout_entry_t;
+
+typedef struct {
+    anvil_layout_entry_t pointer;
+    anvil_layout_entry_t i1, i8, i16, i32, i64;
+    anvil_layout_entry_t f32, f64;
+    size_t aggregate_abi_align;
+    size_t aggregate_preferred_align;
+} anvil_data_layout_t;
+
 /* Target architecture */
 typedef enum {
+    ANVIL_ARCH_NONE = -1,   /* No target has been selected */
     ANVIL_ARCH_X86,          /* x86 32-bit, little-endian, stack grows down */
     ANVIL_ARCH_X86_64,       /* x86-64, little-endian, stack grows down */
     ANVIL_ARCH_S370,         /* IBM S/370, 24-bit addressing, big-endian, stack grows up */
@@ -52,17 +69,14 @@ typedef enum {
 
 /* Output format */
 typedef enum {
-    ANVIL_OUTPUT_ASM,        /* Assembly text output */
-    ANVIL_OUTPUT_BINARY      /* Binary opcodes (future) */
+    ANVIL_OUTPUT_ASM         /* Assembly text output */
 } anvil_output_t;
 
 /* Assembly syntax for mainframe */
 typedef enum {
     ANVIL_SYNTAX_DEFAULT,    /* Default for architecture */
     ANVIL_SYNTAX_HLASM,      /* IBM HLASM for mainframes */
-    ANVIL_SYNTAX_GAS,        /* GNU Assembler syntax */
-    ANVIL_SYNTAX_NASM,       /* NASM syntax for x86 */
-    ANVIL_SYNTAX_MASM        /* Microsoft MASM syntax */
+    ANVIL_SYNTAX_GAS         /* GNU Assembler syntax */
 } anvil_syntax_t;
 
 /* Endianness */
@@ -79,6 +93,7 @@ typedef enum {
 
 /* Floating-point format */
 typedef enum {
+    ANVIL_FP_UNSPECIFIED = -1, /* No target-selected floating-point format */
     ANVIL_FP_IEEE754,        /* IEEE 754 (x86, x86-64, PowerPC, z/Architecture) */
     ANVIL_FP_HFP,            /* IBM Hexadecimal Floating Point (S/370, S/390) */
     ANVIL_FP_HFP_IEEE        /* HFP with IEEE 754 support (z/Architecture, some S/390) */
@@ -102,6 +117,7 @@ typedef enum {
 /* Data types */
 typedef enum {
     ANVIL_TYPE_VOID,
+    ANVIL_TYPE_I1,
     ANVIL_TYPE_I8,
     ANVIL_TYPE_I16,
     ANVIL_TYPE_I32,
@@ -119,16 +135,35 @@ typedef enum {
     ANVIL_TYPE_FUNC
 } anvil_type_kind_t;
 
+/* IEEE-754 comparison predicates. Ordered predicates are false on NaN;
+ * unordered predicates are true when either operand is NaN. */
+typedef enum {
+    ANVIL_FCMP_FALSE,
+    ANVIL_FCMP_OEQ,
+    ANVIL_FCMP_OGT,
+    ANVIL_FCMP_OGE,
+    ANVIL_FCMP_OLT,
+    ANVIL_FCMP_OLE,
+    ANVIL_FCMP_ONE,
+    ANVIL_FCMP_ORD,
+    ANVIL_FCMP_UEQ,
+    ANVIL_FCMP_UGT,
+    ANVIL_FCMP_UGE,
+    ANVIL_FCMP_ULT,
+    ANVIL_FCMP_ULE,
+    ANVIL_FCMP_UNE,
+    ANVIL_FCMP_UNO,
+    ANVIL_FCMP_TRUE
+} anvil_fcmp_pred_t;
+
 /* IR Operations */
 typedef enum {
     /* Arithmetic */
     ANVIL_OP_ADD,
     ANVIL_OP_SUB,
     ANVIL_OP_MUL,
-    ANVIL_OP_DIV,
     ANVIL_OP_SDIV,           /* Signed division */
     ANVIL_OP_UDIV,           /* Unsigned division */
-    ANVIL_OP_MOD,
     ANVIL_OP_SMOD,           /* Signed modulo */
     ANVIL_OP_UMOD,           /* Unsigned modulo */
     ANVIL_OP_NEG,
@@ -158,7 +193,7 @@ typedef enum {
     ANVIL_OP_LOAD,
     ANVIL_OP_STORE,
     ANVIL_OP_ALLOCA,         /* Stack allocation */
-    ANVIL_OP_GEP,            /* Get element pointer (array indexing) */
+    ANVIL_OP_GEP,            /* Typed aggregate/pointer address walk */
     ANVIL_OP_STRUCT_GEP,     /* Get struct field pointer (fixed offset) */
     
     /* Control flow */
@@ -243,6 +278,7 @@ typedef enum {
     ANVIL_ERR_INVALID_ARG,
     ANVIL_ERR_INVALID_TYPE,
     ANVIL_ERR_INVALID_OP,
+    ANVIL_ERR_NO_TARGET,
     ANVIL_ERR_NO_BACKEND,
     ANVIL_ERR_CODEGEN,
     ANVIL_ERR_IO
@@ -255,11 +291,20 @@ typedef enum {
 /* Create a new anvil context */
 anvil_ctx_t *anvil_ctx_create(void);
 
+/* Atomically create a context configured for the requested target. */
+anvil_ctx_t *anvil_ctx_create_for_target(anvil_arch_t arch);
+
 /* Destroy context and free all resources */
 void anvil_ctx_destroy(anvil_ctx_t *ctx);
 
 /* Set target architecture */
 anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch);
+
+/* Get current target architecture */
+anvil_arch_t anvil_ctx_get_target(anvil_ctx_t *ctx);
+
+/* True only after a target and its backend/layout were initialized atomically. */
+bool anvil_ctx_has_target(const anvil_ctx_t *ctx);
 
 /* Set output format */
 anvil_error_t anvil_ctx_set_output(anvil_ctx_t *ctx, anvil_output_t output);
@@ -281,12 +326,15 @@ anvil_fp_format_t anvil_ctx_get_fp_format(anvil_ctx_t *ctx);
 
 /* Get architecture info */
 const anvil_arch_info_t *anvil_ctx_get_arch_info(anvil_ctx_t *ctx);
+const anvil_data_layout_t *anvil_ctx_get_data_layout(const anvil_ctx_t *ctx);
 
 /* Get architecture info without context (for early initialization) */
 const anvil_arch_info_t *anvil_arch_get_info(anvil_arch_t arch);
 
 /* Get last error message */
 const char *anvil_ctx_get_error(anvil_ctx_t *ctx);
+anvil_error_t anvil_ctx_get_last_error(anvil_ctx_t *ctx);
+void anvil_ctx_clear_error(anvil_ctx_t *ctx);
 
 /* Set CPU model for target-specific code generation */
 anvil_error_t anvil_ctx_set_cpu(anvil_ctx_t *ctx, anvil_cpu_model_t cpu);
@@ -330,6 +378,17 @@ anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
 /* Add an external declaration */
 anvil_value_t *anvil_module_add_extern(anvil_module_t *mod, const char *name,
                                         anvil_type_t *type);
+anvil_value_t *anvil_module_declare_global(anvil_module_t *mod,
+                                            const char *name,
+                                            anvil_type_t *type,
+                                            anvil_linkage_t linkage);
+
+/* Unified global/function symbol namespace. Lookup is average O(1);
+ * enumeration uses stable insertion order for the module lifetime. */
+anvil_value_t *anvil_module_lookup_symbol(const anvil_module_t *mod,
+                                           const char *name);
+size_t anvil_module_symbol_count(const anvil_module_t *mod);
+anvil_value_t *anvil_module_symbol_at(const anvil_module_t *mod, size_t index);
 
 /* Generate code for the module */
 anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *len);
@@ -347,6 +406,7 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len);
 
 /* Get primitive types */
 anvil_type_t *anvil_type_void(anvil_ctx_t *ctx);
+anvil_type_t *anvil_type_i1(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_i8(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_i16(anvil_ctx_t *ctx);
 anvil_type_t *anvil_type_i32(anvil_ctx_t *ctx);
@@ -372,6 +432,23 @@ anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee);
 /* Create struct type */
 anvil_type_t *anvil_type_struct(anvil_ctx_t *ctx, const char *name,
                                  anvil_type_t **fields, size_t num_fields);
+/* Literal structs compare structurally. Identified structs compare nominally
+ * and may be obtained opaque first to form recursive pointer graphs. */
+anvil_type_t *anvil_type_literal_struct(anvil_ctx_t *ctx,
+                                         anvil_type_t **fields,
+                                         size_t num_fields, bool packed);
+anvil_type_t *anvil_type_named_struct(anvil_ctx_t *ctx, const char *name);
+bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
+                                size_t num_fields, bool packed);
+bool anvil_type_struct_is_identified(const anvil_type_t *type);
+bool anvil_type_struct_is_opaque(const anvil_type_t *type);
+bool anvil_type_struct_is_packed(const anvil_type_t *type);
+const char *anvil_type_struct_name(const anvil_type_t *type);
+size_t anvil_type_struct_field_count(const anvil_type_t *type);
+anvil_type_t *anvil_type_struct_field_type(const anvil_type_t *type,
+                                            size_t field_idx);
+size_t anvil_type_struct_field_offset(const anvil_type_t *type,
+                                      size_t field_idx);
 
 /* Create array type */
 anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count);
@@ -382,9 +459,11 @@ anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
 
 /* Get type size in bytes */
 size_t anvil_type_size(anvil_type_t *type);
+unsigned anvil_type_bit_width(const anvil_type_t *type);
 
 /* Get type alignment */
 size_t anvil_type_align(anvil_type_t *type);
+size_t anvil_type_preferred_align(anvil_type_t *type);
 
 /* Decimal type metadata */
 anvil_decimal_encoding_t anvil_type_decimal_encoding(anvil_type_t *type);
@@ -404,6 +483,7 @@ bool anvil_type_is_pointer(anvil_type_t *type);
 
 /* Get the type of a value */
 anvil_type_t *anvil_value_get_type(anvil_value_t *val);
+anvil_module_t *anvil_value_get_module(const anvil_value_t *val);
 
 /* Check if value is a comparison result (boolean) */
 bool anvil_value_is_bool(anvil_value_t *val);
@@ -424,12 +504,16 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
 /* Declare an external function (no body, for linking) */
 anvil_func_t *anvil_func_declare(anvil_module_t *mod, const char *name,
                                   anvil_type_t *type);
+anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
+                                          const char *name,
+                                          anvil_type_t *type,
+                                          anvil_linkage_t linkage);
 
 /* Get function as a value (for use in calls) */
 anvil_value_t *anvil_func_get_value(anvil_func_t *func);
 
 /* Set calling convention */
-void anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
+bool anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
 
 /* Get function parameter */
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index);
@@ -455,9 +539,13 @@ bool anvil_block_has_terminator(anvil_block_t *block);
  * ============================================================================ */
 
 /* Set insertion point */
-void anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
+bool anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
+
+/* Get current insertion block */
+anvil_block_t *anvil_get_insert_block(anvil_ctx_t *ctx);
 
 /* Constants */
+anvil_value_t *anvil_const_i1(anvil_ctx_t *ctx, bool val);
 anvil_value_t *anvil_const_i8(anvil_ctx_t *ctx, int8_t val);
 anvil_value_t *anvil_const_i16(anvil_ctx_t *ctx, int16_t val);
 anvil_value_t *anvil_const_i32(anvil_ctx_t *ctx, int32_t val);
@@ -477,7 +565,7 @@ anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
 
 /* Set global variable initializer */
-void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
+bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 
 /* Arithmetic operations */
 anvil_value_t *anvil_build_add(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
@@ -516,16 +604,16 @@ anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type, const ch
 anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
                                        anvil_value_t *count, const char *name);
 anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr, const char *name);
-anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr);
+bool anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr);
 anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr,
                                 anvil_value_t **indices, size_t num_indices, const char *name);
 anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_type, 
                                        anvil_value_t *ptr, unsigned field_idx, const char *name);
 
 /* Control flow */
-anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
-anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
-                                    anvil_block_t *then_block, anvil_block_t *else_block);
+bool anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
+bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
+                         anvil_block_t *then_block, anvil_block_t *else_block);
 anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
                                   anvil_block_t *default_block);
 bool anvil_switch_add_case(anvil_instr_t *switch_instr,
@@ -533,8 +621,8 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
                            anvil_block_t *dest);
 anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *callee,
                                  anvil_value_t **args, size_t num_args, const char *name);
-anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
-anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx);
+bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
+bool anvil_build_ret_void(anvil_ctx_t *ctx);
 
 /* Type conversions */
 anvil_value_t *anvil_build_trunc(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name);
@@ -557,11 +645,13 @@ anvil_value_t *anvil_build_fmul(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_valu
 anvil_value_t *anvil_build_fdiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_fneg(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
 anvil_value_t *anvil_build_fabs(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
-anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
+anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx, anvil_fcmp_pred_t predicate,
+                                anvil_value_t *lhs, anvil_value_t *rhs,
+                                const char *name);
 
 /* Misc */
 anvil_value_t *anvil_build_phi(anvil_ctx_t *ctx, anvil_type_t *type, const char *name);
-void anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val, anvil_block_t *block);
+bool anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val, anvil_block_t *block);
 anvil_value_t *anvil_build_select(anvil_ctx_t *ctx, anvil_value_t *cond,
                                    anvil_value_t *then_val, anvil_value_t *else_val, const char *name);
 

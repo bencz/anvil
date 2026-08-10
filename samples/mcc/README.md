@@ -5,13 +5,13 @@ MCC is a small C compiler sample built on ANVIL. Its main purpose in this reposi
 ## Features
 
 - **C89/ANSI C baseline** with selected C99/C11/C23/GNU extensions
-- **Preprocessor** with full support for:
+- **Preprocessor** with tested support for:
   - `#include` (local and system headers)
   - `#define` / `#undef` (object-like and function-like macros)
   - `#ifdef` / `#ifndef` / `#if` / `#elif` / `#else` / `#endif`
   - Conditional expressions with arithmetic and logical operators
   - `defined()` operator
-  - `#pragma`, `#error`, `#warning`, `#line`
+  - `#pragma once`, `#error`, `#warning`, `#line` (other pragmas are diagnosed)
   - Stringification (`#`), token pasting (`##`), variadic macros, and `__VA_OPT__`
 - **C type system and semantic analysis**:
   - Basic integer/floating types, including `_Bool` and `long long`
@@ -27,6 +27,9 @@ MCC is a small C compiler sample built on ANVIL. Its main purpose in this reposi
   - ANVIL verifies and optimizes that IR before invoking a selected backend.
   - Any registered ANVIL backend can be selected with `-arch=...`.
   - The executable stress suite currently validates the most complete runtime path available on the host.
+
+The accepted `-std=` names select implemented subsets, not full ISO/GNU
+conformance. See the authoritative [capability matrix](docs/C_STANDARDS.md).
 
 ## Building
 
@@ -175,7 +178,6 @@ mcc/
 │   ├── types.c         # Type system implementation
 │   ├── symtab.c        # Symbol table implementation
 │   ├── sema/           # Modular semantic analysis
-│   ├── opt/            # AST optimizer
 │   └── codegen/        # ANVIL code generator
 ├── includes/           # C standard library headers
 │   ├── stdio.h, stdlib.h, string.h, ...

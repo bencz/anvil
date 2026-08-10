@@ -100,16 +100,9 @@ int main(void)
     printf("==================\n\n");
     
     /* Create context */
-    anvil_ctx_t *ctx = anvil_ctx_create();
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ARM64);
     if (!ctx) {
         fprintf(stderr, "Failed to create context\n");
-        return 1;
-    }
-    
-    /* Set target to ARM64 */
-    if (anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64) != ANVIL_OK) {
-        fprintf(stderr, "Failed to set target\n");
-        anvil_ctx_destroy(ctx);
         return 1;
     }
     

@@ -3,20 +3,29 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 anvil_type_t *anvil_type_create(anvil_ctx_t *ctx, anvil_type_kind_t kind)
 {
-    anvil_type_t *type = calloc(1, sizeof(anvil_type_t));
-    if (!type) return NULL;
-    type->kind = kind;
-
-    /* Register with the context so anvil_ctx_destroy can reclaim it. */
-    if (ctx) {
-        type->ctx_next = ctx->types;
-        ctx->types = type;
+    if (!ctx) return NULL;
+    anvil_type_t *type = anvil_ctx_calloc(ctx, 1, sizeof(anvil_type_t));
+    if (!type) {
+        anvil_set_error(ctx, ANVIL_ERR_NOMEM, "Out of memory creating type");
+        return NULL;
     }
+    type->kind = kind;
+    type->owner_ctx = ctx;
+    return type;
+}
+
+static anvil_type_t *type_register(anvil_ctx_t *ctx, anvil_type_t *type)
+{
+    if (!ctx || !type || type->owner_ctx != ctx) return NULL;
+    type->ctx_next = ctx->types;
+    ctx->types = type;
     return type;
 }
 
@@ -45,113 +54,82 @@ void anvil_type_free(anvil_type_t *type)
 void anvil_type_init_sizes(anvil_ctx_t *ctx)
 {
     if (!ctx) return;
-    
-    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
-    int ptr_size = arch ? arch->ptr_size : 8;
-    
-    /* Create void type */
-    if (!ctx->type_void) {
-        ctx->type_void = anvil_type_create(ctx, ANVIL_TYPE_VOID);
-        ctx->type_void->size = 0;
-        ctx->type_void->align = 1;
-    }
-    
-    /* Create i8 type */
-    if (!ctx->type_i8) {
-        ctx->type_i8 = anvil_type_create(ctx, ANVIL_TYPE_I8);
-        ctx->type_i8->size = 1;
-        ctx->type_i8->align = 1;
-        ctx->type_i8->is_signed = true;
-    }
-    
-    /* Create i16 type */
-    if (!ctx->type_i16) {
-        ctx->type_i16 = anvil_type_create(ctx, ANVIL_TYPE_I16);
-        ctx->type_i16->size = 2;
-        ctx->type_i16->align = 2;
-        ctx->type_i16->is_signed = true;
-    }
-    
-    /* Create i32 type */
-    if (!ctx->type_i32) {
-        ctx->type_i32 = anvil_type_create(ctx, ANVIL_TYPE_I32);
-        ctx->type_i32->size = 4;
-        ctx->type_i32->align = 4;
-        ctx->type_i32->is_signed = true;
-    }
-    
-    /* Create i64 type */
-    if (!ctx->type_i64) {
-        ctx->type_i64 = anvil_type_create(ctx, ANVIL_TYPE_I64);
-        ctx->type_i64->size = 8;
-        ctx->type_i64->align = 8;
-        ctx->type_i64->is_signed = true;
-    }
-    
-    /* Create u8 type */
-    if (!ctx->type_u8) {
-        ctx->type_u8 = anvil_type_create(ctx, ANVIL_TYPE_U8);
-        ctx->type_u8->size = 1;
-        ctx->type_u8->align = 1;
-        ctx->type_u8->is_signed = false;
-    }
-    
-    /* Create u16 type */
-    if (!ctx->type_u16) {
-        ctx->type_u16 = anvil_type_create(ctx, ANVIL_TYPE_U16);
-        ctx->type_u16->size = 2;
-        ctx->type_u16->align = 2;
-        ctx->type_u16->is_signed = false;
-    }
-    
-    /* Create u32 type */
-    if (!ctx->type_u32) {
-        ctx->type_u32 = anvil_type_create(ctx, ANVIL_TYPE_U32);
-        ctx->type_u32->size = 4;
-        ctx->type_u32->align = 4;
-        ctx->type_u32->is_signed = false;
-    }
-    
-    /* Create u64 type */
-    if (!ctx->type_u64) {
-        ctx->type_u64 = anvil_type_create(ctx, ANVIL_TYPE_U64);
-        ctx->type_u64->size = 8;
-        ctx->type_u64->align = 8;
-        ctx->type_u64->is_signed = false;
-    }
-    
-    /* Create f32 type */
-    if (!ctx->type_f32) {
-        ctx->type_f32 = anvil_type_create(ctx, ANVIL_TYPE_F32);
-        ctx->type_f32->size = 4;
-        ctx->type_f32->align = 4;
-    }
-    
-    /* Create f64 type */
-    if (!ctx->type_f64) {
-        ctx->type_f64 = anvil_type_create(ctx, ANVIL_TYPE_F64);
-        ctx->type_f64->size = 8;
-        ctx->type_f64->align = 8;
-    }
+
+    const anvil_data_layout_t *dl = &ctx->data_layout;
+
+#define INIT_SCALAR(member, type_kind, entry, signedness)                       \
+    do {                                                                        \
+        if (!ctx->member) {                                                     \
+            anvil_type_t *new_type = anvil_type_create(ctx, (type_kind));       \
+            if (new_type) {                                                     \
+                new_type->size = (entry).size;                                  \
+                new_type->align = (entry).abi_align;                            \
+                new_type->preferred_align = (entry).preferred_align;            \
+                new_type->is_signed = (signedness);                             \
+                ctx->member = type_register(ctx, new_type);                     \
+            }                                                                   \
+        } else {                                                                \
+            ctx->member->size = (entry).size;                                   \
+            ctx->member->align = (entry).abi_align;                             \
+            ctx->member->preferred_align = (entry).preferred_align;             \
+        }                                                                       \
+    } while (0)
+
+    anvil_layout_entry_t void_layout = { 0, 1, 1 };
+    INIT_SCALAR(type_void, ANVIL_TYPE_VOID, void_layout, false);
+    /* i1 is a one-bit integer with byte-addressable storage. */
+    INIT_SCALAR(type_i1, ANVIL_TYPE_I1, dl->i1, false);
+    INIT_SCALAR(type_i8, ANVIL_TYPE_I8, dl->i8, true);
+    INIT_SCALAR(type_i16, ANVIL_TYPE_I16, dl->i16, true);
+    INIT_SCALAR(type_i32, ANVIL_TYPE_I32, dl->i32, true);
+    INIT_SCALAR(type_i64, ANVIL_TYPE_I64, dl->i64, true);
+    INIT_SCALAR(type_u8, ANVIL_TYPE_U8, dl->i8, false);
+    INIT_SCALAR(type_u16, ANVIL_TYPE_U16, dl->i16, false);
+    INIT_SCALAR(type_u32, ANVIL_TYPE_U32, dl->i32, false);
+    INIT_SCALAR(type_u64, ANVIL_TYPE_U64, dl->i64, false);
+    INIT_SCALAR(type_f32, ANVIL_TYPE_F32, dl->f32, false);
+    INIT_SCALAR(type_f64, ANVIL_TYPE_F64, dl->f64, false);
+
+#undef INIT_SCALAR
 
     /* Cache i8* and void* pointer types — they dominate composite usage
      * (every string constant, every alloca-derived address, every byte
      * buffer). Caching avoids a calloc+free cycle per call and eliminates
      * what used to be the biggest composite-type leak. */
     if (!ctx->type_ptr_i8) {
-        ctx->type_ptr_i8 = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        if (type && ctx->type_i8) {
+            type->size = dl->pointer.size;
+            type->align = dl->pointer.abi_align;
+            type->preferred_align = dl->pointer.preferred_align;
+            type->data.pointee = ctx->type_i8;
+            ctx->type_ptr_i8 = type_register(ctx, type);
+        } else {
+            anvil_type_free(type);
+        }
     }
     if (ctx->type_ptr_i8) {
-        ctx->type_ptr_i8->size = ptr_size;
-        ctx->type_ptr_i8->align = ptr_size;
+        ctx->type_ptr_i8->size = dl->pointer.size;
+        ctx->type_ptr_i8->align = dl->pointer.abi_align;
+        ctx->type_ptr_i8->preferred_align = dl->pointer.preferred_align;
         ctx->type_ptr_i8->data.pointee = ctx->type_i8;
     }
     if (!ctx->type_ptr_void) {
-        ctx->type_ptr_void = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_PTR);
+        if (type && ctx->type_void) {
+            type->size = dl->pointer.size;
+            type->align = dl->pointer.abi_align;
+            type->preferred_align = dl->pointer.preferred_align;
+            type->data.pointee = ctx->type_void;
+            ctx->type_ptr_void = type_register(ctx, type);
+        } else {
+            anvil_type_free(type);
+        }
     }
     if (ctx->type_ptr_void) {
-        ctx->type_ptr_void->size = ptr_size;
-        ctx->type_ptr_void->align = ptr_size;
+        ctx->type_ptr_void->size = dl->pointer.size;
+        ctx->type_ptr_void->align = dl->pointer.abi_align;
+        ctx->type_ptr_void->preferred_align = dl->pointer.preferred_align;
         ctx->type_ptr_void->data.pointee = ctx->type_void;
     }
 }
@@ -159,6 +137,11 @@ void anvil_type_init_sizes(anvil_ctx_t *ctx)
 anvil_type_t *anvil_type_void(anvil_ctx_t *ctx)
 {
     return ctx ? ctx->type_void : NULL;
+}
+
+anvil_type_t *anvil_type_i1(anvil_ctx_t *ctx)
+{
+    return ctx ? ctx->type_i1 : NULL;
 }
 
 anvil_type_t *anvil_type_i8(anvil_ctx_t *ctx)
@@ -216,9 +199,17 @@ anvil_type_t *anvil_type_decimal(anvil_ctx_t *ctx,
                                   unsigned precision,
                                   unsigned scale)
 {
-    if (!ctx || precision == 0 || scale > precision) return NULL;
+    if (!ctx || !ctx->target_configured || precision == 0 || scale > precision) {
+        if (ctx && !ctx->target_configured)
+            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                            "Select a target before creating types");
+        return NULL;
+    }
     if (encoding != ANVIL_DECIMAL_PACKED &&
         encoding != ANVIL_DECIMAL_ZONED) {
+        return NULL;
+    }
+    if (encoding == ANVIL_DECIMAL_PACKED && precision > UINT_MAX - 2u) {
         return NULL;
     }
 
@@ -226,6 +217,7 @@ anvil_type_t *anvil_type_decimal(anvil_ctx_t *ctx,
     if (!type) return NULL;
 
     type->align = 1;
+    type->preferred_align = 1;
     type->data.decimal.encoding = encoding;
     type->data.decimal.precision = precision;
     type->data.decimal.scale = scale;
@@ -236,7 +228,7 @@ anvil_type_t *anvil_type_decimal(anvil_ctx_t *ctx,
         type->size = precision;
     }
 
-    return type;
+    return type_register(ctx, type);
 }
 
 anvil_type_t *anvil_type_decimal_packed(anvil_ctx_t *ctx,
@@ -255,101 +247,309 @@ anvil_type_t *anvil_type_decimal_zoned(anvil_ctx_t *ctx,
 
 anvil_type_t *anvil_type_ptr(anvil_ctx_t *ctx, anvil_type_t *pointee)
 {
-    if (!ctx) return NULL;
-
+    if (!ctx || !ctx->target_configured || !pointee ||
+        pointee->owner_ctx != ctx) {
+        if (ctx && !ctx->target_configured)
+            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                            "Select a target before creating types");
+        return NULL;
+    }
     /* Fast path: return the cached pointer type for the common cases. */
-    if (pointee == ctx->type_i8   && ctx->type_ptr_i8)   return ctx->type_ptr_i8;
-    if (pointee == ctx->type_void && ctx->type_ptr_void) return ctx->type_ptr_void;
+    if (pointee == ctx->type_i8 && ctx->type_ptr_i8) {
+        anvil_ctx_freeze_target(ctx);
+        return ctx->type_ptr_i8;
+    }
+    if (pointee == ctx->type_void && ctx->type_ptr_void) {
+        anvil_ctx_freeze_target(ctx);
+        return ctx->type_ptr_void;
+    }
 
     anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_PTR);
     if (!type) return NULL;
 
-    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
-    type->size = arch ? arch->ptr_size : 8;
-    type->align = type->size;
+    type->size = ctx->data_layout.pointer.size;
+    type->align = ctx->data_layout.pointer.abi_align;
+    type->preferred_align = ctx->data_layout.pointer.preferred_align;
     type->data.pointee = pointee;
 
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
+    return type;
+}
+
+static bool checked_align_up(size_t value, size_t align, size_t *result)
+{
+    if (!result || align == 0 || (align & (align - 1)) != 0 ||
+        value > SIZE_MAX - (align - 1)) {
+        return false;
+    }
+    *result = (value + align - 1) & ~(align - 1);
+    return true;
+}
+
+static uint64_t struct_name_hash(const char *name)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    while (*name) {
+        hash ^= (unsigned char)*name++;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool named_table_reserve(anvil_ctx_t *ctx, size_t needed)
+{
+    size_t old_cap = ctx->named_struct_bucket_count;
+    if (old_cap && needed <= old_cap - old_cap / 4) return true;
+    size_t new_cap = old_cap ? old_cap * 2 : 32;
+    if (new_cap < old_cap || new_cap > SIZE_MAX / sizeof(anvil_type_t *)) {
+        anvil_set_error(ctx, ANVIL_ERR_NOMEM, "Named struct table overflow");
+        return false;
+    }
+    anvil_type_t **buckets = anvil_ctx_calloc(ctx, new_cap, sizeof(*buckets));
+    if (!buckets) {
+        anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                        "Out of memory growing named struct table");
+        return false;
+    }
+    for (size_t i = 0; i < old_cap; i++) {
+        anvil_type_t *cur = ctx->named_struct_buckets[i];
+        while (cur) {
+            anvil_type_t *next = cur->data.struc.symbol_next;
+            size_t slot = (size_t)(struct_name_hash(cur->data.struc.name) &
+                                   (uint64_t)(new_cap - 1));
+            cur->data.struc.symbol_next = buckets[slot];
+            buckets[slot] = cur;
+            cur = next;
+        }
+    }
+    free(ctx->named_struct_buckets);
+    ctx->named_struct_buckets = buckets;
+    ctx->named_struct_bucket_count = new_cap;
+    return true;
+}
+
+anvil_type_t *anvil_type_named_struct(anvil_ctx_t *ctx, const char *name)
+{
+    if (!ctx || !ctx->target_configured || !name || !*name) {
+        if (ctx && !ctx->target_configured) {
+            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                            "Select a target before creating types");
+            return NULL;
+        }
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                                 "Identified struct requires a non-empty name");
+        return NULL;
+    }
+    if (ctx->named_struct_bucket_count) {
+        size_t slot = (size_t)(struct_name_hash(name) &
+                               (uint64_t)(ctx->named_struct_bucket_count - 1));
+        for (anvil_type_t *cur = ctx->named_struct_buckets[slot]; cur;
+             cur = cur->data.struc.symbol_next) {
+            if (strcmp(cur->data.struc.name, name) == 0) {
+                anvil_ctx_freeze_target(ctx);
+                return cur;
+            }
+        }
+    }
+
+    anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_STRUCT);
+    if (!type) return NULL;
+    type->data.struc.name = anvil_ctx_strdup(ctx, name);
+    if (!type->data.struc.name ||
+        !named_table_reserve(ctx, ctx->named_struct_count + 1)) {
+        anvil_type_free(type);
+        return NULL;
+    }
+    type->data.struc.identified = true;
+    type->data.struc.complete = false;
+    size_t slot = (size_t)(struct_name_hash(name) &
+                           (uint64_t)(ctx->named_struct_bucket_count - 1));
+    type->data.struc.symbol_next = ctx->named_struct_buckets[slot];
+    ctx->named_struct_buckets[slot] = type;
+    ctx->named_struct_count++;
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
+    return type;
+}
+
+bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
+                                size_t num_fields, bool packed)
+{
+    if (!type || type->kind != ANVIL_TYPE_STRUCT ||
+        !type->data.struc.identified || type->data.struc.complete) {
+        if (type && type->owner_ctx)
+            anvil_set_error(type->owner_ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Struct body may only be set once on an opaque identified struct");
+        return false;
+    }
+    anvil_ctx_t *ctx = type->owner_ctx;
+    if (!ctx || !ctx->target_configured) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                                 "Select a target before defining types");
+        return false;
+    }
+    if ((num_fields && !fields) ||
+        num_fields > SIZE_MAX / sizeof(*fields) ||
+        num_fields > SIZE_MAX / sizeof(size_t)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "Invalid struct body");
+        return false;
+    }
+    for (size_t i = 0; i < num_fields; i++) {
+        if (!fields[i] || fields[i]->owner_ctx != ctx ||
+            fields[i]->kind == ANVIL_TYPE_VOID ||
+            fields[i]->kind == ANVIL_TYPE_FUNC || fields[i]->align == 0) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Struct fields must be sized first-class types from the same context");
+            return false;
+        }
+    }
+
+    anvil_type_t **new_fields = NULL;
+    size_t *new_offsets = NULL;
+    if (num_fields) {
+        new_fields = anvil_ctx_malloc(ctx, num_fields * sizeof(*new_fields));
+        new_offsets = anvil_ctx_malloc(ctx, num_fields * sizeof(*new_offsets));
+        if (!new_fields || !new_offsets) {
+            free(new_fields);
+            free(new_offsets);
+            anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                            "Out of memory defining struct body");
+            return false;
+        }
+    }
+
+    size_t offset = 0;
+    size_t max_align = packed ? 1 : ctx->data_layout.aggregate_abi_align;
+    size_t max_preferred = packed ? 1
+                                  : ctx->data_layout.aggregate_preferred_align;
+    for (size_t i = 0; i < num_fields; i++) {
+        size_t field_align = packed ? 1 : fields[i]->align;
+        if (!checked_align_up(offset, field_align, &offset) ||
+            fields[i]->size > SIZE_MAX - offset) {
+            free(new_fields);
+            free(new_offsets);
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Struct layout overflows size_t");
+            return false;
+        }
+        new_fields[i] = fields[i];
+        new_offsets[i] = offset;
+        offset += fields[i]->size;
+        if (field_align > max_align) max_align = field_align;
+        if (fields[i]->preferred_align > max_preferred)
+            max_preferred = fields[i]->preferred_align;
+    }
+    size_t total = offset;
+    if (!packed && !checked_align_up(offset, max_align, &total)) {
+        free(new_fields);
+        free(new_offsets);
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                        "Struct tail padding overflows size_t");
+        return false;
+    }
+
+    type->data.struc.fields = new_fields;
+    type->data.struc.offsets = new_offsets;
+    type->data.struc.num_fields = num_fields;
+    type->data.struc.packed = packed;
+    type->data.struc.complete = true;
+    type->size = total;
+    type->align = packed ? 1 : max_align;
+    type->preferred_align = packed ? 1 : max_preferred;
+    return true;
+}
+
+anvil_type_t *anvil_type_literal_struct(anvil_ctx_t *ctx,
+                                         anvil_type_t **fields,
+                                         size_t num_fields, bool packed)
+{
+    if (!ctx || !ctx->target_configured) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                                 "Select a target before creating types");
+        return NULL;
+    }
+    anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_STRUCT);
+    if (!type) return NULL;
+    type->data.struc.identified = true; /* reuse transactional body builder */
+    if (!anvil_type_struct_set_body(type, fields, num_fields, packed)) {
+        anvil_type_free(type);
+        return NULL;
+    }
+    type->data.struc.identified = false;
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
     return type;
 }
 
 anvil_type_t *anvil_type_struct(anvil_ctx_t *ctx, const char *name,
                                  anvil_type_t **fields, size_t num_fields)
 {
-    if (!ctx) return NULL;
-    
-    anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_STRUCT);
-    if (!type) return NULL;
-    
-    type->data.struc.name = name ? strdup(name) : NULL;
-    type->data.struc.num_fields = num_fields;
-    type->data.struc.packed = false;
-    
-    if (num_fields > 0) {
-        type->data.struc.fields = calloc(num_fields, sizeof(anvil_type_t *));
-        type->data.struc.offsets = calloc(num_fields, sizeof(size_t));
-        
-        if (!type->data.struc.fields || !type->data.struc.offsets) {
-            free(type->data.struc.fields);
-            free(type->data.struc.offsets);
-            free(type);
-            return NULL;
-        }
-        
-        /* Calculate offsets and total size */
-        size_t offset = 0;
-        size_t max_align = 1;
-        
-        for (size_t i = 0; i < num_fields; i++) {
-            type->data.struc.fields[i] = fields[i];
-            
-            size_t field_align = fields[i]->align;
-            if (field_align > max_align) max_align = field_align;
-            
-            /* Align offset */
-            offset = (offset + field_align - 1) & ~(field_align - 1);
-            type->data.struc.offsets[i] = offset;
-            offset += fields[i]->size;
-        }
-        
-        /* Final size with alignment padding */
-        type->size = (offset + max_align - 1) & ~(max_align - 1);
-        type->align = max_align;
-    }
-    
+    if (!name) return anvil_type_literal_struct(ctx, fields, num_fields, false);
+    anvil_type_t *type = anvil_type_named_struct(ctx, name);
+    if (!type || !anvil_type_struct_set_body(type, fields, num_fields, false))
+        return NULL;
     return type;
 }
 
 anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count)
 {
-    if (!ctx || !elem) return NULL;
-    
+    if (!ctx || !ctx->target_configured || !elem || elem->owner_ctx != ctx || elem->align == 0 ||
+        elem->kind == ANVIL_TYPE_VOID || elem->kind == ANVIL_TYPE_FUNC ||
+        (count != 0 && elem->size > SIZE_MAX / count)) {
+        if (ctx && !ctx->target_configured)
+            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                            "Select a target before creating types");
+        return NULL;
+    }
+
     anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_ARRAY);
     if (!type) return NULL;
-    
+
     type->data.array.elem = elem;
     type->data.array.count = count;
     type->size = elem->size * count;
     type->align = elem->align;
+    type->preferred_align = elem->preferred_align;
     
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
     return type;
 }
 
 anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
                                anvil_type_t **params, size_t num_params, bool variadic)
 {
-    if (!ctx) return NULL;
-    
+    if (!ctx || !ctx->target_configured || (ret && ret->owner_ctx != ctx) ||
+        (num_params > 0 && !params) ||
+        num_params > SIZE_MAX / sizeof(anvil_type_t *)) {
+        if (ctx && !ctx->target_configured)
+            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                            "Select a target before creating types");
+        return NULL;
+    }
+    for (size_t i = 0; i < num_params; i++) {
+        if (!params[i] || params[i]->owner_ctx != ctx ||
+            params[i]->kind == ANVIL_TYPE_VOID ||
+            params[i]->kind == ANVIL_TYPE_FUNC) {
+            return NULL;
+        }
+    }
+
     anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_FUNC);
     if (!type) return NULL;
-    
+
     type->data.func.ret = ret ? ret : ctx->type_void;
     type->data.func.num_params = num_params;
     type->data.func.variadic = variadic;
     
-    if (num_params > 0 && params) {
-        type->data.func.params = calloc(num_params, sizeof(anvil_type_t *));
+    if (num_params > 0) {
+        type->data.func.params = anvil_ctx_calloc(ctx, num_params,
+                                                  sizeof(anvil_type_t *));
         if (!type->data.func.params) {
-            free(type);
+            anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                            "Out of memory creating function type");
+            anvil_type_free(type);
             return NULL;
         }
         memcpy(type->data.func.params, params, num_params * sizeof(anvil_type_t *));
@@ -358,8 +558,170 @@ anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
     /* Function types don't have a meaningful size */
     type->size = 0;
     type->align = 1;
+    type->preferred_align = 1;
     
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
     return type;
+}
+
+typedef struct type_pair {
+    const anvil_type_t *lhs;
+    const anvil_type_t *rhs;
+    const struct type_pair *parent;
+} type_pair_t;
+
+static bool types_equal_graph(const anvil_type_t *lhs,
+                              const anvil_type_t *rhs,
+                              const type_pair_t *parents)
+{
+    if (lhs == rhs) return true;
+    if (!lhs || !rhs || lhs->owner_ctx != rhs->owner_ctx ||
+        lhs->kind != rhs->kind) {
+        return false;
+    }
+    for (const type_pair_t *p = parents; p; p = p->parent) {
+        if (p->lhs == lhs && p->rhs == rhs) return true;
+    }
+    type_pair_t pair = { lhs, rhs, parents };
+
+    switch (lhs->kind) {
+        case ANVIL_TYPE_VOID:
+        case ANVIL_TYPE_I1:
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U8:
+        case ANVIL_TYPE_U16:
+        case ANVIL_TYPE_U32:
+        case ANVIL_TYPE_U64:
+        case ANVIL_TYPE_F32:
+        case ANVIL_TYPE_F64:
+            return true;
+        case ANVIL_TYPE_DECIMAL:
+            return lhs->data.decimal.encoding == rhs->data.decimal.encoding &&
+                   lhs->data.decimal.precision == rhs->data.decimal.precision &&
+                   lhs->data.decimal.scale == rhs->data.decimal.scale;
+        case ANVIL_TYPE_PTR:
+            return types_equal_graph(lhs->data.pointee, rhs->data.pointee,
+                                     &pair);
+        case ANVIL_TYPE_ARRAY:
+            return lhs->data.array.count == rhs->data.array.count &&
+                   types_equal_graph(lhs->data.array.elem, rhs->data.array.elem,
+                                     &pair);
+        case ANVIL_TYPE_STRUCT:
+            if (lhs->data.struc.identified || rhs->data.struc.identified)
+                return false; /* distinct identified types are nominal */
+            if (!lhs->data.struc.complete || !rhs->data.struc.complete)
+                return false;
+            if (lhs->data.struc.num_fields != rhs->data.struc.num_fields ||
+                lhs->data.struc.packed != rhs->data.struc.packed) {
+                return false;
+            }
+            for (size_t i = 0; i < lhs->data.struc.num_fields; i++) {
+                if (!types_equal_graph(lhs->data.struc.fields[i],
+                                       rhs->data.struc.fields[i], &pair)) {
+                    return false;
+                }
+            }
+            return true;
+        case ANVIL_TYPE_FUNC:
+            if (lhs->data.func.num_params != rhs->data.func.num_params ||
+                lhs->data.func.variadic != rhs->data.func.variadic ||
+                !types_equal_graph(lhs->data.func.ret, rhs->data.func.ret,
+                                   &pair)) {
+                return false;
+            }
+            for (size_t i = 0; i < lhs->data.func.num_params; i++) {
+                if (!types_equal_graph(lhs->data.func.params[i],
+                                       rhs->data.func.params[i], &pair)) {
+                    return false;
+                }
+            }
+            return true;
+    }
+    return false;
+}
+
+bool anvil_types_equal(const anvil_type_t *lhs, const anvil_type_t *rhs)
+{
+    return types_equal_graph(lhs, rhs, NULL);
+}
+
+bool anvil_gep_analyze_step(anvil_type_t **current,
+                            const anvil_value_t *index,
+                            size_t index_ordinal,
+                            anvil_gep_step_t *step)
+{
+    if (!current || !*current || !index || !step ||
+        !anvil_type_is_integer(index->type) ||
+        index->type->kind == ANVIL_TYPE_I1) return false;
+    anvil_type_t *type = *current;
+    if (index_ordinal == 0) {
+        step->kind = ANVIL_GEP_STEP_SCALE;
+        step->amount = type->size;
+        step->result_type = type;
+        return true;
+    }
+    if (type->kind == ANVIL_TYPE_ARRAY) {
+        type = type->data.array.elem;
+        step->kind = ANVIL_GEP_STEP_SCALE;
+        step->amount = type->size;
+        step->result_type = type;
+        *current = type;
+        return true;
+    }
+    if (type->kind == ANVIL_TYPE_STRUCT && type->data.struc.complete &&
+        index->kind == ANVIL_VAL_CONST_INT && index->data.i >= 0 &&
+        (size_t)index->data.i < type->data.struc.num_fields) {
+        size_t field = (size_t)index->data.i;
+        step->kind = ANVIL_GEP_STEP_FIELD_OFFSET;
+        step->amount = type->data.struc.offsets[field];
+        type = type->data.struc.fields[field];
+        step->result_type = type;
+        *current = type;
+        return true;
+    }
+    return false;
+}
+
+bool anvil_gep_const_step_offset(const anvil_gep_step_t *step,
+                                 const anvil_value_t *index,
+                                 int64_t *offset)
+{
+    if (!step || !index || !offset || step->amount > (size_t)INT64_MAX)
+        return false;
+    if (step->kind == ANVIL_GEP_STEP_FIELD_OFFSET) {
+        *offset = (int64_t)step->amount;
+        return true;
+    }
+    if (index->kind != ANVIL_VAL_CONST_INT) return false;
+    unsigned ptr_bits = index->owner_ctx
+        ? (unsigned)(index->owner_ctx->data_layout.pointer.size * 8) : 64;
+    if (ptr_bits == 0 || ptr_bits > 64) return false;
+    uint64_t bits = index->data.u;
+    if (ptr_bits < 64) bits &= (UINT64_C(1) << ptr_bits) - 1;
+    int64_t signed_index;
+    if (index->type && !index->type->is_signed) {
+        if (bits > (uint64_t)INT64_MAX) return false;
+        signed_index = (int64_t)bits;
+    } else {
+        if (ptr_bits < 64 && (bits & (UINT64_C(1) << (ptr_bits - 1))))
+            bits |= ~((UINT64_C(1) << ptr_bits) - 1);
+        signed_index = (int64_t)bits;
+    }
+    return !__builtin_mul_overflow(signed_index, (int64_t)step->amount,
+                                   offset);
+}
+
+bool anvil_gep_accumulate_offset(int64_t *total, int64_t step_offset)
+{
+    if (!total) return false;
+    int64_t result;
+    if (__builtin_add_overflow(*total, step_offset, &result)) return false;
+    *total = result;
+    return true;
 }
 
 size_t anvil_type_size(anvil_type_t *type)
@@ -367,9 +729,80 @@ size_t anvil_type_size(anvil_type_t *type)
     return type ? type->size : 0;
 }
 
+unsigned anvil_type_bit_width(const anvil_type_t *type)
+{
+    if (!type) return 0;
+    switch (type->kind) {
+        case ANVIL_TYPE_I1: return 1;
+        case ANVIL_TYPE_I8: case ANVIL_TYPE_U8: return 8;
+        case ANVIL_TYPE_I16: case ANVIL_TYPE_U16: return 16;
+        case ANVIL_TYPE_I32: case ANVIL_TYPE_U32:
+        case ANVIL_TYPE_F32: return 32;
+        case ANVIL_TYPE_I64: case ANVIL_TYPE_U64:
+        case ANVIL_TYPE_F64: return 64;
+        case ANVIL_TYPE_PTR:
+            return type->size <= UINT_MAX / 8 ? (unsigned)(type->size * 8) : 0;
+        default:
+            return 0;
+    }
+}
+
 size_t anvil_type_align(anvil_type_t *type)
 {
     return type ? type->align : 1;
+}
+
+size_t anvil_type_preferred_align(anvil_type_t *type)
+{
+    return type ? type->preferred_align : 1;
+}
+
+bool anvil_type_struct_is_identified(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           type->data.struc.identified;
+}
+
+bool anvil_type_struct_is_opaque(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           !type->data.struc.complete;
+}
+
+bool anvil_type_struct_is_packed(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           type->data.struc.complete && type->data.struc.packed;
+}
+
+const char *anvil_type_struct_name(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT
+               ? type->data.struc.name : NULL;
+}
+
+size_t anvil_type_struct_field_count(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           type->data.struc.complete ? type->data.struc.num_fields : 0;
+}
+
+anvil_type_t *anvil_type_struct_field_type(const anvil_type_t *type,
+                                            size_t field_idx)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           type->data.struc.complete &&
+           field_idx < type->data.struc.num_fields
+               ? type->data.struc.fields[field_idx] : NULL;
+}
+
+size_t anvil_type_struct_field_offset(const anvil_type_t *type,
+                                      size_t field_idx)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT &&
+           type->data.struc.complete &&
+           field_idx < type->data.struc.num_fields
+               ? type->data.struc.offsets[field_idx] : SIZE_MAX;
 }
 
 anvil_decimal_encoding_t anvil_type_decimal_encoding(anvil_type_t *type)
@@ -394,17 +827,14 @@ unsigned anvil_type_decimal_scale(anvil_type_t *type)
 
 bool anvil_type_is_bool(anvil_type_t *type)
 {
-    /* ANVIL doesn't have a dedicated i1/bool type.
-     * Comparison results use i8 but are semantically boolean.
-     * This function returns false; use anvil_value_is_bool() instead. */
-    (void)type;
-    return false;
+    return type && type->kind == ANVIL_TYPE_I1;
 }
 
 bool anvil_type_is_integer(anvil_type_t *type)
 {
     if (!type) return false;
     switch (type->kind) {
+        case ANVIL_TYPE_I1:
         case ANVIL_TYPE_I8:
         case ANVIL_TYPE_I16:
         case ANVIL_TYPE_I32:
@@ -433,4 +863,147 @@ bool anvil_type_is_signed(anvil_type_t *type)
 bool anvil_type_is_pointer(anvil_type_t *type)
 {
     return type && type->kind == ANVIL_TYPE_PTR;
+}
+
+bool anvil_sem_bool_type(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_I1;
+}
+
+bool anvil_sem_type_is_sized(const anvil_type_t *type)
+{
+    if (!type || type->kind == ANVIL_TYPE_VOID ||
+        type->kind == ANVIL_TYPE_FUNC) return false;
+    if (type->kind == ANVIL_TYPE_STRUCT)
+        return type->data.struc.complete;
+    if (type->kind == ANVIL_TYPE_ARRAY)
+        return anvil_sem_type_is_sized(type->data.array.elem);
+    return true;
+}
+
+bool anvil_sem_binary_types(anvil_op_t op, const anvil_type_t *lhs,
+                            const anvil_type_t *rhs,
+                            const anvil_type_t *result)
+{
+    if (!lhs || !rhs || !result || !anvil_types_equal(lhs, rhs) ||
+        !anvil_types_equal(lhs, result)) return false;
+    switch (op) {
+        case ANVIL_OP_ADD: case ANVIL_OP_SUB: case ANVIL_OP_MUL:
+            return anvil_type_is_integer((anvil_type_t *)lhs) &&
+                   lhs->kind != ANVIL_TYPE_I1;
+        case ANVIL_OP_AND: case ANVIL_OP_OR: case ANVIL_OP_XOR:
+            return anvil_type_is_integer((anvil_type_t *)lhs);
+        case ANVIL_OP_SDIV: case ANVIL_OP_SMOD:
+            return anvil_type_is_integer((anvil_type_t *)lhs) &&
+                   lhs->kind != ANVIL_TYPE_I1 && lhs->is_signed;
+        case ANVIL_OP_UDIV: case ANVIL_OP_UMOD:
+            return anvil_type_is_integer((anvil_type_t *)lhs) &&
+                   lhs->kind != ANVIL_TYPE_I1 && !lhs->is_signed;
+        case ANVIL_OP_SHL: case ANVIL_OP_SHR: case ANVIL_OP_SAR:
+            /* Shift amount may have any integer width, so it is handled by
+             * the builder/verifier separately. */
+            return false;
+        case ANVIL_OP_FADD: case ANVIL_OP_FSUB:
+        case ANVIL_OP_FMUL: case ANVIL_OP_FDIV:
+            return anvil_type_is_floating((anvil_type_t *)lhs);
+        default:
+            return false;
+    }
+}
+
+bool anvil_sem_unary_types(anvil_op_t op, const anvil_type_t *operand,
+                           const anvil_type_t *result)
+{
+    if (!operand || !result || !anvil_types_equal(operand, result)) return false;
+    if (op == ANVIL_OP_NEG)
+        return anvil_type_is_integer((anvil_type_t *)operand) &&
+               operand->kind != ANVIL_TYPE_I1;
+    if (op == ANVIL_OP_NOT)
+        return anvil_type_is_integer((anvil_type_t *)operand);
+    if (op == ANVIL_OP_FNEG || op == ANVIL_OP_FABS)
+        return anvil_type_is_floating((anvil_type_t *)operand);
+    return false;
+}
+
+bool anvil_sem_cmp_types(anvil_op_t op, const anvil_type_t *lhs,
+                         const anvil_type_t *rhs,
+                         const anvil_type_t *result)
+{
+    if (!lhs || !rhs || !result || !anvil_types_equal(lhs, rhs) ||
+        !anvil_sem_bool_type(result)) return false;
+    if (op == ANVIL_OP_FCMP)
+        return anvil_type_is_floating((anvil_type_t *)lhs);
+    if (op < ANVIL_OP_CMP_EQ || op > ANVIL_OP_CMP_UGE) return false;
+    if (op == ANVIL_OP_CMP_EQ || op == ANVIL_OP_CMP_NE)
+        return anvil_type_is_integer((anvil_type_t *)lhs) ||
+               lhs->kind == ANVIL_TYPE_PTR;
+    if (!anvil_type_is_integer((anvil_type_t *)lhs)) return false;
+    if (lhs->kind == ANVIL_TYPE_I1) return false;
+    if (op >= ANVIL_OP_CMP_ULT) return !lhs->is_signed;
+    return lhs->is_signed;
+}
+
+bool anvil_sem_cast_types(anvil_op_t op, const anvil_type_t *source,
+                          const anvil_type_t *result)
+{
+    if (!source || !result) return false;
+    bool src_int = anvil_type_is_integer((anvil_type_t *)source);
+    bool dst_int = anvil_type_is_integer((anvil_type_t *)result);
+    bool src_fp = anvil_type_is_floating((anvil_type_t *)source);
+    bool dst_fp = anvil_type_is_floating((anvil_type_t *)result);
+    unsigned src_bits = anvil_type_bit_width(source);
+    unsigned dst_bits = anvil_type_bit_width(result);
+    switch (op) {
+        case ANVIL_OP_TRUNC:
+            return src_int && dst_int && src_bits > dst_bits;
+        case ANVIL_OP_ZEXT: case ANVIL_OP_SEXT:
+            return src_int && dst_int && src_bits < dst_bits;
+        case ANVIL_OP_FPTRUNC:
+            return src_fp && dst_fp && source->size > result->size;
+        case ANVIL_OP_FPEXT:
+            return src_fp && dst_fp && source->size < result->size;
+        case ANVIL_OP_FPTOSI: case ANVIL_OP_FPTOUI:
+            return src_fp && dst_int &&
+                   (op == ANVIL_OP_FPTOSI ? result->is_signed
+                                          : !result->is_signed);
+        case ANVIL_OP_SITOFP: case ANVIL_OP_UITOFP:
+            return src_int && dst_fp &&
+                   (op == ANVIL_OP_SITOFP ? source->is_signed
+                                          : !source->is_signed);
+        case ANVIL_OP_PTRTOINT:
+            return source->kind == ANVIL_TYPE_PTR && dst_int;
+        case ANVIL_OP_INTTOPTR:
+            return src_int && result->kind == ANVIL_TYPE_PTR;
+        case ANVIL_OP_BITCAST:
+        {
+            bool src_scalar = src_int || src_fp ||
+                              source->kind == ANVIL_TYPE_PTR;
+            bool dst_scalar = dst_int || dst_fp ||
+                              result->kind == ANVIL_TYPE_PTR;
+            return src_scalar && dst_scalar && src_bits != 0 &&
+                   src_bits == dst_bits;
+        }
+        default:
+            return false;
+    }
+}
+
+anvil_type_t *anvil_sem_memory_object_type(const anvil_value_t *value)
+{
+    if (!value || !value->type) return NULL;
+    if (value->kind == ANVIL_VAL_GLOBAL &&
+        value->type->kind != ANVIL_TYPE_FUNC) return value->type;
+    return value->type->kind == ANVIL_TYPE_PTR
+               ? value->type->data.pointee : NULL;
+}
+
+anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee)
+{
+    if (!callee || !callee->type) return NULL;
+    if (callee->type->kind == ANVIL_TYPE_FUNC) return callee->type;
+    if (callee->type->kind == ANVIL_TYPE_PTR &&
+        callee->type->data.pointee &&
+        callee->type->data.pointee->kind == ANVIL_TYPE_FUNC)
+        return callee->type->data.pointee;
+    return NULL;
 }

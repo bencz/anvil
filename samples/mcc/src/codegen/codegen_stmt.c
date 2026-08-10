@@ -67,7 +67,9 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         
         case AST_LABEL_STMT: {
             anvil_block_t *label_block = codegen_get_label_block(cg, stmt->data.label_stmt.label);
-            anvil_build_br(cg->anvil_ctx, label_block);
+            if (!codegen_block_has_terminator(cg)) {
+                anvil_build_br(cg->anvil_ctx, label_block);
+            }
             codegen_set_current_block(cg, label_block);
             codegen_stmt(cg, stmt->data.label_stmt.stmt);
             break;
@@ -84,6 +86,7 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         case AST_VAR_DECL: {
             /* Local variable declaration */
             mcc_type_t *var_type = stmt->data.var_decl.var_type;
+            anvil_type_t *type = codegen_type(cg, var_type);
             anvil_value_t *alloca_val;
 
             /* VLA: dimensions use runtime expressions. Emit
@@ -99,7 +102,6 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
                 alloca_val = anvil_build_alloca_dyn(cg->anvil_ctx, anvil_elem,
                                                     count, stmt->data.var_decl.name);
             } else {
-                anvil_type_t *type = codegen_type(cg, var_type);
                 alloca_val = anvil_build_alloca(cg->anvil_ctx, type, stmt->data.var_decl.name);
             }
 
@@ -115,14 +117,13 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
                     stmt->data.var_decl.var_type->kind == TYPE_ARRAY) {
                     /* Initialize each element of the array */
                     mcc_type_t *elem_type = stmt->data.var_decl.var_type->data.array.element;
-                    anvil_type_t *anvil_elem_type = codegen_type(cg, elem_type);
-                    
                     for (size_t i = 0; i < init_node->data.init_list.num_exprs; i++) {
                         /* Get pointer to element */
-                        anvil_value_t *indices[1];
-                        indices[0] = anvil_const_i64(cg->anvil_ctx, (int64_t)i);
+                        anvil_value_t *indices[2];
+                        indices[0] = anvil_const_i64(cg->anvil_ctx, 0);
+                        indices[1] = anvil_const_i64(cg->anvil_ctx, (int64_t)i);
                         anvil_value_t *elem_ptr = anvil_build_gep(cg->anvil_ctx, 
-                            anvil_elem_type, alloca_val, indices, 1, "elem");
+                            type, alloca_val, indices, 2, "elem");
                         
                         /* Generate element value */
                         mcc_ast_node_t *elem_node = init_node->data.init_list.exprs[i];
@@ -163,9 +164,20 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 
 void codegen_compound_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
+    size_t saved_num_locals = cg->num_locals;
     for (size_t i = 0; i < stmt->data.compound_stmt.num_stmts; i++) {
-        codegen_stmt(cg, stmt->data.compound_stmt.stmts[i]);
+        mcc_ast_node_t *child = stmt->data.compound_stmt.stmts[i];
+        /* A terminator ends ordinary sequential code. Labels remain valid
+         * re-entry points and switch insertion to their dedicated blocks. */
+        if (codegen_block_has_terminator(cg) && child &&
+            child->kind != AST_LABEL_STMT &&
+            child->kind != AST_CASE_STMT &&
+            child->kind != AST_DEFAULT_STMT) {
+            continue;
+        }
+        codegen_stmt(cg, child);
     }
+    cg->num_locals = saved_num_locals;
 }
 
 void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
@@ -181,7 +193,12 @@ void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     anvil_block_t *then_block = anvil_block_create(cg->current_func, then_name);
     anvil_block_t *else_block = stmt->data.if_stmt.else_stmt ?
         anvil_block_create(cg->current_func, else_name) : NULL;
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
+    /* Without an else the false edge needs a merge immediately.  With an
+     * else, defer creating it until we know that at least one arm falls
+     * through; otherwise `if (...) return; else return;` would leave an
+     * unreachable empty block, which is invalid ANVIL IR. */
+    anvil_block_t *end_block = else_block ? NULL
+        : anvil_block_create(cg->current_func, end_name);
     
     /* Convert to boolean if not already */
     anvil_value_t *cond_bool = codegen_to_bool(cg, cond);
@@ -192,20 +209,33 @@ void codegen_if_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     /* Then block */
     codegen_set_current_block(cg, then_block);
     codegen_stmt(cg, stmt->data.if_stmt.then_stmt);
-    if (!codegen_block_has_terminator(cg)) {
-        anvil_build_br(cg->anvil_ctx, end_block);
-    }
+    anvil_block_t *then_exit = cg->current_block;
+    bool then_falls_through = !codegen_block_has_terminator(cg);
     
     /* Else block */
     if (else_block) {
         codegen_set_current_block(cg, else_block);
         codegen_stmt(cg, stmt->data.if_stmt.else_stmt);
-        if (!codegen_block_has_terminator(cg)) {
-            anvil_build_br(cg->anvil_ctx, end_block);
+        anvil_block_t *else_exit = cg->current_block;
+        bool else_falls_through = !codegen_block_has_terminator(cg);
+
+        if (then_falls_through || else_falls_through) {
+            end_block = anvil_block_create(cg->current_func, end_name);
+            if (then_falls_through) {
+                codegen_set_current_block(cg, then_exit);
+                anvil_build_br(cg->anvil_ctx, end_block);
+            }
+            if (else_falls_through) {
+                codegen_set_current_block(cg, else_exit);
+                anvil_build_br(cg->anvil_ctx, end_block);
+            }
         }
+    } else if (then_falls_through) {
+        codegen_set_current_block(cg, then_exit);
+        anvil_build_br(cg->anvil_ctx, end_block);
     }
-    
-    codegen_set_current_block(cg, end_block);
+
+    if (end_block) codegen_set_current_block(cg, end_block);
 }
 
 void codegen_while_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
@@ -285,6 +315,10 @@ void codegen_do_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 
 void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
+    /* A declaration in the initializer belongs to the for statement's
+     * enclosing scope, including its condition, increment, and body, but not
+     * statements that follow the loop. */
+    size_t saved_num_locals = cg->num_locals;
     int id = cg->label_counter++;
     char cond_name[32], body_name[32], incr_name[32], end_name[32];
     snprintf(cond_name, sizeof(cond_name), "for%d.cond", id);
@@ -335,32 +369,117 @@ void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     anvil_build_br(cg->anvil_ctx, cond_block);
     
     codegen_set_current_block(cg, end_block);
+    cg->num_locals = saved_num_locals;
     cg->break_target = old_break;
     cg->continue_target = old_continue;
 }
 
-/* Helper to collect case statements from switch body */
-static void collect_cases(mcc_ast_node_t *node, mcc_ast_node_t ***cases, size_t *num_cases,
-                          mcc_ast_node_t **default_case)
+/* Count first so switch lowering can allocate once and cannot leave a raw
+ * realloc result unchecked. */
+static bool count_cases(mcc_codegen_t *cg, mcc_ast_node_t *node,
+                        size_t *num_cases, mcc_ast_node_t **default_case)
 {
-    if (!node) return;
+    if (!node) return true;
     
     if (node->kind == AST_CASE_STMT) {
-        size_t n = *num_cases;
-        *cases = realloc(*cases, (n + 1) * sizeof(mcc_ast_node_t*));
-        (*cases)[n] = node;
+        if (*num_cases == SIZE_MAX) {
+            mcc_error(cg->mcc_ctx, "too many switch cases");
+            return false;
+        }
         (*num_cases)++;
     } else if (node->kind == AST_DEFAULT_STMT) {
         *default_case = node;
     } else if (node->kind == AST_COMPOUND_STMT) {
         for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
-            collect_cases(node->data.compound_stmt.stmts[i], cases, num_cases, default_case);
+            if (!count_cases(cg, node->data.compound_stmt.stmts[i],
+                             num_cases, default_case)) return false;
+        }
+    }
+    return true;
+}
+
+static void fill_cases(mcc_ast_node_t *node, mcc_ast_node_t **cases,
+                       size_t *case_index)
+{
+    if (!node) return;
+    if (node->kind == AST_CASE_STMT) {
+        cases[(*case_index)++] = node;
+    } else if (node->kind == AST_COMPOUND_STMT) {
+        for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
+            fill_cases(node->data.compound_stmt.stmts[i], cases, case_index);
         }
     }
 }
 
+static bool switch_body_has_break(mcc_ast_node_t *node)
+{
+    if (!node) return false;
+    if (node->kind == AST_BREAK_STMT) return true;
+    /* A break nested in another loop/switch does not target this switch. */
+    if (node->kind == AST_SWITCH_STMT || node->kind == AST_WHILE_STMT ||
+        node->kind == AST_DO_STMT || node->kind == AST_FOR_STMT) return false;
+    if (node->kind == AST_COMPOUND_STMT) {
+        for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
+            if (switch_body_has_break(node->data.compound_stmt.stmts[i])) return true;
+        }
+    } else if (node->kind == AST_IF_STMT) {
+        return switch_body_has_break(node->data.if_stmt.then_stmt) ||
+               switch_body_has_break(node->data.if_stmt.else_stmt);
+    } else if (node->kind == AST_CASE_STMT) {
+        return switch_body_has_break(node->data.case_stmt.stmt);
+    } else if (node->kind == AST_DEFAULT_STMT) {
+        return switch_body_has_break(node->data.default_stmt.stmt);
+    }
+    return false;
+}
+
+static bool stmt_always_terminates(mcc_ast_node_t *node)
+{
+    if (!node) return false;
+    if (node->kind == AST_RETURN_STMT || node->kind == AST_GOTO_STMT ||
+        node->kind == AST_BREAK_STMT || node->kind == AST_CONTINUE_STMT) {
+        return true;
+    }
+    if (node->kind == AST_COMPOUND_STMT) {
+        size_t n = node->data.compound_stmt.num_stmts;
+        return n > 0 && stmt_always_terminates(
+            node->data.compound_stmt.stmts[n - 1]);
+    }
+    if (node->kind == AST_IF_STMT) {
+        return node->data.if_stmt.else_stmt &&
+               stmt_always_terminates(node->data.if_stmt.then_stmt) &&
+               stmt_always_terminates(node->data.if_stmt.else_stmt);
+    }
+    return false;
+}
+
 void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
+    size_t num_cases = 0;
+    mcc_ast_node_t *default_case = NULL;
+    if (!count_cases(cg, stmt->data.switch_stmt.body, &num_cases,
+                     &default_case)) return;
+    if (num_cases > SIZE_MAX / sizeof(mcc_ast_node_t *) ||
+        num_cases > SIZE_MAX / sizeof(anvil_block_t *)) {
+        mcc_error(cg->mcc_ctx, "switch case table size overflow");
+        return;
+    }
+
+    mcc_ast_node_t **cases = NULL;
+    anvil_block_t **case_blocks = NULL;
+    anvil_block_t **cmp_blocks = NULL;
+    if (num_cases > 0) {
+        cases = mcc_alloc(cg->mcc_ctx,
+                          num_cases * sizeof(mcc_ast_node_t *));
+        case_blocks = mcc_alloc(cg->mcc_ctx,
+                                num_cases * sizeof(anvil_block_t *));
+        cmp_blocks = mcc_alloc(cg->mcc_ctx,
+                               num_cases * sizeof(anvil_block_t *));
+        if (!cases || !case_blocks || !cmp_blocks) return;
+        size_t case_index = 0;
+        fill_cases(stmt->data.switch_stmt.body, cases, &case_index);
+    }
+
     int id = cg->label_counter++;
     char end_name[32];
     snprintf(end_name, sizeof(end_name), "switch%d.end", id);
@@ -379,21 +498,19 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     anvil_value_t *switch_ptr = anvil_build_alloca(cg->anvil_ctx, switch_type, "switch.val");
     anvil_build_store(cg->anvil_ctx, switch_expr, switch_ptr);
     
-    anvil_block_t *end_block = anvil_block_create(cg->current_func, end_name);
-    
+    /* ANVIL rejects unreachable blocks.  A fully returning switch with a
+     * default has no path to a merge block, so do not manufacture one. */
+    bool need_end = !default_case ||
+                    switch_body_has_break(stmt->data.switch_stmt.body) ||
+                    !stmt_always_terminates(default_case->data.default_stmt.stmt);
+    anvil_block_t *end_block = need_end
+        ? anvil_block_create(cg->current_func, end_name) : NULL;
+
     anvil_block_t *old_break = cg->break_target;
     cg->break_target = end_block;
     
-    /* Collect all case and default statements */
-    mcc_ast_node_t **cases = NULL;
-    size_t num_cases = 0;
-    mcc_ast_node_t *default_case = NULL;
-    collect_cases(stmt->data.switch_stmt.body, &cases, &num_cases, &default_case);
-    
     /* Create blocks for each case */
-    anvil_block_t **case_blocks = NULL;
     if (num_cases > 0) {
-        case_blocks = malloc(num_cases * sizeof(anvil_block_t*));
         for (size_t i = 0; i < num_cases; i++) {
             char case_name[32];
             snprintf(case_name, sizeof(case_name), "switch%d.case%zu", id, i);
@@ -409,9 +526,7 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
     }
     
     /* Generate comparison chain - first create all comparison blocks */
-    anvil_block_t **cmp_blocks = NULL;
     if (num_cases > 0) {
-        cmp_blocks = malloc(num_cases * sizeof(anvil_block_t*));
         for (size_t i = 0; i < num_cases; i++) {
             char cmp_name[32];
             snprintf(cmp_name, sizeof(cmp_name), "switch%d.cmp%zu", id, i);
@@ -465,7 +580,6 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
             anvil_build_br_cond(cg->anvil_ctx, cmp, case_blocks[i], next_block);
         }
     }
-    free(cmp_blocks);
     
     /* Generate code for switch body - process statements between cases */
     /* In C, case labels are just labels - statements continue until break/return */
@@ -525,11 +639,9 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         }
     }
     
-    codegen_set_current_block(cg, end_block);
+    if (end_block) codegen_set_current_block(cg, end_block);
     cg->break_target = old_break;
     
-    free(cases);
-    free(case_blocks);
 }
 
 void codegen_return_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)

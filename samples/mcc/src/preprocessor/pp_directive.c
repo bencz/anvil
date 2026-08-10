@@ -321,17 +321,21 @@ static void pp_process_pragma(mcc_preprocessor_t *pp)
     /* Check for specific pragmas */
     mcc_token_t *tok = mcc_lexer_peek(pp->lexer);
     
+    bool handled = false;
     if (tok->type == TOK_IDENT) {
         if (strcmp(tok->text, "once") == 0) {
             /* Remember the path so a subsequent #include of the same file
              * is suppressed (see pp_mark_pragma_once / pp_process_include). */
             pp_mark_pragma_once(pp);
             mcc_lexer_next(pp->lexer);
+            handled = true;
         }
-        /* Other pragmas can be added here */
     }
-    
-    /* Ignore unknown pragmas */
+
+    if (!handled) {
+        mcc_warning_at(pp->ctx, tok->location,
+                       "unsupported #pragma is ignored");
+    }
     pp_skip_line(pp);
 }
 
@@ -426,11 +430,8 @@ void pp_process_directive(mcc_preprocessor_t *pp)
     }
     
     if (strcmp(directive, "include_next") == 0) {
-        if (!pp_has_include_next(pp)) {
-            mcc_warning(pp->ctx, "#include_next is a GNU extension");
-        }
-        /* TODO: Implement include_next properly */
-        pp_process_include(pp);
+        mcc_error(pp->ctx, "#include_next is not supported");
+        pp_skip_line(pp);
         return;
     }
     

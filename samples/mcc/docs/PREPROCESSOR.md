@@ -52,7 +52,7 @@ The public `mcc_macro_t`, `mcc_include_file_t`, `mcc_cond_stack_t` and
 
 | Directive | Description | Standard |
 |-----------|-------------|----------|
-| `_Pragma()` | Pragma operator (syntactically consumed; the pragma is currently dropped) | C99 |
+| `_Pragma()` | Unsupported: diagnosed and rejected (never silently dropped) | — |
 | Variadic macros | `__VA_ARGS__` | C99 |
 | `__has_include` | Usable in `#if`/`#elif` expressions to probe the include path | C23/GNU |
 
@@ -639,7 +639,7 @@ static inline bool pp_has_elifdef(mcc_preprocessor_t *pp)
 | `#` (stringification) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `##` (token pasting) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `__VA_ARGS__` | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `_Pragma()` | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `_Pragma()` | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `#elifdef` | ❌ | ❌ | ❌ | ✅ | ❌ |
 | `#elifndef` | ❌ | ❌ | ❌ | ✅ | ❌ |
 | `__VA_OPT__` | ❌ | ❌ | ❌ | ✅ | ❌ |
@@ -797,10 +797,10 @@ Current limitations of the MCC preprocessor:
 
 1. **No computed includes**: `#include` with a macro-expanded filename is not
    supported (the filename must be a literal `"..."` or `<...>`).
-2. **`_Pragma()` is dropped**: the operator is parsed and consumed, but the
-   pragma is not re-interpreted as a `#pragma` directive.
-3. **`#include_next` is approximate**: it currently behaves like a plain
-   `#include` rather than resuming the search path after the current directory.
+2. **`_Pragma()` is rejected**: the operator is diagnosed because MCC cannot
+   yet destringize and execute it; its semantics are never silently dropped.
+3. **`#include_next` is rejected** until resumed include-path search is
+   implemented.
 4. **Two expansion paths exist**: the active hide-set expander
    (`pp_expand.c`) plus an older `pp_expand_macro` path in `pp_macro.c` kept
    for reference.

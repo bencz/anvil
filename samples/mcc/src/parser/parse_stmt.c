@@ -247,8 +247,8 @@ mcc_ast_node_t *parse_goto_stmt(mcc_parser_t *p)
     /* GNU: Computed goto (goto *expr) */
     if (parse_match(p, TOK_STAR)) {
         if (!parse_has_label_addr(p)) {
-            mcc_warning_at(p->ctx, tok->location,
-                "computed goto is a GNU extension");
+            mcc_error_at(p->ctx, tok->location,
+                "computed goto is unavailable: ANVIL IR has no indirect branch");
         }
         mcc_ast_node_t *expr = parse_expression(p);
         parse_expect(p, TOK_SEMICOLON, ";");
@@ -343,8 +343,8 @@ static void skip_attributes(mcc_parser_t *p)
 {
     while (parse_check(p, TOK_LBRACKET2)) {
         if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
-            mcc_warning_at(p->ctx, p->peek->location,
-                "attribute syntax [[...]] is a C23 feature");
+            mcc_error_at(p->ctx, p->peek->location,
+                "C23 statement attributes are not implemented by MCC");
         }
         parse_advance(p);  /* Skip [[ */
         int depth = 1;
@@ -413,28 +413,6 @@ mcc_ast_node_t *parse_statement(mcc_parser_t *p)
             parse_advance(p);
             return mcc_ast_create(p->ctx, AST_NULL_STMT, tok->location);
 
-        case TOK_ASM:
-            /* GNU inline asm statement: asm("...") or asm volatile("..." : outputs : inputs : clobbers);
-             * Parse tolerantly as a no-op — we consume tokens and emit a null
-             * statement so downstream passes don't trip. */
-            parse_advance(p);
-            /* Optional 'volatile', 'inline', 'goto' qualifiers */
-            if (parse_check(p, TOK_VOLATILE) || parse_check(p, TOK_INLINE) ||
-                parse_check(p, TOK_GOTO)) {
-                parse_advance(p);
-            }
-            if (parse_match(p, TOK_LPAREN)) {
-                int depth = 1;
-                while (depth > 0 && !parse_check(p, TOK_EOF)) {
-                    if (parse_check(p, TOK_LPAREN)) depth++;
-                    else if (parse_check(p, TOK_RPAREN)) { depth--; if (depth == 0) break; }
-                    parse_advance(p);
-                }
-                parse_match(p, TOK_RPAREN);
-            }
-            parse_match(p, TOK_SEMICOLON);
-            return mcc_ast_create(p->ctx, AST_NULL_STMT, tok->location);
-            
         case TOK_IDENT: {
             /* Check if it's a typedef name - then it's a declaration */
             if (parse_is_typedef_name(p, p->peek->text)) {
@@ -445,14 +423,19 @@ mcc_ast_node_t *parse_statement(mcc_parser_t *p)
                 }
                 return parse_declaration(p);
             }
-            
-            /* Check for label - need to look ahead */
+
+            /* A label is the only expression-statement ambiguity here.  The
+             * preprocessor owns a linked token stream, so inspect its next
+             * token without consuming the identifier.  The old code consumed
+             * the identifier and then reimplemented only postfix and
+             * assignment parsing; consequently perfectly ordinary statements
+             * such as `a > b ? a : b;` failed at the first binary operator. */
             mcc_token_t *ident_tok = p->peek;
-            parse_advance(p);
-            
-            if (parse_check(p, TOK_COLON)) {
+            mcc_token_t *next = mcc_preprocessor_peek(p->pp);
+            if (next && next->type == TOK_COLON) {
+                parse_advance(p); /* identifier */
                 /* It's a label */
-                parse_advance(p);
+                parse_advance(p); /* ':' */
                 mcc_ast_node_t *stmt = parse_statement(p);
                 
                 node = mcc_ast_create(p->ctx, AST_LABEL_STMT, ident_tok->location);
@@ -460,102 +443,10 @@ mcc_ast_node_t *parse_statement(mcc_parser_t *p)
                 node->data.label_stmt.stmt = stmt;
                 return node;
             }
-            
-            /* Not a label - build identifier expression and continue parsing */
-            mcc_ast_node_t *ident = mcc_ast_create(p->ctx, AST_IDENT_EXPR, ident_tok->location);
-            ident->data.ident_expr.name = mcc_strdup(p->ctx, ident_tok->text);
-            
-            /* Parse postfix operators (., ->, [], (), ++, --) */
-            mcc_ast_node_t *expr = ident;
-            while (1) {
-                if (parse_match(p, TOK_DOT)) {
-                    mcc_token_t *member = parse_expect(p, TOK_IDENT, "member name");
-                    mcc_ast_node_t *mem = mcc_ast_create(p->ctx, AST_MEMBER_EXPR, ident_tok->location);
-                    mem->data.member_expr.object = expr;
-                    mem->data.member_expr.member = mcc_strdup(p->ctx, member->text);
-                    mem->data.member_expr.is_arrow = false;
-                    expr = mem;
-                } else if (parse_match(p, TOK_ARROW)) {
-                    mcc_token_t *member = parse_expect(p, TOK_IDENT, "member name");
-                    mcc_ast_node_t *mem = mcc_ast_create(p->ctx, AST_MEMBER_EXPR, ident_tok->location);
-                    mem->data.member_expr.object = expr;
-                    mem->data.member_expr.member = mcc_strdup(p->ctx, member->text);
-                    mem->data.member_expr.is_arrow = true;
-                    expr = mem;
-                } else if (parse_match(p, TOK_LBRACKET)) {
-                    mcc_ast_node_t *index = parse_expression(p);
-                    parse_expect(p, TOK_RBRACKET, "]");
-                    mcc_ast_node_t *sub = mcc_ast_create(p->ctx, AST_SUBSCRIPT_EXPR, ident_tok->location);
-                    sub->data.subscript_expr.array = expr;
-                    sub->data.subscript_expr.index = index;
-                    expr = sub;
-                } else if (parse_match(p, TOK_LPAREN)) {
-                    /* Function call */
-                    mcc_ast_node_t **args = NULL;
-                    size_t num_args = 0;
-                    size_t cap_args = 0;
-                    
-                    if (!parse_check(p, TOK_RPAREN)) {
-                        do {
-                            mcc_ast_node_t *arg = parse_assignment_expr(p);
-                            if (num_args >= cap_args) {
-                                cap_args = cap_args ? cap_args * 2 : 4;
-                                args = mcc_realloc(p->ctx, args,
-                                                   num_args * sizeof(mcc_ast_node_t*),
-                                                   cap_args * sizeof(mcc_ast_node_t*));
-                            }
-                            args[num_args++] = arg;
-                        } while (parse_match(p, TOK_COMMA));
-                    }
-                    parse_expect(p, TOK_RPAREN, ")");
-                    
-                    mcc_ast_node_t *call = mcc_ast_create(p->ctx, AST_CALL_EXPR, ident_tok->location);
-                    call->data.call_expr.func = expr;
-                    call->data.call_expr.args = args;
-                    call->data.call_expr.num_args = num_args;
-                    expr = call;
-                } else if (parse_match(p, TOK_INC)) {
-                    mcc_ast_node_t *inc = mcc_ast_create(p->ctx, AST_UNARY_EXPR, ident_tok->location);
-                    inc->data.unary_expr.op = UNOP_POST_INC;
-                    inc->data.unary_expr.operand = expr;
-                    expr = inc;
-                } else if (parse_match(p, TOK_DEC)) {
-                    mcc_ast_node_t *dec = mcc_ast_create(p->ctx, AST_UNARY_EXPR, ident_tok->location);
-                    dec->data.unary_expr.op = UNOP_POST_DEC;
-                    dec->data.unary_expr.operand = expr;
-                    expr = dec;
-                } else {
-                    break;
-                }
-            }
-            
-            /* Handle assignment or other binary operators */
-            if (mcc_token_is_assignment_op(p->peek->type)) {
-                mcc_token_t *op_tok = p->peek;
-                mcc_binop_t op;
-                switch (op_tok->type) {
-                    case TOK_ASSIGN: op = BINOP_ASSIGN; break;
-                    case TOK_PLUS_ASSIGN: op = BINOP_ADD_ASSIGN; break;
-                    case TOK_MINUS_ASSIGN: op = BINOP_SUB_ASSIGN; break;
-                    case TOK_STAR_ASSIGN: op = BINOP_MUL_ASSIGN; break;
-                    case TOK_SLASH_ASSIGN: op = BINOP_DIV_ASSIGN; break;
-                    case TOK_PERCENT_ASSIGN: op = BINOP_MOD_ASSIGN; break;
-                    case TOK_AMP_ASSIGN: op = BINOP_AND_ASSIGN; break;
-                    case TOK_PIPE_ASSIGN: op = BINOP_OR_ASSIGN; break;
-                    case TOK_CARET_ASSIGN: op = BINOP_XOR_ASSIGN; break;
-                    case TOK_LSHIFT_ASSIGN: op = BINOP_LSHIFT_ASSIGN; break;
-                    case TOK_RSHIFT_ASSIGN: op = BINOP_RSHIFT_ASSIGN; break;
-                    default: op = BINOP_ASSIGN; break;
-                }
-                parse_advance(p);
-                mcc_ast_node_t *rhs = parse_assignment_expr(p);
-                mcc_ast_node_t *bin = mcc_ast_create(p->ctx, AST_BINARY_EXPR, op_tok->location);
-                bin->data.binary_expr.op = op;
-                bin->data.binary_expr.lhs = expr;
-                bin->data.binary_expr.rhs = rhs;
-                expr = bin;
-            }
-            
+
+            /* Not a label: use the canonical expression parser so every
+             * precedence level, ternary and comma expression is accepted. */
+            mcc_ast_node_t *expr = parse_expression(p);
             parse_expect(p, TOK_SEMICOLON, ";");
             
             node = mcc_ast_create(p->ctx, AST_EXPR_STMT, ident_tok->location);

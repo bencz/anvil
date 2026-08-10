@@ -7,6 +7,8 @@
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
+-include $(DEPS)
+
 # Keep MCC linked against the current ANVIL library. The recursive make owns
 # the full dependency graph for libanvil.a, including backend source files.
 .PHONY: FORCE
@@ -46,9 +48,6 @@ $(OBJDIR)/cg_%.o: $(CODEGEN_SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Compile optimization source files
-$(OBJDIR)/opt_%.o: $(OPT_SRCDIR)/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
 # Compile AST source files
 $(OBJDIR)/ast_%.o: $(AST_SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -118,16 +117,6 @@ $(OBJDIR)/cg_codegen_type.o: $(CODEGEN_INTERNAL_H) $(INCDIR)/mcc.h
 # ============================================================
 # Dependencies - Optimization source files
 # ============================================================
-$(OBJDIR)/opt_ast_opt.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h $(INCDIR)/ast_opt.h
-$(OBJDIR)/opt_opt_helpers.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_const.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_simplify.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_dead.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_propagate.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_cse.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_loop.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_inline.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
-$(OBJDIR)/opt_opt_stubs.o: $(OPT_INTERNAL_H) $(INCDIR)/mcc.h
 
 # ============================================================
 # Dependencies - AST source files

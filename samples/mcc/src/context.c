@@ -18,7 +18,9 @@ struct mcc_arena_block {
 
 static struct mcc_arena_block *arena_block_new(size_t payload)
 {
-    struct mcc_arena_block *blk = malloc(sizeof(struct mcc_arena_block) + payload);
+    if (payload > SIZE_MAX - sizeof(struct mcc_arena_block)) return NULL;
+    size_t total = sizeof(struct mcc_arena_block) + payload;
+    struct mcc_arena_block *blk = malloc(total);
     if (!blk) return NULL;
     blk->next = NULL;
     blk->size = payload;
@@ -75,6 +77,11 @@ mcc_context_t *mcc_context_create(void)
     /* Initialize diagnostics */
     ctx->cap_diagnostics = 64;
     ctx->diagnostics = malloc(ctx->cap_diagnostics * sizeof(mcc_diagnostic_t));
+    if (!ctx->diagnostics) {
+        free(ctx->arena);
+        free(ctx);
+        return NULL;
+    }
     
     /* Initialize C standard to default (C89) */
     ctx->options.c_std = MCC_STD_DEFAULT;
@@ -152,13 +159,24 @@ void mcc_ctx_disable_feature(mcc_context_t *ctx, mcc_feature_id_t feature)
 /* Memory allocation */
 void *mcc_alloc(mcc_context_t *ctx, size_t size)
 {
+    if (!ctx || !ctx->arena) return NULL;
+
     /* Align to ARENA_ALIGN bytes */
+    if (size == 0) size = 1;
+    if (size > SIZE_MAX - (ARENA_ALIGN - 1)) {
+        mcc_fatal(ctx, "Arena allocation size overflow");
+        return NULL;
+    }
     size = (size + (ARENA_ALIGN - 1)) & ~((size_t)ARENA_ALIGN - 1);
 
     struct mcc_arena_block *cur = ctx->arena;
+    if (cur->used > cur->size) {
+        mcc_fatal(ctx, "Corrupt arena block accounting");
+        return NULL;
+    }
 
     /* Check if the current block can satisfy the request */
-    if (cur->used + size > cur->size) {
+    if (size > cur->size - cur->used) {
         /* Oversized requests get a dedicated block; otherwise grow by a
            fresh default-sized block. Existing blocks never move. */
         size_t payload = size > ARENA_INITIAL_SIZE ? size : ARENA_INITIAL_SIZE;
@@ -182,6 +200,7 @@ void *mcc_alloc(mcc_context_t *ctx, size_t size)
 
 void *mcc_realloc(mcc_context_t *ctx, void *ptr, size_t old_size, size_t new_size)
 {
+    if (!ctx || !ctx->arena) return NULL;
     if (!ptr) return mcc_alloc(ctx, new_size);
     
     void *new_ptr = mcc_alloc(ctx, new_size);
@@ -193,8 +212,12 @@ void *mcc_realloc(mcc_context_t *ctx, void *ptr, size_t old_size, size_t new_siz
 
 char *mcc_strdup(mcc_context_t *ctx, const char *str)
 {
-    if (!str) return NULL;
+    if (!ctx || !str) return NULL;
     size_t len = strlen(str);
+    if (len == SIZE_MAX) {
+        mcc_fatal(ctx, "String allocation size overflow");
+        return NULL;
+    }
     char *copy = mcc_alloc(ctx, len + 1);
     if (copy) {
         memcpy(copy, str, len + 1);
@@ -206,10 +229,28 @@ char *mcc_strdup(mcc_context_t *ctx, const char *str)
 static void mcc_add_diagnostic(mcc_context_t *ctx, mcc_severity_t sev,
                                 mcc_location_t loc, const char *fmt, va_list args)
 {
+    if (!ctx || !fmt) return;
     if (ctx->num_diagnostics >= ctx->cap_diagnostics) {
-        ctx->cap_diagnostics *= 2;
-        ctx->diagnostics = realloc(ctx->diagnostics,
-                                    ctx->cap_diagnostics * sizeof(mcc_diagnostic_t));
+        if (ctx->cap_diagnostics > SIZE_MAX / 2) {
+            fprintf(stderr, "fatal error: diagnostic capacity overflow\n");
+            ctx->error_count++;
+            return;
+        }
+        size_t new_capacity = ctx->cap_diagnostics * 2;
+        if (new_capacity > SIZE_MAX / sizeof(mcc_diagnostic_t)) {
+            fprintf(stderr, "fatal error: diagnostic allocation overflow\n");
+            ctx->error_count++;
+            return;
+        }
+        void *new_diagnostics = realloc(
+            ctx->diagnostics, new_capacity * sizeof(mcc_diagnostic_t));
+        if (!new_diagnostics) {
+            fprintf(stderr, "fatal error: out of memory growing diagnostics\n");
+            ctx->error_count++;
+            return;
+        }
+        ctx->diagnostics = new_diagnostics;
+        ctx->cap_diagnostics = new_capacity;
     }
     
     mcc_diagnostic_t *diag = &ctx->diagnostics[ctx->num_diagnostics++];
@@ -220,6 +261,13 @@ static void mcc_add_diagnostic(mcc_context_t *ctx, mcc_severity_t sev,
     char buf[1024];
     vsnprintf(buf, sizeof(buf), fmt, args);
     diag->message = strdup(buf);
+    if (!diag->message) {
+        ctx->num_diagnostics--;
+        fprintf(stderr, "fatal error: out of memory recording diagnostic: %s\n",
+                buf);
+        ctx->error_count++;
+        return;
+    }
     
     /* Print to stderr */
     const char *sev_str = "";
@@ -339,6 +387,6 @@ anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch)
         case MCC_ARCH_PPC64LE:     return ANVIL_ARCH_PPC64LE;
         case MCC_ARCH_ARM64:       return ANVIL_ARCH_ARM64;
         case MCC_ARCH_ARM64_MACOS: return ANVIL_ARCH_ARM64;
-        default:                   return ANVIL_ARCH_X86_64;
+        default:                   return ANVIL_ARCH_NONE;
     }
 }

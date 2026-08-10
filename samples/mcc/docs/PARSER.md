@@ -579,7 +579,8 @@ const char *name = _Generic(x, int: "int", float: "float", default: "other");
 
 ## C23 Attributes
 
-MCC supports C23 standard attributes with full AST storage:
+MCC retains attribute AST structures for future work, but C23 attributes are
+currently rejected because their semantic and lowering effects are not implemented:
 
 ### Attribute Structure
 
@@ -773,18 +774,13 @@ bool parse_is_declaration_start(mcc_parser_t *p)
 }
 ```
 
-This allows local variables with attributes to be parsed correctly:
-
-```c
-int main(void) {
-    [[maybe_unused]] int unused_var = 10;  /* Now parsed correctly */
-    return 0;
-}
-```
+Attribute token sequences are recognized only so MCC can reject them with a
+specific diagnostic; no attribute is silently attached to a declaration.
 
 ### C23 Attributes Parsing
 
-The parser supports C23 standard attributes:
+The parser recognizes these C23 spellings only to emit an explicit unsupported
+feature error; they are not part of MCC's capability surface:
 
 | Attribute | Description |
 |-----------|-------------|
@@ -798,15 +794,8 @@ The parser supports C23 standard attributes:
 | `[[unsequenced]]` | C23 function attribute |
 | `[[reproducible]]` | C23 function attribute |
 
-GNU-style attributes are also supported:
-
-| Attribute | Description |
-|-----------|-------------|
-| `__attribute__((packed))` | Packed struct/union |
-| `__attribute__((aligned(n)))` | Custom alignment |
-| `__attribute__((pure))` | Pure function |
-| `__attribute__((const))` | Const function |
-| `__attribute__((unused))` | Suppress unused warnings |
+GNU-style attributes, including `packed` and `aligned`, are likewise rejected
+until their semantics are represented in layout and IR.
 
 Attributes are stored in the AST node:
 

@@ -11,6 +11,7 @@
 #include "anvil/anvil_internal.h"
 #include "x86_64_internal.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -424,7 +425,8 @@ static bool lower_params(x64_mir_lower_t *lower)
                                       gpr_count, fpr_count);
             anvil_mir_vreg_t incoming = x64_add_vreg_for_type(lower, param->type);
             if (incoming == ANVIL_MIR_NO_VREG ||
-                !anvil_mir_set_fixed_reg(lower->mir, incoming, reg)) {
+                !anvil_mir_set_fixed_reg(lower->mir, incoming, reg) ||
+                !anvil_mir_set_live_in(lower->mir, incoming, true)) {
                 return false;
             }
 
@@ -659,7 +661,7 @@ static bool map_binop(anvil_op_t op, anvil_mir_opcode_t *out_op)
             *out_op = ANVIL_MIR_OP_CMP_UGE;
             return true;
         case ANVIL_OP_FCMP:
-            *out_op = ANVIL_MIR_OP_CMP;
+            *out_op = ANVIL_MIR_OP_FCMP;
             return true;
         default:
             return false;
@@ -670,6 +672,7 @@ static bool mir_op_is_compare(anvil_mir_opcode_t op)
 {
     switch (op) {
         case ANVIL_MIR_OP_CMP:
+        case ANVIL_MIR_OP_FCMP:
         case ANVIL_MIR_OP_CMP_EQ:
         case ANVIL_MIR_OP_CMP_NE:
         case ANVIL_MIR_OP_CMP_LT:
@@ -1091,7 +1094,10 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
     int vector_args = is_variadic ? x64_call_num_vector_args(fn_type, instr) : 0;
 
     size_t num_args = instr->num_operands - 1;
-    size_t max_call_uses = num_args + (direct_call ? 0 : 1);
+    if (num_args > (SIZE_MAX - (direct_call ? 0u : 1u)) / 2) return false;
+    /* Win64 variadic floating arguments occupy both their positional XMM
+       register and the corresponding integer register. */
+    size_t max_call_uses = num_args * 2 + (direct_call ? 0 : 1);
     anvil_mir_vreg_t *call_uses = NULL;
     if (max_call_uses > 0) {
         call_uses = calloc(max_call_uses, sizeof(*call_uses));
@@ -1163,6 +1169,31 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
             break;
         }
         call_uses[num_call_uses++] = fixed_arg;
+        if (desc->is_win64 && is_variadic && x64_type_is_fp(arg->type) &&
+            i < (size_t)desc->num_int_arg_regs) {
+            const anvil_mir_vreg_info_t *src_info =
+                anvil_mir_get_vreg_info(lower->mir, src);
+            if (!src_info || (src_info->size_bits != 32 &&
+                              src_info->size_bits != 64)) {
+                ok = false;
+                break;
+            }
+            anvil_mir_vreg_t duplicate = anvil_mir_add_vreg_typed(
+                lower->mir, ANVIL_MIR_REG_GPR, src_info->size_bits, false);
+            if (duplicate == ANVIL_MIR_NO_VREG ||
+                !anvil_mir_set_fixed_reg(lower->mir, duplicate,
+                                         desc->int_arg_regs[i])) {
+                ok = false;
+                break;
+            }
+            anvil_mir_vreg_t duplicate_uses[] = { src };
+            if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_BITCAST,
+                                     duplicate, duplicate_uses, 1)) {
+                ok = false;
+                break;
+            }
+            call_uses[num_call_uses++] = duplicate;
+        }
         advance_arg_count(arg->type, &gpr_count, &fpr_count);
     }
 
@@ -1183,11 +1214,13 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
         }
     }
 
-    (void)is_variadic;
-    (void)vector_args;
-    bool emit_ok = anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                              call_def, call_uses,
-                                              num_call_uses, symbol);
+    bool emit_ok = is_variadic
+        ? anvil_mir_add_instr_symbol_imm(lower->mir, ANVIL_MIR_OP_CALL,
+                                         call_def, call_uses,
+                                         num_call_uses, symbol, vector_args)
+        : anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
+                                     call_def, call_uses,
+                                     num_call_uses, symbol);
     free(call_uses);
     if (!emit_ok) return false;
 
@@ -1331,18 +1364,6 @@ static bool lower_alloca(x64_mir_lower_t *lower, anvil_instr_t *instr)
     return map_put(lower, instr->result, ptr);
 }
 
-static int64_t gep_element_size(anvil_instr_t *instr)
-{
-    anvil_type_t *element_type = NULL;
-    if (instr && instr->result && instr->result->type &&
-        instr->result->type->kind == ANVIL_TYPE_PTR) {
-        element_type = instr->result->type->data.pointee;
-    }
-
-    int64_t elem_size = element_type ? x64_type_size(element_type) : 1;
-    return elem_size > 0 ? elem_size : 1;
-}
-
 static bool lower_add_const_offset(x64_mir_lower_t *lower,
                                    anvil_mir_vreg_t base,
                                    int64_t offset,
@@ -1372,32 +1393,37 @@ static bool lower_add_const_offset(x64_mir_lower_t *lower,
 
 static bool lower_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
 {
-    if (instr->num_operands < 1 || !instr->result) return false;
+    if (instr->num_operands < 2 || !instr->result || !instr->aux_type)
+        return false;
 
     anvil_mir_vreg_t current = lower_value(lower, instr->operands[0]);
     if (current == ANVIL_MIR_NO_VREG) return false;
     current = lower_widen_gpr_to_64(lower, current, false);
     if (current == ANVIL_MIR_NO_VREG) return false;
 
-    int64_t elem_size = gep_element_size(instr);
+    anvil_type_t *walk_type = instr->aux_type;
     bool all_constant = true;
     int64_t constant_offset = 0;
     for (size_t i = 1; i < instr->num_operands; i++) {
         anvil_value_t *index_value = instr->operands[i];
-        if (!index_value || index_value->kind != ANVIL_VAL_CONST_INT) {
-            all_constant = false;
-            break;
+        anvil_gep_step_t step;
+        if (!anvil_gep_analyze_step(&walk_type, index_value, i - 1, &step) ||
+            step.amount > (size_t)INT64_MAX) return false;
+        if (index_value->kind == ANVIL_VAL_CONST_INT) {
+            int64_t offset;
+            if (!anvil_gep_const_step_offset(&step, index_value, &offset) ||
+                !anvil_gep_accumulate_offset(&constant_offset, offset)) {
+                return false;
+            }
+            continue;
         }
-        constant_offset += index_value->data.i * elem_size;
-    }
-    if (all_constant) {
-        return addr_map_put(lower, instr->result, current, constant_offset);
-    }
-
-    for (size_t i = 1; i < instr->num_operands; i++) {
-        anvil_mir_vreg_t index = lower_value(lower, instr->operands[i]);
+        all_constant = false;
+        if (step.kind != ANVIL_GEP_STEP_SCALE) return false;
+        int64_t elem_size = (int64_t)step.amount;
+        anvil_mir_vreg_t index = lower_value(lower, index_value);
         if (index == ANVIL_MIR_NO_VREG) return false;
-        index = lower_widen_gpr_to_64(lower, index, true);
+        index = lower_widen_gpr_to_64(lower, index,
+                                      index_value->type->is_signed);
         if (index == ANVIL_MIR_NO_VREG) return false;
 
         anvil_mir_vreg_t scaled = index;
@@ -1430,7 +1456,10 @@ static bool lower_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
         }
         current = next;
     }
-
+    if (all_constant)
+        return addr_map_put(lower, instr->result, current, constant_offset);
+    if (!lower_add_const_offset(lower, current, constant_offset, &current))
+        return false;
     return map_put(lower, instr->result, current);
 }
 
@@ -1464,6 +1493,57 @@ static bool lower_cast(x64_mir_lower_t *lower,
     anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
     anvil_mir_vreg_t def = x64_add_vreg_for_type(lower, instr->result->type);
     if (src == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) return false;
+
+    if (instr->result->type->kind == ANVIL_TYPE_I1 &&
+        instr->operands[0]->type->kind != ANVIL_TYPE_I1) {
+        const anvil_mir_vreg_info_t *src_info =
+            anvil_mir_get_vreg_info(lower->mir, src);
+        if (src_info && src_info->reg_class == ANVIL_MIR_REG_FPR) {
+            if (mir_op != ANVIL_MIR_OP_FPTOUI) return false;
+            anvil_mir_vreg_t converted = anvil_mir_add_vreg_typed(
+                lower->mir, ANVIL_MIR_REG_GPR, 32, false);
+            anvil_mir_vreg_t convert_use[] = { src };
+            if (converted == ANVIL_MIR_NO_VREG ||
+                !anvil_mir_add_instr(lower->mir, mir_op, converted,
+                                     convert_use, 1)) return false;
+            src = converted;
+            src_info = anvil_mir_get_vreg_info(lower->mir, src);
+        }
+        anvil_mir_vreg_t narrowed = src;
+        if (!src_info || src_info->reg_class != ANVIL_MIR_REG_GPR) return false;
+        if (src_info->size_bits > 8) {
+            narrowed = anvil_mir_add_vreg_typed(lower->mir,
+                ANVIL_MIR_REG_GPR, 8, false);
+            anvil_mir_vreg_t narrow_use[] = { src };
+            if (narrowed == ANVIL_MIR_NO_VREG ||
+                !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_TRUNC,
+                                     narrowed, narrow_use, 1)) return false;
+        }
+        anvil_mir_vreg_t one = anvil_mir_add_vreg_typed(
+            lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+        anvil_mir_vreg_t uses[] = { narrowed, one };
+        if (one == ANVIL_MIR_NO_VREG ||
+            !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) ||
+            !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, def, uses, 2))
+            return false;
+        return map_put(lower, instr->result, def);
+    }
+
+    if (mir_op == ANVIL_MIR_OP_BITCAST) {
+        const anvil_mir_vreg_info_t *src_info =
+            anvil_mir_get_vreg_info(lower->mir, src);
+        const anvil_mir_vreg_info_t *dst_info =
+            anvil_mir_get_vreg_info(lower->mir, def);
+        if (!src_info || !dst_info) return false;
+        if (src_info->size_bits != dst_info->size_bits) {
+            if (instr->op != ANVIL_OP_PTRTOINT &&
+                instr->op != ANVIL_OP_INTTOPTR) {
+                return false;
+            }
+            mir_op = src_info->size_bits < dst_info->size_bits
+                ? ANVIL_MIR_OP_ZEXT : ANVIL_MIR_OP_TRUNC;
+        }
+    }
 
     anvil_mir_vreg_t uses[] = { src };
     if (!anvil_mir_add_instr(lower->mir, mir_op, def, uses, 1)) return false;
@@ -1655,7 +1735,11 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
         }
 
         anvil_mir_vreg_t uses[] = { lhs, rhs };
-        if (!anvil_mir_add_instr(lower->mir, mir_op, def, uses, 2)) {
+        bool added = mir_op == ANVIL_MIR_OP_FCMP
+            ? anvil_mir_add_instr_imm_uses(lower->mir, mir_op, def, uses, 2,
+                                           instr->fcmp_pred)
+            : anvil_mir_add_instr(lower->mir, mir_op, def, uses, 2);
+        if (!added) {
             return false;
         }
         return map_put(lower, instr->result, def);
@@ -1697,14 +1781,28 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
             anvil_mir_vreg_t def = x64_add_vreg_for_type(lower,
                                                          instr->result->type);
             if (ptr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) return false;
+            bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
+            anvil_mir_vreg_t loaded = is_i1
+                ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false)
+                : def;
+            if (loaded == ANVIL_MIR_NO_VREG) return false;
             anvil_mir_vreg_t uses[] = { ptr };
             bool ok = offset == 0
-                ? anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_LOAD, def,
+                ? anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_LOAD, loaded,
                                       uses, 1)
                 : anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_LOAD,
-                                               def, uses, 1, offset);
+                                               loaded, uses, 1, offset);
             if (!ok) {
                 return false;
+            }
+            if (is_i1) {
+                anvil_mir_vreg_t one = anvil_mir_add_vreg_typed(
+                    lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+                anvil_mir_vreg_t norm_uses[] = { loaded, one };
+                if (one == ANVIL_MIR_NO_VREG ||
+                    !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) ||
+                    !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, def,
+                                         norm_uses, 2)) return false;
             }
             return map_put(lower, instr->result, def);
         }
@@ -1718,6 +1816,18 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
                 return false;
             }
             if (val == ANVIL_MIR_NO_VREG || ptr == ANVIL_MIR_NO_VREG) return false;
+            if (instr->operands[0]->type->kind == ANVIL_TYPE_I1) {
+                anvil_mir_vreg_t one = anvil_mir_add_vreg_typed(
+                    lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+                anvil_mir_vreg_t normalized = anvil_mir_add_vreg_typed(
+                    lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+                anvil_mir_vreg_t norm_uses[] = { val, one };
+                if (one == ANVIL_MIR_NO_VREG || normalized == ANVIL_MIR_NO_VREG ||
+                    !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) ||
+                    !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, normalized,
+                                         norm_uses, 2)) return false;
+                val = normalized;
+            }
             anvil_mir_vreg_t uses[] = { val, ptr };
             if (offset == 0) {
                 return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_STORE,
@@ -2170,6 +2280,7 @@ static bool x64_legal_instr(const anvil_mir_func_t *mir,
         case ANVIL_MIR_OP_FPEXT:
         case ANVIL_MIR_OP_FPTRUNC:
         case ANVIL_MIR_OP_CMP:
+        case ANVIL_MIR_OP_FCMP:
         case ANVIL_MIR_OP_CMP_EQ:
         case ANVIL_MIR_OP_CMP_NE:
         case ANVIL_MIR_OP_CMP_LT:
@@ -2183,7 +2294,7 @@ static bool x64_legal_instr(const anvil_mir_func_t *mir,
         case ANVIL_MIR_OP_RET:
         case ANVIL_MIR_OP_BR:
         case ANVIL_MIR_OP_BR_COND:
-        case ANVIL_MIR_OP_OTHER:
+        case ANVIL_MIR_OP_KEEPALIVE:
             return true;
 
         case ANVIL_MIR_OP_INVALID:
@@ -2218,11 +2329,11 @@ bool anvil_x86_64_verify_mir_legal(const anvil_mir_func_t *mir,
     return true;
 }
 
-bool anvil_x86_64_regalloc_mir(anvil_mir_func_t *mir)
+bool anvil_x86_64_regalloc_mir_abi(anvil_mir_func_t *mir, anvil_abi_t abi)
 {
     if (!mir) return false;
 
-    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(ANVIL_ABI_SYSV);
+    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(abi);
     if (!desc) return false;
 
     anvil_regalloc_class_config_t configs[2];
@@ -2260,6 +2371,11 @@ bool anvil_x86_64_regalloc_mir(anvil_mir_func_t *mir)
     return anvil_x86_64_verify_mir_legal(mir, NULL, 0);
 }
 
+bool anvil_x86_64_regalloc_mir(anvil_mir_func_t *mir)
+{
+    return anvil_x86_64_regalloc_mir_abi(mir, ANVIL_ABI_SYSV);
+}
+
 typedef struct {
     const anvil_mir_func_t *mir;
     const anvil_x64_abi_desc_t *desc;
@@ -2270,6 +2386,7 @@ typedef struct {
     int *frame_slot_offsets;
     size_t num_frame_slot_offsets;
     int gpr_save_offsets[16];
+    int fpr_save_offsets[16];
     int outgoing_size;
     int frame_size;
     bool has_frame;
@@ -2448,9 +2565,10 @@ static bool x64_scan_outgoing_stack_args(x64_mir_emit_t *emit)
         if (end > outgoing_size) outgoing_size = end;
     }
 
-    if (emit->desc->shadow_space > outgoing_size && x64_instr_has_call(emit->mir)) {
-        outgoing_size = emit->desc->shadow_space;
-    } else if (outgoing_size > 0) {
+    bool has_call = x64_instr_has_call(emit->mir);
+    if (!has_call && outgoing_size > 0) return false;
+    if (has_call) {
+        if (outgoing_size > INT_MAX - emit->desc->shadow_space) return false;
         outgoing_size += emit->desc->shadow_space;
     }
     emit->outgoing_size = x64_align_int(outgoing_size, 16);
@@ -2466,8 +2584,19 @@ static bool x64_prepare_frame(x64_mir_emit_t *emit)
     if (!x64_scan_outgoing_stack_args(emit)) return false;
 
     int offset = 0;
-    static const int callee_saved[] = { X64_RBX, X64_R12, X64_R13, X64_R14, X64_R15 };
-    for (size_t c = 0; c < sizeof(callee_saved) / sizeof(callee_saved[0]); c++) {
+    for (size_t i = 0; i < 16; i++) emit->fpr_save_offsets[i] = -1;
+
+    static const int sysv_saved[] = {
+        X64_RBX, X64_R12, X64_R13, X64_R14, X64_R15
+    };
+    static const int win64_saved[] = {
+        X64_RBX, X64_RDI, X64_RSI, X64_R12, X64_R13, X64_R14, X64_R15
+    };
+    const int *callee_saved = emit->desc->is_win64 ? win64_saved : sysv_saved;
+    size_t num_callee_saved = emit->desc->is_win64
+        ? sizeof(win64_saved) / sizeof(win64_saved[0])
+        : sizeof(sysv_saved) / sizeof(sysv_saved[0]);
+    for (size_t c = 0; c < num_callee_saved; c++) {
         int reg = callee_saved[c];
         bool used = false;
         for (size_t i = 0; i < anvil_mir_num_vregs(emit->mir); i++) {
@@ -2483,6 +2612,27 @@ static bool x64_prepare_frame(x64_mir_emit_t *emit)
         if (used) {
             offset += 8;
             emit->gpr_save_offsets[reg] = offset;
+        }
+    }
+
+    if (emit->desc->is_win64) {
+        for (int reg = 6; reg <= 15; reg++) {
+            bool used = false;
+            for (size_t i = 0; i < anvil_mir_num_vregs(emit->mir); i++) {
+                const anvil_regalloc_assignment_t *assignment =
+                    anvil_mir_get_assignment(emit->mir, (anvil_mir_vreg_t)i);
+                if (!assignment || assignment->spilled) continue;
+                if (assignment->reg_class == ANVIL_MIR_REG_FPR &&
+                    assignment->phys_reg == reg) {
+                    used = true;
+                    break;
+                }
+            }
+            if (used) {
+                offset = x64_align_int(offset, 16);
+                offset += 16;
+                emit->fpr_save_offsets[reg] = offset;
+            }
         }
     }
 
@@ -2537,6 +2687,14 @@ static void x64_emit_prologue(x64_mir_emit_t *emit)
         anvil_strbuf_appendf(&emit->code, "\t.globl %s%s\n", prefix, name);
         anvil_strbuf_append(&emit->code, "\t.p2align 4\n");
         anvil_strbuf_appendf(&emit->code, "%s%s:\n", prefix, name);
+    } else if (emit->desc->is_win64) {
+        anvil_strbuf_append(&emit->code, "\t.text\n");
+        anvil_strbuf_appendf(&emit->code, "\t.globl %s%s\n", prefix, name);
+        anvil_strbuf_appendf(&emit->code,
+                             "\t.def %s%s; .scl 2; .type 32; .endef\n",
+                             prefix, name);
+        anvil_strbuf_appendf(&emit->code, "\t.seh_proc %s%s\n", prefix, name);
+        anvil_strbuf_appendf(&emit->code, "%s%s:\n", prefix, name);
     } else {
         anvil_strbuf_append(&emit->code, "\t.text\n");
         anvil_strbuf_appendf(&emit->code, "\t.globl %s%s\n", prefix, name);
@@ -2546,9 +2704,14 @@ static void x64_emit_prologue(x64_mir_emit_t *emit)
     }
 
     anvil_strbuf_append(&emit->code, "\tpushq %rbp\n");
+    if (emit->desc->is_win64)
+        anvil_strbuf_append(&emit->code, "\t.seh_pushreg %rbp\n");
     anvil_strbuf_append(&emit->code, "\tmovq %rsp, %rbp\n");
     if (emit->frame_size > 0) {
         anvil_strbuf_appendf(&emit->code, "\tsubq $%d, %%rsp\n", emit->frame_size);
+        if (emit->desc->is_win64)
+            anvil_strbuf_appendf(&emit->code, "\t.seh_stackalloc %d\n",
+                                 emit->frame_size);
     }
 
     for (int reg = 0; reg < 16; reg++) {
@@ -2556,12 +2719,35 @@ static void x64_emit_prologue(x64_mir_emit_t *emit)
             anvil_strbuf_appendf(&emit->code, "\tmovq %%%s, -%d(%%rbp)\n",
                                  x64_reg64_names[reg],
                                  emit->gpr_save_offsets[reg]);
+            if (emit->desc->is_win64)
+                anvil_strbuf_appendf(&emit->code, "\t.seh_savereg %%%s, %d\n",
+                    x64_reg64_names[reg],
+                    emit->frame_size - emit->gpr_save_offsets[reg]);
         }
     }
+    for (int reg = 6; reg < 16; reg++) {
+        if (emit->fpr_save_offsets[reg] >= 0) {
+            anvil_strbuf_appendf(&emit->code,
+                                 "\tmovdqu %%xmm%d, -%d(%%rbp)\n",
+                                 reg, emit->fpr_save_offsets[reg]);
+            anvil_strbuf_appendf(&emit->code, "\t.seh_savexmm %%xmm%d, %d\n",
+                                 reg,
+                                 emit->frame_size - emit->fpr_save_offsets[reg]);
+        }
+    }
+    if (emit->desc->is_win64)
+        anvil_strbuf_append(&emit->code, "\t.seh_endprologue\n");
 }
 
 static void x64_emit_epilogue(x64_mir_emit_t *emit)
 {
+    for (int reg = 15; reg >= 6; reg--) {
+        if (emit->fpr_save_offsets[reg] >= 0) {
+            anvil_strbuf_appendf(&emit->code,
+                                 "\tmovdqu -%d(%%rbp), %%xmm%d\n",
+                                 emit->fpr_save_offsets[reg], reg);
+        }
+    }
     for (int reg = 15; reg >= 0; reg--) {
         if (emit->gpr_save_offsets[reg] >= 0) {
             anvil_strbuf_appendf(&emit->code, "\tmovq -%d(%%rbp), %%%s\n",
@@ -2609,12 +2795,16 @@ static void x64_emit_copy(x64_mir_emit_t *emit,
                              x64_gpr_name(dst_phys, size));
     } else if (dst_info->reg_class == ANVIL_MIR_REG_FPR &&
                src_info->reg_class == ANVIL_MIR_REG_GPR) {
-        anvil_strbuf_appendf(&emit->code, "\tmovq %%%s, %%%s\n",
-                             x64_gpr_name(src_phys, 8), dst_reg);
+        int size = x64_size_bytes(dst_info->size_bits);
+        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n",
+                             size <= 4 ? "movd" : "movq",
+                             x64_gpr_name(src_phys, size <= 4 ? 4 : 8), dst_reg);
     } else if (dst_info->reg_class == ANVIL_MIR_REG_GPR &&
                src_info->reg_class == ANVIL_MIR_REG_FPR) {
-        anvil_strbuf_appendf(&emit->code, "\tmovq %%%s, %%%s\n",
-                             src_reg, x64_gpr_name(dst_phys, 8));
+        int size = x64_size_bytes(src_info->size_bits);
+        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n",
+                             size <= 4 ? "movd" : "movq", src_reg,
+                             x64_gpr_name(dst_phys, size <= 4 ? 4 : 8));
     } else {
         emit->failed = true;
     }
@@ -2830,8 +3020,37 @@ static void x64_emit_cmp(x64_mir_emit_t *emit,
         if (emit->failed) return;
         anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n",
                              size <= 4 ? "ucomiss" : "ucomisd", b, a);
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s\n",
-                             x64_setcc(info->op), dst8);
+        if (info->op == ANVIL_MIR_OP_FCMP) {
+            anvil_fcmp_pred_t pred = (anvil_fcmp_pred_t)info->imm;
+            static const unsigned masks[] = {
+                0,4,2,6,1,5,3,7,12,10,14,9,13,11,8,15
+            };
+            unsigned mask = masks[pred];
+            anvil_strbuf_appendf(&emit->code, "\tmovb $0, %%%s\n", dst8);
+            if (mask == 15) {
+                anvil_strbuf_appendf(&emit->code, "\tmovb $1, %%%s\n", dst8);
+            } else if (mask != 0) {
+                const char *name = anvil_mir_func_name(emit->mir);
+                if (mask & 8) anvil_strbuf_appendf(&emit->code,
+                    "\tjp .L%s_fcmp_true_%zu\n", name, instr_index);
+                else anvil_strbuf_appendf(&emit->code,
+                    "\tjp .L%s_fcmp_done_%zu\n", name, instr_index);
+                if (mask & 1) anvil_strbuf_appendf(&emit->code,
+                    "\tjb .L%s_fcmp_true_%zu\n", name, instr_index);
+                if (mask & 2) anvil_strbuf_appendf(&emit->code,
+                    "\tja .L%s_fcmp_true_%zu\n", name, instr_index);
+                if (mask & 4) anvil_strbuf_appendf(&emit->code,
+                    "\tje .L%s_fcmp_true_%zu\n", name, instr_index);
+                anvil_strbuf_appendf(&emit->code,
+                    "\tjmp .L%s_fcmp_done_%zu\n.L%s_fcmp_true_%zu:\n"
+                    "\tmovb $1, %%%s\n.L%s_fcmp_done_%zu:\n",
+                    name, instr_index, name, instr_index, dst8,
+                    name, instr_index);
+            }
+        } else {
+            anvil_strbuf_appendf(&emit->code, "\t%s %%%s\n",
+                                 x64_setcc(info->op), dst8);
+        }
         anvil_strbuf_appendf(&emit->code, "\tmovzbl %%%s, %%%s\n", dst8, dst32);
         return;
     }
@@ -3305,29 +3524,18 @@ static void x64_emit_call_stack_arg(x64_mir_emit_t *emit,
     anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %d(%%rsp)\n", op, src, slot);
 }
 
-static int x64_count_xmm_args(x64_mir_emit_t *emit, size_t instr_index,
-                              size_t arg_start, size_t num_uses)
-{
-    int count = 0;
-    for (size_t u = arg_start; u < num_uses; u++) {
-        anvil_mir_vreg_t use = anvil_mir_get_instr_use(emit->mir, instr_index, u);
-        const anvil_mir_vreg_info_t *info =
-            anvil_mir_get_vreg_info(emit->mir, use);
-        if (info && info->reg_class == ANVIL_MIR_REG_FPR) count++;
-    }
-    return count;
-}
-
 static void x64_emit_call(x64_mir_emit_t *emit,
                           size_t instr_index,
                           const anvil_mir_instr_info_t *info)
 {
     bool direct = info->symbol && info->symbol[0];
-    size_t arg_start = direct ? 0 : 1;
-    int xmm_args = x64_count_xmm_args(emit, instr_index, arg_start,
-                                      info->num_uses);
-    if (!emit->desc->is_win64) {
-        anvil_strbuf_appendf(&emit->code, "\tmovb $%d, %%al\n", xmm_args);
+    if (!emit->desc->is_win64 && info->has_imm) {
+        if (info->imm < 0 || info->imm > 8) {
+            emit->failed = true;
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\tmovb $%lld, %%al\n",
+                             (long long)info->imm);
     }
 
     if (direct) {
@@ -3501,6 +3709,7 @@ static void x64_emit_instr(x64_mir_emit_t *emit,
         case ANVIL_MIR_OP_FPTRUNC:
             x64_emit_cast(emit, instr_index, info);
             break;
+        case ANVIL_MIR_OP_FCMP:
         case ANVIL_MIR_OP_CMP:
         case ANVIL_MIR_OP_CMP_EQ:
         case ANVIL_MIR_OP_CMP_NE:
@@ -3583,7 +3792,11 @@ static void x64_emit_instr(x64_mir_emit_t *emit,
         case ANVIL_MIR_OP_SPILL_STORE:
             x64_emit_spill_store(emit, instr_index, info);
             break;
-        case ANVIL_MIR_OP_OTHER:
+        case ANVIL_MIR_OP_KEEPALIVE:
+            break;
+        case ANVIL_MIR_OP_CALL_RESULT:
+        case ANVIL_MIR_OP_RET_VALUE_PART:
+            emit->failed = true;
             break;
         default:
             emit->failed = true;
@@ -3661,6 +3874,8 @@ bool anvil_x86_64_emit_mir_abi(const anvil_mir_func_t *mir,
                                size_t *len)
 {
     if (!mir || !output) return false;
+    *output = NULL;
+    if (len) *len = 0;
     if (!anvil_x86_64_verify_mir_legal(mir, NULL, 0)) return false;
 
     const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(abi);
@@ -3685,13 +3900,13 @@ bool anvil_x86_64_emit_mir_abi(const anvil_mir_func_t *mir,
 
     size_t num_blocks = anvil_mir_num_blocks(mir);
     size_t num_instrs = anvil_mir_num_instrs(mir);
-    for (size_t b = 0; b < num_blocks && !emit.failed; b++) {
+    for (size_t b = 0; b < num_blocks && !emit.failed && !emit.code.failed; b++) {
         if (!x64_emit_label(&emit, (anvil_mir_block_t)b)) {
             emit.failed = true;
             break;
         }
 
-        for (size_t i = 0; i < num_instrs && !emit.failed; i++) {
+        for (size_t i = 0; i < num_instrs && !emit.failed && !emit.code.failed; i++) {
             anvil_mir_instr_info_t info;
             if (!anvil_mir_get_instr_info(mir, i, &info)) {
                 emit.failed = true;
@@ -3702,19 +3917,21 @@ bool anvil_x86_64_emit_mir_abi(const anvil_mir_func_t *mir,
         }
     }
 
-    if (!emit.failed && !emit.desc->is_darwin) {
+    if (!emit.failed && !emit.code.failed && emit.desc->is_win64) {
+        anvil_strbuf_append(&emit.code, "\t.seh_endproc\n");
+    } else if (!emit.failed && !emit.code.failed && !emit.desc->is_darwin) {
         const char *prefix = x64_symbol_prefix(&emit);
         const char *name = anvil_mir_func_name(mir);
         anvil_strbuf_appendf(&emit.code, "\t.size %s%s, .-%s%s\n",
                              prefix, name, prefix, name);
     }
-    if (!emit.failed) {
+    if (!emit.failed && !emit.code.failed) {
         x64_emit_rodata(&emit);
     }
 
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);
-    if (emit.failed) {
+    if (emit.failed || emit.code.failed) {
         anvil_strbuf_destroy(&emit.code);
         return false;
     }

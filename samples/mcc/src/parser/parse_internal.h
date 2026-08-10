@@ -344,52 +344,6 @@ static inline bool parse_has_gnu_typeof(mcc_parser_t *p)
     return parse_has_feature(p, MCC_FEAT_GNU_TYPEOF);
 }
 
-/* GNU: __attribute__ */
-static inline bool parse_has_gnu_attr(mcc_parser_t *p)
-{
-    return parse_has_feature(p, MCC_FEAT_GNU_ATTR);
-}
-
-/* Consume any pending GNU attribute specifiers ``__attribute__((...))`` at the
- * current parse position. Tolerant parser: we discard the body so downstream
- * declarators see clean syntax. Attributes aren't enforced but code using them
- * compiles. */
-static inline void parse_gnu_attributes(mcc_parser_t *p)
-{
-    while (parse_check(p, TOK_ATTRIBUTE)) {
-        parse_advance(p);  /* consume __attribute__ */
-        /* Expect (( ... )) — two parentheses deep. */
-        if (!parse_match(p, TOK_LPAREN)) break;
-        if (!parse_match(p, TOK_LPAREN)) break;
-        int depth = 2;
-        while (depth > 0 && !parse_check(p, TOK_EOF)) {
-            if (parse_check(p, TOK_LPAREN)) depth++;
-            else if (parse_check(p, TOK_RPAREN)) depth--;
-            if (depth == 0) break;
-            parse_advance(p);
-        }
-        parse_match(p, TOK_RPAREN);
-        parse_match(p, TOK_RPAREN);
-    }
-}
-
-/* GNU asm label / inline asm after a declarator, e.g. `int foo asm("bar");`
- * or `__asm__("movq ...");` — consume and ignore tolerantly. */
-static inline void parse_gnu_asm_label(mcc_parser_t *p)
-{
-    while (parse_check(p, TOK_ASM)) {
-        parse_advance(p);
-        if (!parse_match(p, TOK_LPAREN)) break;
-        int depth = 1;
-        while (depth > 0 && !parse_check(p, TOK_EOF)) {
-            if (parse_check(p, TOK_LPAREN)) depth++;
-            else if (parse_check(p, TOK_RPAREN)) { depth--; if (depth == 0) break; }
-            parse_advance(p);
-        }
-        parse_match(p, TOK_RPAREN);
-    }
-}
-
 /* ============================================================
  * Helper Macros for Feature Warnings
  * ============================================================ */

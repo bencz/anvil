@@ -147,9 +147,7 @@ static void test_multiarch(void)
     for (int i = 0; i < 3; i++) {
         printf("\n=== Architecture: %s ===\n", arch_names[i]);
         
-        anvil_ctx_t *ctx = anvil_ctx_create();
-        anvil_ctx_set_target(ctx, archs[i]);
-        
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(archs[i]);
         anvil_module_t *mod = anvil_module_create(ctx, "multiarch_test");
         
         /* Create function: int double_it(int x) { return x * 2; } */

@@ -84,10 +84,7 @@ sudo make install
 int main(void)
 {
     // Create context
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    
-    // Set target architecture. Any registered backend can be selected here.
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
     
     // Create module
     anvil_module_t *mod = anvil_module_create(ctx, "my_module");
@@ -217,6 +214,7 @@ int main(void)
 
 ## Supported Types
 
+* Boolean: `i1` (one semantic bit, one-byte storage)
 * Integers: `i8`, `i16`, `i32`, `i64` (signed)
 * Integers: `u8`, `u16`, `u32`, `u64` (unsigned)
 * Floating point: `f32`, `f64`
@@ -383,7 +381,11 @@ Optimization is target-independent and runs before backend `prepare_ir`/codegen.
 8. CFG simplification
 9. dead code elimination
 
-The pass manager iterates up to a bounded fixpoint. `ANVIL_PASS_LOOP_UNROLL` is reserved in the API but currently disabled in the built-in table while it needs more testing.
+The pass manager verifies the current function after every pass and iterates to
+a bounded fixpoint. The bound defaults to 10 and is configurable through
+`anvil_pass_manager_set_iteration_limit()`; pass failure, invalid IR, or failure
+to converge is reported as an error. Only implemented passes are exposed by the
+public pass enum.
 
 ### MachineIR and Regalloc
 
@@ -543,7 +545,7 @@ ANVIL includes a configurable optimization pass infrastructure that can be enabl
 | Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
 | O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
 | O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2; loop-unroll pass is reserved but disabled in the built-in pass table |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | Currently the same verified pass set as O2 |
 
 ### Available Passes
 
@@ -558,7 +560,6 @@ ANVIL includes a configurable optimization pass infrastructure that can be enabl
 | **Dead Store Elimination** | O2+ | Removes stores overwritten before read |
 | **Redundant Load Elimination** | O2+ | Reuses loaded values from same address |
 | **Common Subexpression Elimination (CSE)** | O2+ | Reuses computed values |
-| **Loop Unrolling** | O3+ | Reserved API entry; currently disabled in the built-in pass table |
 
 ### Usage
 

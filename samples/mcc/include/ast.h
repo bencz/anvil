@@ -476,6 +476,7 @@ struct mcc_ast_node {
             struct mcc_generic_assoc *associations;
             int num_associations;
             mcc_ast_node_t *default_expr;
+            mcc_ast_node_t *selected_expr; /* Set by semantic analysis. */
         } generic_expr;
         
         /* GNU: Statement expression ({ ... }) */

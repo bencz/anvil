@@ -23,24 +23,35 @@ Complete API reference for the ANVIL library.
 
 The context is the root object managing all ANVIL resources.
 
-### anvil_ctx_create
+### anvil_ctx_create / anvil_ctx_create_for_target
 
 ```c
 anvil_ctx_t *anvil_ctx_create(void);
+anvil_ctx_t *anvil_ctx_create_for_target(anvil_arch_t arch);
 ```
 
-Creates a new ANVIL context.
+`anvil_ctx_create()` creates a neutral context with `ANVIL_ARCH_NONE`: it has
+no backend, architecture info, `DataLayout`, floating-point format, or builtin
+target types. Call `anvil_ctx_set_target()` before creating types, values, or a
+module. `anvil_ctx_create_for_target()` performs creation and target selection
+atomically and is the preferred constructor when the target is already known.
+Use `anvil_ctx_has_target()` when consuming scalar getters such as ABI/CPU whose
+sentinel values alone cannot distinguish a neutral context.
 
 **Returns:** Pointer to new context, or NULL on failure.
 
 **Example:**
 ```c
-anvil_ctx_t *ctx = anvil_ctx_create();
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
 if (!ctx) {
     fprintf(stderr, "Failed to create context\n");
     return 1;
 }
 ```
+
+Invalid targets or any allocation/backend initialization failure make the
+atomic constructor return `NULL`. A failed `anvil_ctx_set_target()` leaves a
+neutral context fully retryable and exposes no partial layout or builtin types.
 
 ### anvil_ctx_destroy
 
@@ -53,7 +64,9 @@ Destroys a context and frees all associated resources.
 **Parameters:**
 - `ctx`: Context to destroy
 
-**Note:** This does NOT free modules. Destroy modules first with `anvil_module_destroy`.
+The context owns every module created from it. `anvil_ctx_destroy` destroys any
+remaining modules automatically; callers may still destroy individual modules
+earlier with `anvil_module_destroy`.
 
 ### anvil_ctx_set_target
 
@@ -61,7 +74,20 @@ Destroys a context and frees all associated resources.
 anvil_error_t anvil_ctx_set_target(anvil_ctx_t *ctx, anvil_arch_t arch);
 ```
 
+Target selection is mandatory and may occur once. Re-selecting the identical
+target is idempotent; changing it is rejected. Before selection,
+`anvil_ctx_get_target()` returns `ANVIL_ARCH_NONE`,
+`anvil_ctx_get_fp_format()` returns `ANVIL_FP_UNSPECIFIED`, and architecture
+info/DataLayout getters return `NULL`. Target-dependent setters return
+`ANVIL_ERR_NO_TARGET` after validating their arguments.
+
 Sets the target architecture for code generation.
+
+Each context permits one target selection after creation; use one context per
+target. Target-dependent refinements such as ABI may change only before a
+module, value, pointer, array, function type, or struct type freezes the
+selected `DataLayout`. Every rejected configuration change leaves the prior
+backend, architecture and layout unchanged.
 
 **Parameters:**
 - `ctx`: Context
@@ -87,13 +113,24 @@ Gets the current target architecture.
 
 **Returns:** Current target architecture.
 
+### anvil_ctx_get_data_layout
+
+```c
+const anvil_data_layout_t *anvil_ctx_get_data_layout(const anvil_ctx_t *ctx);
+```
+
+Returns the immutable target layout, including size, ABI alignment and
+preferred alignment for pointers, integer/floating scalars and aggregates.
+
 ### anvil_set_insert_point
 
 ```c
-void anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
+bool anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
 ```
 
-Sets the current insertion point for IR building.
+Sets the current insertion point for IR building. Returns `false` with a
+context diagnostic when the block is destroyed, foreign, or no longer live.
+Passing `NULL` clears the insertion point and succeeds.
 
 **Parameters:**
 - `ctx`: Context
@@ -470,12 +507,13 @@ Gets the type of a value.
 bool anvil_value_is_bool(anvil_value_t *val);
 ```
 
-Checks if a value is a boolean (result of a comparison instruction).
+Checks whether a value has the first-class `i1` boolean type.
 
 **Parameters:**
 - `val`: Value to check
 
-**Returns:** `true` if the value is a comparison result (CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE, CMP_ULT, CMP_ULE, CMP_UGT, CMP_UGE, FCMP), `false` otherwise.
+**Returns:** `true` for any `i1` value, including constants, PHIs, selects and
+comparison results; `false` otherwise.
 
 **Example:**
 ```c
@@ -550,19 +588,24 @@ if (err == ANVIL_OK) {
 }
 ```
 
-### anvil_module_get_function
+### Module symbol lookup and enumeration
 
 ```c
-anvil_func_t *anvil_module_get_function(anvil_module_t *mod, const char *name);
+anvil_value_t *anvil_module_lookup_symbol(const anvil_module_t *mod,
+                                           const char *name);
+size_t anvil_module_symbol_count(const anvil_module_t *mod);
+anvil_value_t *anvil_module_symbol_at(const anvil_module_t *mod, size_t index);
+anvil_module_t *anvil_value_get_module(const anvil_value_t *value);
 ```
 
-Finds a function by name.
-
-**Parameters:**
-- `mod`: Module
-- `name`: Function name
-
-**Returns:** Function pointer, or NULL if not found.
+Functions and globals occupy a single module namespace backed by an average
+O(1) hash lookup. Enumeration is stable in insertion order for the module
+lifetime. Compatible repeated external declarations return the original
+symbol; a compatible declaration followed by a definition materializes the
+same function/global identity. A duplicate definition, a global/function kind
+collision, or an incompatible type/linkage fails with a context diagnostic.
+The ownership getter returns the defining module for symbols, parameters and
+inserted instruction results; context-wide constants return `NULL`.
 
 ## Function API
 
@@ -575,7 +618,9 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
                                  anvil_type_t *type, anvil_linkage_t linkage);
 ```
 
-Creates a new function.
+Creates a new function. If a compatible external declaration already exists,
+its parameters, entry block and body are materialized in place and the same
+function/symbol identity is returned. Duplicate definitions are rejected.
 
 **Parameters:**
 - `mod`: Parent module
@@ -598,9 +643,17 @@ anvil_func_t *func = anvil_func_create(mod, "add", func_type, ANVIL_LINK_EXTERNA
 ```c
 anvil_func_t *anvil_func_declare(anvil_module_t *mod, const char *name,
                                   anvil_type_t *type);
+anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
+                                          const char *name,
+                                          anvil_type_t *type,
+                                          anvil_linkage_t linkage);
 ```
 
-Declares an external function (no body, for linking/calling).
+Declares an external function (no body, for linking/calling). Repeated
+compatible declarations reuse the existing symbol, including declarations
+that follow a compatible external or weak definition.
+The linkage-aware form additionally represents internal/static and weak
+declarations; use the same compatible linkage when supplying the definition.
 
 **Returns:** Pointer to new function declaration, or NULL on failure.
 
@@ -615,12 +668,13 @@ Gets a function as a value, for use as the callee of `anvil_build_call`.
 ### anvil_func_set_cc
 
 ```c
-void anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
+bool anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
 ```
 
 Sets the calling convention for a function (see `anvil_cc_t`). This is consumed by
 the x86 and x86_64 backends to select the matching ABI/descriptor (cdecl/stdcall/
-fastcall on x86; SysV/Win64 on x86_64).
+fastcall on x86; SysV/Win64 on x86_64). Returns `false` for an invalid
+convention or a function whose module was destroyed.
 
 **Parameters:**
 - `func`: Function
@@ -765,7 +819,7 @@ Types define the shape of values.
 
 ```c
 anvil_type_t *anvil_type_void(anvil_ctx_t *ctx);
-anvil_type_t *anvil_type_i1(anvil_ctx_t *ctx);    // Boolean
+anvil_type_t *anvil_type_i1(anvil_ctx_t *ctx);    // Boolean: 1 bit, 1-byte storage
 anvil_type_t *anvil_type_i8(anvil_ctx_t *ctx);    // Signed 8-bit
 anvil_type_t *anvil_type_i16(anvil_ctx_t *ctx);   // Signed 16-bit
 anvil_type_t *anvil_type_i32(anvil_ctx_t *ctx);   // Signed 32-bit
@@ -777,6 +831,11 @@ anvil_type_t *anvil_type_u64(anvil_ctx_t *ctx);   // Unsigned 64-bit
 anvil_type_t *anvil_type_f32(anvil_ctx_t *ctx);   // 32-bit float
 anvil_type_t *anvil_type_f64(anvil_ctx_t *ctx);   // 64-bit double
 ```
+
+`anvil_type_size(type)` reports byte-addressable storage size, while
+`anvil_type_bit_width(type)` reports scalar semantic width. They intentionally
+differ for `i1`: size is 1 byte and bit width is 1. The selected
+`anvil_data_layout_t` exposes the same `i1` size/alignment contract explicitly.
 
 ### anvil_type_ptr
 
@@ -826,7 +885,9 @@ anvil_type_t *anvil_type_struct(anvil_ctx_t *ctx, const char *name,
                                  anvil_type_t **fields, size_t num_fields);
 ```
 
-Creates a struct type.
+Creates and completes a literal struct when `name` is NULL, or creates and
+completes an identified nominal struct when `name` is non-NULL. A nominal body
+may be defined only once.
 
 **Parameters:**
 - `ctx`: Context
@@ -844,6 +905,19 @@ anvil_type_t *fields[] = {
 };
 anvil_type_t *point = anvil_type_struct(ctx, "Point", fields, 2);
 ```
+
+Recursive nominal types use the opaque-first API:
+
+```c
+anvil_type_t *node = anvil_type_named_struct(ctx, "Node");
+anvil_type_t *fields[] = { anvil_type_i32(ctx), anvil_type_ptr(ctx, node) };
+bool ok = anvil_type_struct_set_body(node, fields, 2, false);
+```
+
+`anvil_type_literal_struct(..., packed)` creates structural literal types.
+`anvil_type_struct_field_count/type/offset`, `is_opaque`, `is_identified`,
+`is_packed`, and `name` provide public introspection. Identified structs compare
+nominally; literal structs compare structurally with cycle-safe equality.
 
 ### anvil_type_func
 
@@ -1002,6 +1076,20 @@ anvil_value_t *anvil_build_cmp_ugt(ctx, lhs, rhs, name);  // Unsigned greater th
 anvil_value_t *anvil_build_cmp_uge(ctx, lhs, rhs, name);  // Unsigned greater or equal
 ```
 
+Floating-point comparisons require an explicit IEEE-754 predicate and return
+`i1`:
+
+```c
+anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx,
+                                anvil_fcmp_pred_t predicate,
+                                anvil_value_t *lhs, anvil_value_t *rhs,
+                                const char *name);
+```
+
+`anvil_fcmp_pred_t` contains `FALSE`, ordered `OEQ/OGT/OGE/OLT/OLE/ONE/ORD`,
+unordered `UEQ/UGT/UGE/ULT/ULE/UNE/UNO`, and `TRUE`. Invalid predicates or
+non-floating/mismatched operands fail before allocating or inserting IR.
+
 ### Memory Operations
 
 ```c
@@ -1023,10 +1111,11 @@ anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type,
 Loads a value of `type` from memory.
 
 ```c
-anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
-                                  anvil_value_t *ptr);
+bool anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
+                       anvil_value_t *ptr);
 ```
-Stores a value to memory. Returns NULL (store has no result).
+Stores a value to memory. Returns whether the checked void instruction was
+created and inserted successfully.
 
 ```c
 anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type,
@@ -1034,14 +1123,22 @@ anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type,
                                 anvil_value_t **indices, size_t num_indices,
                                 const char *name);
 ```
-Get Element Pointer. Computes address of a sub-element (`type` is the pointee/base type).
+Typed Get Element Pointer. `type` is the source element type and must match the
+base address. At least one index is required. The first index steps over source
+objects (`index * sizeof(type)`); later indices descend arrays or structs.
+Array indices may be dynamic. Struct indices must be in-range integer constants.
+The result pointer type is inferred from the final walked element.
+
+For `ptr<[4 x i64]> %p`, element 2 is built with source `[4 x i64]` and indices
+`[0, 2]`, not with the legacy ambiguous `i64`/single-index form.
 
 ```c
 anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_type,
                                        anvil_value_t *ptr, unsigned field_idx,
                                        const char *name);
 ```
-Computes the address of struct field `field_idx` (fixed offset).
+Computes the address of struct field `field_idx` (fixed offset). `ptr` must have
+type `ptr<struct_type>` and the result is `ptr<field_type>`.
 
 **Example:**
 ```c
@@ -1059,14 +1156,14 @@ anvil_value_t *loaded = anvil_build_load(ctx, anvil_type_i32(ctx), ptr, "loaded"
 ### Control Flow Operations
 
 ```c
-anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
+bool anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
 ```
 Unconditional branch to a block.
 
 ```c
-anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
-                                    anvil_block_t *then_block,
-                                    anvil_block_t *else_block);
+bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
+                         anvil_block_t *then_block,
+                         anvil_block_t *else_block);
 ```
 Conditional branch. If `cond` is true, branches to `then_block`, otherwise to `else_block`.
 
@@ -1089,12 +1186,12 @@ Builds a multi-way switch on `value`, falling through to `default_block`; add ca
 with `anvil_switch_add_case`.
 
 ```c
-anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
+bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
 ```
 Returns a value from the function.
 
 ```c
-anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx);
+bool anvil_build_ret_void(anvil_ctx_t *ctx);
 ```
 Returns void from the function.
 
@@ -1161,8 +1258,8 @@ anvil_value_t *anvil_build_phi(anvil_ctx_t *ctx, anvil_type_t *type,
 Creates a PHI node for SSA form.
 
 ```c
-void anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val,
-                             anvil_block_t *block);
+bool anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val,
+                            anvil_block_t *block);
 ```
 Adds an incoming value to a PHI node.
 
@@ -1185,6 +1282,7 @@ anvil_phi_add_incoming(i, i_next, loop_body);
 ## Constants API
 
 ```c
+anvil_value_t *anvil_const_i1(anvil_ctx_t *ctx, bool val);
 anvil_value_t *anvil_const_i8(anvil_ctx_t *ctx, int8_t val);
 anvil_value_t *anvil_const_i16(anvil_ctx_t *ctx, int16_t val);
 anvil_value_t *anvil_const_i32(anvil_ctx_t *ctx, int32_t val);
@@ -1221,7 +1319,13 @@ anvil_value_t *anvil_module_add_global(anvil_module_t *mod, const char *name,
                                         anvil_type_t *type, anvil_linkage_t linkage);
 ```
 
-Creates a global variable in the module.
+Creates a global definition in the module. A preceding compatible extern
+declaration is promoted in place; duplicate definitions are rejected.
+
+Use `anvil_module_declare_global(mod, name, type, linkage)` for an explicit
+declaration with external, internal, weak, or common linkage. Repeated
+compatible `COMMON` entries coalesce as one tentative symbol. The convenience
+`anvil_module_add_extern()` remains equivalent to an external declaration.
 
 **Parameters:**
 - `mod`: Parent module
@@ -1248,10 +1352,12 @@ anvil_build_store(ctx, new_val, counter);
 ### anvil_global_set_initializer
 
 ```c
-void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
+bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 ```
 
-Sets the initializer for a global variable. The initializer must be a constant value (integer, float, string, or array constant).
+Sets the initializer for a global definition and reports success. The
+initializer must be a same-context, same-type, well-formed acyclic constant
+DAG; declarations and SSA instruction values are rejected.
 
 **Parameters:**
 - `global`: Global variable value (from `anvil_module_add_global`)
@@ -1422,13 +1528,13 @@ cdecl/stdcall/fastcall; the x86_64 backend consumes SysV/Win64.
 typedef enum {
     ANVIL_SYNTAX_DEFAULT,   // Default for architecture
     ANVIL_SYNTAX_HLASM,     // IBM HLASM for mainframes
-    ANVIL_SYNTAX_GAS,       // GNU Assembler syntax
-    ANVIL_SYNTAX_NASM,      // NASM syntax for x86
-    ANVIL_SYNTAX_MASM       // Microsoft MASM syntax
+    ANVIL_SYNTAX_GAS        // GNU Assembler syntax
 } anvil_syntax_t;
 ```
 
-Set with `anvil_ctx_set_syntax`.
+Set with `anvil_ctx_set_syntax`. HLASM is accepted only for mainframe targets;
+GAS is accepted only for x86, ARM64 and PowerPC targets. Unsupported
+target/syntax pairs are rejected without mutating the context or backend.
 
 ### anvil_type_kind_t
 
@@ -1461,10 +1567,8 @@ typedef enum {
     ANVIL_OP_ADD,
     ANVIL_OP_SUB,
     ANVIL_OP_MUL,
-    ANVIL_OP_DIV,
     ANVIL_OP_SDIV,           // Signed division
     ANVIL_OP_UDIV,           // Unsigned division
-    ANVIL_OP_MOD,
     ANVIL_OP_SMOD,           // Signed modulo
     ANVIL_OP_UMOD,           // Unsigned modulo
     ANVIL_OP_NEG,
@@ -1615,7 +1719,8 @@ Destroys a pass manager.
 ### anvil_pass_manager_set_level
 
 ```c
-void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level);
+anvil_error_t anvil_pass_manager_set_level(anvil_pass_manager_t *pm,
+                                            anvil_opt_level_t level);
 ```
 
 Sets optimization level, enabling/disabling passes accordingly.
@@ -1623,15 +1728,30 @@ Sets optimization level, enabling/disabling passes accordingly.
 ### anvil_pass_manager_enable
 
 ```c
-void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_enable(anvil_pass_manager_t *pm,
+                                         anvil_pass_id_t pass);
 ```
 
 Enables a specific optimization pass.
 
+### anvil_pass_manager_set_iteration_limit
+
+```c
+anvil_error_t anvil_pass_manager_set_iteration_limit(
+    anvil_pass_manager_t *pm, unsigned limit);
+unsigned anvil_pass_manager_get_iteration_limit(
+    const anvil_pass_manager_t *pm);
+```
+
+Sets or reads the fixpoint iteration bound. The default is 10. A zero limit is
+rejected and leaves the previous value unchanged. Reaching the bound while a
+pass still reports changes returns `ANVIL_PASS_RUN_ERROR`.
+
 ### anvil_pass_manager_disable
 
 ```c
-void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_disable(anvil_pass_manager_t *pm,
+                                          anvil_pass_id_t pass);
 ```
 
 Disables a specific optimization pass.
@@ -1639,35 +1759,38 @@ Disables a specific optimization pass.
 ### anvil_pass_manager_run_module
 
 ```c
-bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod);
+anvil_pass_result_t anvil_pass_manager_run_module(anvil_pass_manager_t *pm,
+                                                   anvil_module_t *mod);
 ```
 
 Runs all enabled passes on a module.
 
-**Returns:** `true` if any changes were made.
+**Returns:** `ANVIL_PASS_RUN_UNCHANGED`, `ANVIL_PASS_RUN_CHANGED`, or
+`ANVIL_PASS_RUN_ERROR`. The context contains the diagnostic on error.
 
 ### anvil_pass_manager_run_func
 
 ```c
-bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func);
+anvil_pass_result_t anvil_pass_manager_run_func(anvil_pass_manager_t *pm,
+                                                 anvil_func_t *func);
 ```
 
 Runs all enabled passes on a function.
 
-**Returns:** `true` if any changes were made.
+**Returns:** `ANVIL_PASS_RUN_UNCHANGED`, `ANVIL_PASS_RUN_CHANGED`, or
+`ANVIL_PASS_RUN_ERROR`. IR is verified after each pass.
 
 ### Built-in Pass Functions
 
 ```c
-bool anvil_pass_const_fold(anvil_func_t *func);    // Constant folding
-bool anvil_pass_dce(anvil_func_t *func);           // Dead code elimination
-bool anvil_pass_simplify_cfg(anvil_func_t *func);  // CFG simplification
-bool anvil_pass_strength_reduce(anvil_func_t *func); // Strength reduction
-bool anvil_pass_copy_prop(anvil_func_t *func);     // Copy propagation
-bool anvil_pass_dead_store(anvil_func_t *func);    // Dead store elimination
-bool anvil_pass_load_elim(anvil_func_t *func);     // Redundant load elimination
-bool anvil_pass_loop_unroll(anvil_func_t *func);   // Loop unrolling (experimental)
-bool anvil_pass_cse(anvil_func_t *func);           // Common subexpression elimination
+anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_copy_prop(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dead_store(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_load_elim(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_cse(anvil_func_t *func);
 ```
 
 ## Debug/Dump API

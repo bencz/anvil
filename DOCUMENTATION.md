@@ -145,10 +145,7 @@ The context is the root object that manages all ANVIL resources. It holds:
 
 ```c
 // Create a new context
-anvil_ctx_t *ctx = anvil_ctx_create();
-
-// Set target architecture
-anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
 
 // Set OS ABI (optional - for platform-specific code generation)
 anvil_ctx_set_abi(ctx, ANVIL_ABI_SYSV);
@@ -299,6 +296,7 @@ ANVIL supports the following types:
 | Category | Types | Creation Function |
 |----------|-------|-------------------|
 | Void | void | `anvil_type_void(ctx)` |
+| Boolean | i1 (one bit, byte storage) | `anvil_type_i1(ctx)` |
 | Integer | i8, i16, i32, i64 | `anvil_type_i8(ctx)`, etc. |
 | Unsigned | u8, u16, u32, u64 | `anvil_type_u8(ctx)`, etc. |
 | Float | f32, f64 | `anvil_type_f32(ctx)`, `anvil_type_f64(ctx)` |
@@ -368,7 +366,7 @@ Optimization levels:
 | `ANVIL_OPT_DEBUG` | Copy propagation and store-load propagation |
 | `ANVIL_OPT_BASIC` | Debug passes plus constant folding and DCE |
 | `ANVIL_OPT_STANDARD` | Basic passes plus CFG simplification, strength reduction, memory opts, and CSE |
-| `ANVIL_OPT_AGGRESSIVE` | Standard passes; loop unroll is reserved but disabled in the built-in table |
+| `ANVIL_OPT_AGGRESSIVE` | Currently the same verified pass set as `ANVIL_OPT_STANDARD` |
 
 ## API Reference
 
@@ -385,7 +383,7 @@ anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi);
 anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx);
 
 // Set insertion point for IR building
-void anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
+bool anvil_set_insert_point(anvil_ctx_t *ctx, anvil_block_t *block);
 ```
 
 ### Module Functions
@@ -535,8 +533,8 @@ anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
                                        anvil_value_t *count, const char *name);
 anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type,
                                  anvil_value_t *ptr, const char *name);
-anvil_value_t *anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
-                                  anvil_value_t *ptr);
+bool anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val,
+                       anvil_value_t *ptr);
 anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type,
                                 anvil_value_t *ptr, anvil_value_t **indices,
                                 size_t num_indices, const char *name);
@@ -548,10 +546,10 @@ anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_typ
 #### Control Flow Operations
 
 ```c
-anvil_value_t *anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
-anvil_value_t *anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
-                                    anvil_block_t *then_block,
-                                    anvil_block_t *else_block);
+bool anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest);
+bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
+                         anvil_block_t *then_block,
+                         anvil_block_t *else_block);
 anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
                                   anvil_block_t *default_block);
 bool anvil_switch_add_case(anvil_instr_t *switch_instr,
@@ -560,8 +558,8 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
 anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type,
                                  anvil_value_t *callee, anvil_value_t **args,
                                  size_t num_args, const char *name);
-anvil_value_t *anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
-anvil_value_t *anvil_build_ret_void(anvil_ctx_t *ctx);
+bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
+bool anvil_build_ret_void(anvil_ctx_t *ctx);
 ```
 
 #### Type Conversion Operations
@@ -608,7 +606,7 @@ anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
 
 // Set initializer for global variable
-void anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
+bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 ```
 
 ### Error Codes
@@ -680,9 +678,7 @@ typedef enum {
 typedef enum {
     ANVIL_SYNTAX_DEFAULT,   // Default for architecture
     ANVIL_SYNTAX_HLASM,     // IBM HLASM for mainframes
-    ANVIL_SYNTAX_GAS,       // GNU Assembler syntax
-    ANVIL_SYNTAX_NASM,      // NASM syntax for x86
-    ANVIL_SYNTAX_MASM       // Microsoft MASM syntax
+    ANVIL_SYNTAX_GAS        // GNU Assembler syntax
 } anvil_syntax_t;
 ```
 
@@ -691,8 +687,6 @@ typedef enum {
 | `ANVIL_SYNTAX_DEFAULT` | All | Use default syntax for target architecture |
 | `ANVIL_SYNTAX_HLASM` | S/370, S/390, z/Architecture | IBM High Level Assembler |
 | `ANVIL_SYNTAX_GAS` | x86, x86-64, ARM64, PowerPC | GNU Assembler (AT&T style for x86) |
-| `ANVIL_SYNTAX_NASM` | x86, x86-64 | Netwide Assembler (Intel style) |
-| `ANVIL_SYNTAX_MASM` | x86, x86-64 | Microsoft Macro Assembler |
 
 ### Endianness
 
@@ -887,7 +881,10 @@ anvil_value_t *anvil_build_fmul(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_valu
 anvil_value_t *anvil_build_fdiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_fneg(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
 anvil_value_t *anvil_build_fabs(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
-anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
+anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx,
+                                anvil_fcmp_pred_t predicate,
+                                anvil_value_t *lhs, anvil_value_t *rhs,
+                                const char *name);
 
 /* FP conversions */
 anvil_value_t *anvil_build_fptrunc(anvil_ctx_t *ctx, anvil_value_t *val, anvil_type_t *type, const char *name);
@@ -1547,8 +1544,7 @@ _my_func:
 ```c
 // Create: int add(int a, int b) { return a + b; }
 
-anvil_ctx_t *ctx = anvil_ctx_create();
-anvil_ctx_set_target(ctx, ANVIL_ARCH_S370);
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_S370);
 
 anvil_module_t *mod = anvil_module_create(ctx, "example");
 
@@ -1927,17 +1923,28 @@ anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx);
 void anvil_pass_manager_destroy(anvil_pass_manager_t *pm);
 
 /* Set optimization level */
-void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level);
+anvil_error_t anvil_pass_manager_set_level(anvil_pass_manager_t *pm,
+                                            anvil_opt_level_t level);
 anvil_opt_level_t anvil_pass_manager_get_level(anvil_pass_manager_t *pm);
 
+/* Configure/read the fixpoint bound (default: 10, zero is invalid) */
+anvil_error_t anvil_pass_manager_set_iteration_limit(
+    anvil_pass_manager_t *pm, unsigned limit);
+unsigned anvil_pass_manager_get_iteration_limit(
+    const anvil_pass_manager_t *pm);
+
 /* Enable/disable individual passes */
-void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
-void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_enable(anvil_pass_manager_t *pm,
+                                         anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_disable(anvil_pass_manager_t *pm,
+                                          anvil_pass_id_t pass);
 bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
 
 /* Run passes */
-bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func);
-bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod);
+anvil_pass_result_t anvil_pass_manager_run_func(anvil_pass_manager_t *pm,
+                                                 anvil_func_t *func);
+anvil_pass_result_t anvil_pass_manager_run_module(anvil_pass_manager_t *pm,
+                                                   anvil_module_t *mod);
 
 /* Register custom pass */
 anvil_error_t anvil_pass_manager_register(anvil_pass_manager_t *pm, 
@@ -1971,22 +1978,20 @@ anvil_error_t anvil_module_optimize(anvil_module_t *mod);
 | `ANVIL_PASS_DEAD_STORE` | Dead Store Elimination | Remove overwritten stores | O2 |
 | `ANVIL_PASS_LOAD_ELIM` | Load Elimination | Reuse loaded values | O2 |
 | `ANVIL_PASS_COMMON_SUBEXPR` | CSE | Common subexpression elimination | O2 |
-| `ANVIL_PASS_LOOP_UNROLL` | Loop Unrolling | Reserved API entry; disabled in the built-in pass table | O3 |
 
 ### Built-in Pass Functions
 
 ```c
 /* Can be called directly for custom pipelines */
-bool anvil_pass_const_fold(anvil_func_t *func);
-bool anvil_pass_dce(anvil_func_t *func);
-bool anvil_pass_simplify_cfg(anvil_func_t *func);
-bool anvil_pass_strength_reduce(anvil_func_t *func);
-bool anvil_pass_copy_prop(anvil_func_t *func);
-bool anvil_pass_store_load_prop(anvil_func_t *func);
-bool anvil_pass_dead_store(anvil_func_t *func);
-bool anvil_pass_load_elim(anvil_func_t *func);
-bool anvil_pass_loop_unroll(anvil_func_t *func);   // Reserved; not run by default
-bool anvil_pass_cse(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_copy_prop(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_store_load_prop(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dead_store(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_load_elim(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_cse(anvil_func_t *func);
 ```
 
 ### Usage Example
@@ -1997,8 +2002,7 @@ bool anvil_pass_cse(anvil_func_t *func);
 
 int main(void)
 {
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_S390);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_S390);
     
     /* Enable O2 optimization */
     anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
@@ -2053,16 +2057,16 @@ The constant folding pass evaluates:
 
 ```c
 /* Define custom pass function */
-bool my_custom_pass(anvil_func_t *func)
+anvil_pass_result_t my_custom_pass(anvil_func_t *func)
 {
     bool changed = false;
     /* ... optimization logic ... */
-    return changed;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 
 /* Register with pass manager */
 anvil_pass_info_t my_pass = {
-    .id = ANVIL_PASS_COUNT,  /* Use next available ID */
+    .id = ANVIL_PASS_CUSTOM,
     .name = "my-pass",
     .description = "My custom optimization",
     .run = my_custom_pass,

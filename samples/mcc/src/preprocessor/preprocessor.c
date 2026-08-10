@@ -62,22 +62,22 @@ void pp_process_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
 {
     /* Check for macro expansion */
     if (tok->type == TOK_IDENT && !pp->skip_mode) {
-        /* C99 _Pragma("stuff") operator — destringize the argument and
-         * treat it as a #pragma directive. Equivalent to `#pragma stuff`.
-         * We just consume the syntactic form; full reparsing as #pragma
-         * would require wiring the string back through the lexer — for
-         * now we silently drop the pragma, matching the minimal-behaviour
-         * policy we use for unknown #pragmas. */
+        /* _Pragma requires destringizing and processing the resulting pragma.
+         * Reject it until that pipeline exists instead of silently discarding
+         * the requested semantics. */
         if (strcmp(tok->text, "_Pragma") == 0) {
+            mcc_error_at(pp->ctx, tok->location,
+                         "_Pragma is not implemented by MCC");
             mcc_token_t *peek = mcc_lexer_peek(pp->lexer);
             if (peek->type == TOK_LPAREN) {
-                mcc_lexer_next(pp->lexer);  /* ( */
-                mcc_lexer_next(pp->lexer);  /* string literal (consumed) */
-                /* Expect ) */
-                mcc_token_t *close = mcc_lexer_peek(pp->lexer);
-                if (close->type == TOK_RPAREN) {
-                    mcc_lexer_next(pp->lexer);
-                }
+                int depth = 0;
+                do {
+                    mcc_token_t *part = mcc_lexer_next(pp->lexer);
+                    if (part->type == TOK_LPAREN) depth++;
+                    else if (part->type == TOK_RPAREN) depth--;
+                    else if (part->type == TOK_EOF || part->type == TOK_NEWLINE)
+                        break;
+                } while (depth > 0);
             }
             return;
         }

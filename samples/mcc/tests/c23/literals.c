@@ -17,8 +17,5 @@ int main(void)
     int bin = 0b1111'0000'1111'0000;
     double pi = 3.141'592'653'589;
     
-    /* C23: u8 character literals */
-    unsigned char u8char = u8'A';
-    
     return bin1 + bin2;
 }

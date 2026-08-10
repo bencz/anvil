@@ -68,6 +68,7 @@ Module
 | Type | Description | Size (bytes) |
 |------|-------------|--------------|
 | void | No value | 0 |
+| i1 | First-class one-bit boolean (byte-addressable storage) | 1 |
 | i8 | 8-bit signed integer | 1 |
 | i16 | 16-bit signed integer | 2 |
 | i32 | 32-bit signed integer | 4 |
@@ -79,11 +80,12 @@ Module
 | f32 | 32-bit IEEE float | 4 |
 | f64 | 64-bit IEEE double | 8 |
 
-**Note on booleans:** ANVIL has **no dedicated `i1`/boolean type** (`anvil_type_is_bool()`
-always returns `false`). Comparison instructions (`cmp_*`, `fcmp`) produce an `i8`
-result that is treated as boolean. Anywhere this document refers to a "boolean"
-value (e.g. the condition of `br_cond` or `select`), the type is `i8` (or `u8`);
-the verifier accepts either 8-bit integer type for these positions.
+**Boolean contract:** `i1` has semantic bit width 1, size 1 and alignment 1 so
+it can be loaded and stored on byte-addressable targets. Comparisons produce
+`i1`; `br_cond` and `select` require exactly `i1` (never `i8`/`u8`). Boolean
+`and`, `or`, `xor`, `not`, equality, PHI, select, load/store and integer
+extension/truncation are supported. Arithmetic, division, shifts, negation and
+relational comparison on `i1` are invalid.
 
 ### Decimal Types
 
@@ -126,9 +128,18 @@ An array of N elements of type T.
 
 ```
 { T1, T2, ..., Tn }
+<{ T1, T2, ..., Tn }>       // packed literal
+%Node = type opaque          // identified declaration
+%Node = type { i32, ptr<%Node> }
 ```
 
-A structure with fields of types T1 through Tn.
+A literal structure compares structurally. An identified `%Name` type compares
+nominally and can be declared opaque, allowing self- and mutually-recursive
+graphs through pointers. Its body is defined once. Field offsets and tail
+padding come from the context's frozen target `DataLayout`; a context has no
+implicit/default target, so one must be selected before any IR or composite
+type is created. Packed bodies use
+byte alignment and no inter-field padding.
 
 #### Function Type
 
@@ -180,6 +191,33 @@ Global variables are referenced by name:
 ## Instructions
 
 ### Arithmetic Instructions
+
+#### Normative scalar semantics
+
+- Integer `add`, `sub`, `mul` and integer `neg` wrap modulo `2^N`, where `N`
+  is the semantic bit width. Signed overflow is therefore not a separate IR
+  event for these opcodes.
+- `sdiv`/`smod` require signed integer types; `udiv`/`umod` require unsigned
+  integer types. Division by zero and signed `MIN / -1` (and its corresponding
+  remainder) are immediate undefined behavior in ANVIL IR. There is no
+  implicit target trap and no poison value. The verifier checks types, not
+  runtime operand values.
+- Shift operands must be non-`i1` integers. A negative shift amount or an
+  amount greater than or equal to the value bit width is immediate undefined
+  behavior. Frontends needing language exceptions must emit explicit checks
+  and control flow before division or shifts; they must not rely on an ISA's
+  incidental trap behavior.
+- Signed relational predicates require signed integer operands and unsigned
+  predicates require unsigned operands. Pointer values support only `cmp_eq`
+  and `cmp_ne`; ordering a pointer is not valid IR.
+
+Pointer values retain the provenance of their allocation/global through GEP
+and pointer-preserving casts. `ptrtoint` exposes the target-width address bits;
+`inttoptr(ptrtoint(p))` may recover `p` when no bits were lost. Dereferencing a
+pointer synthesized from unrelated integer bits, or comparing provenance by
+integer ordering, has undefined behavior. Frontends that need a managed
+object/reference model should keep references as pointers and use explicit
+runtime metadata rather than integer arithmetic.
 
 #### add
 
@@ -243,12 +281,8 @@ Signed integer modulo (remainder).
 
 Unsigned integer modulo.
 
-> **Generic `div` / `mod`:** The opcodes `ANVIL_OP_DIV` and `ANVIL_OP_MOD`
-> exist in the `anvil_op_t` enum but are **not part of the supported source
-> IR**. The verifier explicitly rejects them ("unsupported source opcode") and
-> no backend lowers them. Front-ends must emit the signed/unsigned variants
-> (`sdiv`/`udiv`, `smod`/`umod`) instead. There are no `anvil_build_div` /
-> `anvil_build_mod` builder functions.
+Division and modulo are always explicit about signedness: frontends use
+`sdiv`/`udiv` and `smod`/`umod`.
 
 #### neg
 
@@ -256,7 +290,7 @@ Unsigned integer modulo.
 %result = neg %val
 ```
 
-Integer or floating-point negation.
+Integer negation. Floating-point negation uses the distinct `fneg` opcode.
 
 ### Bitwise Instructions
 
@@ -318,10 +352,10 @@ Arithmetic shift right. Shifts `%val` right by `%amount` bits, preserving sign.
 
 ### Comparison Instructions
 
-All comparison instructions return `i8` (used as a boolean; ANVIL has no `i1`
-type). The verifier requires the result type to be `i8` or `u8` and the two
-operands to share a type that is integer or pointer (`cmp_*`) or floating-point
-(`fcmp`).
+All comparison instructions return `i1`. Operands must have the same type.
+Signed relational predicates require signed integers; unsigned relational
+predicates require unsigned integers. Pointers support equality/inequality
+only. Floating-point comparison uses `fcmp` and an explicit predicate.
 
 #### cmp_eq
 
@@ -418,10 +452,9 @@ Allocates space for one value of type T on the stack. Returns a pointer to the a
 A **dynamic-size** form (`anvil_build_alloca_dyn`) is also available: it takes an
 integer `count` operand and reserves space for `count` elements of type T. The
 verifier requires the single extra operand to be an integer.
-
-> **Backend limitation:** On the mainframe backends, dynamic alloca is currently
-> a stub — it returns a fixed pointer into the local stack area and does not
-> reserve `count`-sized storage. See `doc/MAINFRAME.md`.
+Mainframe lowering computes `count * sizeof(T)`, aligns the reservation, updates
+the stack/backchain according to the selected variant, and keeps fixed frame and
+outgoing-call areas disjoint from the dynamic allocation.
 
 #### load
 
@@ -508,7 +541,7 @@ br_cond %cond, label %then, label %else
 Conditional branch. If `%cond` is true, branches to `%then`, otherwise to `%else`.
 
 **Operands:**
-- `%cond`: Condition (i8, used as boolean)
+- `%cond`: Condition (exactly i1)
 - `%then`: True branch target
 - `%else`: False branch target
 
@@ -690,7 +723,7 @@ loop:
 Selects between two values based on a condition. Like the ternary operator (`cond ? then_val : else_val`).
 
 **Operands:**
-- `%cond`: Condition (i8, used as boolean)
+- `%cond`: Condition (exactly i1)
 - `%then_val`: Value if true
 - `%else_val`: Value if false (must have the same type as `%then_val`)
 
@@ -702,6 +735,15 @@ Selects between two values based on a condition. Like the ternary operator (`con
 ```
 
 ## Floating-Point Instructions
+
+Unless an operation says otherwise, binary FP arithmetic uses IEEE-754
+round-to-nearest, ties-to-even at the declared `f32`/`f64` precision. NaNs,
+infinities and signed zero follow IEEE-754 value semantics. These are
+non-constrained operations: the floating-point exception flags and trapping
+mode are not observable IR state, and optimizations may assume the documented
+rounding mode. Frontends requiring a dynamic rounding environment or
+observable FP exceptions need future constrained FP operations rather than
+these opcodes.
 
 ### Arithmetic
 
@@ -764,11 +806,19 @@ Floating-point absolute value.
 #### fcmp
 
 ```
-%result = fcmp %lhs, %rhs
+%result = fcmp oeq %lhs, %rhs
 ```
 
-Floating-point comparison. Returns `i8` (used as boolean). The verifier requires
-both operands to be the same floating-point type and the result to be `i8`/`u8`.
+Floating-point comparison. Returns `i1` and requires same-typed `f32` or `f64`
+operands. Predicates are `false`, `oeq`, `ogt`, `oge`, `olt`, `ole`, `one`,
+`ord`, `ueq`, `ugt`, `uge`, `ult`, `ule`, `une`, `uno`, and `true`. Ordered
+predicates are false on NaN; unordered predicates are true when either operand
+is NaN.
+
+FCMP is quiet/non-constrained IR: ANVIL does not preserve floating-point
+exception flags or require traps for signaling NaNs. Consequently `false` and
+`true` may be folded without evaluating their operands. A future constrained
+FP opcode must be used by frontends that need observable exception semantics.
 
 ### Conversions
 
@@ -937,11 +987,19 @@ entry:
 
 define i32 @get_y(ptr<{i32, i32}> %p) {
 entry:
-    %y_ptr = gep %p, 0, 1
+    %y_ptr = gep ptr<i32> source {i32, i32} %p, 0, 1
     %y = load %y_ptr
     ret %y
 }
 ```
+
+GEP is a typed walk. Index zero is the pointer step and is scaled by the source
+element's allocation size. Each later array index is scaled by its element
+size; each later struct index must be constant and contributes the field's
+DataLayout offset. The result is `ptr<final-walked-type>`. The verifier rejects
+a mismatched source/base, dynamic struct field, invalid aggregate walk or a
+manually corrupted result type. `struct_gep` is the one-field convenience form
+and requires a base `ptr<the same struct>`.
 
 ## Lowering to Assembly
 
@@ -1290,7 +1348,6 @@ ANVIL IR values can be one of several kinds:
 | **FP Conversion** | fptrunc, fpext, fptosi, fptoui, sitofp, uitofp |
 | **Miscellaneous** | phi, select, nop |
 
-The enum `anvil_op_t` also contains `ANVIL_OP_DIV` and `ANVIL_OP_MOD`, but these
-are rejected by the verifier and not lowered by any backend — use the signed /
-unsigned variants instead (see the note under [arithmetic instructions](#umod)).
-`ANVIL_OP_NOP` is a placeholder left by optimization passes and removed by DCE.
+`ANVIL_OP_NOP` is the canonical zero-operand, zero-result semantic no-op. Passes
+normally erase instructions directly; NOP exists for explicit padding/testing
+and may be removed without changing program behavior.

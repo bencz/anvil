@@ -25,194 +25,25 @@ spill-materialization passes are target-independent and live in `src/machine/`
 contract — see `src/backend/x86_64/x86_64_mir.c` and `src/backend/x86/x86_mir.c`
 for the x86 implementations that mirror it.
 
-## Recent Improvements (Implemented)
+## Current implementation notes
 
-The ARM64 backend has received significant improvements for correctness, robustness, and optimization:
+ARM64 no longer has a target-specific source-IR preparation or peephole
+directory. The former passes could mutate observable loads and stores without
+the IR mutation and alias contracts required to prove those rewrites correct,
+so the backend exposes no `prepare_ir` hook. Source-level dead-store,
+load-elimination, and control-flow transformations belong to the generic pass
+manager in `src/opt/`, where their analyses and invalidation are shared and
+tested.
 
-### Architecture-Specific Optimizations
-New optimization pass infrastructure in `src/backend/arm64/opt/`:
-- **Pass Manager**: `arm64_opt.c` coordinates all optimization passes
-- **Peephole Optimizations**: Redundant store elimination, load-store same address removal
-- **Dead Store Elimination**: Remove stores that are immediately overwritten
-- **Redundant Load Elimination**: Reuse values already loaded from same address
-- **Branch Optimization**: Combine cmp+cset+cbnz into cmp+b.cond, use cbz/cbnz/tbz/tbnz
-- **Immediate Optimization**: Use immediate forms of instructions when possible
+Target lowering preserves every observable `LOAD` and `STORE`, then uses the
+verified MachineIR pipeline above. MachineIR carries explicit register class,
+width, CFG ownership, ABI live-ins, call bundles, spill slots, and all sixteen
+floating-point comparison predicates. `i1` occupies one byte in memory and is
+normalized to 0/1 at casts, loads, stores, comparisons, parameters, and returns.
 
-### Conditional Branch Optimization
-The `arm64_emit_br_cond()` function now detects when the condition is a comparison result and emits `cmp` + `b.cond` directly instead of loading the boolean result:
-
-**Before:**
-```asm
-cmp x9, x10
-cset x0, le
-strb w0, [stack]
-ldrsb x9, [stack]
-cbnz x9, .body
-```
-
-**After:**
-```asm
-cmp x9, x10
-b.le .body
-```
-
-Supported condition codes: `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `lo`, `ls`, `hi`, `hs` (unsigned).
-
-### 32-bit Register Optimization
-Arithmetic and bitwise operations now use 32-bit registers (W) when the result type is 32 bits or smaller:
-
-**Before:**
-```asm
-ldrsw x9, [x29, #-8]
-ldrsw x10, [x29, #-16]
-add x0, x9, x10       ; 64-bit operation
-```
-
-**After:**
-```asm
-ldrsw x9, [x29, #-8]
-ldrsw x10, [x29, #-16]
-add w0, w9, w10       ; 32-bit operation
-```
-
-Affected operations: `add`, `sub`, `mul`, `sdiv`, `udiv`, `smod`, `umod`, `neg`, `and`, `or`, `xor`, `not`, `shl`, `shr`, `sar`.
-
-### Immediate Operand Optimization
-ADD and SUB operations now use immediate form when the operand is a small constant (0-4095):
-
-**Before:**
-```asm
-mov x10, #1
-add w0, w9, w10       ; 2 instructions
-```
-
-**After:**
-```asm
-add w0, w9, #1        ; 1 instruction
-```
-
-**Savings:** 1 instruction per operation with small constant.
-
-Also applies to CMP instructions:
-```asm
-cmp x9, #0        ; instead of: mov x10, #0; cmp x9, x10
-b.gt .label
-```
-
-### Comparison Fusion
-When a comparison is immediately followed by BR_COND that uses the result, the `cset` and `strb` are eliminated:
-
-**Before:**
-```asm
-cmp x9, x10
-cset x0, le           ; 2 extra instructions
-strb w0, [x29, #-48]
-cmp x9, x10           ; redundant comparison
-b.le .body
-```
-
-**After:**
-```asm
-cmp x9, x10
-b.le .body            ; direct branch, no cset/strb
-```
-
-**Savings:** 3 instructions per comparison in control flow.
-
-### CBZ/CBNZ Optimization
-Comparisons with zero using `==` or `!=` are optimized to use `cbz`/`cbnz`:
-
-**Before:**
-```asm
-cmp x9, #0
-b.eq .label       ; 2 instructions
-```
-
-**After:**
-```asm
-cbz x9, .label    ; 1 instruction
-```
-
-Similarly, `x != 0` uses `cbnz x9, .label`.
-
-### Leaf Function Optimization
-Functions that don't call other functions (leaf functions) skip saving the link register (x30):
-
-**Non-leaf function:**
-```asm
-stp x29, x30, [sp, #-16]!   ; save both FP and LR
-mov x29, sp
-...
-ldp x29, x30, [sp], #16     ; restore both
-ret
-```
-
-**Leaf function:**
-```asm
-str x29, [sp, #-16]!        ; save only FP
-mov x29, sp
-...
-ldr x29, [sp], #16          ; restore only FP
-ret
-```
-
-**Savings:** 2 instructions per leaf function (1 in prologue, 1 in epilogue).
-
-### Zero Register Optimization
-Stores of zero use the `wzr`/`xzr` register directly instead of loading zero into a register first:
-
-**Before:**
-```asm
-mov x9, #0
-str w9, [x29, #-24]
-```
-
-**After:**
-```asm
-str wzr, [x29, #-24]
-```
-
-**Savings:** 1 instruction per zero initialization.
-
-### Register Value Cache
-The backend maintains a cache of values loaded into temporary registers (x9-x15). When a value is requested that's already in a register, a simple `mov` is emitted instead of reloading from stack:
-
-```asm
-; Without cache:
-ldrsw x9, [x29, #-8]    ; load value
-ldrsw x10, [x29, #-8]   ; load same value again
-
-; With cache:
-ldrsw x9, [x29, #-8]    ; load value
-mov x10, x9             ; reuse cached value
-```
-
-The cache is invalidated at:
-- Branch instructions (values may not be valid in target block)
-- Function calls (caller-saved registers are clobbered)
-
-### ARM64-Specific Peephole Optimizations
-The `arm64_opt_peephole.c` pass performs ARM64-specific IR optimizations:
-
-**1. Redundant Store Elimination:**
-```
-STORE %val -> %addr
-STORE %val2 -> %addr   ; first store is dead
-```
-
-**2. Load-Store Same Address:**
-```
-LOAD %addr -> %tmp
-STORE %tmp -> %addr    ; no-op, both eliminated
-```
-
-> **Note:** Generic IR optimizations like store-load propagation and redundant load elimination are now in `src/opt/` and apply to all backends.
-
-### IR Preparation Phase
-New `prepare_ir` callback in backend interface:
-- Called automatically by `anvil_module_codegen()` before code generation
-- Analyzes all functions (detect leaf functions, calculate stack layout)
-- Runs architecture-specific optimizations via `arm64_opt_module()`
+Assembly-level improvements must be implemented after legal MachineIR lowering
+or as a formally verified MachineIR transform. There is deliberately no dormant
+ARM64 pass API advertising transformations that are not safe to run.
 
 ### Variadic Function Calls (Darwin/macOS)
 - **Problem**: `printf` and other variadic functions were receiving incorrect arguments

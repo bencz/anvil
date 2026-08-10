@@ -93,8 +93,12 @@ src/backend/arm64/
 - **`arm64_mir.c`**: source IR lowering, ABI constraints, PHI edge copies, switch lowering, MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission
 - **`arm64_internal.h`**: backend state and ARM64 register constants
 - **`arm64_helpers.c`**: target type sizing/alignment helpers and register name tables
-- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, `arm64_prepare_ir()`, and module/function codegen entry points
-- **`opt/`**: Architecture-specific optimizations run during `prepare_ir` phase
+- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, and module/function codegen entry points
+
+ARM64 deliberately has no target `prepare_ir` hook or dormant target peephole
+directory. Source-IR transformations run through the generic pass manager;
+target-specific work starts at verified MachineIR lowering so observable memory
+operations cannot be erased by an untracked backend rewrite.
 
 The x86 and x86-64 backends are no longer direct source-IR emitters: they were
 rewritten onto the same MachineIR pipeline as ARM64 and PowerPC. New backend work
@@ -104,7 +108,7 @@ should follow ARM64's MachineIR structure.
 
 | Backend | Arch enum | Pipeline | ABIs / conventions | Output | Maturity |
 |---------|-----------|----------|--------------------|--------|----------|
-| x86-64 | `ANVIL_ARCH_X86_64` | MachineIR | SysV (Linux/BSD), Darwin, Win64 | GAS/AT&T | Linux/SysV execution-tested; Darwin/Win64 emit-validated only |
+| x86-64 | `ANVIL_ARCH_X86_64` | MachineIR | SysV (Linux/BSD), Darwin, Win64 | GAS/AT&T | Linux/SysV and Win64 execution-tested; Darwin emit-validated |
 | x86 (32-bit) | `ANVIL_ARCH_X86` | MachineIR | cdecl, stdcall, fastcall; ELF/Mach-O/COFF decoration | GAS/AT&T | ELF execution-tested (`as --32` / `gcc -m32`); Mach-O/COFF emit-validated only |
 | ARM64 | `ANVIL_ARCH_ARM64` | MachineIR (reference) | AAPCS64 (Linux SysV), Darwin | GAS | Reference path; execution-tested |
 | PPC32 | `ANVIL_ARCH_PPC32` | MachineIR | System V (ELF) | GAS | Shared `ppc_mir.c` |
@@ -116,9 +120,18 @@ should follow ARM64's MachineIR structure.
 | z/Architecture | `ANVIL_ARCH_ZARCH` | MachineIR | MVS linkage | HLASM | Mainframe |
 
 > **Output syntax:** All non-mainframe backends currently emit **GAS / AT&T
-> syntax only**. The `ANVIL_SYNTAX_NASM`/`ANVIL_SYNTAX_MASM` (Intel) enum values
-> exist but are not implemented for x86/x86-64; emission falls back to GAS.
-> Mainframe backends emit IBM HLASM.
+> syntax only**. Intel/NASM/MASM output is not exposed until an emitter
+> implements it completely. Mainframe backends emit IBM HLASM.
+
+All five MachineIR emitter families implement `i1` as a normalized 0/1 value
+with one-byte memory storage. Loads and stores mask the low bit, casts (including
+`FPTOUI` to `i1`) normalize explicitly, and comparisons, branches, selects,
+PHIs, parameters, and returns use the GPR8 boolean contract. `FCMP` carries one
+of the 16 explicit ordered/unordered predicates through MachineIR. The native
+x86-64 conformance gate executes every predicate over ordered values, NaNs,
+infinities, and signed zero; ARM64 and PowerPC comparison sequences are
+cross-assembled, while S/370 HFP and z/Architecture BFP mnemonic/condition-code
+invariants are checked separately.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -887,10 +900,10 @@ Key design points to keep in mind when wiring up a new backend:
 
 > **x86-64 FP note:** Under SysV/Darwin there are **no callee-saved XMM
 > registers**, so the allocatable FPR pool is **empty** and every floating-point
-> value is spilled to the stack. The Win64 descriptor defines a callee-saved XMM
-> pool (`xmm6-xmm12`) and a wider GPR pool, but `anvil_x86_64_regalloc_mir`
-> currently drives allocation with the SysV descriptor for all functions, so those
-> Win64-only pools are defined but not yet wired into the allocator.
+> value is spilled to the stack. Win64 allocation uses its ABI descriptor's
+> callee-saved `xmm6-xmm12` pool and wider GPR pool. The emitter saves and
+> restores every allocated or spill-scratch nonvolatile XMM register actually
+> used by the function.
 
 ## Handling Special Cases
 
@@ -991,8 +1004,7 @@ Create test cases for each instruction type:
 
 ```c
 void test_add(void) {
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_MYARCH);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_MYARCH);
     
     anvil_module_t *mod = anvil_module_create(ctx, "test");
     // Create add function...
@@ -1194,8 +1206,8 @@ full 32-bit destination and need no fixup.
 
 ### Known limitations (x86 / x86-64)
 
-- **GAS / AT&T output only.** NASM/Intel (`ANVIL_SYNTAX_NASM`/`_MASM`) is not
-  implemented; emission falls back to GAS.
+- **GAS / AT&T output only.** NASM/Intel output is not implemented or exposed
+  as a selectable syntax.
 - **`u64 -> floating point` is simplified.** `UITOFP` uses the signed
   `cvtsi2ss/cvtsi2sd` path, treating the unsigned source as signed (no full
   unsigned-64 fixup).
@@ -1203,8 +1215,11 @@ full 32-bit destination and need no fixup.
   struct-GEP); there is no System V field-classification of structs into
   registers. Stack arguments use fixed 8-byte (x86-64) / 4-byte-rounded (x86)
   slots.
-- **Darwin and Win64 are emit-validated, not execution-tested** on the Linux
-  host. SysV/Linux x86-64 and ELF x86-32 are the execution-tested paths.
+- **Win64 is execution-tested bidirectionally** with a MinGW C shim under Wine:
+  C calls Anvil-generated code, Anvil calls a C variadic function, and the gate
+  checks stack arguments, shadow space and nonvolatile XMM preservation. Darwin
+  remains emit-validated on the Linux host. SysV/Linux x86-64 and ELF x86-32 are
+  also execution-tested paths.
 
 ### Validation
 
@@ -1244,8 +1259,7 @@ ANVIL supports multiple OS ABIs through the `anvil_ctx_set_abi()` function. This
 ### ARM64 macOS (Apple Silicon) Example
 
 ```c
-anvil_ctx_t *ctx = anvil_ctx_create();
-anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ARM64);
 anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);  // Enable macOS mode
 
 // ... build IR ...

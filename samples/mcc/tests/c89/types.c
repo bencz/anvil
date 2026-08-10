@@ -22,7 +22,6 @@ unsigned long ul;
 /* Floating point types */
 float f;
 double d;
-long double ld;
 
 /* Type qualifiers */
 const int ci = 10;

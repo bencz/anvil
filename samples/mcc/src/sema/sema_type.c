@@ -7,6 +7,38 @@
 
 #include "sema_internal.h"
 
+mcc_type_t *sema_resolve_type(mcc_sema_t *sema, mcc_type_t *type)
+{
+    if (!type) return NULL;
+    if (type->kind == TYPE_TYPEOF_EXPR) {
+        mcc_type_t *resolved = sema_analyze_expr(
+            sema, type->data.typeof_expr.expr);
+        if (!resolved) return NULL;
+        if (type->data.typeof_expr.unqualified) {
+            resolved = mcc_type_unqualified(resolved);
+        }
+        if (type->qualifiers != QUAL_NONE) {
+            resolved = mcc_type_qualified(sema->types, resolved,
+                                          type->qualifiers);
+        }
+        return resolved;
+    }
+    if (type->kind == TYPE_POINTER) {
+        type->data.pointer.pointee = sema_resolve_type(
+            sema, type->data.pointer.pointee);
+    } else if (type->kind == TYPE_ARRAY) {
+        type->data.array.element = sema_resolve_type(
+            sema, type->data.array.element);
+    } else if (type->kind == TYPE_FUNCTION) {
+        type->data.function.return_type = sema_resolve_type(
+            sema, type->data.function.return_type);
+        for (mcc_func_param_t *p = type->data.function.params; p; p = p->next) {
+            p->type = sema_resolve_type(sema, p->type);
+        }
+    }
+    return type;
+}
+
 /* ============================================================
  * Type Checking Predicates
  * ============================================================ */
@@ -181,11 +213,6 @@ bool sema_check_assignment_compat(mcc_sema_t *sema, mcc_type_t *lhs, mcc_type_t 
         }
     }
 
-    /* C23: nullptr can be assigned to any pointer */
-    if (sema_has_nullptr(sema) && mcc_type_is_pointer(lhs)) {
-        /* TODO: Check for nullptr constant */
-    }
-
     /* Array initialization from compatible array (e.g. char[] = "str") or
      * from pointer-to-compatible (rare) — accept silently. Arrays vs
      * pointers with same element decay-equivalent also fine. */
@@ -275,8 +302,8 @@ bool sema_is_null_pointer_constant(mcc_sema_t *sema, mcc_ast_node_t *expr)
     }
     
     /* C23: nullptr */
-    if (sema_has_nullptr(sema)) {
-        /* TODO: Check for nullptr keyword */
+    if (sema_has_nullptr(sema) && expr->kind == AST_NULL_PTR) {
+        return true;
     }
     
     return false;

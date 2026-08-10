@@ -14,6 +14,40 @@
 #include <stdint.h>
 
 /* ---------------------------------------------------------------------------
+ * Instruction erasure.
+ *
+ * Instructions are context-owned and released with the context.  Optimizers
+ * therefore erase an instruction by unlinking it from its block, while the
+ * ownership chain keeps the allocation alive.  Keeping the old next pointer
+ * also makes erase-during-iteration safe.  Every pass must leave independently
+ * verifiable IR; a non-canonical NOP with operands/result is not valid IR.
+ * ------------------------------------------------------------------------- */
+
+static inline bool anvil_opt_erase_instr(anvil_instr_t *instr)
+{
+    if (!instr || !instr->parent) return false;
+
+    anvil_block_t *block = instr->parent;
+    if (instr->prev) instr->prev->next = instr->next;
+    else block->first = instr->next;
+
+    if (instr->next) instr->next->prev = instr->prev;
+    else block->last = instr->prev;
+
+    /* The builder cursor may still name a context-owned instruction that was
+     * just erased. Repair it before clearing parent so subsequent appends are
+     * well-defined. Keep `next` as an iteration cursor, but clear parent/prev
+     * to make a second erase a harmless false return. */
+    anvil_ctx_t *ctx = block->parent && block->parent->parent
+        ? block->parent->parent->ctx : NULL;
+    if (ctx && ctx->insert_point == instr) ctx->insert_point = block->last;
+    instr->parent = NULL;
+    instr->prev = NULL;
+
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
  * Constant queries
  * ------------------------------------------------------------------------- */
 
@@ -53,9 +87,26 @@ static inline bool anvil_opt_is_one(const anvil_value_t *val)
 
 static inline bool anvil_opt_is_all_ones(const anvil_value_t *val)
 {
-    if (!anvil_opt_is_const_int(val)) return false;
-    int64_t v = val->data.i;
-    return v == -1 || v == (int64_t)0xFFFFFFFFFFFFFFFFLL;
+    if (!anvil_opt_is_const_int(val) || !val->type) return false;
+
+    unsigned bits;
+    switch (val->type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_U8:  bits = 8;  break;
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_U16: bits = 16; break;
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_U32: bits = 32; break;
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U64: bits = 64; break;
+        default: return false;
+    }
+
+    uint64_t value = val->type->is_signed ? (uint64_t)val->data.i
+                                          : val->data.u;
+    uint64_t mask = bits == 64 ? UINT64_MAX
+                               : ((UINT64_C(1) << bits) - 1);
+    return (value & mask) == mask;
 }
 
 /* ---------------------------------------------------------------------------
@@ -111,17 +162,13 @@ static inline anvil_value_t *anvil_opt_make_const_float(anvil_ctx_t *ctx,
 /* ---------------------------------------------------------------------------
  * Use replacement.
  *
- * Previously five slightly different copies existed across passes. These two
- * canonical variants cover every call-site:
+ * Previously five slightly different copies existed across passes.  The
+ * canonical helper below covers every current call-site:
  *
  *   anvil_opt_replace_uses_in_func: rewrite every operand equal to old_val
  *     across every instruction of every block. Safe whenever new_val
  *     dominates every use of old_val (the common case when new_val replaces
  *     old_val at a fold/propagate site).
- *
- *   anvil_opt_replace_uses_in_block_after: rewrite operands only within the
- *     same block, starting after `start`. Used by the local CSE pass, where
- *     we intentionally keep the scope intra-block.
  * ------------------------------------------------------------------------- */
 
 static inline int anvil_opt_replace_uses_in_func(anvil_func_t *func,
@@ -139,25 +186,6 @@ static inline int anvil_opt_replace_uses_in_func(anvil_func_t *func,
                     instr->operands[i] = new_val;
                     count++;
                 }
-            }
-        }
-    }
-    return count;
-}
-
-static inline int anvil_opt_replace_uses_in_block_after(anvil_instr_t *start,
-                                                        anvil_value_t *old_val,
-                                                        anvil_value_t *new_val)
-{
-    int count = 0;
-    if (!start || !old_val) return 0;
-
-    for (anvil_instr_t *instr = start->next; instr; instr = instr->next) {
-        if (instr->op == ANVIL_OP_NOP) continue;
-        for (size_t i = 0; i < instr->num_operands; i++) {
-            if (instr->operands[i] == old_val) {
-                instr->operands[i] = new_val;
-                count++;
             }
         }
     }

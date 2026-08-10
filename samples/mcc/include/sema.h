@@ -23,9 +23,6 @@ struct mcc_sema {
     int loop_depth;
     int switch_depth;
     
-    /* Label tracking */
-    mcc_symbol_t **pending_gotos;
-    size_t num_pending_gotos;
 };
 
 /* Semantic analyzer lifecycle */

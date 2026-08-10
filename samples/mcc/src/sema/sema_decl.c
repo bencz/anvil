@@ -13,12 +13,16 @@
 
 bool sema_analyze_func_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
+    decl->data.func_decl.func_type = sema_resolve_type(
+        sema, decl->data.func_decl.func_type);
     /* Create function type */
     mcc_func_param_t *params = NULL;
     mcc_func_param_t *param_tail = NULL;
     
     for (size_t i = 0; i < decl->data.func_decl.num_params; i++) {
         mcc_ast_node_t *p = decl->data.func_decl.params[i];
+        p->data.param_decl.param_type = sema_resolve_type(
+            sema, p->data.param_decl.param_type);
         mcc_func_param_t *param = mcc_alloc(sema->ctx, sizeof(mcc_func_param_t));
         param->name = p->data.param_decl.name;
         param->type = p->data.param_decl.param_type;
@@ -91,11 +95,13 @@ bool sema_analyze_func_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
             fn_scope = fn_scope->parent;
         }
         if (fn_scope && fn_scope->labels) {
-            for (size_t i = 0; i < fn_scope->num_labels; i++) {
+            for (size_t i = 0; i < fn_scope->label_table_size; i++) {
                 mcc_symbol_t *lbl = fn_scope->labels[i];
-                if (lbl && !lbl->is_defined) {
-                    mcc_error_at(sema->ctx, lbl->location,
-                        "label '%s' used but not defined", lbl->name);
+                for (; lbl; lbl = lbl->next) {
+                    if (!lbl->is_defined) {
+                        mcc_error_at(sema->ctx, lbl->location,
+                            "label '%s' used but not defined", lbl->name);
+                    }
                 }
             }
         }
@@ -116,6 +122,13 @@ bool sema_analyze_func_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
     mcc_type_t *var_type = decl->data.var_decl.var_type;
+    var_type = sema_resolve_type(sema, var_type);
+    if (!var_type) {
+        mcc_error_at(sema->ctx, decl->location,
+                     "could not resolve declaration type");
+        return false;
+    }
+    decl->data.var_decl.var_type = var_type;
     
     /* Check for complete type. Exemptions:
      *  - an array with an initializer: the size is inferred from the init.
@@ -149,6 +162,38 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
     
     if (sym && decl->data.var_decl.init) {
         mcc_type_t *init_type = sema_analyze_expr(sema, decl->data.var_decl.init);
+
+        if (mcc_type_is_integer(var_type) &&
+            decl->data.var_decl.init->kind != AST_INT_LIT &&
+            decl->data.var_decl.init->kind != AST_CHAR_LIT) {
+            int64_t value;
+            if (sema_eval_const_expr(sema, decl->data.var_decl.init, &value)) {
+                mcc_ast_node_t *init = decl->data.var_decl.init;
+                init->kind = AST_INT_LIT;
+                init->data.int_lit.value = (uint64_t)value;
+                init->data.int_lit.suffix = INT_SUFFIX_NONE;
+            }
+        }
+
+        /* Complete an array of unknown bound from its initializer.  Keeping a
+         * zero-length surrogate here made codegen emit a zero-sized global
+         * for perfectly ordinary declarations such as `char s[] = "x"`. */
+        if (var_type->kind == TYPE_ARRAY &&
+            var_type->data.array.length == 0 &&
+            !var_type->data.array.is_vla) {
+            mcc_ast_node_t *init = decl->data.var_decl.init;
+            size_t length = 0;
+            if (init->kind == AST_INIT_LIST) {
+                length = init->data.init_list.num_exprs;
+            } else if (init->kind == AST_STRING_LIT &&
+                       var_type->data.array.element->kind == TYPE_CHAR) {
+                length = strlen(init->data.string_lit.value) + 1;
+            }
+            if (length > 0) {
+                var_type->data.array.length = length;
+                var_type->size = var_type->data.array.element->size * length;
+            }
+        }
         if (init_type) {
             sema_check_assignment_compat(sema, var_type, init_type, decl->location);
         }
@@ -164,6 +209,8 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 static bool analyze_typedef_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
 {
     mcc_type_t *type = decl->data.typedef_decl.type;
+    type = sema_resolve_type(sema, type);
+    decl->data.typedef_decl.type = type;
     
     /* If the typedef is for an enum, register the enum constants */
     if (type && type->kind == TYPE_ENUM && type->data.enumeration.is_complete) {
@@ -192,6 +239,8 @@ static bool analyze_typedef_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
  * Struct/Union Declaration Analysis
  * ============================================================ */
 
+static bool analyze_static_assert(mcc_sema_t *sema, mcc_ast_node_t *decl);
+
 static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl, bool is_union)
 {
     /* Register the tag in symbol table if named */
@@ -202,7 +251,21 @@ static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl, bool is_
             decl->data.struct_decl.struct_type,
             decl->location);
     }
-    return true;
+
+    bool success = true;
+    mcc_type_t *record = decl->data.struct_decl.struct_type;
+    if (record) {
+        for (mcc_record_assert_t *item = record->data.record.static_asserts;
+             item; item = item->next) {
+            mcc_ast_node_t assertion = { 0 };
+            assertion.kind = AST_STATIC_ASSERT;
+            assertion.location = item->location;
+            assertion.data.static_assert.expr = item->expr;
+            assertion.data.static_assert.message = item->message;
+            if (!analyze_static_assert(sema, &assertion)) success = false;
+        }
+    }
+    return success;
 }
 
 /* ============================================================
@@ -252,6 +315,10 @@ static bool analyze_static_assert(mcc_sema_t *sema, mcc_ast_node_t *decl)
         return false;
     }
     
+    if (!sema_analyze_expr(sema, decl->data.static_assert.expr)) {
+        return false;
+    }
+
     int64_t result;
     if (!sema_eval_const_expr(sema, decl->data.static_assert.expr, &result)) {
         mcc_error_at(sema->ctx, decl->location,

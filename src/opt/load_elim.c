@@ -85,9 +85,13 @@ static anvil_value_t *find_available_load(anvil_instr_t *load_instr)
 }
 
 /* Main redundant load elimination pass */
-bool anvil_pass_load_elim(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_load_elim(anvil_func_t *func)
 {
-    if (!func || !func->blocks) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (!func->blocks) return ANVIL_PASS_RUN_UNCHANGED;
     
     bool changed = false;
     
@@ -106,12 +110,13 @@ bool anvil_pass_load_elim(anvil_func_t *func)
              * block as `instr` so it dominates all those uses too. */
             anvil_value_t *old_result = instr->result;
             if (old_result && anvil_opt_replace_uses_in_func(func, old_result, available) > 0) {
-                /* Mark the redundant load as NOP */
-                instr->op = ANVIL_OP_NOP;
+                anvil_opt_erase_instr(instr);
                 changed = true;
             }
         }
     }
     
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

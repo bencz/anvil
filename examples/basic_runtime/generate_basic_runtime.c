@@ -33,8 +33,9 @@ static bool create_memory_select_func(anvil_ctx_t *ctx, anvil_module_t *mod)
     anvil_value_t *fp = anvil_func_get_param(fn, 4);
 
     anvil_value_t *items = anvil_build_alloca(ctx, array_i64_4, "items");
-    anvil_value_t *indices[] = { idx };
-    anvil_value_t *slot = anvil_build_gep(ctx, i64, items, indices, 1, "slot");
+    anvil_value_t *indices[] = { anvil_const_i64(ctx, 0), idx };
+    anvil_value_t *slot =
+        anvil_build_gep(ctx, array_i64_4, items, indices, 2, "slot");
     anvil_build_store(ctx, a, slot);
 
     anvil_value_t *loaded = anvil_build_load(ctx, i64, slot, "loaded");
@@ -239,7 +240,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    anvil_ctx_t *ctx = anvil_ctx_create();
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(config.arch);
     if (!ctx) {
         fprintf(stderr, "Failed to create context\n");
         return 1;

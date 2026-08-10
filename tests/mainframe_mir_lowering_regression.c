@@ -7,6 +7,7 @@
 #include <anvil/anvil_mainframe_mir.h>
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,45 @@ static int failures = 0;
 static void check_contains(const char *text, const char *needle, const char *msg)
 {
     CHECK(text && needle && strstr(text, needle) != NULL, msg);
+}
+
+static size_t count_occurrences(const char *text, const char *needle)
+{
+    size_t count = 0;
+    size_t needle_len = needle ? strlen(needle) : 0;
+    if (!text || needle_len == 0) return 0;
+    while ((text = strstr(text, needle)) != NULL) {
+        count++;
+        text += needle_len;
+    }
+    return count;
+}
+
+static int hlasm_dynamic_frame_size(const char *text)
+{
+    const char *equ = text ? strstr(text, "_DYN EQU   ") : NULL;
+    return equ ? atoi(equ + strlen("_DYN EQU   ")) : -1;
+}
+
+static size_t hlasm_store_offsets(const char *text, const char *opcode,
+                                  int *offsets, size_t capacity)
+{
+    size_t count = 0;
+    size_t opcode_len = strlen(opcode);
+    const char *line = text;
+    while (line && *line) {
+        const char *end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        const char *found = strstr(line, opcode);
+        if (found && found < end) {
+            const char *comma = strchr(found + opcode_len, ',');
+            if (comma && comma < end && count < capacity) {
+                offsets[count++] = (int)strtol(comma + 1, NULL, 10);
+            }
+        }
+        line = *end ? end + 1 : NULL;
+    }
+    return count;
 }
 
 static bool hlasm_has_lowercase_outside_literals(const char *text)
@@ -281,9 +321,10 @@ static void test_s370_constant_gep_index_does_not_create_64bit_gpr(void)
         if (fn && arr_type) {
             anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
             anvil_value_t *arr = anvil_build_alloca(ctx, arr_type, "arr");
-            anvil_value_t *idx = anvil_const_i64(ctx, 2);
+            anvil_value_t *idx[] = { anvil_const_i64(ctx, 0),
+                                     anvil_const_i64(ctx, 2) };
             anvil_value_t *slot =
-                anvil_build_gep(ctx, i32, arr, &idx, 1, "slot");
+                anvil_build_gep(ctx, arr_type, arr, idx, 2, "slot");
             anvil_build_store(ctx, anvil_const_i32(ctx, 99), slot);
             anvil_value_t *loaded = anvil_build_load(ctx, i32, slot, "loaded");
             anvil_build_ret(ctx, loaded);
@@ -321,9 +362,10 @@ static void test_s370_global_array_address_is_pointer_sized(void)
         CHECK(fn != NULL, "S/370 global array function should be created");
         if (global && fn) {
             anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
-            anvil_value_t *idx = anvil_const_i64(ctx, 0);
+            anvil_value_t *idx[] = { anvil_const_i64(ctx, 0),
+                                     anvil_const_i64(ctx, 0) };
             anvil_value_t *slot =
-                anvil_build_gep(ctx, i32, global, &idx, 1, "slot");
+                anvil_build_gep(ctx, arr_type, global, idx, 2, "slot");
             anvil_build_store(ctx, anvil_const_i32(ctx, 7), slot);
             anvil_build_ret(ctx, anvil_const_i32(ctx, 0));
 
@@ -463,6 +505,709 @@ static void test_fp_format_selection_is_target_honest(void)
     anvil_ctx_destroy(ctx);
 }
 
+static void test_mainframe_frame_allocation_separates_nested_calls(void)
+{
+    struct {
+        anvil_mainframe_variant_t variant;
+        uint16_t ptr_bits;
+        uint16_t slot_bits;
+        int local_offset;
+        const char *name;
+    } cases[] = {
+        { ANVIL_MAINFRAME_VARIANT_S390, 32, 512, 88, "frame32" },
+        { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, 1024, 160, "frame64" },
+    };
+
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_mir_func_t *mir = anvil_mir_func_create(cases[c].name);
+        CHECK(mir != NULL, "mainframe frame-layout MIR should be created");
+        if (!mir) continue;
+
+        anvil_mir_vreg_t addr = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, cases[c].ptr_bits);
+        anvil_mir_vreg_t value = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, 32);
+        int slot = anvil_mir_add_frame_slot(mir, cases[c].slot_bits, 8);
+        anvil_mir_vreg_t store_uses[] = { value, addr };
+        CHECK(slot >= 0 && anvil_mir_add_frame_addr(mir, addr, slot),
+              "mainframe local frame address should be represented");
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, value, 7),
+              "mainframe local frame test should define its value");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_STORE,
+                                  ANVIL_MIR_NO_VREG, store_uses, 2),
+              "mainframe local frame test should store into its frame");
+        CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
+                                         ANVIL_MIR_NO_VREG, NULL, 0,
+                                         "nested_callee"),
+              "mainframe frame test should contain a nested call");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "mainframe frame test should terminate");
+        CHECK(anvil_mainframe_regalloc_mir(mir, cases[c].variant),
+              "mainframe frame-layout MIR should allocate");
+
+        char *asm_text = NULL;
+        size_t asm_len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, cases[c].variant,
+                                       &asm_text, &asm_len),
+              "mainframe frame-layout MIR should emit");
+        if (asm_text) {
+            int frame_size = hlasm_dynamic_frame_size(asm_text);
+            int slot_bytes = (cases[c].slot_bits + 7) / 8;
+            char prologue[64];
+            char local[64];
+            snprintf(prologue, sizeof(prologue),
+                     "LA    R2,%d(,R13)", frame_size);
+            snprintf(local, sizeof(local), ",%d(,R11)", cases[c].local_offset);
+            CHECK(frame_size >= cases[c].local_offset + slot_bytes,
+                  "allocated mainframe frame must contain the complete local slot");
+            CHECK(frame_size > cases[c].local_offset,
+                  "next callee save area must begin after current-frame locals");
+            check_contains(asm_text, prologue,
+                           "prologue must advance R13 by the complete dynamic frame size");
+            check_contains(asm_text, local,
+                           "locals must use the stable current-frame base R11");
+            CHECK(strstr(asm_text, "LGR   R11,R1\n") == NULL &&
+                  strstr(asm_text, "LR    R11,R1\n") == NULL,
+                  "prologue must not overwrite the frame base with the parameter list");
+            free(asm_text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+}
+
+static void test_mainframe_materializes_call_values_before_bundle(void)
+{
+    anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_S370);
+    if (!ctx) return;
+    anvil_module_t *mod = anvil_module_create(ctx, "call_bundle_constants");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *callee_params[] = { i32, i32 };
+    anvil_func_t *callee = anvil_func_declare(mod, "callee",
+        anvil_type_func(ctx, i32, callee_params, 2, false));
+    anvil_func_t *caller = anvil_func_create(mod, "caller",
+        anvil_type_func(ctx, i32, NULL, 0, false), ANVIL_LINK_EXTERNAL);
+    CHECK(callee && caller, "mainframe call-bundle source functions should build");
+    if (callee && caller) {
+        anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+        anvil_value_t *args[] = {
+            anvil_const_i32(ctx, 11), anvil_const_i32(ctx, 22)
+        };
+        anvil_value_t *result = anvil_build_call(ctx, i32,
+            anvil_func_get_value(callee), args, 2, "result");
+        CHECK(result && anvil_build_ret(ctx, result),
+              "mainframe constant-argument call should build");
+        anvil_mir_func_t *mir = anvil_mainframe_lower_func_to_mir(
+            caller, ANVIL_MAINFRAME_VARIANT_S370);
+        CHECK(mir != NULL, "mainframe constant-argument call should lower");
+        bool contiguous = false;
+        if (mir) for (size_t i = 2; i < anvil_mir_num_instrs(mir); i++) {
+            anvil_mir_instr_info_t a, b, call;
+            if (anvil_mir_get_instr_info(mir, i - 2, &a) &&
+                anvil_mir_get_instr_info(mir, i - 1, &b) &&
+                anvil_mir_get_instr_info(mir, i, &call) &&
+                a.op == ANVIL_MIR_OP_CALL_STACK_ARG && a.imm == 0 &&
+                b.op == ANVIL_MIR_OP_CALL_STACK_ARG && b.imm == 1 &&
+                call.op == ANVIL_MIR_OP_CALL) contiguous = true;
+        }
+        CHECK(contiguous,
+              "all argument values must materialize before the contiguous call bundle");
+        CHECK(mir && anvil_mainframe_regalloc_mir(
+                         mir, ANVIL_MAINFRAME_VARIANT_S370),
+              "constant-argument S370 call bundle should legalize and allocate");
+        anvil_mir_func_destroy(mir);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_mainframe_fp_parameters_use_gpr_address_scratch(void)
+{
+    anvil_mainframe_variant_t variants[] = {
+        ANVIL_MAINFRAME_VARIANT_S390,
+        ANVIL_MAINFRAME_VARIANT_ZARCH,
+    };
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        anvil_mir_func_t *mir = anvil_mir_func_create("fp_param_address");
+        CHECK(mir != NULL, "mainframe FP parameter MIR should be created");
+        if (!mir) continue;
+        anvil_mir_vreg_t fp = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_FPR, 64);
+        anvil_mir_vreg_t ret_uses[] = { fp };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_INCOMING_STACK_ARG,
+                                      fp, 0),
+              "mainframe FP parameter should use an incoming stack pseudo");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, ret_uses, 1),
+              "mainframe FP parameter MIR should terminate");
+        CHECK(anvil_mainframe_regalloc_mir(mir, variants[v]),
+              "mainframe FP parameter MIR should allocate");
+
+        char *asm_text = NULL;
+        size_t asm_len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, variants[v], &asm_text, &asm_len),
+              "mainframe FP parameter MIR should emit");
+        if (asm_text) {
+            check_contains(asm_text,
+                variants[v] == ANVIL_MAINFRAME_VARIANT_ZARCH
+                    ? "LG    R0,0(,R1)" : "L     R0,0(,R1)",
+                "FP parameter pointer must be loaded into GPR scratch R0");
+            check_contains(asm_text, "LD    F",
+                           "f64 parameter value should be loaded into its FPR");
+            CHECK(strstr(asm_text, "(,F") == NULL,
+                  "generated HLASM must never use an FPR as an address register");
+            free(asm_text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+}
+
+static void test_s390_call_bundles_layout_f64_and_mark_each_call(void)
+{
+    anvil_mir_func_t *mir = anvil_mir_func_create("call_bundles_32");
+    CHECK(mir != NULL, "S/390 call-bundle MIR should be created");
+    if (!mir) return;
+
+    anvil_mir_vreg_t f0 = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_FPR, 64);
+    anvil_mir_vreg_t f1 = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_FPR, 64);
+    anvil_mir_vreg_t f2 = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_FPR, 64);
+    anvil_mir_vreg_t arg0[] = { f0 };
+    anvil_mir_vreg_t arg1[] = { f1 };
+    anvil_mir_vreg_t arg2[] = { f2 };
+    CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f0, 0),
+          "first f64 call value should be defined");
+    CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f1, 0),
+          "second f64 call value should be defined");
+    CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
+                                       ANVIL_MIR_NO_VREG, arg0, 1, 0),
+          "first call should contain argument zero");
+    CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
+                                       ANVIL_MIR_NO_VREG, arg1, 1, 1),
+          "first call should contain argument one");
+    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
+                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee_two"),
+          "first call should terminate its argument bundle");
+    CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f2, 0),
+          "second call f64 value should be defined after the first call");
+    CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
+                                       ANVIL_MIR_NO_VREG, arg2, 1, 0),
+          "second call should contain one argument");
+    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
+                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee_one"),
+          "second call should terminate its argument bundle");
+    CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "S/390 call-bundle MIR should terminate");
+    CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+          "S/390 call-bundle MIR should allocate");
+
+    char *asm_text = NULL;
+    size_t asm_len = 0;
+    CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                   &asm_text, &asm_len),
+          "S/390 call-bundle MIR should emit");
+    if (asm_text) {
+        int offsets[3] = { -1, -1, -1 };
+        size_t stores = hlasm_store_offsets(asm_text, "STD", offsets, 3);
+        CHECK(stores == 3, "both S/390 call bundles should store all f64 values");
+        CHECK(stores == 3 && offsets[1] >= offsets[0] + 8,
+              "two f64 values in one 32-bit call bundle must not overlap");
+        CHECK(stores == 3 && offsets[2] == offsets[0],
+              "a later call may safely reuse the outgoing value area");
+        CHECK(count_occurrences(asm_text, "O     R0,=X'80000000'") == 2,
+              "the last-parameter marker must be emitted once per nonempty call");
+        for (size_t i = 0; i < stores; i++) {
+            char stable_store[48];
+            snprintf(stable_store, sizeof(stable_store),
+                     ",%d(,R11)", offsets[i]);
+            check_contains(asm_text, stable_store,
+                           "outgoing call data must use stable frame base R11");
+        }
+        free(asm_text);
+    }
+    anvil_mir_func_destroy(mir);
+}
+
+static void test_mainframe_rejects_malformed_call_bundle(void)
+{
+    anvil_mir_func_t *mir = anvil_mir_func_create("bad_call_bundle");
+    CHECK(mir != NULL, "malformed mainframe call-bundle MIR should be created");
+    if (!mir) return;
+    anvil_mir_vreg_t value = anvil_mir_add_vreg_ex(
+        mir, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t uses[] = { value };
+    CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, value, 1),
+          "malformed bundle test value should be defined");
+    CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
+                                       ANVIL_MIR_NO_VREG, uses, 1, 1),
+          "generic MIR should represent a malformed first argument index");
+    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
+                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee"),
+          "malformed bundle should still have a call");
+    CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "malformed bundle MIR should terminate");
+    char error[160] = { 0 };
+    CHECK(!anvil_mainframe_verify_mir_legal(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                            error, sizeof(error)),
+          "mainframe legalizer must reject a malformed call bundle");
+    CHECK(strstr(error, "malformed call argument bundle") != NULL,
+          "malformed mainframe call bundle should produce a precise diagnostic");
+    CHECK(!anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+          "mainframe allocation pipeline must not admit a malformed call bundle");
+    char *asm_text = NULL;
+    size_t asm_len = 0;
+    CHECK(!anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                    &asm_text, &asm_len),
+          "mainframe emitter must reject a structurally malformed call bundle");
+    free(asm_text);
+    anvil_mir_func_destroy(mir);
+}
+
+static void test_mainframe_dynamic_alloca_updates_stack_chain(void)
+{
+    struct {
+        anvil_mainframe_variant_t variant;
+        uint16_t bits;
+        const char *multiply;
+        const char *align;
+        const char *backchain;
+        const char *advance;
+    } cases[] = {
+        { ANVIL_MAINFRAME_VARIANT_S370, 32, "M     R0,=F'24'",
+          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
+        { ANVIL_MAINFRAME_VARIANT_S370_XA, 32, "M     R0,=F'24'",
+          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
+        { ANVIL_MAINFRAME_VARIANT_S390, 32, "M     R0,=F'24'",
+          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
+        { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, "MSGFI R0,24",
+          "NILL  R", "STG   R11,8(,R0)", "LGR   R13,R0" },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_mir_func_t *mir = anvil_mir_func_create("dynamic_alloca");
+        anvil_mir_vreg_t count = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, cases[c].bits);
+        anvil_mir_vreg_t address = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, cases[c].bits);
+        anvil_mir_vreg_t uses[] = { count };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, count, 7),
+              "dynamic alloca count should be defined");
+        CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_DYN_ALLOCA,
+                                           address, uses, 1, 24),
+              "dynamic alloca should retain its element size");
+        CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
+                                         ANVIL_MIR_NO_VREG, NULL, 0, "nested"),
+              "dynamic alloca regression should include a nested call");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "dynamic alloca MIR should terminate");
+        CHECK(anvil_mainframe_regalloc_mir(mir, cases[c].variant),
+              "dynamic alloca MIR should allocate on every mainframe variant");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, cases[c].variant, &text, &len),
+              "dynamic alloca should emit on every mainframe variant");
+        if (text) {
+            check_contains(text, cases[c].multiply,
+                           "dynamic alloca must multiply count by element size");
+            check_contains(text, cases[c].align,
+                           "dynamic alloca result/top must be aligned to 16 bytes");
+            check_contains(text, cases[c].backchain,
+                           "dynamic alloca must install a valid stack backchain");
+            check_contains(text, cases[c].advance,
+                           "dynamic alloca must advance the live R13 stack top");
+            CHECK(strstr(text, "LA    R2,88(,R11)") == NULL,
+                  "dynamic alloca must not collapse to the old fixed-address stub");
+            free(text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+}
+
+static void test_mainframe_narrow_loads_extend_exactly(void)
+{
+    anvil_mainframe_variant_t variants[] = {
+        ANVIL_MAINFRAME_VARIANT_S370, ANVIL_MAINFRAME_VARIANT_S370_XA,
+        ANVIL_MAINFRAME_VARIANT_S390, ANVIL_MAINFRAME_VARIANT_ZARCH,
+    };
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        bool wide = variants[v] == ANVIL_MAINFRAME_VARIANT_ZARCH;
+        anvil_mir_func_t *mir = anvil_mir_func_create("narrow_loads");
+        anvil_mir_vreg_t addr = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, wide ? 64 : 32);
+        anvil_mir_vreg_t i8 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, 8, true);
+        anvil_mir_vreg_t u8 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, 8, false);
+        anvil_mir_vreg_t i16 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, 16, true);
+        anvil_mir_vreg_t u16 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, 16, false);
+        anvil_mir_vreg_t address_use[] = { addr };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, addr, 1024),
+              "narrow-load address should be defined");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, i8, address_use, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, u8, address_use, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, i16, address_use, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, u16, address_use, 1),
+              "all signed/unsigned narrow loads should be represented");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "narrow-load MIR should terminate");
+        CHECK(anvil_mainframe_regalloc_mir(mir, variants[v]),
+              "narrow-load MIR should allocate");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, variants[v], &text, &len),
+              "narrow loads should emit");
+        if (text) {
+            CHECK(count_occurrences(text, "IC    R") == 2,
+                  "i8/u8 loads should use exactly two byte loads");
+            check_contains(text, "SLL   R", "signed i8 load must shift for sign extension");
+            check_contains(text, "SRA   R", "signed i8 load must arithmetically extend");
+            CHECK(count_occurrences(text, "LH    R") == 2,
+                  "i16/u16 loads should use exactly two halfword loads");
+            check_contains(text, "=X'0000FFFF'",
+                           "unsigned i16 load must clear sign-extended bits");
+            if (wide) {
+                check_contains(text, "LGFR  R",
+                               "signed narrow z/Arch load must normalize all 64 bits");
+                check_contains(text, "LLGFR R",
+                               "unsigned narrow z/Arch load must normalize all 64 bits");
+            }
+            free(text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+}
+
+static uint64_t restoring_udiv_model(uint64_t dividend, uint64_t divisor,
+                                     unsigned bits, uint64_t *remainder)
+{
+    uint64_t mask = bits == 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
+    uint64_t quotient = dividend & mask;
+    uint64_t rem = 0;
+    for (unsigned i = 0; i < bits; i++) {
+        bool carry = ((rem >> (bits - 1)) & 1u) != 0;
+        uint64_t input = (quotient >> (bits - 1)) & 1u;
+        rem = ((rem << 1) | input) & mask;
+        quotient = (quotient << 1) & mask;
+        if (carry || rem >= divisor) {
+            rem = (rem - divisor) & mask;
+            quotient |= 1;
+        }
+    }
+    if (remainder) *remainder = rem;
+    return quotient;
+}
+
+static void check_restoring_division_oracle(unsigned bits)
+{
+    uint64_t mask = bits == 64 ? UINT64_MAX : UINT32_MAX;
+    uint64_t divisors[] = {
+        (UINT64_C(1) << (bits - 1)) + 1,
+        mask,
+        (UINT64_C(1) << (bits - 2)) + 3,
+        3,
+    };
+    uint64_t dividends[] = { 0, 1, mask, mask - 1,
+                             (UINT64_C(1) << (bits - 1)),
+                             (UINT64_C(1) << (bits - 1)) + 1 };
+    for (size_t d = 0; d < sizeof(divisors) / sizeof(divisors[0]); d++) {
+        for (size_t n = 0; n < sizeof(dividends) / sizeof(dividends[0]); n++) {
+            uint64_t rem = 0;
+            uint64_t q = restoring_udiv_model(
+                dividends[n], divisors[d], bits, &rem);
+            CHECK(q == dividends[n] / divisors[d] &&
+                  rem == dividends[n] % divisors[d],
+                  "restoring unsigned division must match host / and % at boundaries");
+        }
+    }
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (unsigned i = 0; i < 1000; i++) {
+        state = state * UINT64_C(6364136223846793005) + 1;
+        uint64_t dividend = state & mask;
+        state = state * UINT64_C(6364136223846793005) + 1;
+        uint64_t divisor = (state & mask) | 1;
+        uint64_t rem = 0;
+        uint64_t q = restoring_udiv_model(dividend, divisor, bits, &rem);
+        CHECK(q == dividend / divisor && rem == dividend % divisor,
+              "restoring unsigned division must pass deterministic differential cases");
+    }
+}
+
+static void test_mainframe_unsigned_divmod_and_not64_are_real(void)
+{
+    anvil_mainframe_variant_t variants[] = {
+        ANVIL_MAINFRAME_VARIANT_S370, ANVIL_MAINFRAME_VARIANT_S370_XA,
+        ANVIL_MAINFRAME_VARIANT_S390, ANVIL_MAINFRAME_VARIANT_ZARCH,
+    };
+    CHECK(UINT32_MAX / 2u == 2147483647u && UINT32_MAX % 2u == 1u,
+          "unsigned 32-bit boundary reference must be exact");
+    CHECK(UINT64_MAX / UINT64_C(3) == UINT64_C(6148914691236517205) &&
+          UINT64_MAX % UINT64_C(3) == 0,
+          "unsigned 64-bit boundary reference must be exact");
+    check_restoring_division_oracle(32);
+    check_restoring_division_oracle(64);
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        bool wide = variants[v] == ANVIL_MAINFRAME_VARIANT_ZARCH;
+        uint16_t bits = wide ? 64 : 32;
+        anvil_mir_func_t *mir = anvil_mir_func_create("unsigned_divmod");
+        anvil_mir_vreg_t lhs = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, bits, false);
+        anvil_mir_vreg_t rhs = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, bits, false);
+        anvil_mir_vreg_t quot = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, bits, false);
+        anvil_mir_vreg_t rem = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, bits, false);
+        anvil_mir_vreg_t inv = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, bits, false);
+        anvil_mir_vreg_t operands[] = { lhs, rhs };
+        anvil_mir_vreg_t unary[] = { lhs };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, lhs, -1) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, rhs, wide ? 3 : 2),
+              "unsigned division boundary operands should be defined");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_UDIV, quot, operands, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_UMOD, rem, operands, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_NOT, inv, unary, 1),
+              "unsigned div/mod and NOT should be represented");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "unsigned arithmetic MIR should terminate");
+        CHECK(anvil_mainframe_regalloc_mir(mir, variants[v]),
+              "unsigned arithmetic MIR should allocate");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, variants[v], &text, &len),
+              "unsigned arithmetic should emit");
+        if (text) {
+            check_contains(text, wide ? "CLGR  R0," : "CLR   R0,",
+                           "unsigned division must compare without a sign bit");
+            CHECK(strstr(text, wide ? "DSGR  R0," : "DR    R0,") == NULL,
+                  "unsigned division/modulo must never use signed divide");
+            check_contains(text, wide ? "=X'FFFFFFFFFFFFFFFF'" : "=X'FFFFFFFF'",
+                           "NOT must invert the full target integer width");
+            free(text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+}
+
+static uint64_t legacy_hfp_from_u32(uint32_t magnitude, bool negative)
+{
+    return (negative ? UINT64_C(0x8000000000000000) : 0) |
+           UINT64_C(0x4e00000000000000) | magnitude;
+}
+
+static int32_t legacy_hfp_trunc_i32(uint64_t bits)
+{
+    unsigned exponent = (unsigned)((bits >> 56) & 0x7f);
+    uint64_t fraction = bits & UINT64_C(0x00ffffffffffffff);
+    int shift = 312 - (int)(4 * exponent);
+    uint32_t magnitude = shift >= 56 ? 0
+        : shift >= 0 ? (uint32_t)(fraction >> shift)
+                     : (uint32_t)(fraction << -shift);
+    return (bits >> 63) ? (int32_t)(0u - magnitude) : (int32_t)magnitude;
+}
+
+static void test_mainframe_numeric_conversions_use_target_isa(void)
+{
+    struct {
+        anvil_mainframe_variant_t variant;
+        uint16_t int_bits;
+        const char *sitofp;
+        const char *fptosi;
+        const char *fpext;
+        const char *fptrunc;
+    } cases[] = {
+        { ANVIL_MAINFRAME_VARIANT_S370, 32, "=X'4E000000'", "=F'312'", "LDER", "LEDR" },
+        { ANVIL_MAINFRAME_VARIANT_S370_XA, 32, "=X'4E000000'", "=F'312'", "LDER", "LEDR" },
+        { ANVIL_MAINFRAME_VARIANT_S390, 32, "CEFR", "CFDR", "LDER", "LEDR" },
+        { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, "CEGBR", "CGDBR", "LDEBR", "LEDBR" },
+    };
+    /* These values exercise both integer precision cliffs and the FP poison
+       domain routed to the helpers (NaN/Inf/out-of-range are never folded). */
+    CHECK((float)UINT64_C(16777217) == (float)UINT64_C(16777216),
+          "f32 boundary reference should expose round-to-nearest at 2^24+1");
+    CHECK((double)UINT64_C(9007199254740993) ==
+          (double)UINT64_C(9007199254740992),
+          "f64 boundary reference should expose round-to-nearest at 2^53+1");
+    CHECK(legacy_hfp_trunc_i32(legacy_hfp_from_u32(INT32_MAX, false)) ==
+              INT32_MAX &&
+          legacy_hfp_trunc_i32(legacy_hfp_from_u32(UINT32_C(0x80000000), true)) ==
+              INT32_MIN &&
+          (uint32_t)legacy_hfp_trunc_i32(
+              legacy_hfp_from_u32(UINT32_MAX, false)) == UINT32_MAX,
+          "legacy HFP software conversion must preserve signed/unsigned i32 limits");
+    CHECK(legacy_hfp_trunc_i32(UINT64_C(0x4118000000000000)) == 1 &&
+          legacy_hfp_trunc_i32(UINT64_C(0xc118000000000000)) == -1,
+          "legacy HFP-to-integer model must truncate both signs toward zero");
+
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_mir_func_t *mir = anvil_mir_func_create("numeric_casts");
+        anvil_mir_vreg_t si = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, cases[c].int_bits, true);
+        anvil_mir_vreg_t ui = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, cases[c].int_bits, false);
+        anvil_mir_vreg_t f32 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 32, true);
+        anvil_mir_vreg_t f64 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 64, true);
+        anvil_mir_vreg_t to_f32 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 32, true);
+        anvil_mir_vreg_t to_f64 = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 64, true);
+        anvil_mir_vreg_t to_si = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, cases[c].int_bits, true);
+        anvil_mir_vreg_t to_ui = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_GPR, cases[c].int_bits, false);
+        anvil_mir_vreg_t ext = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 64, true);
+        anvil_mir_vreg_t trunc = anvil_mir_add_vreg_typed(
+            mir, ANVIL_MIR_REG_FPR, 32, true);
+        anvil_mir_vreg_t use_si[] = { si }, use_ui[] = { ui };
+        anvil_mir_vreg_t use_f32[] = { f32 }, use_f64[] = { f64 };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, si,
+                                      cases[c].int_bits == 64
+                                          ? INT64_MIN : INT32_MIN) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, ui, -1) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f32, 0x7f800000) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f64,
+                                      INT64_C(0x7ff8000000000001)),
+              "numeric conversion boundary sources should be defined");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_SITOFP, to_f32, use_si, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_UITOFP, to_f64, use_ui, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_FPTOSI, to_si, use_f64, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_FPTOUI, to_ui, use_f32, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_FPEXT, ext, use_f32, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_FPTRUNC, trunc, use_f64, 1),
+              "all numeric conversion classes should be represented");
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "numeric conversion MIR should terminate");
+        char error[192] = { 0 };
+        CHECK(anvil_mainframe_verify_mir_legal(mir, cases[c].variant,
+                                                error, sizeof(error)),
+              "well-typed numeric conversions should pass the legalizer");
+        CHECK(anvil_mainframe_regalloc_mir(mir, cases[c].variant),
+              "numeric conversion MIR should allocate");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, cases[c].variant, &text, &len),
+              "numeric conversion MIR should emit real ISA sequences");
+        if (text) {
+            check_contains(text, cases[c].sitofp,
+                           "SITOFP must use the target's real HFP/BFP instruction");
+            check_contains(text, cases[c].fptosi,
+                           "FPTOSI must use a real truncating target instruction");
+            check_contains(text, cases[c].fpext,
+                           "FPEXT must use lengthen conversion, not a bit copy");
+            check_contains(text, cases[c].fptrunc,
+                           "FPTRUNC must use rounded shortening, not a bit copy");
+            check_contains(text, cases[c].int_bits == 64
+                                    ? "=X'8000000000000000'"
+                                    : "=X'80000000'",
+                           "unsigned FP-to-int must split around the signed boundary");
+            CHECK(count_occurrences(text, "BALR  R14,R15") == 0,
+                  "numeric conversions must not depend on unresolved helper symbols");
+            CHECK(strstr(text, "requires target-specific runtime support") == NULL,
+                  "numeric conversion placeholder comments must be gone");
+            free(text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
+
+    anvil_mir_func_t *bad = anvil_mir_func_create("bad_numeric_cast");
+    anvil_mir_vreg_t g0 = anvil_mir_add_vreg_ex(bad, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t g1 = anvil_mir_add_vreg_ex(bad, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t bad_use[] = { g0 };
+    CHECK(anvil_mir_add_instr_imm(bad, ANVIL_MIR_OP_MOV, g0, 1) &&
+          anvil_mir_add_instr(bad, ANVIL_MIR_OP_SITOFP, g1, bad_use, 1) &&
+          anvil_mir_add_instr(bad, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "malformed numeric cast should be representable by generic MIR");
+    char bad_error[192] = { 0 };
+    CHECK(!anvil_mainframe_verify_mir_legal(
+              bad, ANVIL_MAINFRAME_VARIANT_S390, bad_error, sizeof(bad_error)) &&
+          (strstr(bad_error, "invalid numeric conversion") != NULL ||
+           strstr(bad_error, "invalid cast widths or classes") != NULL),
+          "mainframe legalizer must reject invalid numeric cast classes");
+    anvil_mir_func_destroy(bad);
+}
+
+static void test_mainframe_phi_swap_uses_parallel_copy(void)
+{
+    anvil_arch_t arches[] = {
+        ANVIL_ARCH_S370, ANVIL_ARCH_S370_XA, ANVIL_ARCH_S390, ANVIL_ARCH_ZARCH,
+    };
+    anvil_mainframe_variant_t variants[] = {
+        ANVIL_MAINFRAME_VARIANT_S370, ANVIL_MAINFRAME_VARIANT_S370_XA,
+        ANVIL_MAINFRAME_VARIANT_S390, ANVIL_MAINFRAME_VARIANT_ZARCH,
+    };
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        anvil_ctx_t *ctx = new_mainframe_ctx(arches[v]);
+        if (!ctx) continue;
+        anvil_module_t *mod = anvil_module_create(ctx, "mainframe_phi_swap");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { i32 };
+        anvil_func_t *fn = anvil_func_create(
+            mod, "phi_swap", anvil_type_func(ctx, i32, params, 1, false),
+            ANVIL_LINK_EXTERNAL);
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_block_t *header = anvil_block_create(fn, "header");
+        anvil_block_t *body = anvil_block_create(fn, "body");
+        anvil_block_t *exit_block = anvil_block_create(fn, "exit");
+        anvil_set_insert_point(ctx, entry);
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *a = anvil_build_phi(ctx, i32, "a");
+        anvil_value_t *b = anvil_build_phi(ctx, i32, "b");
+        anvil_phi_add_incoming(a, anvil_const_i32(ctx, 1), entry);
+        anvil_phi_add_incoming(a, b, body);
+        anvil_phi_add_incoming(b, anvil_const_i32(ctx, 2), entry);
+        anvil_phi_add_incoming(b, a, body);
+        anvil_value_t *again = anvil_build_cmp_ne(
+            ctx, anvil_func_get_param(fn, 0), anvil_const_i32(ctx, 0), "again");
+        anvil_build_br_cond(ctx, again, body, exit_block);
+        anvil_set_insert_point(ctx, body);
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, exit_block);
+        anvil_build_ret(ctx, anvil_build_add(ctx, a, b, "sum"));
+
+        char source_error[256] = { 0 };
+        CHECK(anvil_module_verify(mod, source_error, sizeof(source_error)),
+              source_error[0] ? source_error : "PHI swap source IR should verify");
+        anvil_mir_func_t *mir = anvil_mainframe_lower_func_to_mir(fn, variants[v]);
+        CHECK(mir != NULL, "mainframe PHI cycle should lower on every variant");
+        if (mir) {
+            anvil_mir_block_t mir_body = ANVIL_MIR_NO_BLOCK;
+            for (size_t bidx = 0; bidx < anvil_mir_num_blocks(mir); bidx++) {
+                anvil_mir_block_info_t info;
+                anvil_mir_get_block_info(mir, (anvil_mir_block_t)bidx, &info);
+                if (info.name && strcmp(info.name, "body_to_header_phi") == 0) {
+                    mir_body = (anvil_mir_block_t)bidx;
+                }
+            }
+            size_t body_copies = 0;
+            for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
+                anvil_mir_instr_info_t info;
+                anvil_mir_get_instr_info(mir, i, &info);
+                if (info.block == mir_body && info.op == ANVIL_MIR_OP_COPY) {
+                    body_copies++;
+                }
+            }
+            CHECK(body_copies == 3,
+                  "two-node PHI cycle must lower to save-temp plus two copies");
+            CHECK(anvil_mainframe_regalloc_mir(mir, variants[v]),
+                  "parallel-copy PHI cycle should survive register allocation");
+            anvil_mir_func_destroy(mir);
+        }
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 static void test_decimal_types_and_hlasm_constants_are_first_class(void)
 {
     anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_ZARCH);
@@ -522,8 +1267,113 @@ static void test_decimal_types_and_hlasm_constants_are_first_class(void)
     anvil_ctx_destroy(ctx);
 }
 
+static void test_mainframe_emits_interleaved_block_ownership_correctly(void)
+{
+    anvil_mir_func_t *mir = anvil_mir_func_create("mf_interleaved");
+    CHECK(mir != NULL, "interleaved mainframe MIR should be created");
+    if (!mir) return;
+    anvil_mir_block_t entry = anvil_mir_current_block(mir);
+    anvil_mir_block_t then_block = anvil_mir_add_block(mir, "then");
+    anvil_mir_block_t else_block = anvil_mir_add_block(mir, "else");
+    anvil_mir_vreg_t cond = anvil_mir_add_vreg_ex(
+        mir, ANVIL_MIR_REG_GPR, 8);
+    CHECK(anvil_mir_set_current_block(mir, entry) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, cond, 1) &&
+          anvil_mir_set_current_block(mir, then_block) &&
+          anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0) &&
+          anvil_mir_set_current_block(mir, entry) &&
+          anvil_mir_add_cond_branch(mir, cond, then_block, else_block) &&
+          anvil_mir_set_current_block(mir, else_block) &&
+          anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "mainframe MIR should permit valid per-block order with interleaved storage");
+    CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+          "interleaved mainframe MIR should allocate");
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                   &text, &len),
+          "interleaved mainframe MIR should emit");
+    if (text) {
+        const char *branch = strstr(text, "         BNE   MF_INTERLEAVED_THEN");
+        const char *then_label = branch
+            ? strstr(branch + strlen("         BNE   MF_INTERLEAVED_THEN"),
+                     "MF_INTERLEAVED_THEN") : NULL;
+        CHECK(branch && then_label && branch < then_label,
+              "mainframe emitter must select instructions by block, not a false contiguous range");
+        free(text);
+    }
+    anvil_mir_func_destroy(mir);
+}
+
+static void test_mainframe_internal_labels_do_not_truncate(void)
+{
+    char name[96];
+    memset(name, 'a', sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    anvil_mir_func_t *mir = anvil_mir_func_create(name);
+    CHECK(mir != NULL, "maximum supported mainframe name should create MIR");
+    if (mir) {
+        anvil_mir_vreg_t a = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t b = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t result = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
+        anvil_mir_vreg_t uses[] = { a, b };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, a, 1) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, b, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_CMP_EQ, result, uses, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "long-name mainframe MIR stream should build");
+        CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+              "long-name mainframe MIR should allocate");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                       &text, &len),
+              "95-character mainframe name should emit without truncating internals");
+        CHECK(text && strstr(text, "_CMP_T_0"),
+              "long internal compare label suffix must remain intact");
+        free(text);
+        anvil_mir_func_destroy(mir);
+    }
+
+    char too_long[97];
+    memset(too_long, 'b', sizeof(too_long) - 1);
+    too_long[sizeof(too_long) - 1] = '\0';
+    mir = anvil_mir_func_create(too_long);
+    if (mir) {
+        anvil_mir_vreg_t live = anvil_mir_add_vreg_ex(
+            mir, ANVIL_MIR_REG_GPR, 32);
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, live, 0) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE,
+                                  ANVIL_MIR_NO_VREG, &live, 1) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "overlong-name MIR should build structurally");
+        CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+              "overlong-name MIR should allocate before emitter name validation");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(!anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                        &text, &len) && !text && len == 0,
+              "mainframe emitter must reject rather than truncate an overlong symbol");
+        anvil_mir_func_destroy(mir);
+    }
+}
+
 int main(void)
 {
+    test_mainframe_frame_allocation_separates_nested_calls();
+    test_mainframe_materializes_call_values_before_bundle();
+    test_mainframe_dynamic_alloca_updates_stack_chain();
+    test_mainframe_narrow_loads_extend_exactly();
+    test_mainframe_unsigned_divmod_and_not64_are_real();
+    test_mainframe_numeric_conversions_use_target_isa();
+    test_mainframe_phi_swap_uses_parallel_copy();
+    test_mainframe_fp_parameters_use_gpr_address_scratch();
+    test_s390_call_bundles_layout_f64_and_mark_each_call();
+    test_mainframe_rejects_malformed_call_bundle();
     test_mainframe_descriptors_model_real_variants();
     test_s370_lowers_i32_add_through_mvs_parameter_list();
     test_zarch_lowers_and_emits_64bit_hlasm();
@@ -533,6 +1383,8 @@ int main(void)
     test_hlasm_control_text_is_uppercase();
     test_fp_format_selection_is_target_honest();
     test_decimal_types_and_hlasm_constants_are_first_class();
+    test_mainframe_emits_interleaved_block_ownership_correctly();
+    test_mainframe_internal_labels_do_not_truncate();
 
     if (failures != 0) {
         fprintf(stderr, "%d mainframe MachineIR regression checks failed\n", failures);

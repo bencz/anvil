@@ -13,6 +13,50 @@
 
 #include "parse_internal.h"
 
+static mcc_type_t *parse_primitive_layout(mcc_parser_t *p, int type_spec,
+                                          int long_count, bool is_signed,
+                                          bool is_unsigned)
+{
+    mcc_type_t *base;
+    switch (type_spec) {
+        case 1: base = mcc_type_void(p->types); break;
+        case 2:
+            base = is_unsigned ? mcc_type_uchar(p->types)
+                : is_signed ? mcc_type_schar(p->types)
+                : mcc_type_char(p->types);
+            break;
+        case 3: base = is_unsigned ? mcc_type_ushort(p->types)
+                                   : mcc_type_short(p->types); break;
+        case 4: base = is_unsigned ? mcc_type_uint(p->types)
+                                   : mcc_type_int(p->types); break;
+        case 5: base = is_unsigned ? mcc_type_ulong(p->types)
+                                   : mcc_type_long(p->types); break;
+        case 6: base = mcc_type_float(p->types); break;
+        case 7: base = long_count > 0 ? mcc_type_long_double(p->types)
+                                     : mcc_type_double(p->types); break;
+        case 8: base = is_unsigned ? mcc_type_ullong(p->types)
+                                   : mcc_type_llong(p->types); break;
+        case 9: base = mcc_type_bool(p->types); break;
+        default: base = mcc_type_int(p->types); break;
+    }
+    if (!base) return NULL;
+    mcc_type_t *copy = mcc_alloc(p->ctx, sizeof(*copy));
+    if (!copy) return NULL;
+    *copy = *base;
+    return copy;
+}
+
+static mcc_type_t *parse_pointer_type(mcc_parser_t *p, mcc_type_t *pointee)
+{
+    return mcc_type_pointer(p->types, pointee);
+}
+
+static mcc_type_t *parse_array_type(mcc_parser_t *p, mcc_type_t *element,
+                                    size_t length)
+{
+    return mcc_type_array(p->types, element, length);
+}
+
 /* ============================================================
  * Type Start Detection
  * ============================================================ */
@@ -151,18 +195,12 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
     mcc_location_t loc = p->peek->location;
     parse_advance(p); /* consume 'struct' or 'union' */
 
-    /* GNU: __attribute__((packed,...)) may appear between the struct/union
-     * keyword and the tag, between the tag and the brace, or after the
-     * closing brace. Consume tolerantly at each point. */
-    parse_gnu_attributes(p);
-
     /* Get tag name if present */
     const char *tag = NULL;
     if (parse_check(p, TOK_IDENT)) {
         tag = mcc_strdup(p->ctx, p->peek->text);
         parse_advance(p);
     }
-    parse_gnu_attributes(p);
     
     mcc_type_t *stype = NULL;
     
@@ -173,11 +211,14 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
         stype->kind = is_union ? TYPE_UNION : TYPE_STRUCT;
         stype->data.record.tag = tag;
         stype->data.record.fields = NULL;
+        stype->data.record.static_asserts = NULL;
         stype->data.record.num_fields = 0;
         
         /* Parse fields */
         mcc_struct_field_t *fields = NULL;
         mcc_struct_field_t *field_tail = NULL;
+        mcc_record_assert_t *static_asserts = NULL;
+        mcc_record_assert_t *static_assert_tail = NULL;
         int num_fields = 0;
         
         while (!parse_check(p, TOK_RBRACE) && !parse_check(p, TOK_EOF)) {
@@ -195,12 +236,17 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 parse_expect(p, TOK_RPAREN, ")");
                 parse_expect(p, TOK_SEMICOLON, ";");
                 
-                /* Evaluate static assert at compile time */
-                if (expr && expr->kind == AST_INT_LIT) {
-                    if (expr->data.int_lit.value == 0) {
-                        mcc_error_at(p->ctx, expr->location,
-                            "static assertion failed: %s", msg->literal.string_val.value);
-                    }
+                mcc_record_assert_t *record_assert = mcc_alloc(
+                    p->ctx, sizeof(*record_assert));
+                record_assert->expr = expr;
+                record_assert->message = mcc_strdup(
+                    p->ctx, msg->literal.string_val.value);
+                record_assert->location = expr ? expr->location : loc;
+                if (!static_asserts) {
+                    static_asserts = static_assert_tail = record_assert;
+                } else {
+                    static_assert_tail->next = record_assert;
+                    static_assert_tail = record_assert;
                 }
                 continue;
             }
@@ -265,12 +311,7 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                         func_type->data.function.num_params = 0;
                         func_type->data.function.is_variadic = false;
                         
-                        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                        ptr->kind = TYPE_POINTER;
-                        ptr->data.pointer.pointee = func_type;
-                        ptr->size = 8;
-                        ptr->align = 8;
-                        field_type = ptr;
+                        field_type = parse_pointer_type(p, func_type);
                         
                         goto add_field;
                     } else {
@@ -280,10 +321,7 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 }
                 
                 while (parse_match(p, TOK_STAR)) {
-                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    ptr->kind = TYPE_POINTER;
-                    ptr->data.pointer.pointee = field_type;
-                    field_type = ptr;
+                    field_type = parse_pointer_type(p, field_type);
                     
                     /* Pointer qualifiers */
                     while (parse_match(p, TOK_CONST)) {
@@ -327,10 +365,8 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                     }
                     parse_expect(p, TOK_RBRACKET, "]");
                     
-                    mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    arr->kind = TYPE_ARRAY;
-                    arr->data.array.element = field_type;
-                    arr->data.array.length = arr_size;
+                    mcc_type_t *arr = parse_array_type(p, field_type, arr_size);
+                    if (!arr) return NULL;
                     arr->data.array.is_flexible = is_flexible;
                     field_type = arr;
                 }
@@ -338,7 +374,8 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 /* Parse bitfield width */
                 int bitfield_width = 0;
                 if (parse_match(p, TOK_COLON)) {
-                    /* Bitfield */
+                    mcc_error_at(p->ctx, loc,
+                                 "bit-fields are not implemented by MCC");
                     mcc_ast_node_t *width_expr = parse_constant_expr(p);
                     if (width_expr && width_expr->kind == AST_INT_LIT) {
                         bitfield_width = (int)width_expr->data.int_lit.value;
@@ -376,12 +413,14 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
         
         parse_expect(p, TOK_RBRACE, "}");
 
-        /* GNU: __attribute__((packed,aligned(N))) after the struct body. */
-        parse_gnu_attributes(p);
-
-        stype->data.record.fields = fields;
-        stype->data.record.num_fields = num_fields;
-        stype->data.record.is_complete = true;
+        stype->data.record.static_asserts = static_asserts;
+        if (is_union) {
+            if (!mcc_type_complete_union(p->types, stype, fields,
+                                         num_fields)) return NULL;
+        } else {
+            if (!mcc_type_complete_struct(p->types, stype, fields,
+                                          num_fields)) return NULL;
+        }
         
         /* Register in struct table if tagged */
         if (tag) {
@@ -406,6 +445,7 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
             stype->kind = is_union ? TYPE_UNION : TYPE_STRUCT;
             stype->data.record.tag = tag;
             stype->data.record.fields = NULL;
+            stype->data.record.static_asserts = NULL;
             stype->data.record.num_fields = 0;
             
             /* Register for later completion */
@@ -512,6 +552,7 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
     bool is_const = false;
     bool is_volatile = false;
     bool is_restrict = false;
+    bool is_atomic = false;
     bool is_inline = false;
     bool is_noreturn = false;
     bool is_complex = false;
@@ -547,16 +588,16 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 continue;
             case TOK__NORETURN:
                 if (!parse_has_noreturn(p)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "'_Noreturn' is a C11 extension");
+                    mcc_error_at(p->ctx, p->peek->location,
+                        "'_Noreturn' semantics are not implemented by MCC");
                 }
                 parse_advance(p);
                 is_noreturn = true;
                 continue;
             case TOK__ATOMIC:
                 if (!parse_has_atomic(p)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "'_Atomic' is a C11 extension");
+                    mcc_error_at(p->ctx, p->peek->location,
+                        "atomic semantics are not implemented by MCC");
                 }
                 parse_advance(p);
                 /* _Atomic has two forms:
@@ -577,10 +618,7 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                         return qinner;
                     }
                 }
-                /* Qualifier form — flag atomic and continue collecting specs. */
-                /* (Currently folded into QUAL_ATOMIC on the final type below
-                 * via is_const etc. flags path — we add an explicit field.) */
-                is_const = is_const; /* no-op: placeholder to express intent */
+                is_atomic = true;
                 continue;
             case TOK_UNSIGNED:
                 parse_advance(p);
@@ -642,16 +680,16 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 break;
             case TOK__COMPLEX:
                 if (!parse_has_feature(p, MCC_FEAT_COMPLEX)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "'_Complex' is a C99 extension");
+                    mcc_error_at(p->ctx, p->current->location,
+                        "'_Complex' is not implemented by MCC");
                 }
                 parse_advance(p);
                 is_complex = true;
                 continue;
             case TOK__IMAGINARY:
                 if (!parse_has_feature(p, MCC_FEAT_IMAGINARY)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "'_Imaginary' is a C99 extension");
+                    mcc_error_at(p->ctx, p->current->location,
+                        "'_Imaginary' is not implemented by MCC");
                 }
                 parse_advance(p);
                 is_imaginary = true;
@@ -679,26 +717,28 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 if (parse_is_type_start(p)) {
                     result_type = parse_type_specifier(p);
                 } else {
-                    /* typeof(expression) - get type from expression */
+                    /* typeof(expression) is unevaluated, but its type cannot
+                     * generally be known until semantic analysis has populated
+                     * the surrounding scope. Keep an explicit deferred type
+                     * instead of the old (and wrong) unconditional `int`. */
                     mcc_ast_node_t *expr = parse_expression(p);
-                    /* For now, return int as placeholder - proper implementation
-                     * would need semantic analysis to determine expression type */
                     result_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    result_type->kind = TYPE_INT;
-                    result_type->size = 4;
-                    result_type->align = 4;
-                    (void)expr;
+                    result_type->kind = TYPE_TYPEOF_EXPR;
+                    result_type->data.typeof_expr.expr = expr;
+                    result_type->data.typeof_expr.unqualified = is_unqual;
                 }
                 parse_expect(p, TOK_RPAREN, ")");
                 
                 /* typeof_unqual removes qualifiers */
-                if (is_unqual && result_type) {
+                if (is_unqual && result_type &&
+                    result_type->kind != TYPE_TYPEOF_EXPR) {
                     result_type->qualifiers = 0;
                 }
                 
                 /* Handle additional qualifiers */
                 if (is_const && result_type) result_type->qualifiers |= QUAL_CONST;
                 if (is_volatile && result_type) result_type->qualifiers |= QUAL_VOLATILE;
+                if (is_atomic && result_type) result_type->qualifiers |= QUAL_ATOMIC;
                 
                 return result_type;
             }
@@ -710,13 +750,11 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 /* Handle qualifiers */
                 if (is_const) stype->qualifiers |= QUAL_CONST;
                 if (is_volatile) stype->qualifiers |= QUAL_VOLATILE;
+                if (is_atomic) stype->qualifiers |= QUAL_ATOMIC;
                 
                 /* Parse pointer */
                 while (parse_match(p, TOK_STAR)) {
-                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    ptr->kind = TYPE_POINTER;
-                    ptr->data.pointer.pointee = stype;
-                    stype = ptr;
+                    stype = parse_pointer_type(p, stype);
                     
                     /* Pointer qualifiers */
                     while (1) {
@@ -740,13 +778,11 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                 /* Handle qualifiers */
                 if (is_const) etype->qualifiers |= QUAL_CONST;
                 if (is_volatile) etype->qualifiers |= QUAL_VOLATILE;
+                if (is_atomic) etype->qualifiers |= QUAL_ATOMIC;
                 
                 /* Parse pointer */
                 while (parse_match(p, TOK_STAR)) {
-                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    ptr->kind = TYPE_POINTER;
-                    ptr->data.pointer.pointee = etype;
-                    etype = ptr;
+                    etype = parse_pointer_type(p, etype);
                 }
                 
                 return etype;
@@ -760,15 +796,16 @@ mcc_type_t *parse_type_specifier(mcc_parser_t *p)
                             mcc_type_t *type = t->type;
                             
                             /* Handle qualifiers */
-                            if (is_const) type->qualifiers |= QUAL_CONST;
-                            if (is_volatile) type->qualifiers |= QUAL_VOLATILE;
+                            mcc_type_qual_t added = QUAL_NONE;
+                            if (is_const) added |= QUAL_CONST;
+                            if (is_volatile) added |= QUAL_VOLATILE;
+                            if (is_atomic) added |= QUAL_ATOMIC;
+                            if (added) type = mcc_type_qualified(
+                                p->types, type, type->qualifiers | added);
                             
                             /* Parse pointer */
                             while (parse_match(p, TOK_STAR)) {
-                                mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                                ptr->kind = TYPE_POINTER;
-                                ptr->data.pointer.pointee = type;
-                                type = ptr;
+                                type = parse_pointer_type(p, type);
                                 
                                 /* Pointer qualifiers */
                                 while (1) {
@@ -804,11 +841,14 @@ done:
         type_spec = 7; /* double _Complex by default */
     }
     
-    /* Create type */
-    mcc_type_t *type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+    /* Create a type whose primitive layout comes from the selected target's
+     * Anvil DataLayout. */
+    mcc_type_t *type = NULL;
     
     /* Handle _Complex types */
     if (is_complex) {
+        type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+        if (!type) return NULL;
         switch (type_spec) {
             case 6: /* float _Complex */
                 type->kind = TYPE_COMPLEX_FLOAT;
@@ -840,18 +880,9 @@ done:
                 break;
         }
     } else {
-        switch (type_spec) {
-            case 1: type->kind = TYPE_VOID; type->size = 0; type->align = 1; break;
-            case 2: type->kind = TYPE_CHAR; type->size = 1; type->align = 1; break;
-            case 3: type->kind = TYPE_SHORT; type->size = 2; type->align = 2; break;
-            case 4: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
-            case 5: type->kind = TYPE_LONG; type->size = 4; type->align = 4; break; /* Will be corrected by codegen_sizeof */
-            case 6: type->kind = TYPE_FLOAT; type->size = 4; type->align = 4; break;
-            case 7: type->kind = TYPE_DOUBLE; type->size = 8; type->align = 8; break;
-            case 8: type->kind = TYPE_LONG_LONG; type->size = 8; type->align = 8; break;
-            case 9: type->kind = TYPE_BOOL; type->size = 1; type->align = 1; break;
-            default: type->kind = TYPE_INT; type->size = 4; type->align = 4; break;
-        }
+        type = parse_primitive_layout(p, type_spec, long_count,
+                                      is_signed, is_unsigned);
+        if (!type) return NULL;
     }
     
     /* Handle long double _Complex specially */
@@ -860,20 +891,23 @@ done:
         type->size = 16;
         type->align = 8;
     }
+    if (!is_complex && long_count > 0 && type_spec == 7) {
+        mcc_error_at(p->ctx, p->current ? p->current->location
+                                        : p->peek->location,
+                     "'long double' ABI lowering is not implemented by MCC");
+    }
     
-    type->is_unsigned = is_unsigned;
+    if (mcc_type_is_integer(type)) type->is_unsigned = is_unsigned;
     if (is_const) type->qualifiers |= QUAL_CONST;
     if (is_volatile) type->qualifiers |= QUAL_VOLATILE;
     if (is_restrict) type->qualifiers |= QUAL_RESTRICT;
+    if (is_atomic) type->qualifiers |= QUAL_ATOMIC;
     type->is_inline = is_inline;
     type->is_noreturn = is_noreturn;
     
     /* Parse pointer */
     while (parse_match(p, TOK_STAR)) {
-        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        ptr->kind = TYPE_POINTER;
-        ptr->data.pointer.pointee = type;
-        type = ptr;
+        type = parse_pointer_type(p, type);
         
         /* Pointer qualifiers */
         while (1) {
@@ -954,14 +988,10 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
     }
     parse_expect(p, TOK_RBRACKET, "]");
 
-    mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-    arr->kind = TYPE_ARRAY;
-    arr->data.array.element = element_type;
-    arr->data.array.length = arr_size;
+    mcc_type_t *arr = parse_array_type(p, element_type, arr_size);
+    if (!arr) return NULL;
     arr->data.array.is_vla = is_vla;
     arr->data.array.length_expr = length_expr;
-    arr->size = element_type->size * arr_size;
-    arr->align = element_type->align;
     return arr;
 }
 
@@ -1011,8 +1041,8 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             /* C23: Skip attributes [[...]] on parameters */
             while (parse_check(p, TOK_LBRACKET2)) {
                 if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "attribute syntax [[...]] is a C23 feature");
+                    mcc_error_at(p->ctx, p->peek->location,
+                        "C23 parameter attributes are not implemented by MCC");
                 }
                 parse_advance(p);  /* Skip [[ */
                 int depth = 1;
@@ -1063,22 +1093,14 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                     /* First dimension decays to pointer, rest become array types */
                     /* e.g., int m[2][3] becomes int (*)[3] */
                     for (int i = num_dims - 1; i >= 1; i--) {
-                        mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                        arr->kind = TYPE_ARRAY;
-                        arr->data.array.element = param_type;
-                        arr->data.array.length = array_dims[i];
+                        mcc_type_t *arr = parse_array_type(
+                            p, param_type, array_dims[i]);
+                        if (!arr) return NULL;
                         arr->data.array.is_vla = false;
-                        arr->size = param_type->size * array_dims[i];
-                        arr->align = param_type->align;
                         param_type = arr;
                     }
                     /* First dimension decays to pointer */
-                    mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-                    ptr->kind = TYPE_POINTER;
-                    ptr->data.pointer.pointee = param_type;
-                    ptr->size = 8;  /* pointer size */
-                    ptr->align = 8;
-                    param_type = ptr;
+                    param_type = parse_pointer_type(p, param_type);
                 }
             } else if (parse_check(p, TOK_STAR)) {
                 /* Pointer without name - use abstract declarator */
@@ -1167,9 +1189,8 @@ parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_typ
     
     /* Apply pointer prefixes in reverse order (innermost first) */
     for (int i = ptr_count - 1; i >= 0; i--) {
-        mcc_type_t *ptr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        ptr->kind = TYPE_POINTER;
-        ptr->data.pointer.pointee = result.type;
+        mcc_type_t *ptr = parse_pointer_type(p, result.type);
+        if (!ptr) return (parse_declarator_result_t){ NULL, result.name };
         ptr->qualifiers = ptr_stack[i].quals;
         result.type = ptr;
     }
@@ -1334,14 +1355,11 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
     /* Build array types from inside out (reverse order). Propagate
      * is_vla and length_expr so the codegen can emit anvil_build_alloca_dyn. */
     for (int i = num_dims - 1; i >= 0; i--) {
-        mcc_type_t *arr = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        arr->kind = TYPE_ARRAY;
-        arr->data.array.element = result.type;
-        arr->data.array.length = array_dims[i];
+        mcc_type_t *arr = parse_array_type(p, result.type, array_dims[i]);
+        if (!arr) return (parse_declarator_result_t){ NULL, result.name };
         arr->data.array.is_vla = dim_is_vla[i];
         arr->data.array.length_expr = dim_exprs[i];
-        arr->size = dim_is_vla[i] ? 0 : (result.type->size * array_dims[i]);
-        arr->align = result.type->align;
+        if (dim_is_vla[i]) arr->size = 0;
         result.type = arr;
     }
 

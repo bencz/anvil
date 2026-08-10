@@ -27,7 +27,8 @@ define run_codegen_tests
 		fi; \
 	done; \
 	echo "  $(3): $$passed passed, $$failed failed"; \
-	echo ""
+	echo ""; \
+	test "$$failed" -eq 0
 endef
 
 # ============================================================
@@ -102,7 +103,7 @@ test-codegen-multifile: $(TARGET) | $(TEST_OUTPUT_DIR)
 		$(TESTDIR)/multi_file/utils.c 2>/dev/null; then \
 		echo "OK"; \
 	else \
-		echo "FAILED"; \
+		echo "FAILED"; exit 1; \
 	fi
 	@echo ""
 
@@ -127,7 +128,8 @@ define run_arch_codegen_tests
 		fi; \
 	done; \
 	echo "  $(2): $$passed passed, $$failed failed"; \
-	echo ""
+	echo ""; \
+	test "$$failed" -eq 0
 endef
 
 # Test x86_64 code generation
@@ -182,10 +184,10 @@ test-run: $(TARGET) | $(TEST_OUTPUT_DIR)
 			if echo "$$output" | grep -q "Hello"; then \
 				echo "OK (output: $$output)"; \
 			else \
-				echo "WRONG OUTPUT: $$output"; \
+				echo "WRONG OUTPUT: $$output"; exit 1; \
 			fi; \
 		else \
-			echo "COMPILE FAILED"; \
+			echo "COMPILE FAILED"; exit 1; \
 		fi; \
 	fi
 	@echo ""

@@ -125,16 +125,9 @@ int main(void)
         printf("Generating for %s...\n", targets[i].name);
         
         /* Create fresh context for each target */
-        anvil_ctx_t *ctx = anvil_ctx_create();
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(targets[i].arch);
         if (!ctx) {
             fprintf(stderr, "  Failed to create context\n");
-            continue;
-        }
-        
-        /* Set target */
-        if (anvil_ctx_set_target(ctx, targets[i].arch) != ANVIL_OK) {
-            fprintf(stderr, "  Failed to set target: %s\n", anvil_ctx_get_error(ctx));
-            anvil_ctx_destroy(ctx);
             continue;
         }
         

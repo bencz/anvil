@@ -21,6 +21,8 @@ mcc_parser_t *mcc_parser_create(mcc_context_t *ctx, mcc_preprocessor_t *pp)
     mcc_parser_t *p = mcc_alloc(ctx, sizeof(mcc_parser_t));
     p->ctx = ctx;
     p->pp = pp;
+    p->types = mcc_type_context_create(ctx);
+    if (!p->types) return NULL;
     p->current = NULL;
     p->peek = NULL;
     p->symtab = NULL;
@@ -34,7 +36,7 @@ mcc_parser_t *mcc_parser_create(mcc_context_t *ctx, mcc_preprocessor_t *pp)
 
 void mcc_parser_destroy(mcc_parser_t *p)
 {
-    (void)p; /* Arena allocated */
+    if (p) mcc_type_context_destroy(p->types); /* Arena allocated */
 }
 
 /* ============================================================

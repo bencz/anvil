@@ -7,6 +7,144 @@
 
 #include "codegen_internal.h"
 
+static anvil_value_t *codegen_zero_initializer(mcc_codegen_t *cg,
+                                                mcc_type_t *type)
+{
+    while (type && type->kind == TYPE_TYPEDEF)
+        type = type->data.typedef_ref.underlying;
+    if (!type) return NULL;
+
+    anvil_type_t *anvil_type = codegen_type(cg, type);
+    if (mcc_type_is_integer(type))
+        return codegen_const_int_for_type(cg, anvil_type, 0);
+    if (mcc_type_is_floating(type))
+        return anvil_type_size(anvil_type) == 4
+            ? anvil_const_f32(cg->anvil_ctx, 0.0f)
+            : anvil_const_f64(cg->anvil_ctx, 0.0);
+    if (mcc_type_is_pointer(type))
+        return anvil_const_null(cg->anvil_ctx, anvil_type);
+    if (type->kind == TYPE_ARRAY) {
+        size_t count = type->data.array.length;
+        anvil_value_t **elements = count
+            ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+        for (size_t i = 0; i < count; i++) {
+            elements[i] = codegen_zero_initializer(cg, type->data.array.element);
+            if (!elements[i]) return NULL;
+        }
+        return anvil_const_array(cg->anvil_ctx,
+                                 codegen_type(cg, type->data.array.element),
+                                 elements, count);
+    }
+    return NULL;
+}
+
+static bool codegen_eval_initializer_int(mcc_ast_node_t *expr, uint64_t *value)
+{
+    if (!expr || !value) return false;
+    if (expr->kind == AST_INT_LIT) {
+        *value = expr->data.int_lit.value;
+        return true;
+    }
+    if (expr->kind == AST_CHAR_LIT) {
+        *value = (uint64_t)(int64_t)expr->data.char_lit.value;
+        return true;
+    }
+    if (expr->kind == AST_UNARY_EXPR) {
+        uint64_t operand;
+        if (!codegen_eval_initializer_int(expr->data.unary_expr.operand,
+                                          &operand)) return false;
+        switch (expr->data.unary_expr.op) {
+            case UNOP_POS:     *value = operand; return true;
+            case UNOP_NEG:     *value = UINT64_C(0) - operand; return true;
+            case UNOP_NOT:     *value = !operand; return true;
+            case UNOP_BIT_NOT: *value = ~operand; return true;
+            default: return false;
+        }
+    }
+    return false;
+}
+
+static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
+                                                  mcc_type_t *type,
+                                                  mcc_ast_node_t *init)
+{
+    while (type && type->kind == TYPE_TYPEDEF)
+        type = type->data.typedef_ref.underlying;
+    if (!type || !init) return NULL;
+
+    anvil_type_t *anvil_type = codegen_type(cg, type);
+    if (type->kind == TYPE_ARRAY) {
+        size_t count = type->data.array.length;
+        if (init->kind == AST_STRING_LIT &&
+            type->data.array.element->kind == TYPE_CHAR) {
+            size_t string_len = strlen(init->data.string_lit.value);
+            if (string_len > count) return NULL;
+            anvil_type_t *elem_type = codegen_type(cg,
+                                                   type->data.array.element);
+            anvil_value_t **elements = count
+                ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+            for (size_t i = 0; i < count; i++) {
+                unsigned char byte = i < string_len
+                    ? (unsigned char)init->data.string_lit.value[i] : 0;
+                elements[i] = codegen_const_int_for_type(cg, elem_type, byte);
+                if (!elements[i]) return NULL;
+            }
+            return anvil_const_array(cg->anvil_ctx, elem_type,
+                                     elements, count);
+        }
+        if (init->kind != AST_INIT_LIST) return NULL;
+        if (init->data.init_list.num_exprs > count) return NULL;
+        anvil_value_t **elements = count
+            ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+        for (size_t i = 0; i < count; i++) {
+            elements[i] = i < init->data.init_list.num_exprs
+                ? codegen_global_initializer(cg, type->data.array.element,
+                                             init->data.init_list.exprs[i])
+                : codegen_zero_initializer(cg, type->data.array.element);
+            if (!elements[i]) return NULL;
+        }
+        return anvil_const_array(cg->anvil_ctx,
+                                 codegen_type(cg, type->data.array.element),
+                                 elements, count);
+    }
+
+    if (mcc_type_is_integer(type)) {
+        uint64_t value;
+        if (codegen_eval_initializer_int(init, &value))
+            return codegen_const_int_for_type(cg, anvil_type, (int64_t)value);
+        if (init->kind == AST_SIZEOF_EXPR) {
+            mcc_type_t *arg = init->data.sizeof_expr.type_arg;
+            if (!arg && init->data.sizeof_expr.expr_arg)
+                arg = init->data.sizeof_expr.expr_arg->type;
+            if (arg)
+                return codegen_const_int_for_type(cg, anvil_type,
+                                                  (int64_t)codegen_sizeof(cg, arg));
+        }
+        if (init->kind == AST_ALIGNOF_EXPR) {
+            mcc_type_t *arg = init->data.alignof_expr.type_arg;
+            if (!arg && init->data.alignof_expr.expr_arg)
+                arg = init->data.alignof_expr.expr_arg->type;
+            if (arg)
+                return codegen_const_int_for_type(
+                    cg, anvil_type,
+                    (int64_t)anvil_type_align(codegen_type(cg, arg)));
+        }
+    }
+    if (mcc_type_is_floating(type) && init->kind == AST_FLOAT_LIT) {
+        return anvil_type_size(anvil_type) == 4
+            ? anvil_const_f32(cg->anvil_ctx, (float)init->data.float_lit.value)
+            : anvil_const_f64(cg->anvil_ctx, init->data.float_lit.value);
+    }
+    if (mcc_type_is_pointer(type) && init->kind == AST_NULL_PTR)
+        return anvil_const_null(cg->anvil_ctx, anvil_type);
+    if (mcc_type_is_pointer(type) && init->kind == AST_INT_LIT &&
+        init->data.int_lit.value == 0)
+        return anvil_const_null(cg->anvil_ctx, anvil_type);
+    if (mcc_type_is_pointer(type) && init->kind == AST_STRING_LIT)
+        return codegen_get_string_literal(cg, init->data.string_lit.value);
+    return NULL;
+}
+
 /* Generate code for function */
 void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
 {
@@ -97,34 +235,17 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
     /* Use cache to avoid duplicate global definitions */
     anvil_value_t *global = codegen_get_or_add_global(cg, var->data.var_decl.name, type);
     
-    /* Handle initializer for arrays */
     mcc_ast_node_t *init = var->data.var_decl.init;
-    if (init && init->kind == AST_INIT_LIST && var->data.var_decl.var_type->kind == TYPE_ARRAY) {
-        mcc_type_t *elem_type = var->data.var_decl.var_type->data.array.element;
-        anvil_type_t *anvil_elem_type = codegen_type(cg, elem_type);
-        
-        size_t num_elements = init->data.init_list.num_exprs;
-        anvil_value_t **elements = mcc_alloc(cg->mcc_ctx, num_elements * sizeof(anvil_value_t*));
-        
-        for (size_t i = 0; i < num_elements; i++) {
-            mcc_ast_node_t *elem_expr = init->data.init_list.exprs[i];
-            if (elem_expr->kind == AST_INT_LIT) {
-                int64_t val = (int64_t)elem_expr->data.int_lit.value;
-                elements[i] = anvil_const_i64(cg->anvil_ctx, val);
-            } else if (elem_expr->kind == AST_CHAR_LIT) {
-                int64_t val = (int64_t)elem_expr->data.char_lit.value;
-                elements[i] = anvil_const_i64(cg->anvil_ctx, val);
-            } else if (elem_expr->kind == AST_STRING_LIT) {
-                /* String literal - get pointer to the string constant */
-                elements[i] = codegen_get_string_literal(cg, elem_expr->data.string_lit.value);
-            } else {
-                /* Default to zero for unsupported types */
-                elements[i] = anvil_const_i64(cg->anvil_ctx, 0);
-            }
+    if (init) {
+        anvil_value_t *constant = codegen_global_initializer(
+            cg, var->data.var_decl.var_type, init);
+        if (!constant) {
+            mcc_error_at(cg->mcc_ctx, init->location,
+                         "unsupported or invalid constant initializer for global '%s'",
+                         var->data.var_decl.name);
+            return;
         }
-        
-        anvil_value_t *arr_init = anvil_const_array(cg->anvil_ctx, anvil_elem_type, elements, num_elements);
-        anvil_global_set_initializer(global, arr_init);
+        anvil_global_set_initializer(global, constant);
     }
 }
 

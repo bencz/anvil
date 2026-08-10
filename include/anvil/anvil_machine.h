@@ -75,6 +75,8 @@ typedef enum {
     ANVIL_MIR_OP_CMP_ULE,
     ANVIL_MIR_OP_CMP_UGT,
     ANVIL_MIR_OP_CMP_UGE,
+    /* Floating comparison. Required immediate is anvil_fcmp_pred_t. */
+    ANVIL_MIR_OP_FCMP,
     ANVIL_MIR_OP_SYMBOL_ADDR,
     ANVIL_MIR_OP_LOAD,
     ANVIL_MIR_OP_STORE,
@@ -88,7 +90,13 @@ typedef enum {
     ANVIL_MIR_OP_BR_COND,
     ANVIL_MIR_OP_SPILL_LOAD,
     ANVIL_MIR_OP_SPILL_STORE,
-    ANVIL_MIR_OP_OTHER
+    /* Semantic no-op that keeps all of its operands live. */
+    ANVIL_MIR_OP_KEEPALIVE,
+    /* Defines an additional fixed-register result of the preceding call. */
+    ANVIL_MIR_OP_CALL_RESULT,
+    /* Supplies a value to an additional ABI return register before RET.  The
+       source need not be fixed: the target emitter performs the ABI move. */
+    ANVIL_MIR_OP_RET_VALUE_PART
 } anvil_mir_opcode_t;
 
 typedef struct anvil_mir_func anvil_mir_func_t;
@@ -97,6 +105,7 @@ typedef struct {
     anvil_mir_reg_class_t reg_class;
     uint16_t size_bits;
     bool is_signed;
+    bool is_live_in;
     bool has_fixed_reg;
     int fixed_phys_reg;
 } anvil_mir_vreg_info_t;
@@ -131,6 +140,10 @@ typedef struct {
 
 typedef struct {
     const char *name;
+    /* Index of the first instruction owned by this block and total ownership
+       count. Instructions are not required to be contiguous; consumers must
+       filter anvil_mir_instr_info_t::block rather than treating this as a
+       [first_instr, first_instr + num_instrs) interval. */
     size_t first_instr;
     size_t num_instrs;
 } anvil_mir_block_info_t;
@@ -177,6 +190,8 @@ anvil_mir_get_vreg_info(const anvil_mir_func_t *func, anvil_mir_vreg_t vreg);
 bool anvil_mir_set_vreg_signed(anvil_mir_func_t *func,
                                anvil_mir_vreg_t vreg,
                                bool is_signed);
+bool anvil_mir_set_live_in(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
+                           bool is_live_in);
 bool anvil_mir_set_fixed_reg(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
                              int phys_reg);
 bool anvil_mir_clear_fixed_reg(anvil_mir_func_t *func, anvil_mir_vreg_t vreg);
@@ -198,6 +213,13 @@ bool anvil_mir_add_instr_symbol(anvil_mir_func_t *func,
                                 const anvil_mir_vreg_t *uses,
                                 size_t num_uses,
                                 const char *symbol);
+bool anvil_mir_add_instr_symbol_imm(anvil_mir_func_t *func,
+                                    anvil_mir_opcode_t op,
+                                    anvil_mir_vreg_t def,
+                                    const anvil_mir_vreg_t *uses,
+                                    size_t num_uses,
+                                    const char *symbol,
+                                    int64_t imm);
 int anvil_mir_add_frame_slot(anvil_mir_func_t *func,
                              uint16_t size_bits,
                              uint16_t align_bytes);

@@ -31,7 +31,7 @@ int main(int argc, char **argv)
         return 1;
     }
     
-    ctx = anvil_ctx_create();
+    ctx = anvil_ctx_create_for_target(config.arch);
     if (!ctx) {
         fprintf(stderr, "Failed to create context\n");
         return 1;

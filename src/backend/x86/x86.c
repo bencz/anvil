@@ -239,6 +239,8 @@ static anvil_error_t x86_codegen_module(anvil_backend_t *be, anvil_module_t *mod
                                         char **output, size_t *len)
 {
     if (!be || !mod || !output) return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len) *len = 0;
 
     x86_backend_priv_t *priv = be->priv;
 
@@ -262,27 +264,38 @@ static anvil_error_t x86_codegen_module(anvil_backend_t *be, anvil_module_t *mod
 
     x86_emit_globals(priv, mod);
 
+    if (priv->code.failed || priv->data.failed) return ANVIL_ERR_NOMEM;
+
     anvil_strbuf_t result;
     anvil_strbuf_init(&result);
+    if (result.failed) return ANVIL_ERR_NOMEM;
     char *code_str = anvil_strbuf_detach(&priv->code, NULL);
     char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (code_str) {
-        anvil_strbuf_append(&result, code_str);
+    if (!code_str || !data_str) {
         free(code_str);
-    }
-    if (data_str) {
-        anvil_strbuf_append(&result, data_str);
         free(data_str);
+        anvil_strbuf_destroy(&result);
+        return ANVIL_ERR_NOMEM;
+    }
+    anvil_strbuf_append(&result, code_str);
+    anvil_strbuf_append(&result, data_str);
+    free(code_str);
+    free(data_str);
+    if (result.failed) {
+        anvil_strbuf_destroy(&result);
+        return ANVIL_ERR_NOMEM;
     }
 
     *output = anvil_strbuf_detach(&result, len);
-    return ANVIL_OK;
+    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
 }
 
 static anvil_error_t x86_codegen_func(anvil_backend_t *be, anvil_func_t *func,
                                       char **output, size_t *len)
 {
     if (!be || !func || !output) return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len) *len = 0;
 
     x86_backend_priv_t *priv = be->priv;
 
@@ -291,9 +304,10 @@ static anvil_error_t x86_codegen_func(anvil_backend_t *be, anvil_func_t *func,
 
     anvil_error_t err = x86_emit_func(priv, func);
     if (err != ANVIL_OK) return err;
+    if (priv->code.failed) return ANVIL_ERR_NOMEM;
 
     *output = anvil_strbuf_detach(&priv->code, len);
-    return ANVIL_OK;
+    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
 }
 
 const anvil_backend_ops_t anvil_backend_x86 = {

@@ -39,8 +39,6 @@ static bool is_copy_instr(anvil_instr_t *instr)
     anvil_value_t *op1 = instr->operands[1];
     if (!op1 || op1->kind != ANVIL_VAL_CONST_INT) return false;
     
-    int64_t val = op1->data.i;
-    
     switch (instr->op) {
         case ANVIL_OP_ADD:
         case ANVIL_OP_SUB:
@@ -49,13 +47,13 @@ static bool is_copy_instr(anvil_instr_t *instr)
         case ANVIL_OP_SHL:
         case ANVIL_OP_SHR:
         case ANVIL_OP_SAR:
-            return val == 0;
+            return anvil_opt_is_zero(op1);
         case ANVIL_OP_AND:
-            return val == -1 || val == (int64_t)0xFFFFFFFF || val == (int64_t)0xFFFFFFFFFFFFFFFFULL;
+            return anvil_opt_is_all_ones(op1);
         case ANVIL_OP_MUL:
         case ANVIL_OP_SDIV:
         case ANVIL_OP_UDIV:
-            return val == 1;
+            return anvil_opt_is_one(op1);
         default:
             return false;
     }
@@ -69,9 +67,13 @@ static anvil_value_t *get_copy_source(anvil_instr_t *instr)
 }
 
 /* Main copy propagation pass */
-bool anvil_pass_copy_prop(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_copy_prop(anvil_func_t *func)
 {
-    if (!func || !func->blocks) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (!func->blocks) return ANVIL_PASS_RUN_UNCHANGED;
     
     bool changed = false;
     
@@ -94,5 +96,7 @@ bool anvil_pass_copy_prop(anvil_func_t *func)
         }
     }
     
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

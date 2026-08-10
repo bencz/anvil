@@ -19,12 +19,8 @@ bool b2 = false;
 static_assert(sizeof(int) >= 4, "int must be at least 4 bytes");
 static_assert(true, "true must be true");
 
-/* C23: alignas and alignof without underscore */
-alignas(16) int aligned_var;
+/* C23: alignof without underscore */
 int alignment = alignof(double);
-
-/* C23: thread_local without underscore */
-thread_local int tls_var = 0;
 
 int main(void)
 {

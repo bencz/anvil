@@ -255,11 +255,11 @@ FACTORIAL DS    0H
          STM   R14,R12,12(R13)    Save caller's registers
          LR    R12,R15            Copy entry point to base reg
          USING FACTORIAL,R12      Establish addressability
-         LR    R11,R1             Save parameter list pointer
+         LR    R11,R13            Stable base of this function's frame
 *        Set up save area chain (stack allocation)
-         LA    R2,72(,R13)        R2 -> our save area (after caller's)
-         ST    R13,4(,R2)         Chain: new->prev = caller's
-         ST    R2,8(,R13)         Chain: caller->next = new
+         LA    R2,FRAME_SIZE(,R13) R2 -> next free/callee save area
+         ST    R11,4(,R2)         Chain: new->prev = this frame
+         ST    R2,8(,R11)         Chain: this frame->next = new
          LR    R13,R2             R13 -> our save area
 *
 ```
@@ -270,11 +270,11 @@ FACTORIAL DS    0H
          STMG  R14,R12,24(R13)    Save caller's registers (64-bit)
          LGR   R12,R15            Copy entry point to base reg
          USING FACTORIAL,R12      Establish addressability
-         LGR   R11,R1             Save parameter list pointer
+         LGR   R11,R13            Stable base of this function's frame
 *        Set up save area chain (stack allocation)
-         LA    R2,144(,R13)       R2 -> our save area (144 bytes for 64-bit)
-         STG   R13,8(,R2)         Chain: new->prev = caller's
-         STG   R2,16(,R13)        Chain: caller->next = new
+         LA    R2,FRAME_SIZE(,R13) R2 -> next free/callee save area
+         STG   R11,8(,R2)         Chain: new->prev = this frame
+         STG   R2,16(,R11)        Chain: this frame->next = new
          LGR   R13,R2             R13 -> our save area
 *
 ```
@@ -362,7 +362,7 @@ FUNC     DS    0H
          STM   R14,R12,12(R13)    Save caller's registers
          LR    R12,R15            Establish base register
          USING FUNC,R12           Tell assembler
-         LR    R11,R1             Save parameter list pointer
+         LR    R11,R13            Stable frame base (R1 remains parameter list)
 *
          GETMAIN R,LV=DYN@FUNC    Allocate dynamic storage
          LR    R2,R1              R2 -> new area
@@ -599,7 +599,7 @@ ADD      DS    0H
          STM   R14,R12,12(R13)    Save caller's registers
          LR    R12,R15            Copy entry point to base reg
          USING ADD,R12            Establish addressability
-         LR    R11,R1             Save parameter list pointer
+         LR    R11,R13            Stable frame base (R1 remains parameter list)
 *        Set up save area chain (stack allocation)
          LA    R2,72(,R13)        R2 -> our save area
          ST    R13,4(,R2)         Chain: new->prev = caller's
@@ -660,7 +660,7 @@ ADD      DS    0H
          STMG  R14,R12,24(R13)    Save caller's registers
          LGR   R12,R15            Copy entry point to base reg
          USING ADD,R12            Establish addressability
-         LGR   R11,R1             Save parameter list pointer
+         LGR   R11,R13            Stable frame base (R1 remains parameter list)
 *        Set up save area chain (stack allocation)
          LA    R2,144(,R13)       R2 -> our save area (144 bytes for 64-bit)
          STG   R13,8(,R2)         Chain: new->prev = caller's
@@ -1073,21 +1073,33 @@ S/390 and z/Architecture expose 16 FPRs; ANVIL allocates F1-F15 (F0 is scratch).
 
 ```
 
-### Integer ↔ Floating-Point Conversion (NOT IMPLEMENTED)
+### Integer ↔ Floating-Point Conversion
 
-The IR conversion opcodes `sitofp`, `uitofp`, `fptosi`, and `fptoui` are lowered
-to MachineIR (`ANVIL_MIR_OP_SITOFP`, etc.), but the HLASM emitter does **not**
-currently generate real conversion code for them. When a cast crosses register
-classes (GPR ↔ FPR), `mf_emit_cast()` emits only a placeholder comment:
+The six numeric conversion opcodes are emitted as real HFP or BFP operations;
+there are no unresolved runtime-helper placeholders. ESA/390 and z/Architecture
+use `CEFR/CDFR/CEGR/CDGR` for HFP and `CEFBR/CDFBR/CEGBR/CDGBR` for BFP. The
+reverse direction uses `CFER/CFDR/CGER/CGDR` or
+`CFEBR/CFDBR/CGEBR/CGDBR`, with rounding-mode field 5 (toward zero).
 
-```hlasm
-*        numeric int/FP conversion requires target-specific runtime support
-```
+S/370 and S/370-XA predate those ESA conversion instructions. Their HFP path is
+fully inline: integer-to-HFP constructs an exact long-HFP value in the reserved
+FP temporary and applies `LEDR` only when a short result is requested; HFP-to-
+integer decodes sign, hexadecimal exponent and the 56-bit fraction with GPR
+shifts, discarding fractional bits. It therefore remains linkable without a
+fictional helper library and does not emit instructions unavailable to the
+selected architecture.
 
-In other words, integer↔FP conversion is a known limitation on the mainframe
-backend today. Same-class casts (`zext`/`sext`/`trunc` between GPRs, `fpext`/
-`fptrunc` between FPRs) are handled. Conversion instructions such as `CEFBR` /
-`CFEBR` (IEEE) or the HFP "magic number" technique are *not* emitted.
+Unsigned full-register conversions use an exact decomposition on machines where
+logical-conversion instructions are not part of the selected baseline:
+`u -> float((u >> 1) | (u & 1)) * 2` for a high-bit-set integer, and a split at
+2^(N-1) for FP-to-unsigned. Powers of two are exact in both HFP and BFP. Values
+outside the destination integer range, NaNs and infinities are IR poison; the
+backend deliberately does not promise a result for that domain. `fpext` uses
+`LDER`/`LDEBR`; `fptrunc` uses the rounded `LEDR`/`LEDBR` operation.
+
+Loads of signed/unsigned i8 and i16 are normalized immediately after `IC`/`LH`:
+sign extension uses shifts, unsigned halfwords are masked, and z/Architecture
+finishes with `LGFR`/`LLGFR` so the upper 32 bits are never stale.
 
 ### FP Format Selection in ANVIL
 
@@ -1140,6 +1152,15 @@ The dynamic storage area includes space for FP temporaries:
 +152  FP Temp 2 (8 bytes) - for conversions
 +160  Local variables start
 ```
+
+`ANVIL_MIR_OP_DYN_ALLOCA` reserves real storage. The emitter computes
+`count * element_size`, aligns both the returned address and the new stack top
+to 16 bytes, installs the appropriate 32- or 64-bit backchain, and advances R13.
+R11 remains the fixed-frame base, so fixed locals and outgoing parameter bundles
+cannot overlap a dynamic object. Each new dynamic top chains directly to R11;
+therefore nested callees use the current R13 while this function's epilogue can
+restore its caller in one step. Integer overflow or exhaustion of the available
+stack is outside the defined program domain.
 
 ## Global Variables
 
@@ -1230,12 +1251,6 @@ anvil_build_store(ctx, new_val, counter);
 
 These reflect the present state of the MachineIR mainframe backend:
 
-- **Integer ↔ FP conversions are not emitted.** `sitofp`/`uitofp`/`fptosi`/
-  `fptoui` lower to MIR but `mf_emit_cast()` only emits a placeholder comment when
-  the cast crosses register classes (see the FP section).
-- **Dynamic alloca is a stub.** `ANVIL_MIR_OP_DYN_ALLOCA` is emitted as
-  `LA reg,local_area_offset(,R13)` — it returns a fixed pointer into the local
-  area and does not reserve `count`-sized storage.
 - **No immediate-form ALU selection.** Integer arithmetic uses register-register
   instructions only (`AR`/`AGR`, `SR`/`SGR`, `MR`/`MSGR`, `DR`/`DSGR`, etc.);
   the AHI/AGHI/LHI/LGHI family is not generated.

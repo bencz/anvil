@@ -409,8 +409,7 @@ A minimal test skeleton:
 #include <string.h>
 
 int main(void) {
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_YOUR_ARCH);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_YOUR_ARCH);
     anvil_module_t *mod = anvil_module_create(ctx, "test");
 
     /* Build: int add(int a, int b) { return a + b; } */
@@ -675,7 +674,7 @@ Areas that need development:
 1. **Register Allocation**: A target-independent linear-scan allocator now exists
    (`src/machine/regalloc.c`, used by the MachineIR backends). It has no call-clobber
    model yet, so allocatable pools must be callee-saved (see Backend Development).
-2. **Binary Output**: Currently text assembly only (`ANVIL_OUTPUT_BINARY` reserved).
+2. **Binary Output**: The current public output API supports text assembly only.
 3. **Debug Info**: No DWARF support.
 4. **More Architectures**: RISC-V, etc. (x86, x86-64, ARM64, PowerPC, and the
    mainframe family are implemented).

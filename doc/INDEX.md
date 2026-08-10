@@ -22,8 +22,7 @@ This documentation provides comprehensive technical details about the ANVIL libr
 ### Creating a Simple Function
 
 ```c
-anvil_ctx_t *ctx = anvil_ctx_create();
-anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
 anvil_module_t *mod = anvil_module_create(ctx, "example");
 
 anvil_type_t *i32 = anvil_type_i32(ctx);

@@ -13,7 +13,7 @@
  *           return 1;
  *       }
  *       
- *       anvil_ctx_t *ctx = anvil_ctx_create();
+ *       anvil_ctx_t *ctx = anvil_ctx_create_for_target(config.arch);
  *       if (!setup_arch_context(ctx, &config)) {
  *           anvil_ctx_destroy(ctx);
  *           return 1;
@@ -136,15 +136,15 @@ static inline bool parse_arch_args(int argc, char **argv, arch_config_t *config)
     return true;
 }
 
-/* Set up context with architecture configuration
+/* Apply optional ABI/FP overrides to an already target-configured context.
  * Returns true on success, false on error */
 static inline bool setup_arch_context(anvil_ctx_t *ctx, const arch_config_t *config)
 {
     if (!ctx) return false;
     
-    /* Set target architecture */
-    if (anvil_ctx_set_target(ctx, config->arch) != ANVIL_OK) {
-        fprintf(stderr, "Failed to set target: %s\n", anvil_ctx_get_error(ctx));
+    if (!anvil_ctx_has_target(ctx) ||
+        anvil_ctx_get_target(ctx) != config->arch) {
+        fprintf(stderr, "Context was not created for the requested target\n");
         return false;
     }
     
@@ -187,6 +187,9 @@ static inline const char *get_file_extension(anvil_arch_t arch)
 static inline void print_fp_format(anvil_fp_format_t fp_format)
 {
     switch (fp_format) {
+        case ANVIL_FP_UNSPECIFIED:
+            printf("  FP Format: unspecified (no target)\n");
+            break;
         case ANVIL_FP_IEEE754:
             printf("  FP Format: IEEE 754 (binary floating-point)\n");
             break;
@@ -220,7 +223,7 @@ static inline void print_arch_info(anvil_ctx_t *ctx, const arch_config_t *config
         if (!parse_arch_args(argc, argv, &config)) { \
             return 1; \
         } \
-        ctx = anvil_ctx_create(); \
+        ctx = anvil_ctx_create_for_target(config.arch); \
         if (!ctx) { \
             fprintf(stderr, "Failed to create context\n"); \
             return 1; \

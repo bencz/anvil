@@ -41,7 +41,7 @@ install: $(TARGET)
 # ============================================================
 
 # Run all tests (syntax + codegen + cross-standard)
-test-all: test-syntax test-codegen test-cross
+test-all: test-unit test-build-deps test-syntax test-negative test-codegen test-cross
 	@echo ""
 	@echo "=========================================="
 	@echo "All tests complete!"
@@ -71,6 +71,8 @@ help:
 	@echo "  test-syntax-c23  Run C23 syntax tests only"
 	@echo "  test-syntax-gnu  Run GNU extension syntax tests"
 	@echo "  test-syntax-legacy  Run legacy tests (tests/*.c)"
+	@echo "  test-negative     Require unsupported/invalid programs to fail"
+	@echo "  test-unit         Run allocator/target contract unit tests"
 	@echo ""
 	@echo "Cross-Standard Test Targets:"
 	@echo "  test-cross       Run cross-standard warning tests"
@@ -98,7 +100,7 @@ help:
 
 .PHONY: all clean install test test-all test-quick help
 .PHONY: test-syntax test-syntax-c89 test-syntax-c99 test-syntax-c11 test-syntax-c23 test-syntax-gnu test-syntax-legacy
-.PHONY: test-cross
+.PHONY: test-cross test-negative test-unit test-build-deps
 .PHONY: test-codegen test-codegen-basic test-codegen-multifile
 .PHONY: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos
 .PHONY: test-codegen-ppc32 test-codegen-ppc64 test-codegen-ppc64le test-codegen-s370 test-codegen-all-arch

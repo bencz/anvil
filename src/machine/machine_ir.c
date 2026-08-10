@@ -192,6 +192,7 @@ anvil_mir_vreg_t anvil_mir_add_vreg_typed(anvil_mir_func_t *func,
     func->vregs[vreg].reg_class = reg_class;
     func->vregs[vreg].size_bits = size_bits;
     func->vregs[vreg].is_signed = is_signed;
+    func->vregs[vreg].is_live_in = false;
     func->vregs[vreg].has_fixed_reg = false;
     func->vregs[vreg].fixed_phys_reg = -1;
     return vreg;
@@ -222,6 +223,15 @@ bool anvil_mir_set_vreg_signed(anvil_mir_func_t *func,
 {
     if (!anvil_mir_valid_vreg(func, vreg)) return false;
     func->vregs[vreg].is_signed = is_signed;
+    return true;
+}
+
+bool anvil_mir_set_live_in(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
+                           bool is_live_in)
+{
+    if (!anvil_mir_valid_vreg(func, vreg)) return false;
+    anvil_mir_clear_allocations(func);
+    func->vregs[vreg].is_live_in = is_live_in;
     return true;
 }
 
@@ -375,6 +385,19 @@ bool anvil_mir_add_instr_symbol(anvil_mir_func_t *func,
 {
     return add_instr_full(func, op, def, uses, num_uses, false, 0, symbol,
                           ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK);
+}
+
+bool anvil_mir_add_instr_symbol_imm(anvil_mir_func_t *func,
+                                    anvil_mir_opcode_t op,
+                                    anvil_mir_vreg_t def,
+                                    const anvil_mir_vreg_t *uses,
+                                    size_t num_uses,
+                                    const char *symbol,
+                                    int64_t imm)
+{
+    return add_instr_full(func, op, def, uses, num_uses, true, imm,
+                          symbol, ANVIL_MIR_NO_BLOCK,
+                          ANVIL_MIR_NO_BLOCK);
 }
 
 static bool reserve_frame_slots(anvil_mir_func_t *func, size_t needed)
@@ -590,22 +613,19 @@ static bool mir_vregs_coalescible(const anvil_mir_func_t *func,
            dst_info->size_bits == src_info->size_bits;
 }
 
-static void clear_instr_to_other(anvil_mir_instr_t *instr)
+static void recompute_block_instr_ranges(anvil_mir_func_t *func);
+
+static void remove_instr_at(anvil_mir_func_t *func, size_t index)
 {
-    if (!instr) return;
-    free(instr->uses);
-    free(instr->symbol);
-    instr->op = ANVIL_MIR_OP_OTHER;
-    instr->def = ANVIL_MIR_NO_VREG;
-    instr->uses = NULL;
-    instr->num_uses = 0;
-    instr->true_block = ANVIL_MIR_NO_BLOCK;
-    instr->false_block = ANVIL_MIR_NO_BLOCK;
-    instr->has_imm = false;
-    instr->imm = 0;
-    instr->symbol = NULL;
-    instr->spill_slot = -1;
-    instr->frame_slot = -1;
+    if (!func || index >= func->num_instrs) return;
+    free(func->instrs[index].uses);
+    free(func->instrs[index].symbol);
+    if (index + 1 < func->num_instrs) {
+        memmove(&func->instrs[index], &func->instrs[index + 1],
+                (func->num_instrs - index - 1) * sizeof(*func->instrs));
+    }
+    func->num_instrs--;
+    recompute_block_instr_ranges(func);
 }
 
 bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
@@ -633,19 +653,29 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
         if (!mir_vregs_coalescible(func, dst, src)) continue;
         if (def_counts[dst] != 1 || def_counts[src] != 1) continue;
 
-        bool dst_used_before_copy = false;
-        for (size_t j = 0; j < i && !dst_used_before_copy; j++) {
+        /*
+         * Without dominator information, a textual instruction order is not
+         * enough to prove that a COPY reaches a use in another block.  Keep
+         * this pass deliberately local: instruction order within one block
+         * gives us the dominance proof we need, while cross-block copies are
+         * left for a future CFG-aware coalescer.
+         */
+        bool all_uses_after_copy_in_block = true;
+        for (size_t j = 0; j < func->num_instrs; j++) {
             for (size_t u = 0; u < func->instrs[j].num_uses; u++) {
-                if (func->instrs[j].uses[u] == dst) {
-                    dst_used_before_copy = true;
+                if (func->instrs[j].uses[u] != dst) continue;
+                if (j <= i || func->instrs[j].block != instr->block) {
+                    all_uses_after_copy_in_block = false;
                     break;
                 }
             }
+            if (!all_uses_after_copy_in_block) break;
         }
-        if (dst_used_before_copy) continue;
+        if (!all_uses_after_copy_in_block) continue;
 
         bool rewrote_use = false;
         for (size_t j = i + 1; j < func->num_instrs; j++) {
+            if (func->instrs[j].block != instr->block) continue;
             for (size_t u = 0; u < func->instrs[j].num_uses; u++) {
                 if (func->instrs[j].uses[u] == dst) {
                     func->instrs[j].uses[u] = src;
@@ -655,7 +685,8 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
         }
 
         if (rewrote_use) {
-            clear_instr_to_other(instr);
+            remove_instr_at(func, i);
+            i--;
             changed = true;
         }
     }
@@ -781,7 +812,8 @@ static bool mir_verify_same_class_uses(const anvil_mir_func_t *func,
         const anvil_mir_vreg_info_t *info =
             mir_verify_vreg_info(func, instr->uses[u], index, error, error_len);
         if (!info) return false;
-        if (info->reg_class != first->reg_class) {
+        if (info->reg_class != first->reg_class ||
+            info->size_bits != first->size_bits) {
             return mir_verify_fail(error, error_len,
                                    "instruction %zu register class mismatch",
                                    index);
@@ -792,7 +824,8 @@ static bool mir_verify_same_class_uses(const anvil_mir_func_t *func,
         const anvil_mir_vreg_info_t *def =
             mir_verify_vreg_info(func, instr->def, index, error, error_len);
         if (!def) return false;
-        if (def->reg_class != first->reg_class) {
+        if (def->reg_class != first->reg_class ||
+            def->size_bits != first->size_bits) {
             return mir_verify_fail(error, error_len,
                                    "instruction %zu register class mismatch",
                                    index);
@@ -802,36 +835,95 @@ static bool mir_verify_same_class_uses(const anvil_mir_func_t *func,
     return true;
 }
 
-static bool mir_verify_block(const anvil_mir_func_t *func,
-                             anvil_mir_block_t block,
-                             char *error,
-                             size_t error_len)
+static bool mir_verify_cast(const anvil_mir_func_t *func,
+                            const anvil_mir_instr_t *instr,
+                            size_t index, char *error, size_t error_len)
 {
-    bool saw_instr = false;
-    bool saw_terminator = false;
-    const anvil_mir_instr_t *last = NULL;
+    if (!mir_verify_has_def(instr, index, error, error_len) ||
+        !mir_verify_num_uses(instr, 1, index, error, error_len)) return false;
+    const anvil_mir_vreg_info_t *dst =
+        mir_verify_vreg_info(func, instr->def, index, error, error_len);
+    const anvil_mir_vreg_info_t *src =
+        mir_verify_vreg_info(func, instr->uses[0], index, error, error_len);
+    if (!dst || !src) return false;
+    bool valid = false;
+    switch (instr->op) {
+        case ANVIL_MIR_OP_ZEXT:
+        case ANVIL_MIR_OP_SEXT:
+            valid = src->reg_class == ANVIL_MIR_REG_GPR &&
+                    dst->reg_class == ANVIL_MIR_REG_GPR &&
+                    src->size_bits < dst->size_bits;
+            break;
+        case ANVIL_MIR_OP_TRUNC:
+            valid = src->reg_class == ANVIL_MIR_REG_GPR &&
+                    dst->reg_class == ANVIL_MIR_REG_GPR &&
+                    src->size_bits > dst->size_bits;
+            break;
+        case ANVIL_MIR_OP_BITCAST:
+            valid = src->size_bits == dst->size_bits;
+            break;
+        case ANVIL_MIR_OP_SITOFP:
+        case ANVIL_MIR_OP_UITOFP:
+            valid = src->reg_class == ANVIL_MIR_REG_GPR &&
+                    dst->reg_class == ANVIL_MIR_REG_FPR;
+            break;
+        case ANVIL_MIR_OP_FPTOSI:
+        case ANVIL_MIR_OP_FPTOUI:
+            valid = src->reg_class == ANVIL_MIR_REG_FPR &&
+                    dst->reg_class == ANVIL_MIR_REG_GPR;
+            break;
+        case ANVIL_MIR_OP_FPEXT:
+            valid = src->reg_class == ANVIL_MIR_REG_FPR &&
+                    dst->reg_class == ANVIL_MIR_REG_FPR &&
+                    src->size_bits < dst->size_bits;
+            break;
+        case ANVIL_MIR_OP_FPTRUNC:
+            valid = src->reg_class == ANVIL_MIR_REG_FPR &&
+                    dst->reg_class == ANVIL_MIR_REG_FPR &&
+                    src->size_bits > dst->size_bits;
+            break;
+        default:
+            break;
+    }
+    return valid || mir_verify_fail(error, error_len,
+                                    "instruction %zu has invalid cast widths or classes",
+                                    index);
+}
 
+static bool mir_verify_blocks(const anvil_mir_func_t *func,
+                              char *error, size_t error_len)
+{
+    bool *saw_instr = calloc(func->num_blocks, sizeof(*saw_instr));
+    bool *saw_terminator = calloc(func->num_blocks, sizeof(*saw_terminator));
+    if (!saw_instr || !saw_terminator) {
+        free(saw_instr); free(saw_terminator);
+        return mir_verify_fail(error, error_len,
+                               "out of memory verifying MachineIR blocks");
+    }
     for (size_t i = 0; i < func->num_instrs; i++) {
-        if (func->instrs[i].block != block) continue;
-        if (saw_terminator) {
+        anvil_mir_block_t block = func->instrs[i].block;
+        if (saw_terminator[block]) {
             const char *name = func->blocks[block].name
                 ? func->blocks[block].name
                 : "";
+            free(saw_instr); free(saw_terminator);
             return mir_verify_fail(error, error_len,
                                    "block %s has instructions after terminator",
                                    name);
         }
-        saw_instr = true;
-        last = &func->instrs[i];
-        saw_terminator = mir_op_is_terminator(func->instrs[i].op);
+        saw_instr[block] = true;
+        saw_terminator[block] = mir_op_is_terminator(func->instrs[i].op);
     }
-
-    if (!saw_instr) return true;
-    if (last && mir_op_is_terminator(last->op)) return true;
-
-    const char *name = func->blocks[block].name ? func->blocks[block].name : "";
-    return mir_verify_fail(error, error_len,
-                           "block %s is missing a terminator", name);
+    for (size_t block = 0; block < func->num_blocks; block++) {
+        if (!saw_instr[block] || saw_terminator[block]) continue;
+        const char *name = func->blocks[block].name
+            ? func->blocks[block].name : "";
+        free(saw_instr); free(saw_terminator);
+        return mir_verify_fail(error, error_len,
+                               "block %s is missing a terminator", name);
+    }
+    free(saw_instr); free(saw_terminator);
+    return true;
 }
 
 static bool mir_verify_instr(const anvil_mir_func_t *func,
@@ -863,9 +955,33 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                    mir_verify_num_uses(instr, 0, index, error, error_len);
 
         case ANVIL_MIR_OP_COPY:
-        case ANVIL_MIR_OP_NEG:
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
+                   mir_verify_same_class_uses(func, instr, index, true,
+                                              error, error_len);
+
         case ANVIL_MIR_OP_NOT:
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
+                   mir_verify_def_class(func, instr, index,
+                                        ANVIL_MIR_REG_GPR, error, error_len) &&
+                   mir_verify_same_class_uses(func, instr, index, true,
+                                              error, error_len);
+
+        case ANVIL_MIR_OP_NEG:
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
+                   mir_verify_same_class_uses(func, instr, index, true,
+                                              error, error_len);
+
         case ANVIL_MIR_OP_FABS:
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
+                   mir_verify_def_class(func, instr, index,
+                                        ANVIL_MIR_REG_FPR, error, error_len) &&
+                   mir_verify_same_class_uses(func, instr, index, true,
+                                              error, error_len);
+
         case ANVIL_MIR_OP_ZEXT:
         case ANVIL_MIR_OP_SEXT:
         case ANVIL_MIR_OP_TRUNC:
@@ -876,8 +992,7 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
         case ANVIL_MIR_OP_FPTOUI:
         case ANVIL_MIR_OP_FPEXT:
         case ANVIL_MIR_OP_FPTRUNC:
-            return mir_verify_has_def(instr, index, error, error_len) &&
-                   mir_verify_num_uses(instr, 1, index, error, error_len);
+            return mir_verify_cast(func, instr, index, error, error_len);
 
         case ANVIL_MIR_OP_ADD:
         case ANVIL_MIR_OP_SUB:
@@ -909,13 +1024,34 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
         case ANVIL_MIR_OP_CMP_ULT:
         case ANVIL_MIR_OP_CMP_ULE:
         case ANVIL_MIR_OP_CMP_UGT:
-        case ANVIL_MIR_OP_CMP_UGE:
-            return mir_verify_has_def(instr, index, error, error_len) &&
-                   mir_verify_num_uses(instr, 2, index, error, error_len) &&
-                   mir_verify_def_class(func, instr, index, ANVIL_MIR_REG_GPR,
-                                        error, error_len) &&
-                   mir_verify_same_class_uses(func, instr, index, false,
-                                              error, error_len);
+        case ANVIL_MIR_OP_CMP_UGE: {
+            if (!mir_verify_has_def(instr, index, error, error_len) ||
+                !mir_verify_num_uses(instr, 2, index, error, error_len) ||
+                !mir_verify_def_class(func, instr, index, ANVIL_MIR_REG_GPR,
+                                      error, error_len) ||
+                !mir_verify_same_class_uses(func, instr, index, false,
+                                            error, error_len)) return false;
+            return func->vregs[instr->def].size_bits == 8 ||
+                   mir_verify_fail(error, error_len,
+                       "instruction %zu comparison result must be GPR8", index);
+        }
+
+        case ANVIL_MIR_OP_FCMP: {
+            if (!mir_verify_has_def(instr, index, error, error_len) ||
+                !mir_verify_num_uses(instr, 2, index, error, error_len) ||
+                !mir_verify_def_class(func, instr, index, ANVIL_MIR_REG_GPR,
+                                      error, error_len) ||
+                !instr->has_imm || instr->imm < 0 || instr->imm > 15) return false;
+            const anvil_mir_vreg_info_t *def = &func->vregs[instr->def];
+            const anvil_mir_vreg_info_t *lhs = &func->vregs[instr->uses[0]];
+            const anvil_mir_vreg_info_t *rhs = &func->vregs[instr->uses[1]];
+            return (def->size_bits == 8 &&
+                    lhs->reg_class == ANVIL_MIR_REG_FPR &&
+                    rhs->reg_class == ANVIL_MIR_REG_FPR &&
+                    lhs->size_bits == rhs->size_bits) ||
+                   mir_verify_fail(error, error_len,
+                       "instruction %zu has invalid FCMP classes or widths", index);
+        }
 
         case ANVIL_MIR_OP_SELECT:
             if (!mir_verify_has_def(instr, index, error, error_len) ||
@@ -933,7 +1069,13 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                 const anvil_mir_vreg_info_t *else_info =
                     mir_verify_vreg_info(func, instr->uses[2], index,
                                          error, error_len);
-                if (!def || !then_info || !else_info) return false;
+                const anvil_mir_vreg_info_t *cond_info =
+                    mir_verify_vreg_info(func, instr->uses[0], index,
+                                         error, error_len);
+                if (!def || !then_info || !else_info || !cond_info) return false;
+                if (cond_info->size_bits != 8)
+                    return mir_verify_fail(error, error_len,
+                        "instruction %zu select condition must be GPR8", index);
                 if (def->reg_class == then_info->reg_class &&
                     def->reg_class == else_info->reg_class) {
                     return true;
@@ -985,6 +1127,11 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                    instr->has_imm && instr->imm >= 0;
 
         case ANVIL_MIR_OP_CALL:
+            if (instr->has_imm && (instr->imm < 0 || instr->imm > 8)) {
+                return mir_verify_fail(error, error_len,
+                    "instruction %zu has an invalid variadic vector-register count",
+                    index);
+            }
             if (instr->symbol && instr->symbol[0]) {
                 return mir_verify_num_uses(instr, instr->num_uses, index,
                                            error, error_len);
@@ -1008,12 +1155,15 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                    mir_valid_block(func, instr->true_block);
 
         case ANVIL_MIR_OP_BR_COND:
-            return mir_verify_no_def(instr, index, error, error_len) &&
-                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
-                   mir_verify_use_class(func, instr, index, 0,
-                                        ANVIL_MIR_REG_GPR, error, error_len) &&
-                   mir_valid_block(func, instr->true_block) &&
-                   mir_valid_block(func, instr->false_block);
+            if (!mir_verify_no_def(instr, index, error, error_len) ||
+                !mir_verify_num_uses(instr, 1, index, error, error_len) ||
+                !mir_verify_use_class(func, instr, index, 0,
+                                      ANVIL_MIR_REG_GPR, error, error_len) ||
+                !mir_valid_block(func, instr->true_block) ||
+                !mir_valid_block(func, instr->false_block)) return false;
+            return func->vregs[instr->uses[0]].size_bits == 8 ||
+                   mir_verify_fail(error, error_len,
+                       "instruction %zu branch condition must be GPR8", index);
 
         case ANVIL_MIR_OP_SPILL_LOAD:
             return mir_verify_has_def(instr, index, error, error_len) &&
@@ -1027,14 +1177,275 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                    instr->spill_slot >= 0 &&
                    (size_t)instr->spill_slot < func->num_spills;
 
-        case ANVIL_MIR_OP_OTHER:
-            return true;
+        case ANVIL_MIR_OP_KEEPALIVE:
+            return mir_verify_no_def(instr, index, error, error_len) &&
+                   instr->num_uses > 0 && !instr->symbol;
+
+        case ANVIL_MIR_OP_CALL_RESULT: {
+            const anvil_mir_vreg_info_t *def =
+                mir_verify_vreg_info(func, instr->def, index, error, error_len);
+            size_t bundle_start = index;
+            while (bundle_start > 0 &&
+                   func->instrs[bundle_start - 1].block == instr->block &&
+                   func->instrs[bundle_start - 1].op ==
+                       ANVIL_MIR_OP_CALL_RESULT) {
+                bundle_start--;
+            }
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 0, index, error, error_len) &&
+                   def && def->has_fixed_reg && bundle_start > 0 &&
+                   func->instrs[bundle_start - 1].block == instr->block &&
+                   func->instrs[bundle_start - 1].op == ANVIL_MIR_OP_CALL;
+        }
+
+        case ANVIL_MIR_OP_RET_VALUE_PART: {
+            size_t bundle_end = index + 1;
+            while (bundle_end < func->num_instrs &&
+                   func->instrs[bundle_end].block == instr->block &&
+                   func->instrs[bundle_end].op ==
+                       ANVIL_MIR_OP_RET_VALUE_PART) {
+                bundle_end++;
+            }
+            return mir_verify_no_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 1, index, error, error_len) &&
+                   bundle_end < func->num_instrs &&
+                   func->instrs[bundle_end].block == instr->block &&
+                   func->instrs[bundle_end].op == ANVIL_MIR_OP_RET;
+        }
 
         case ANVIL_MIR_OP_INVALID:
         default:
             return mir_verify_fail(error, error_len,
                                    "instruction %zu has invalid opcode", index);
     }
+}
+
+static bool mir_verify_cfg_and_assignment(const anvil_mir_func_t *func,
+                                          char *error, size_t error_len)
+{
+    size_t blocks = func->num_blocks;
+    size_t vregs = func->num_vregs;
+    if (blocks == 0 || vregs > SIZE_MAX - 63) {
+        return mir_verify_fail(error, error_len, "MachineIR CFG is too large");
+    }
+    size_t words = vregs == 0 ? 0 : (vregs + 63) / 64;
+    if (blocks > SIZE_MAX / (2 * sizeof(anvil_mir_block_t)) ||
+        blocks > SIZE_MAX / (2 * sizeof(size_t)) ||
+        blocks > SIZE_MAX / sizeof(size_t) ||
+        blocks == SIZE_MAX ||
+        blocks + 1 > SIZE_MAX / sizeof(size_t) ||
+        (words && blocks > (SIZE_MAX / sizeof(uint64_t)) / words)) {
+        return mir_verify_fail(error, error_len, "MachineIR CFG is too large");
+    }
+    anvil_mir_block_t *succ = malloc(blocks * 2 * sizeof(*succ));
+    uint8_t *succ_count = calloc(blocks, sizeof(*succ_count));
+    size_t *pred_count = calloc(blocks, sizeof(*pred_count));
+    size_t *pred_offset = calloc(blocks + 1, sizeof(*pred_offset));
+    size_t *last_instr = malloc(blocks * sizeof(*last_instr));
+    bool *reachable = calloc(blocks, sizeof(*reachable));
+    bool *seen_block = calloc(blocks, sizeof(*seen_block));
+    size_t *queue = malloc(blocks * sizeof(*queue));
+    if (!succ || !succ_count || !pred_count || !pred_offset || !last_instr ||
+        !reachable || !seen_block || !queue) {
+        free(succ); free(succ_count); free(pred_count); free(pred_offset);
+        free(last_instr); free(reachable); free(seen_block); free(queue);
+        return mir_verify_fail(error, error_len, "out of memory verifying MachineIR CFG");
+    }
+    for (size_t b = 0; b < blocks; b++) last_instr[b] = SIZE_MAX;
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        anvil_mir_block_t block = func->instrs[i].block;
+        seen_block[block] = true;
+        last_instr[block] = i;
+    }
+    for (size_t b = 0; b < blocks; b++) {
+        size_t last = last_instr[b];
+        if (last == SIZE_MAX) continue;
+        const anvil_mir_instr_t *term = &func->instrs[last];
+        if (term->op == ANVIL_MIR_OP_BR) {
+            succ[b * 2] = term->true_block;
+            succ_count[b] = 1;
+        } else if (term->op == ANVIL_MIR_OP_BR_COND) {
+            succ[b * 2] = term->true_block;
+            succ_count[b] = 1;
+            if (term->false_block != term->true_block) {
+                succ[b * 2 + 1] = term->false_block;
+                succ_count[b] = 2;
+            }
+        }
+        for (size_t s = 0; s < succ_count[b]; s++) {
+            pred_count[succ[b * 2 + s]]++;
+        }
+    }
+    size_t edge_count = 0;
+    for (size_t b = 0; b < blocks; b++) {
+        pred_offset[b] = edge_count;
+        if (pred_count[b] > SIZE_MAX - edge_count) {
+            free(succ); free(succ_count); free(pred_count); free(pred_offset);
+            free(last_instr); free(reachable); free(seen_block); free(queue);
+            return mir_verify_fail(error, error_len, "MachineIR CFG is too large");
+        }
+        edge_count += pred_count[b];
+    }
+    pred_offset[blocks] = edge_count;
+    size_t *pred = edge_count ? malloc(edge_count * sizeof(*pred)) : NULL;
+    size_t *pred_cursor = calloc(blocks, sizeof(*pred_cursor));
+    if ((edge_count && !pred) || !pred_cursor) {
+        free(succ); free(succ_count); free(pred_count); free(pred_offset);
+        free(last_instr); free(reachable); free(seen_block); free(queue);
+        free(pred); free(pred_cursor);
+        return mir_verify_fail(error, error_len, "out of memory verifying MachineIR CFG");
+    }
+    for (size_t from = 0; from < blocks; from++) {
+        for (size_t s = 0; s < succ_count[from]; s++) {
+            size_t to = succ[from * 2 + s];
+            pred[pred_offset[to] + pred_cursor[to]++] = from;
+        }
+    }
+    reachable[0] = true;
+    size_t qhead = 0, qtail = 0;
+    queue[qtail++] = 0;
+    while (qhead < qtail) {
+        size_t from = queue[qhead++];
+        for (size_t s = 0; s < succ_count[from]; s++) {
+            size_t to = succ[from * 2 + s];
+            if (!reachable[to]) {
+                reachable[to] = true;
+                queue[qtail++] = to;
+            }
+        }
+    }
+    for (size_t b = 0; b < blocks; b++) {
+        if (!reachable[b]) {
+            free(succ); free(succ_count); free(pred_count); free(pred_offset);
+            free(last_instr); free(reachable); free(seen_block); free(queue);
+            free(pred); free(pred_cursor);
+            return mir_verify_fail(error, error_len, "block %s is unreachable",
+                func->blocks[b].name ? func->blocks[b].name : "");
+        }
+        if (!seen_block[b]) {
+            free(succ); free(succ_count); free(pred_count); free(pred_offset);
+            free(last_instr); free(reachable); free(seen_block); free(queue);
+            free(pred); free(pred_cursor);
+            return mir_verify_fail(error, error_len, "reachable block %s is empty",
+                func->blocks[b].name ? func->blocks[b].name : "");
+        }
+    }
+    free(last_instr); free(reachable); free(seen_block); free(pred_cursor);
+
+    if (vregs == 0) {
+        free(succ); free(succ_count); free(pred_count); free(pred_offset);
+        free(queue); free(pred);
+        return true;
+    }
+    uint64_t *in = calloc(blocks * words, sizeof(*in));
+    uint64_t *out = calloc(blocks * words, sizeof(*out));
+    uint64_t *gen = calloc(blocks * words, sizeof(*gen));
+    uint64_t *state = malloc(words * sizeof(*state));
+    bool *queued = calloc(blocks, sizeof(*queued));
+    if (!in || !out || !gen || !state || !queued) {
+        free(succ); free(succ_count); free(pred_count); free(pred_offset);
+        free(queue); free(pred); free(in); free(out); free(gen); free(state);
+        free(queued);
+        return mir_verify_fail(error, error_len,
+                               "out of memory verifying MachineIR dataflow");
+    }
+    uint64_t final_mask = vregs % 64 ? (UINT64_C(1) << (vregs % 64)) - 1
+                                     : UINT64_MAX;
+    for (size_t b = 1; b < blocks; b++) {
+        for (size_t w = 0; w < words; w++) in[b * words + w] = UINT64_MAX;
+        in[b * words + words - 1] &= final_mask;
+    }
+    for (size_t v = 0; v < vregs; v++) {
+        if (func->vregs[v].is_live_in) {
+            in[v / 64] |= UINT64_C(1) << (v % 64);
+        }
+    }
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        if (instr->def != ANVIL_MIR_NO_VREG) {
+            gen[(size_t)instr->block * words + instr->def / 64] |=
+                UINT64_C(1) << (instr->def % 64);
+        }
+    }
+    /* Must-def analysis uses the greatest fixed point for loop headers: all
+       non-entry facts start true and are removed by predecessor intersections. */
+    for (size_t b = 0; b < blocks; b++) {
+        for (size_t w = 0; w < words; w++) {
+            out[b * words + w] = in[b * words + w] | gen[b * words + w];
+        }
+    }
+    qhead = 0; qtail = 0;
+    for (size_t b = 0; b < blocks; b++) {
+        queue[b] = b;
+        queued[b] = true;
+    }
+    size_t qcount = blocks;
+    while (qcount > 0) {
+        size_t b = queue[qhead];
+        qhead = (qhead + 1) % blocks;
+        qcount--;
+        queued[b] = false;
+        if (b != 0) {
+            memcpy(state, &out[pred[pred_offset[b]] * words],
+                   words * sizeof(*state));
+            for (size_t pi = pred_offset[b] + 1; pi < pred_offset[b + 1]; pi++) {
+                const uint64_t *pred_out = &out[pred[pi] * words];
+                for (size_t w = 0; w < words; w++) state[w] &= pred_out[w];
+            }
+            memcpy(&in[b * words], state, words * sizeof(*state));
+        }
+        bool changed = false;
+        for (size_t w = 0; w < words; w++) {
+            uint64_t next = in[b * words + w] | gen[b * words + w];
+            if (out[b * words + w] != next) {
+                out[b * words + w] = next;
+                changed = true;
+            }
+        }
+        if (changed) {
+            for (size_t s = 0; s < succ_count[b]; s++) {
+                size_t to = succ[b * 2 + s];
+                if (!queued[to]) {
+                    queue[qtail] = to;
+                    qtail = (qtail + 1) % blocks;
+                    qcount++;
+                    queued[to] = true;
+                }
+            }
+        }
+    }
+
+    uint64_t *block_state = malloc(blocks * words * sizeof(*block_state));
+    if (!block_state) {
+        free(succ); free(succ_count); free(pred_count); free(pred_offset);
+        free(queue); free(pred); free(in); free(out); free(gen); free(state);
+        free(queued);
+        return mir_verify_fail(error, error_len,
+                               "out of memory verifying MachineIR dataflow");
+    }
+    memcpy(block_state, in, blocks * words * sizeof(*block_state));
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        uint64_t *block_bits = &block_state[(size_t)instr->block * words];
+        for (size_t u = 0; u < instr->num_uses; u++) {
+            anvil_mir_vreg_t use = instr->uses[u];
+            if ((block_bits[use / 64] & (UINT64_C(1) << (use % 64))) == 0) {
+                free(succ); free(succ_count); free(pred_count); free(pred_offset);
+                free(queue); free(pred); free(in); free(out); free(gen); free(state);
+                free(queued); free(block_state);
+                return mir_verify_fail(error, error_len,
+                    "instruction %zu uses vreg %u before definite assignment",
+                    i, use);
+            }
+        }
+        if (instr->def != ANVIL_MIR_NO_VREG) {
+            block_bits[instr->def / 64] |= UINT64_C(1) << (instr->def % 64);
+        }
+    }
+    free(succ); free(succ_count); free(pred_count); free(pred_offset);
+    free(queue); free(pred); free(in); free(out); free(gen); free(state);
+    free(queued); free(block_state);
+    return true;
 }
 
 bool anvil_mir_verify(const anvil_mir_func_t *func,
@@ -1059,6 +1470,10 @@ bool anvil_mir_verify(const anvil_mir_func_t *func,
             return mir_verify_fail(error, error_len,
                                    "vreg %zu has invalid fixed register", i);
         }
+        if (info->is_live_in && !info->has_fixed_reg) {
+            return mir_verify_fail(error, error_len,
+                                   "vreg %zu is a live-in without a fixed register", i);
+        }
     }
 
     for (size_t i = 0; i < func->num_instrs; i++) {
@@ -1071,14 +1486,8 @@ bool anvil_mir_verify(const anvil_mir_func_t *func,
         }
     }
 
-    for (size_t b = 0; b < func->num_blocks; b++) {
-        if (!mir_verify_block(func, (anvil_mir_block_t)b,
-                              error, error_len)) {
-            return false;
-        }
-    }
-
-    return true;
+    if (!mir_verify_blocks(func, error, error_len)) return false;
+    return mir_verify_cfg_and_assignment(func, error, error_len);
 }
 
 static void free_instr_contents(anvil_mir_instr_t *instr)
@@ -1205,38 +1614,35 @@ static bool assignment_is_spilled(const anvil_mir_func_t *func,
            func->assignments[vreg].spilled;
 }
 
-static bool scratch_config_contains_phys(
-    const anvil_regalloc_class_config_t *configs,
-    size_t num_configs,
-    anvil_mir_reg_class_t reg_class,
-    int phys_reg)
+static bool scratch_phys_live_at_instr(const anvil_mir_func_t *func,
+                                       size_t original_vregs,
+                                       anvil_mir_reg_class_t reg_class,
+                                       int phys_reg,
+                                       size_t instr_index)
 {
-    const anvil_regalloc_class_config_t *config =
-        spill_config_for_class(configs, num_configs, reg_class);
-    if (!config || config->num_phys_regs <= 0) return false;
-
-    for (int i = 0; i < config->num_phys_regs; i++) {
-        if (config_phys_reg_at(config, (size_t)i) == phys_reg) return true;
-    }
-    return false;
-}
-
-static bool scratch_regs_are_reserved(const anvil_mir_func_t *func,
-                                      const anvil_regalloc_class_config_t *configs,
-                                      size_t num_configs,
-                                      size_t original_vregs)
-{
-    for (size_t i = 0; i < original_vregs; i++) {
-        const anvil_regalloc_assignment_t *assignment = &func->assignments[i];
-        if (assignment->spilled || assignment->phys_reg < 0) continue;
-        if (scratch_config_contains_phys(configs, num_configs,
-                                         assignment->reg_class,
-                                         assignment->phys_reg)) {
-            return false;
+    for (size_t v = 0; v < original_vregs; v++) {
+        const anvil_regalloc_assignment_t *assignment = &func->assignments[v];
+        if (assignment->spilled || assignment->reg_class != reg_class ||
+            assignment->phys_reg != phys_reg) {
+            continue;
+        }
+        size_t first = SIZE_MAX;
+        size_t last = 0;
+        for (size_t i = 0; i < func->num_instrs; i++) {
+            const anvil_mir_instr_t *instr = &func->instrs[i];
+            bool occurs = instr->def == (anvil_mir_vreg_t)v;
+            for (size_t u = 0; !occurs && u < instr->num_uses; u++) {
+                occurs = instr->uses[u] == (anvil_mir_vreg_t)v;
+            }
+            if (!occurs) continue;
+            if (first == SIZE_MAX) first = i;
+            last = i;
+        }
+        if (first != SIZE_MAX && first <= instr_index && instr_index <= last) {
+            return true;
         }
     }
-
-    return true;
+    return false;
 }
 
 static bool instruction_scratch_needs(const anvil_mir_func_t *func,
@@ -1315,6 +1721,7 @@ static anvil_mir_vreg_t add_spill_temp_vreg(anvil_mir_func_t *func,
     func->vregs[vreg].reg_class = reg_class;
     func->vregs[vreg].size_bits = size_bits;
     func->vregs[vreg].is_signed = is_signed;
+    func->vregs[vreg].is_live_in = false;
     func->vregs[vreg].has_fixed_reg = true;
     func->vregs[vreg].fixed_phys_reg = phys_reg;
 
@@ -1443,17 +1850,28 @@ static bool next_scratch_phys(const anvil_regalloc_class_config_t *configs,
                               size_t num_configs,
                               anvil_mir_reg_class_t reg_class,
                               size_t used[ANVIL_MIR_REG_CLASS_COUNT],
+                              const anvil_mir_func_t *func,
+                              size_t original_vregs,
+                              size_t instr_index,
                               int *out_phys)
 {
     const anvil_regalloc_class_config_t *config =
         spill_config_for_class(configs, num_configs, reg_class);
     if (!config || config->num_phys_regs <= 0) return false;
 
-    size_t index = used[reg_class]++;
-    if (index >= (size_t)config->num_phys_regs) return false;
-
-    *out_phys = config_phys_reg_at(config, index);
-    return *out_phys >= 0;
+    size_t index = used[reg_class];
+    while (index < (size_t)config->num_phys_regs) {
+        int candidate = config_phys_reg_at(config, index++);
+        if (candidate < 0 || scratch_phys_live_at_instr(
+                func, original_vregs, reg_class, candidate, instr_index)) {
+            continue;
+        }
+        used[reg_class] = index;
+        *out_phys = candidate;
+        return true;
+    }
+    used[reg_class] = index;
+    return false;
 }
 
 static void recompute_block_instr_ranges(anvil_mir_func_t *func)
@@ -1488,11 +1906,6 @@ bool anvil_mir_materialize_spills(
                                       num_scratch_configs)) {
         return false;
     }
-    if (!scratch_regs_are_reserved(func, scratch_configs, num_scratch_configs,
-                                   original_vregs)) {
-        return false;
-    }
-
     anvil_mir_instr_t *new_instrs = NULL;
     size_t new_num_instrs = 0;
     size_t new_cap_instrs = 0;
@@ -1514,7 +1927,8 @@ bool anvil_mir_materialize_spills(
             const anvil_mir_vreg_info_t *info = &func->vregs[use];
             int phys_reg = -1;
             if (!next_scratch_phys(scratch_configs, num_scratch_configs,
-                                   info->reg_class, scratch_used, &phys_reg)) {
+                                   info->reg_class, scratch_used, func,
+                                   original_vregs, i, &phys_reg)) {
                 free_instr_contents(&patched);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;
@@ -1543,7 +1957,8 @@ bool anvil_mir_materialize_spills(
             const anvil_mir_vreg_info_t *info = &func->vregs[original_def];
             int phys_reg = -1;
             if (!next_scratch_phys(scratch_configs, num_scratch_configs,
-                                   info->reg_class, scratch_used, &phys_reg)) {
+                                   info->reg_class, scratch_used, func,
+                                   original_vregs, i, &phys_reg)) {
                 free_instr_contents(&patched);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;

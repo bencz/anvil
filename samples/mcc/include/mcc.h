@@ -196,6 +196,5 @@ anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch);
 #include "symtab.h"
 #include "sema.h"
 #include "codegen.h"
-#include "ast_opt.h"
 
 #endif /* MCC_H */

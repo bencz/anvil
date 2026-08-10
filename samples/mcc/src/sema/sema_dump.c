@@ -153,7 +153,7 @@ static void dump_type_detailed(mcc_type_t *type, FILE *out, int indent)
                         fprintf(out, "(anonymous) ");
                     }
                     dump_type_str(f->type, out);
-                    fprintf(out, " [offset: %d", f->offset);
+                    fprintf(out, " [offset: %zu", f->offset);
                     if (f->bitfield_width > 0) {
                         fprintf(out, ", bits: %d", f->bitfield_width);
                     }
@@ -364,7 +364,7 @@ static void dump_struct_decl(mcc_ast_node_t *node, FILE *out, int indent, bool i
                 }
                 fprintf(out, " ");
                 dump_type_str(f->type, out);
-                fprintf(out, " [offset: %d", f->offset);
+                fprintf(out, " [offset: %zu", f->offset);
                 if (f->bitfield_width > 0) {
                     fprintf(out, ", bits: %d", f->bitfield_width);
                 }
@@ -641,7 +641,7 @@ static void dump_type_full(mcc_type_t *type, FILE *out, int indent)
             if (type->data.record.fields) {
                 for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
                     print_indent(out, indent + 2);
-                    fprintf(out, "%s: %s [offset=%d",
+                    fprintf(out, "%s: %s [offset=%zu",
                             f->name ? f->name : "(anon)",
                             mcc_type_to_string(f->type),
                             f->offset);

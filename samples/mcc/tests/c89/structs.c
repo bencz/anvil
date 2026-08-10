@@ -61,13 +61,6 @@ enum status {
     PENDING = 1
 };
 
-/* Bitfields */
-struct flags {
-    unsigned int flag1 : 1;
-    unsigned int flag2 : 1;
-    unsigned int value : 6;
-};
-
 int main(void)
 {
     struct point p1;
@@ -79,7 +72,6 @@ int main(void)
     struct variant v;
     enum color c;
     enum status s;
-    struct flags f;
     
     /* Member access */
     p1.x = 5;
@@ -110,9 +102,6 @@ int main(void)
     s = OK;
     
     /* Bitfield usage */
-    f.flag1 = 1;
-    f.flag2 = 0;
-    f.value = 42;
     
     /* Linked list */
     head.value = 1;

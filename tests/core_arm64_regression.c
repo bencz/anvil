@@ -3,9 +3,11 @@
  */
 
 #include <anvil/anvil.h>
+#include <anvil/anvil_debug.h>
 #include <anvil/anvil_internal.h>
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -68,32 +70,278 @@ static anvil_ctx_t *new_arm64_linux_ctx(void)
     return ctx;
 }
 
-static void test_pointer_cache_tracks_target_changes(void)
+static void test_context_defaults_and_enum_validation(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create();
+    CHECK(ctx != NULL, "neutral context should be created");
+    if (!ctx) return;
+
+    CHECK(ctx->arch == ANVIL_ARCH_NONE &&
+          anvil_ctx_get_target(ctx) == ANVIL_ARCH_NONE &&
+          !anvil_ctx_has_target(ctx) &&
+          anvil_ctx_get_fp_format(ctx) == ANVIL_FP_UNSPECIFIED,
+          "new context must have an explicit no-target state");
+    CHECK(ctx->backend == NULL && anvil_ctx_get_arch_info(ctx) == NULL &&
+          anvil_ctx_get_data_layout(ctx) == NULL,
+          "neutral context must not expose backend or x86-64 layout state");
+    CHECK(anvil_type_i1(ctx) == NULL && anvil_type_i32(ctx) == NULL,
+          "primitive target types must be unavailable before selection");
+    CHECK(anvil_module_create(ctx, "no_target") == NULL &&
+          anvil_ctx_get_last_error(ctx) == ANVIL_ERR_NO_TARGET,
+          "module creation without a target must fail deterministically");
+    CHECK(anvil_ctx_set_abi(ctx, ANVIL_ABI_SYSV) == ANVIL_ERR_NO_TARGET &&
+          anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754) == ANVIL_ERR_NO_TARGET &&
+          anvil_ctx_set_cpu(ctx, ANVIL_CPU_GENERIC) == ANVIL_ERR_NO_TARGET &&
+          anvil_ctx_enable_feature(ctx, 1) == ANVIL_ERR_NO_TARGET,
+          "target-dependent setters must report NO_TARGET");
+    CHECK(anvil_ctx_set_fp_format(ctx, (anvil_fp_format_t)-2) ==
+              ANVIL_ERR_INVALID_ARG &&
+          anvil_ctx_set_cpu(ctx, (anvil_cpu_model_t)-12345) ==
+              ANVIL_ERR_INVALID_ARG,
+          "invalid FP/CPU arguments must take precedence over NO_TARGET");
+    CHECK(anvil_ctx_set_target(ctx, (anvil_arch_t)-1) == ANVIL_ERR_INVALID_ARG,
+          "negative architecture IDs must be rejected");
+    CHECK(anvil_arch_get_info((anvil_arch_t)-1) == NULL,
+          "negative architecture lookup must be rejected");
+    CHECK(anvil_ctx_set_output(ctx, (anvil_output_t)-1) == ANVIL_ERR_INVALID_ARG,
+          "negative output formats must be rejected");
+    CHECK(anvil_ctx_set_output(ctx, (anvil_output_t)(ANVIL_OUTPUT_ASM + 1)) ==
+              ANVIL_ERR_INVALID_ARG,
+          "unknown output formats must be rejected");
+    CHECK(anvil_ctx_set_syntax(ctx, (anvil_syntax_t)-1) == ANVIL_ERR_INVALID_ARG,
+          "negative syntax IDs must be rejected");
+    CHECK(anvil_ctx_set_syntax(ctx, ANVIL_SYNTAX_GAS) == ANVIL_ERR_NO_TARGET &&
+          ctx->syntax == ANVIL_SYNTAX_DEFAULT,
+          "a supported syntax still requires an explicitly selected target");
+    CHECK(anvil_ctx_set_abi(ctx, (anvil_abi_t)-1) == ANVIL_ERR_INVALID_ARG,
+          "negative ABI IDs must be rejected");
+
+    CHECK(anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64) == ANVIL_OK &&
+          anvil_ctx_get_target(ctx) == ANVIL_ARCH_X86_64 &&
+          anvil_ctx_has_target(ctx) &&
+          anvil_type_i32(ctx) != NULL,
+          "neutral context should become fully usable after target selection");
+    CHECK(anvil_ctx_set_syntax(ctx, ANVIL_SYNTAX_HLASM) ==
+              ANVIL_ERR_INVALID_ARG &&
+          ctx->syntax == ANVIL_SYNTAX_DEFAULT &&
+          ctx->backend->syntax == ANVIL_SYNTAX_DEFAULT,
+          "x86-64 must reject HLASM without mutating context/backend state");
+    CHECK(anvil_ctx_set_syntax(ctx, ANVIL_SYNTAX_GAS) == ANVIL_OK &&
+          ctx->syntax == ANVIL_SYNTAX_GAS &&
+          ctx->backend->syntax == ANVIL_SYNTAX_GAS,
+          "x86-64 should accept and commit GAS syntax");
+
+    anvil_ctx_t *mainframe =
+        anvil_ctx_create_for_target(ANVIL_ARCH_S390);
+    CHECK(mainframe &&
+          anvil_ctx_set_syntax(mainframe, ANVIL_SYNTAX_GAS) ==
+              ANVIL_ERR_INVALID_ARG &&
+          mainframe->syntax == ANVIL_SYNTAX_DEFAULT &&
+          anvil_ctx_set_syntax(mainframe, ANVIL_SYNTAX_HLASM) == ANVIL_OK,
+          "mainframe targets must reject GAS and accept HLASM transactionally");
+    anvil_ctx_destroy(mainframe);
+
+    anvil_backend_ops_t invalid_ops = { 0 };
+    invalid_ops.name = "invalid";
+    invalid_ops.arch = (anvil_arch_t)-1;
+    CHECK(anvil_register_backend(&invalid_ops) == ANVIL_ERR_INVALID_ARG,
+          "invalid backend descriptors must be rejected");
+    CHECK(anvil_register_backend(&anvil_backend_x86_64) == ANVIL_ERR_INVALID_ARG,
+          "duplicate backend architectures must be rejected");
+
+    anvil_ctx_destroy(ctx);
+
+    CHECK(anvil_ctx_create_for_target(ANVIL_ARCH_NONE) == NULL &&
+          anvil_ctx_create_for_target(ANVIL_ARCH_COUNT) == NULL,
+          "atomic target constructor must reject sentinel/invalid targets");
+    for (int arch = 0; arch < ANVIL_ARCH_COUNT; arch++) {
+        anvil_ctx_t *target_ctx =
+            anvil_ctx_create_for_target((anvil_arch_t)arch);
+        CHECK(target_ctx && anvil_ctx_has_target(target_ctx) &&
+              anvil_ctx_get_target(target_ctx) == (anvil_arch_t)arch &&
+              anvil_ctx_get_arch_info(target_ctx) != NULL &&
+              anvil_ctx_get_data_layout(target_ctx) != NULL,
+              "create_for_target must initialize every registered architecture");
+        anvil_ctx_destroy(target_ctx);
+    }
+
+    anvil_ctx_t *oom_ctx = anvil_ctx_create();
+    CHECK(oom_ctx != NULL, "neutral context should exist for target OOM test");
+    if (oom_ctx) {
+        anvil_test_fail_alloc_after(oom_ctx, 0);
+        CHECK(anvil_ctx_set_target(oom_ctx, ANVIL_ARCH_X86) == ANVIL_ERR_NOMEM &&
+              !anvil_ctx_has_target(oom_ctx) &&
+              anvil_ctx_get_target(oom_ctx) == ANVIL_ARCH_NONE &&
+              anvil_ctx_get_data_layout(oom_ctx) == NULL &&
+              anvil_type_i32(oom_ctx) == NULL,
+              "target type OOM must roll back to a clean neutral context");
+        anvil_test_disable_alloc_fail(oom_ctx);
+        CHECK(anvil_ctx_set_target(oom_ctx, ANVIL_ARCH_X86) == ANVIL_OK &&
+              anvil_ctx_has_target(oom_ctx),
+              "target selection must be retryable after transactional OOM");
+        anvil_ctx_destroy(oom_ctx);
+    }
+}
+
+static void test_string_buffer_growth_and_overflow_are_safe(void)
+{
+    anvil_strbuf_t sb;
+    anvil_strbuf_init(&sb);
+    CHECK(!sb.failed && sb.data != NULL,
+          "string buffer should initialize successfully");
+
+    for (size_t i = 0; i < 1024; i++) {
+        anvil_strbuf_append_char(&sb, (char)('a' + (i % 26)));
+    }
+    anvil_strbuf_appendf(&sb, "-%s-%d", "formatted", 42);
+    CHECK(!sb.failed && sb.len > 1024,
+          "string buffer should grow for formatted output");
+
+    sb.len = SIZE_MAX;
+    anvil_strbuf_append_char(&sb, 'x');
+    CHECK(sb.failed, "string buffer should detect size overflow");
+
+    size_t detached_len = 99;
+    CHECK(anvil_strbuf_detach(&sb, &detached_len) == NULL,
+          "failed string buffer must not return partial output");
+    CHECK(detached_len == 0,
+          "failed string buffer should report zero detached length");
+    anvil_strbuf_destroy(&sb);
+}
+
+static void test_core_lifetime_and_constant_validation(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+    CHECK(ctx != NULL, "context should be created for lifetime tests");
+    if (!ctx) return;
+
+    anvil_module_t *mod = anvil_module_create(ctx, "lifetime");
+    anvil_type_t *params[] = { anvil_type_i32(ctx) };
+    anvil_type_t *decl_type = anvil_type_func(ctx, anvil_type_i32(ctx),
+                                              params, 1, false);
+    anvil_func_t *decl = anvil_func_declare(mod, "external", decl_type);
+    CHECK(decl != NULL, "declaration should be created");
+    CHECK(anvil_func_get_param(decl, 0) == NULL,
+          "declaration parameter lookup must be safe");
+
+    anvil_type_t *fn_type = anvil_type_func(ctx, anvil_type_void(ctx),
+                                            NULL, 0, false);
+    anvil_func_t *fn = anvil_func_create(mod, "body", fn_type,
+                                         ANVIL_LINK_INTERNAL);
+    CHECK(fn != NULL, "function should be created for insertion lifetime test");
+    if (fn) anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    CHECK(anvil_get_insert_block(ctx) == (fn ? anvil_func_get_entry(fn) : NULL),
+          "insertion block getter should track the current builder block");
+
+    CHECK(anvil_const_null(ctx, anvil_type_i32(ctx)) == NULL,
+          "null constants require pointer types");
+    CHECK(anvil_const_string(ctx, NULL) == NULL,
+          "string constants require a valid string");
+    CHECK(anvil_const_array(ctx, anvil_type_i32(ctx), NULL, 1) == NULL,
+          "non-empty constant arrays require elements");
+    anvil_value_t *bad_elements[] = { NULL };
+    CHECK(anvil_const_array(ctx, anvil_type_i32(ctx), bad_elements, 1) == NULL,
+          "constant arrays reject null elements");
+
+    anvil_type_t *decimal = anvil_type_decimal(ctx, ANVIL_DECIMAL_PACKED, 5, 2);
+    anvil_value_t *decimal_value = anvil_const_decimal(ctx, decimal, "123.45");
+    CHECK(decimal_value != NULL,
+          "decimal literal fitting precision and scale should be accepted");
+    anvil_value_t *decimal_global = anvil_module_add_global(
+        mod, "decimal_value", decimal, ANVIL_LINK_INTERNAL);
+    anvil_global_set_initializer(decimal_global, decimal_value);
+    CHECK(anvil_const_decimal(ctx, decimal, "1.234") == NULL,
+          "decimal literal exceeding scale should be rejected");
+    CHECK(anvil_const_decimal(ctx, decimal, "1234.5") == NULL,
+          "decimal literal exceeding integer precision should be rejected");
+
+    anvil_module_destroy(mod);
+    CHECK(ctx->insert_block == NULL && ctx->insert_point == NULL,
+          "destroying a module must clear its insertion point");
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_ir_dump_is_canonical(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+    anvil_module_t *mod = ctx ? anvil_module_create(ctx, "dump") : NULL;
+    CHECK(mod != NULL, "module should be created for dump test");
+    if (!mod) {
+        anvil_ctx_destroy(ctx);
+        return;
+    }
+
+    anvil_type_t *params[] = { anvil_type_u64(ctx) };
+    anvil_type_t *decl_type = anvil_type_func(ctx, anvil_type_i32(ctx),
+                                              params, 1, true);
+    anvil_func_declare(mod, "variadic_decl", decl_type);
+    anvil_value_t *u64_global = anvil_module_add_global(
+        mod, "unsigned_max", anvil_type_u64(ctx), ANVIL_LINK_INTERNAL);
+    anvil_global_set_initializer(u64_global, anvil_const_u64(ctx, UINT64_MAX));
+
+    anvil_type_t *phi_params[] = { anvil_type_i1(ctx) };
+    anvil_type_t *phi_type = anvil_type_func(ctx, anvil_type_i32(ctx),
+                                             phi_params, 1, false);
+    anvil_func_t *phi_fn = anvil_func_create(mod, "canonical_phi", phi_type,
+                                              ANVIL_LINK_INTERNAL);
+    anvil_block_t *left = phi_fn ? anvil_block_create(phi_fn, "left") : NULL;
+    anvil_block_t *right = phi_fn ? anvil_block_create(phi_fn, "right") : NULL;
+    anvil_block_t *merge = phi_fn ? anvil_block_create(phi_fn, "merge") : NULL;
+    if (phi_fn && left && right && merge) {
+        anvil_set_insert_point(ctx, anvil_func_get_entry(phi_fn));
+        anvil_build_br_cond(ctx, anvil_func_get_param(phi_fn, 0), left, right);
+        anvil_set_insert_point(ctx, left);
+        anvil_build_br(ctx, merge);
+        anvil_set_insert_point(ctx, right);
+        anvil_build_br(ctx, merge);
+        anvil_set_insert_point(ctx, merge);
+        anvil_value_t *phi = anvil_build_phi(ctx, anvil_type_i32(ctx), "joined");
+        anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 1), left);
+        anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 2), right);
+        anvil_build_ret(ctx, phi);
+    }
+
+    char *dump = anvil_module_to_string(mod);
+    CHECK(dump != NULL, "module dump should be produced");
+    if (dump) {
+        CHECK(strstr(dump, "declare external i32 @variadic_decl(u64, ...)") != NULL,
+              "declaration dump should include parameter types and variadic marker");
+        CHECK(strstr(dump, "18446744073709551615") != NULL,
+              "unsigned constants should not be printed as negative values");
+        CHECK(strstr(dump, "phi i32 [1, %left], [2, %right]") != NULL,
+              "PHI dump should contain one canonical incoming pair per edge");
+        CHECK(strstr(dump, "phi i32 1, 2") == NULL,
+              "PHI dump must not duplicate operands as a generic list");
+        free(dump);
+    }
+
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_target_and_layout_freeze(void)
 {
     anvil_ctx_t *ctx = anvil_ctx_create();
     CHECK(ctx != NULL, "context should be created for pointer cache test");
     if (!ctx) return;
 
-    anvil_type_t *i8_ptr = anvil_type_ptr(ctx, anvil_type_i8(ctx));
-    anvil_type_t *void_ptr = anvil_type_ptr(ctx, anvil_type_void(ctx));
-    CHECK(anvil_type_size(i8_ptr) == 8, "default i8* should be 8 bytes");
-    CHECK(anvil_type_size(void_ptr) == 8, "default void* should be 8 bytes");
-
     CHECK(anvil_ctx_set_target(ctx, ANVIL_ARCH_X86) == ANVIL_OK,
           "x86 target should be available");
-    i8_ptr = anvil_type_ptr(ctx, anvil_type_i8(ctx));
-    void_ptr = anvil_type_ptr(ctx, anvil_type_void(ctx));
+    anvil_type_t *i8_ptr = anvil_type_ptr(ctx, anvil_type_i8(ctx));
+    anvil_type_t *void_ptr = anvil_type_ptr(ctx, anvil_type_void(ctx));
     CHECK(anvil_type_size(i8_ptr) == 4, "i8* should update to 4 bytes on x86");
     CHECK(anvil_type_align(i8_ptr) == 4, "i8* align should update to 4 bytes on x86");
     CHECK(anvil_type_size(void_ptr) == 4, "void* should update to 4 bytes on x86");
     CHECK(anvil_type_align(void_ptr) == 4, "void* align should update to 4 bytes on x86");
 
-    CHECK(anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64) == ANVIL_OK,
-          "ARM64 target should be available after x86");
-    i8_ptr = anvil_type_ptr(ctx, anvil_type_i8(ctx));
-    void_ptr = anvil_type_ptr(ctx, anvil_type_void(ctx));
-    CHECK(anvil_type_size(i8_ptr) == 8, "i8* should update back to 8 bytes on ARM64");
-    CHECK(anvil_type_size(void_ptr) == 8, "void* should update back to 8 bytes on ARM64");
+    CHECK(anvil_type_align(anvil_type_i64(ctx)) == 4,
+          "i386 SysV i64 should have four-byte ABI alignment");
+    CHECK(anvil_type_preferred_align(anvil_type_i64(ctx)) == 8,
+          "i386 should still prefer eight-byte i64 alignment");
+    CHECK(anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64) == ANVIL_ERR_INVALID_OP,
+          "target must freeze after its initial selection/composite creation");
+    CHECK(anvil_type_size(i8_ptr) == 4 && anvil_type_size(void_ptr) == 4,
+          "rejected retarget must preserve the complete old layout");
 
     anvil_ctx_destroy(ctx);
 }
@@ -579,8 +827,8 @@ static void test_arm64_module_codegen_routes_memory_cast_select_function_through
         anvil_value_t *tiny = anvil_func_get_param(fn, 3);
         anvil_value_t *fp = anvil_func_get_param(fn, 4);
         anvil_value_t *items = anvil_build_alloca(ctx, array_i64_4, "items");
-        anvil_value_t *indices[] = { idx };
-        anvil_value_t *slot = anvil_build_gep(ctx, i64, items, indices, 1, "slot");
+        anvil_value_t *indices[] = { anvil_const_i64(ctx, 0), idx };
+        anvil_value_t *slot = anvil_build_gep(ctx, array_i64_4, items, indices, 2, "slot");
         anvil_build_store(ctx, a, slot);
         anvil_value_t *loaded = anvil_build_load(ctx, i64, slot, "loaded");
         anvil_value_t *cond = anvil_build_cmp_gt(ctx, loaded, b, "gt");
@@ -640,8 +888,9 @@ static void test_arm64_module_codegen_folds_constant_gep_into_load_store_offsets
     if (fn) {
         anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
         anvil_value_t *items = anvil_build_alloca(ctx, array_i64_4, "items");
-        anvil_value_t *indices[] = { anvil_const_i64(ctx, 2) };
-        anvil_value_t *slot = anvil_build_gep(ctx, i64, items, indices, 1, "slot");
+        anvil_value_t *indices[] = { anvil_const_i64(ctx, 0),
+                                     anvil_const_i64(ctx, 2) };
+        anvil_value_t *slot = anvil_build_gep(ctx, array_i64_4, items, indices, 2, "slot");
         anvil_build_store(ctx, anvil_const_i64(ctx, 88), slot);
         anvil_value_t *loaded = anvil_build_load(ctx, i64, slot, "loaded");
         anvil_build_ret(ctx, loaded);
@@ -725,6 +974,69 @@ static void test_arm64_module_codegen_materializes_global_and_string_addresses(v
               "ARM64 MIR should emit string literal data for const string operands");
         CHECK(strstr(asm_text, ":lo12:.Lstr_mir_const_string_0") != NULL,
               "ARM64 MIR should materialize string literal addresses");
+        free(asm_text);
+    }
+
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_arm64_backend_preserves_cmp_result_store_before_branch(void)
+{
+    anvil_ctx_t *ctx = new_arm64_linux_ctx();
+    if (!ctx) return;
+
+    anvil_module_t *mod = anvil_module_create(ctx, "cmp_store_branch_regression");
+    CHECK(mod != NULL, "module should be created for cmp/store/branch regression");
+    if (!mod) {
+        anvil_ctx_destroy(ctx);
+        return;
+    }
+
+    anvil_type_t *i1 = anvil_type_i1(ctx);
+    anvil_type_t *i64 = anvil_type_i64(ctx);
+    anvil_value_t *observed = anvil_module_add_global(mod, "observed_cmp",
+                                                      i1, ANVIL_LINK_EXTERNAL);
+    CHECK(observed != NULL, "observable comparison global should be created");
+    if (observed) {
+        anvil_global_set_initializer(observed, anvil_const_i1(ctx, false));
+    }
+
+    anvil_type_t *params[] = { i64 };
+    anvil_type_t *fn_type = anvil_type_func(ctx, i64, params, 1, false);
+    anvil_func_t *fn = anvil_func_create(mod, "store_cmp_then_branch", fn_type,
+                                         ANVIL_LINK_EXTERNAL);
+    CHECK(fn != NULL, "cmp/store/branch function should be created");
+    anvil_instr_t *store_instr = NULL;
+    if (fn && observed) {
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_block_t *yes = anvil_block_create(fn, "yes");
+        anvil_block_t *no = anvil_block_create(fn, "no");
+        CHECK(yes && no, "cmp/store/branch successors should be created");
+
+        anvil_set_insert_point(ctx, entry);
+        anvil_value_t *x = anvil_func_get_param(fn, 0);
+        anvil_value_t *cmp = anvil_build_cmp_gt(ctx, x, anvil_const_i64(ctx, 0),
+                                                "positive");
+        anvil_build_store(ctx, cmp, observed);
+        store_instr = entry->last;
+        anvil_build_br_cond(ctx, cmp, yes, no);
+
+        anvil_set_insert_point(ctx, yes);
+        anvil_build_ret(ctx, anvil_const_i64(ctx, 1));
+        anvil_set_insert_point(ctx, no);
+        anvil_build_ret(ctx, anvil_const_i64(ctx, 0));
+    }
+
+    char *asm_text = codegen_or_fail(mod);
+    CHECK(store_instr && store_instr->op == ANVIL_OP_STORE,
+          "ARM64 preparation must not turn an observable comparison store into NOP");
+    if (asm_text) {
+        const char *global_ref = strstr(asm_text, ":lo12:observed_cmp");
+        CHECK(global_ref != NULL,
+              "observable comparison store should retain its global address");
+        CHECK(global_ref && strstr(global_ref, "\tstrb ") != NULL,
+              "observable comparison result should still be stored to memory");
         free(asm_text);
     }
 
@@ -1016,7 +1328,11 @@ static void test_arm64_module_codegen_lowers_function_pointer_indirect_call(void
 
 int main(void)
 {
-    test_pointer_cache_tracks_target_changes();
+    test_context_defaults_and_enum_validation();
+    test_string_buffer_growth_and_overflow_are_safe();
+    test_core_lifetime_and_constant_validation();
+    test_ir_dump_is_canonical();
+    test_target_and_layout_freeze();
     test_arm64_routes_fp_instruction_results_through_mir();
     test_arm64_dynamic_alloca_restores_sp_from_frame_pointer();
     test_arm64_emits_stack_arguments_after_x7();
@@ -1029,6 +1345,7 @@ int main(void)
     test_arm64_module_codegen_routes_memory_cast_select_function_through_mir();
     test_arm64_module_codegen_folds_constant_gep_into_load_store_offsets();
     test_arm64_module_codegen_materializes_global_and_string_addresses();
+    test_arm64_backend_preserves_cmp_result_store_before_branch();
     test_arm64_module_codegen_uses_signed_and_unsigned_byte_loads();
     test_arm64_darwin_module_codegen_routes_supported_leaf_function_through_mir();
     test_arm64_darwin_variadic_calls_route_through_mir();

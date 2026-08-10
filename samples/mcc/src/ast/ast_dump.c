@@ -690,11 +690,25 @@ static void ast_dump_node(mcc_ast_node_t *node, FILE *out, int indent)
                 fprintf(out, "ControllingExpr:\n");
                 ast_dump_node(node->data.generic_expr.controlling_expr, out, indent + 2);
             }
-            /* TODO: dump associations */
+            for (mcc_generic_assoc_t *assoc =
+                     node->data.generic_expr.associations;
+                 assoc; assoc = assoc->next) {
+                print_indent(out, indent + 1);
+                fprintf(out, "Association ");
+                dump_type(assoc->type, out);
+                fprintf(out, ":\n");
+                ast_dump_node(assoc->expr, out, indent + 2);
+            }
             if (node->data.generic_expr.default_expr) {
                 print_indent(out, indent + 1);
                 fprintf(out, "Default:\n");
                 ast_dump_node(node->data.generic_expr.default_expr, out, indent + 2);
+            }
+            if (node->data.generic_expr.selected_expr) {
+                print_indent(out, indent + 1);
+                fprintf(out, "Selected:\n");
+                ast_dump_node(node->data.generic_expr.selected_expr,
+                              out, indent + 2);
             }
             break;
             

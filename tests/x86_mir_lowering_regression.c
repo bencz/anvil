@@ -198,8 +198,9 @@ static void test_cmp_predicates_setcc(void)
     CHECK(mod != NULL, "module should be created for compares");
     if (mod) {
         anvil_type_t *i32 = anvil_type_i32(ctx);
-        anvil_type_t *params[] = { i32, i32 };
-        anvil_type_t *fn_type = anvil_type_func(ctx, i32, params, 2, false);
+        anvil_type_t *u32 = anvil_type_u32(ctx);
+        anvil_type_t *params[] = { i32, i32, u32, u32 };
+        anvil_type_t *fn_type = anvil_type_func(ctx, i32, params, 4, false);
         anvil_func_t *fn = anvil_func_create(mod, "cmps", fn_type,
                                              ANVIL_LINK_EXTERNAL);
         CHECK(fn != NULL, "compare function should be created");
@@ -207,9 +208,13 @@ static void test_cmp_predicates_setcc(void)
             anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
             anvil_value_t *a = anvil_func_get_param(fn, 0);
             anvil_value_t *b = anvil_func_get_param(fn, 1);
+            anvil_value_t *ua = anvil_func_get_param(fn, 2);
+            anvil_value_t *ub = anvil_func_get_param(fn, 3);
             anvil_value_t *lt = anvil_build_cmp_lt(ctx, a, b, "lt");
-            anvil_value_t *ult = anvil_build_cmp_ult(ctx, a, b, "ult");
-            anvil_value_t *acc = anvil_build_add(ctx, lt, ult, "acc");
+            anvil_value_t *ult = anvil_build_cmp_ult(ctx, ua, ub, "ult");
+            anvil_value_t *lt_i = anvil_build_zext(ctx, lt, i32, "lt_i");
+            anvil_value_t *ult_i = anvil_build_zext(ctx, ult, i32, "ult_i");
+            anvil_value_t *acc = anvil_build_add(ctx, lt_i, ult_i, "acc");
             anvil_build_ret(ctx, acc);
 
             char *asm_text = emit_func(fn);
@@ -276,8 +281,9 @@ static void test_div_mod_eax_edx(void)
     CHECK(mod != NULL, "module should be created for div/mod");
     if (mod) {
         anvil_type_t *i32 = anvil_type_i32(ctx);
-        anvil_type_t *params[] = { i32, i32 };
-        anvil_type_t *fn_type = anvil_type_func(ctx, i32, params, 2, false);
+        anvil_type_t *u32 = anvil_type_u32(ctx);
+        anvil_type_t *params[] = { i32, i32, u32, u32 };
+        anvil_type_t *fn_type = anvil_type_func(ctx, i32, params, 4, false);
         anvil_func_t *fn = anvil_func_create(mod, "divmod", fn_type,
                                              ANVIL_LINK_EXTERNAL);
         CHECK(fn != NULL, "div/mod function should be created");
@@ -285,12 +291,16 @@ static void test_div_mod_eax_edx(void)
             anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
             anvil_value_t *a = anvil_func_get_param(fn, 0);
             anvil_value_t *b = anvil_func_get_param(fn, 1);
+            anvil_value_t *ua = anvil_func_get_param(fn, 2);
+            anvil_value_t *ub = anvil_func_get_param(fn, 3);
             anvil_value_t *sd = anvil_build_sdiv(ctx, a, b, "sd");
-            anvil_value_t *ud = anvil_build_udiv(ctx, a, b, "ud");
+            anvil_value_t *ud = anvil_build_udiv(ctx, ua, ub, "ud");
             anvil_value_t *sm = anvil_build_smod(ctx, a, b, "sm");
-            anvil_value_t *um = anvil_build_umod(ctx, a, b, "um");
-            anvil_value_t *acc0 = anvil_build_add(ctx, sd, ud, "acc0");
-            anvil_value_t *acc1 = anvil_build_add(ctx, sm, um, "acc1");
+            anvil_value_t *um = anvil_build_umod(ctx, ua, ub, "um");
+            anvil_value_t *ud_i = anvil_build_bitcast(ctx, ud, i32, "ud_i");
+            anvil_value_t *um_i = anvil_build_bitcast(ctx, um, i32, "um_i");
+            anvil_value_t *acc0 = anvil_build_add(ctx, sd, ud_i, "acc0");
+            anvil_value_t *acc1 = anvil_build_add(ctx, sm, um_i, "acc1");
             anvil_value_t *acc = anvil_build_add(ctx, acc0, acc1, "acc");
             anvil_build_ret(ctx, acc);
 
@@ -861,8 +871,10 @@ static void test_setcc_boolean_in_esi_edi(void)
                       "32-bit emitter must not produce %spl");
                 CHECK(strstr(asm_text, "%bpl") == NULL,
                       "32-bit emitter must not produce %bpl");
-                check_contains(asm_text, "movzbl %al",
-                               "setcc boolean must materialize via byte scratch");
+                check_contains(asm_text, "setg",
+                               "setcc boolean must materialize its predicate");
+                check_contains(asm_text, "movzbl",
+                               "setcc boolean must be normalized to zero or one");
                 assemble_check(asm_text,
                                "setcc-derived boolean asm should assemble with as --32");
                 free(asm_text);
@@ -872,6 +884,42 @@ static void test_setcc_boolean_in_esi_edi(void)
 
     anvil_module_destroy(mod);
     anvil_ctx_destroy(ctx);
+}
+
+static void test_byte_compare_fixed_eax_result_survives_scratch_restore(void)
+{
+    anvil_mir_func_t *mir = anvil_mir_func_create("fixed_eax_cmp");
+    CHECK(mir != NULL, "fixed-EAX compare MIR should be created");
+    if (!mir) return;
+    anvil_mir_vreg_t lhs = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t rhs = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t dst = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t uses[] = { lhs, rhs };
+    CHECK(anvil_mir_set_fixed_reg(mir, lhs, 6) &&
+          anvil_mir_set_fixed_reg(mir, rhs, 7) &&
+          anvil_mir_set_fixed_reg(mir, dst, 0) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, lhs, 2) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, rhs, 1) &&
+          anvil_mir_add_instr(mir, ANVIL_MIR_OP_CMP_GT, dst, uses, 2) &&
+          anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET_VALUE_PART,
+                              ANVIL_MIR_NO_VREG, &dst, 1) &&
+          anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "fixed-EAX compare stream should build");
+    CHECK(anvil_x86_regalloc_mir(mir), "fixed-EAX compare should allocate");
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_x86_emit_mir(mir, &text, &len),
+          "fixed-EAX compare should emit");
+    if (text) {
+        const char *pop = strstr(text, "\tpopl %eax\n");
+        const char *load = pop ? strstr(pop, "\tmovzbl") : NULL;
+        CHECK(pop && load && pop < load,
+              "saved EAX must be restored before loading the boolean result into EAX");
+        assemble_check(text, "fixed-EAX byte compare should assemble with as --32");
+        free(text);
+    }
+    anvil_mir_func_destroy(mir);
 }
 
 static void test_i8_byte_ops_no_high_byte_regs(void)
@@ -1078,6 +1126,7 @@ int main(void)
     test_i64_pair_load_store_cmp();
     test_i64_load_store_pair_offsets();
     test_setcc_boolean_in_esi_edi();
+    test_byte_compare_fixed_eax_result_survives_scratch_restore();
     test_i8_byte_ops_no_high_byte_regs();
     test_local_array_i8_store_address();
     test_small_struct_return_pair();

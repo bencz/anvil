@@ -38,13 +38,13 @@ Build configuration lives in `mk/config.mk`:
 prototype is not exposed by glibc, and this macro re-enables it without
 pulling in C11-only declarations (e.g. the C11 `assert`/`static_assert`
 macro). Source dirs (`include`, `src/preprocessor`, `src/lexer`,
-`src/parser`, `src/sema`, `src/codegen`, `src/opt`, `src/ast`) are added to
+`src/parser`, `src/sema`, `src/codegen`, `src/ast`) are added to
 the include path so the modular subsystems can share internal headers.
 
 ### Compilation Pipeline
 
 ```
-Source (.c) → Preprocessor → Lexer → Parser → Sema → AST Optimizer → ANVIL IR Codegen → ANVIL Backend → Assembly
+Source (.c) → Preprocessor → Lexer → Parser → Sema → ANVIL IR Codegen → ANVIL IR Optimizer → ANVIL Backend → Assembly
 ```
 
 ### Multi-File Compilation
@@ -84,7 +84,6 @@ All files share:
 | `mcc_symtab_t` | symtab.h | Symbol table |
 | `mcc_sema_t` | sema.h | Semantic analyzer |
 | `mcc_codegen_t` | codegen.h | Code generator |
-| `mcc_ast_opt_t` | ast_opt.h | AST optimizer |
 
 ### Source Files Overview
 
@@ -103,7 +102,6 @@ All files share:
 | `src/preprocessor/` | 7 files | Modular preprocessor with C standard support |
 | `src/parser/` | 6 files | Modular parser with C standard support |
 | `src/sema/` | 6 files | Modular semantic analyzer with C standard support |
-| `src/opt/` | 10 files | Modular AST optimizer with multiple passes |
 | `src/codegen/` | 5 files | Modular code generator that emits ANVIL source IR |
 
 ### Test Suite
@@ -115,7 +113,7 @@ Tests are organized by C standard in the `tests/` directory:
 | `tests/c89/` | C89 | Basic types, control flow, operators, functions, structs, typedef, preprocessor |
 | `tests/c99/` | C99 | Comments, declarations, literals, preprocessor, types |
 | `tests/c11/` | C11 | Anonymous structs, `_Generic`, keywords, `_Static_assert` |
-| `tests/c23/` | C23 | Attributes, keywords, literals, `typeof` |
+| `tests/c23/` | C23 subset | Keywords, literals, `typeof`, preprocessing |
 | `tests/gnu/` | GNU | GNU extensions (in progress) |
 | `tests/cross/` | Cross | Cross-standard tests (C99 in C89, C11 in C99, etc.) |
 
@@ -386,15 +384,13 @@ When working with MCC code:
 - **C99 long long**: Added `mcc_type_llong()` and `mcc_type_ullong()` for 64-bit integer types
 - **Multiple Typedef Names**: Support for `typedef int INT, *PINT, **PPINT;` syntax
 - **Complex Declarators**: Full support for C declarator syntax including `int (*arr)[10]`, `int (*func)(int, int)`, etc.
-- **Bitfields**: Parsing and storage of bitfield widths in struct fields
 - **Enum Constants**: Proper storage of enum constant names and values
 - **_Generic (C11)**: Full parsing with AST storage for type associations
 - **_Static_assert (C11)**: Support in structs and at file scope
-- **Thread Local Storage (C11)**: `_Thread_local` keyword support
-- **C11 Keywords**: `_Alignas`, `_Alignof`, `_Atomic`, `_Noreturn` with proper parsing
-- **C23 Attributes**: `[[deprecated]]`, `[[nodiscard]]`, `[[maybe_unused]]`, `[[noreturn]]`, `[[fallthrough]]` with AST storage
+- **C11 subset**: `_Alignof`, `_Generic`, `_Static_assert`, and anonymous record members
+- **Explicit rejection**: `_Alignas`, `_Atomic`, `_Thread_local`, `_Noreturn`, and C23 attributes are diagnosed until their semantics/lowering exist
 - **C23 typeof**: `typeof` and `typeof_unqual` type specifiers
-- **C23 Literals**: Binary literals (`0b1010`), digit separators (`1'000'000`), `u8` character literals
+- **C23 Literals**: Binary literals (`0b1010`) and digit separators (`1'000'000`)
 - **Multiple Variable Declarations**: Full support for `int a, b, c;` with `AST_DECL_LIST` node
 - **Cross-Standard Warnings**: Warnings when using features from newer standards in older modes
 - **Organized Test Suite**: Tests organized by C standard (C89, C99, C11, C23, GNU) with cross-standard tests
@@ -409,7 +405,6 @@ When working with MCC code:
 - **Enum Constants in Switch Cases**: Case expressions with enum constants are now properly resolved
 - **Switch Statement Codegen**: Fixed to process all statements between case labels (not just direct case statement)
 - **Function-to-Pointer Assignment**: Functions can now be assigned to function pointer variables
-- **Anonymous Bitfield Handling**: `mcc_type_find_field` skips anonymous bitfield padding fields
 - **Constant Memory Management**: Fixed double-free by collecting constants from all functions before cleanup
 - **Block Terminator Detection**: `codegen_block_has_terminator()` now correctly detects if a block has a terminator instruction using `anvil_block_has_terminator()`, eliminating dead code after `return` statements
 - **IR Dump Support**: `-dump-ir` flag generates ANVIL IR dump file (`.ir`) for debugging code generation
@@ -418,6 +413,7 @@ When working with MCC code:
 - **MachineIR Backend Path**: ARM64 now exercises the generic MachineIR/regalloc/spill pipeline and serves as the reference backend for migrating other targets
 - **C Conversion Codegen**: Assignments, returns, initializers, fixed args, variadic args, comparisons, casts, `_Bool`, and `sizeof` now preserve target ANVIL types more accurately
 - **Function Pointer Calls**: Function values are emitted as callable `ptr<func>` values, and indirect calls flow through the same ANVIL call builder as direct calls
-- **AST Optimization System**: Modular pass manager with constant folding, constant propagation, copy propagation, dead code elimination, strength reduction, and algebraic simplifications
+- **Optimization handoff**: `-O` levels are forwarded to ANVIL's verified
+  IR/MIR optimizer; MCC does not advertise source-AST passes.
 - **Symbol-Based Variable Tracking**: Optimization passes use symbol pointers for unique variable identification, correctly handling shadowing in nested scopes
 - **Compound Assignment Handling**: Propagation passes correctly invalidate variables on compound assignments (`+=`, `-=`, etc.)

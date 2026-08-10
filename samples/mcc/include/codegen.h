@@ -91,7 +91,7 @@ mcc_codegen_t *mcc_codegen_create(mcc_context_t *ctx, mcc_symtab_t *symtab,
 void mcc_codegen_destroy(mcc_codegen_t *cg);
 
 /* Configuration */
-void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch);
+bool mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch);
 void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level);
 
 /* Main code generation entry point */

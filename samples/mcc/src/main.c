@@ -57,6 +57,30 @@ static mcc_arch_t parse_arch(const char *name)
     return MCC_ARCH_COUNT; /* Invalid */
 }
 
+static bool append_cli_value(const char ***values, size_t *count,
+                             size_t *capacity, const char *value)
+{
+    if (!values || !count || !capacity || !value) return false;
+    if (*count == SIZE_MAX) return false;
+    if (*count == *capacity) {
+        size_t new_capacity;
+        if (*capacity == 0) {
+            new_capacity = 8;
+        } else {
+            if (*capacity > SIZE_MAX / 2) return false;
+            new_capacity = *capacity * 2;
+        }
+        if (new_capacity > SIZE_MAX / sizeof(**values)) return false;
+        void *new_values = realloc((void *)*values,
+                                   new_capacity * sizeof(**values));
+        if (!new_values) return false;
+        *values = new_values;
+        *capacity = new_capacity;
+    }
+    (*values)[(*count)++] = value;
+    return true;
+}
+
 /* Parse a single file and return AST (used for multi-file compilation) */
 static mcc_ast_node_t *parse_file(mcc_context_t *ctx, const char *filename,
                                    mcc_preprocessor_t **out_pp,
@@ -200,14 +224,6 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         return 0;
     }
     
-    /* Syntax only? */
-    if (ctx->options.syntax_only) {
-        printf("Syntax OK\n");
-        mcc_parser_destroy(parser);
-        mcc_preprocessor_destroy(pp);
-        return 0;
-    }
-    
     /* Semantic analysis */
     mcc_sema_t *sema = mcc_sema_create(ctx);
     if (!mcc_sema_analyze(sema, ast)) {
@@ -215,6 +231,17 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         mcc_parser_destroy(parser);
         mcc_preprocessor_destroy(pp);
         return 1;
+    }
+
+    /* Like conventional -fsyntax-only, validate both grammar and language
+     * semantics, but stop before IR/code generation. Parse-only success hid
+     * undefined labels, ambiguous promoted members, and type errors. */
+    if (ctx->options.syntax_only) {
+        printf("Syntax OK\n");
+        mcc_sema_destroy(sema);
+        mcc_parser_destroy(parser);
+        mcc_preprocessor_destroy(pp);
+        return 0;
     }
     
     /* Dump sema? */
@@ -235,17 +262,15 @@ static int compile_file(mcc_context_t *ctx, const char *filename)
         return 0;
     }
     
-    /* AST Optimization */
-    mcc_ast_opt_t *ast_opt = mcc_ast_opt_create(ctx);
-    mcc_ast_opt_set_level(ast_opt, ctx->options.opt_level);
-    mcc_ast_opt_set_sema(ast_opt, sema);
-    mcc_ast_opt_set_verbose(ast_opt, ctx->options.verbose);
-    mcc_ast_opt_run(ast_opt, ast);
-    mcc_ast_opt_destroy(ast_opt);
-    
     /* Code generation - use symtab and types from sema */
     mcc_codegen_t *cg = mcc_codegen_create(ctx, sema->symtab, sema->types);
-    mcc_codegen_set_target(cg, ctx->options.arch);
+    if (!cg || !mcc_codegen_set_target(cg, ctx->options.arch)) {
+        mcc_codegen_destroy(cg);
+        mcc_sema_destroy(sema);
+        mcc_parser_destroy(parser);
+        mcc_preprocessor_destroy(pp);
+        return 1;
+    }
     mcc_codegen_set_opt_level(cg, ctx->options.opt_level);
     
     if (!mcc_codegen_generate(cg, ast)) {
@@ -310,6 +335,11 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
     /* For single file, use the simpler path */
     if (num_files == 1) {
         return compile_file(ctx, files[0]);
+    }
+
+    if (num_files > SIZE_MAX / sizeof(void *)) {
+        mcc_fatal(ctx, "Input file table size overflow");
+        return 1;
     }
     
     /* Arrays to hold parsed data from each file */
@@ -382,19 +412,6 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
         return 0;
     }
     
-    /* Syntax only? */
-    if (ctx->options.syntax_only) {
-        printf("Syntax OK (%zu files)\n", num_files);
-        for (size_t i = 0; i < num_files; i++) {
-            if (parsers[i]) mcc_parser_destroy(parsers[i]);
-            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
-        }
-        free(asts);
-        free(pps);
-        free(parsers);
-        return 0;
-    }
-    
     /* Create shared semantic analyzer */
     mcc_sema_t *sema = mcc_sema_create(ctx);
     
@@ -415,6 +432,19 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
             free(parsers);
             return 1;
         }
+    }
+
+    if (ctx->options.syntax_only) {
+        printf("Syntax OK (%zu files)\n", num_files);
+        mcc_sema_destroy(sema);
+        for (size_t i = 0; i < num_files; i++) {
+            if (parsers[i]) mcc_parser_destroy(parsers[i]);
+            if (pps[i]) mcc_preprocessor_destroy(pps[i]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 0;
     }
     
     /* Dump sema? */
@@ -446,23 +476,20 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
         return 0;
     }
     
-    /* AST Optimization - optimize all ASTs */
-    mcc_ast_opt_t *ast_opt = mcc_ast_opt_create(ctx);
-    mcc_ast_opt_set_level(ast_opt, ctx->options.opt_level);
-    mcc_ast_opt_set_sema(ast_opt, sema);
-    mcc_ast_opt_set_verbose(ast_opt, ctx->options.verbose);
-    
-    for (size_t i = 0; i < num_files; i++) {
-        if (ctx->options.verbose) {
-            fprintf(stderr, "Optimizing: %s\n", files[i]);
-        }
-        mcc_ast_opt_run(ast_opt, asts[i]);
-    }
-    mcc_ast_opt_destroy(ast_opt);
-    
     /* Code generation - use shared symtab and types from sema */
     mcc_codegen_t *cg = mcc_codegen_create(ctx, sema->symtab, sema->types);
-    mcc_codegen_set_target(cg, ctx->options.arch);
+    if (!cg || !mcc_codegen_set_target(cg, ctx->options.arch)) {
+        mcc_codegen_destroy(cg);
+        mcc_sema_destroy(sema);
+        for (size_t j = 0; j < num_files; j++) {
+            if (parsers[j]) mcc_parser_destroy(parsers[j]);
+            if (pps[j]) mcc_preprocessor_destroy(pps[j]);
+        }
+        free(asts);
+        free(pps);
+        free(parsers);
+        return 1;
+    }
     mcc_codegen_set_opt_level(cg, ctx->options.opt_level);
     
     /* Add all ASTs to the same module */
@@ -687,22 +714,34 @@ int main(int argc, char **argv)
         }
         
         if (strncmp(arg, "-I", 2) == 0) {
-            const char *path = arg[2] ? arg + 2 : argv[++i];
-            if (num_include_paths >= cap_include_paths) {
-                cap_include_paths = cap_include_paths ? cap_include_paths * 2 : 8;
-                include_paths = realloc(include_paths, cap_include_paths * sizeof(char*));
+            if (!arg[2] && i + 1 >= argc) {
+                fprintf(stderr, "Error: -I requires an argument\n");
+                free(include_paths); free(defines); free(input_files);
+                return 1;
             }
-            include_paths[num_include_paths++] = path;
+            const char *path = arg[2] ? arg + 2 : argv[++i];
+            if (!append_cli_value(&include_paths, &num_include_paths,
+                                  &cap_include_paths, path)) {
+                fprintf(stderr, "Error: include path list is too large or out of memory\n");
+                free(include_paths); free(defines); free(input_files);
+                return 1;
+            }
             continue;
         }
         
         if (strncmp(arg, "-D", 2) == 0) {
-            const char *def = arg[2] ? arg + 2 : argv[++i];
-            if (num_defines >= cap_defines) {
-                cap_defines = cap_defines ? cap_defines * 2 : 8;
-                defines = realloc(defines, cap_defines * sizeof(char*));
+            if (!arg[2] && i + 1 >= argc) {
+                fprintf(stderr, "Error: -D requires an argument\n");
+                free(include_paths); free(defines); free(input_files);
+                return 1;
             }
-            defines[num_defines++] = def;
+            const char *def = arg[2] ? arg + 2 : argv[++i];
+            if (!append_cli_value(&defines, &num_defines,
+                                  &cap_defines, def)) {
+                fprintf(stderr, "Error: define list is too large or out of memory\n");
+                free(include_paths); free(defines); free(input_files);
+                return 1;
+            }
             continue;
         }
         
@@ -732,11 +771,12 @@ int main(int argc, char **argv)
         }
         
         /* Input file - add to list */
-        if (num_input_files >= cap_input_files) {
-            cap_input_files = cap_input_files ? cap_input_files * 2 : 8;
-            input_files = realloc(input_files, cap_input_files * sizeof(char*));
+        if (!append_cli_value(&input_files, &num_input_files,
+                              &cap_input_files, arg)) {
+            fprintf(stderr, "Error: input file list is too large or out of memory\n");
+            free(include_paths); free(defines); free(input_files);
+            return 1;
         }
-        input_files[num_input_files++] = arg;
     }
     
     if (num_input_files == 0) {
@@ -774,10 +814,15 @@ int main(int argc, char **argv)
         if (opts.opt_level == MCC_OPT_DEBUG) {
             fprintf(stderr, "Optimization: Og (debug)\n");
         } else {
-            /* Map back: NONE=0, BASIC=1, STANDARD=2, AGGRESSIVE=3 */
-            static const int level_nums[] = {0, -1, 1, 2, 3}; /* -1 for DEBUG placeholder */
-            int lvl = (opts.opt_level <= MCC_OPT_AGGRESSIVE) ? level_nums[opts.opt_level] : 0;
-            fprintf(stderr, "Optimization: O%d\n", lvl);
+            static const char *const level_names[] = {
+                [MCC_OPT_NONE] = "O0",
+                [MCC_OPT_BASIC] = "O1",
+                [MCC_OPT_STANDARD] = "O2",
+                [MCC_OPT_AGGRESSIVE] = "O3"
+            };
+            const char *name = opts.opt_level <= MCC_OPT_AGGRESSIVE
+                ? level_names[opts.opt_level] : NULL;
+            fprintf(stderr, "Optimization: %s\n", name ? name : "invalid");
         }
     }
     

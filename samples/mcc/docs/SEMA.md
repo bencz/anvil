@@ -679,8 +679,8 @@ if (mcc_type_is_pointer(lhs) && rhs->kind == TYPE_FUNCTION) {
 
 ### Anonymous Field Lookup
 
-The `mcc_type_find_field` function skips anonymous bitfield padding but recurses into
-anonymous struct/union members (C11), so a member can be found through the outer type:
+The `mcc_type_find_field` function recurses into anonymous struct/union members
+(C11), so a member can be found through the outer type. Bit-fields are rejected.
 
 ```c
 /* In types.c - mcc_type_find_field() */
@@ -691,7 +691,7 @@ mcc_struct_field_t *mcc_type_find_field(mcc_type_t *type, const char *name)
             if (strcmp(f->name, name) == 0) return f;
             continue;
         }
-        /* Anonymous struct/union member: recurse; bitfield padding bails out */
+        /* Anonymous struct/union member: recurse. */
         if (f->type && (f->type->kind == TYPE_STRUCT || f->type->kind == TYPE_UNION)) {
             mcc_struct_field_t *inner = mcc_type_find_field(f->type, name);
             if (inner) return inner;
@@ -790,13 +790,9 @@ The dump includes:
    - Parameters
    - Nested scopes (for loops, if blocks, etc.)
 
-6. **C23 Attributes**
-   - `[[deprecated]]` with optional message
-   - `[[nodiscard]]` with optional message
-   - `[[maybe_unused]]`
-   - `[[noreturn]]`
-   - `[[fallthrough]]`
-   - GNU attributes (`packed`, `aligned`, `pure`, `const`, `unused`)
+6. **Attributes**
+   - C23 and GNU attributes are rejected before semantic lowering; the dump
+     does not claim metadata that cannot affect IR.
 
 ### Example Output
 

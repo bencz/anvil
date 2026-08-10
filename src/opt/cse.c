@@ -25,6 +25,7 @@
  * result==NULL are empty slots. */
 typedef struct {
     anvil_op_t op;
+    anvil_fcmp_pred_t fcmp_pred;
     anvil_value_t *op1;
     anvil_value_t *op2;
     anvil_value_t *result;
@@ -34,6 +35,7 @@ typedef struct {
  * 256-entry linear-scan array that silently dropped expressions beyond 256
  * and turned every lookup into O(n). */
 typedef struct {
+    anvil_ctx_t *ctx;
     expr_entry_t *entries;
     size_t size;      /* number of non-empty slots */
     size_t cap;       /* capacity (always a power of two) */
@@ -71,6 +73,7 @@ static bool is_cse_candidate(anvil_op_t op)
         case ANVIL_OP_CMP_ULE:
         case ANVIL_OP_CMP_UGT:
         case ANVIL_OP_CMP_UGE:
+        case ANVIL_OP_FCMP:
             return true;
         default:
             return false;
@@ -95,17 +98,21 @@ static bool is_commutative(anvil_op_t op)
 }
 
 /* Mix function — good enough for pointer+small-integer inputs. */
-static inline uint64_t expr_hash(anvil_op_t op, anvil_value_t *op1, anvil_value_t *op2)
+static inline uint64_t expr_hash(anvil_op_t op, anvil_fcmp_pred_t fcmp_pred,
+                                 anvil_value_t *op1, anvil_value_t *op2)
 {
     uint64_t h = (uint64_t)op * 0x9E3779B185EBCA87ULL;
+    h ^= (uint64_t)(unsigned)fcmp_pred * 0xD6E8FEB86659FD93ULL;
     h ^= (uintptr_t)op1 + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     h ^= (uintptr_t)op2 + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     return h;
 }
 
-static void expr_table_init(expr_table_t *table)
+static void expr_table_init(expr_table_t *table, anvil_ctx_t *ctx)
 {
-    table->entries = calloc(EXPR_INITIAL_CAP, sizeof(expr_entry_t));
+    table->ctx = ctx;
+    table->entries = anvil_ctx_calloc(ctx, EXPR_INITIAL_CAP,
+                                      sizeof(expr_entry_t));
     table->cap = table->entries ? EXPR_INITIAL_CAP : 0;
     table->size = 0;
 }
@@ -135,18 +142,20 @@ static inline void normalise_operands(anvil_op_t op, anvil_value_t **op1, anvil_
 }
 
 static anvil_value_t *expr_table_lookup(expr_table_t *table, anvil_op_t op,
+                                         anvil_fcmp_pred_t fcmp_pred,
                                          anvil_value_t *op1, anvil_value_t *op2)
 {
     if (!table->entries || table->cap == 0) return NULL;
 
     normalise_operands(op, &op1, &op2);
     size_t mask = table->cap - 1;
-    size_t i = (size_t)expr_hash(op, op1, op2) & mask;
+    size_t i = (size_t)expr_hash(op, fcmp_pred, op1, op2) & mask;
 
     for (size_t probe = 0; probe < table->cap; probe++) {
         expr_entry_t *e = &table->entries[i];
         if (!e->result) return NULL;
-        if (e->op == op && e->op1 == op1 && e->op2 == op2) {
+        if (e->op == op && e->fcmp_pred == fcmp_pred &&
+            e->op1 == op1 && e->op2 == op2) {
             return e->result;
         }
         i = (i + 1) & mask;
@@ -157,6 +166,7 @@ static anvil_value_t *expr_table_lookup(expr_table_t *table, anvil_op_t op,
 static void expr_table_resize(expr_table_t *table);
 
 static void expr_table_add(expr_table_t *table, anvil_op_t op,
+                           anvil_fcmp_pred_t fcmp_pred,
                            anvil_value_t *op1, anvil_value_t *op2,
                            anvil_value_t *result)
 {
@@ -171,11 +181,12 @@ static void expr_table_add(expr_table_t *table, anvil_op_t op,
 
     normalise_operands(op, &op1, &op2);
     size_t mask = table->cap - 1;
-    size_t i = (size_t)expr_hash(op, op1, op2) & mask;
+    size_t i = (size_t)expr_hash(op, fcmp_pred, op1, op2) & mask;
 
     while (table->entries[i].result) {
         /* On duplicate, leave existing entry (prefer the earliest). */
         if (table->entries[i].op == op &&
+            table->entries[i].fcmp_pred == fcmp_pred &&
             table->entries[i].op1 == op1 &&
             table->entries[i].op2 == op2) {
             return;
@@ -183,6 +194,7 @@ static void expr_table_add(expr_table_t *table, anvil_op_t op,
         i = (i + 1) & mask;
     }
     table->entries[i].op = op;
+    table->entries[i].fcmp_pred = fcmp_pred;
     table->entries[i].op1 = op1;
     table->entries[i].op2 = op2;
     table->entries[i].result = result;
@@ -195,7 +207,14 @@ static void expr_table_resize(expr_table_t *table)
     expr_entry_t *old = table->entries;
     size_t new_cap = old_cap ? old_cap * 2 : EXPR_INITIAL_CAP;
 
-    table->entries = calloc(new_cap, sizeof(expr_entry_t));
+    if (old_cap > SIZE_MAX / 2 ||
+        new_cap > SIZE_MAX / sizeof(expr_entry_t)) {
+        anvil_set_error(table->ctx, ANVIL_ERR_NOMEM,
+                        "CSE expression table capacity overflow");
+        return;
+    }
+    table->entries = anvil_ctx_calloc(table->ctx, new_cap,
+                                      sizeof(expr_entry_t));
     if (!table->entries) {
         table->entries = old;   /* best-effort: keep old on alloc failure */
         return;
@@ -205,7 +224,8 @@ static void expr_table_resize(expr_table_t *table)
 
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i].result) {
-            expr_table_add(table, old[i].op, old[i].op1, old[i].op2, old[i].result);
+            expr_table_add(table, old[i].op, old[i].fcmp_pred,
+                           old[i].op1, old[i].op2, old[i].result);
         }
     }
     free(old);
@@ -216,7 +236,9 @@ static bool cse_block(anvil_block_t *block)
 {
     bool changed = false;
     expr_table_t table;
-    expr_table_init(&table);
+    anvil_ctx_t *ctx = block && block->parent && block->parent->parent
+        ? block->parent->parent->ctx : NULL;
+    expr_table_init(&table, ctx);
     
     for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
         /* Skip non-CSE candidates */
@@ -240,16 +262,24 @@ static bool cse_block(anvil_block_t *block)
         anvil_value_t *op1 = instr->operands[0];
         anvil_value_t *op2 = instr->operands[1];
 
-        anvil_value_t *existing = expr_table_lookup(&table, instr->op, op1, op2);
+        anvil_value_t *existing = expr_table_lookup(
+            &table, instr->op, instr->fcmp_pred, op1, op2);
 
         if (existing && instr->result) {
-            int replaced = anvil_opt_replace_uses_in_block_after(instr, instr->result, existing);
+            /* The earlier expression dominates this instruction, and a valid
+             * SSA result may also be used by successor blocks or PHIs.  Replace
+             * every use before deleting the duplicate; a block-local rewrite
+             * can otherwise leave cross-block uses referring to a NOP. */
+            int replaced = anvil_opt_replace_uses_in_func(block->parent,
+                                                          instr->result,
+                                                          existing);
             if (replaced > 0) {
-                instr->op = ANVIL_OP_NOP;
+                anvil_opt_erase_instr(instr);
                 changed = true;
             }
         } else if (instr->result) {
-            expr_table_add(&table, instr->op, op1, op2, instr->result);
+            expr_table_add(&table, instr->op, instr->fcmp_pred,
+                           op1, op2, instr->result);
         }
     }
 
@@ -258,9 +288,13 @@ static bool cse_block(anvil_block_t *block)
 }
 
 /* Main CSE pass */
-bool anvil_pass_cse(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_cse(anvil_func_t *func)
 {
-    if (!func || !func->blocks) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (!func->blocks) return ANVIL_PASS_RUN_UNCHANGED;
     
     bool changed = false;
     
@@ -271,5 +305,7 @@ bool anvil_pass_cse(anvil_func_t *func)
         }
     }
     
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

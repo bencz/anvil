@@ -44,11 +44,10 @@ level is a strict superset of the one below it.
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
 | O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + loop_unroll (currently a no-op — the pass is disabled) |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | Currently the same verified pass set as O2 |
 
-> At O3 the loop-unroll pass is *selected* but does nothing, because its `run`
-> function pointer is `NULL` in `builtin_passes[]`. O3 therefore produces the
-> same result as O2 today.
+O3 currently produces the same result as O2; no unimplemented pass is selected
+or exposed.
 
 ## Available Passes
 
@@ -259,16 +258,13 @@ result = a * a;
 Commutative operations recognized for normalization: `ADD`, `MUL`, `AND`, `OR`,
 `XOR`, `CMP_EQ`, `CMP_NE`.
 
-### Loop Unrolling (`ANVIL_PASS_LOOP_UNROLL`) - Experimental
+### Loop Unrolling - Design requirement, not exposed
 
 Unrolls small loops with known trip counts to reduce branch overhead.
 
-**Status:** **Disabled / no-op.** The pass is registered (`ANVIL_PASS_LOOP_UNROLL`,
-enabled at O3) but its `run` pointer is `NULL` in `src/opt/opt.c`, so it performs
-no transformation. A `bool anvil_pass_loop_unroll(anvil_func_t *)` function is
-declared in `anvil_opt.h` and `src/opt/loop_unroll.c` exists, but it is not wired
-into the pipeline. The descriptions below reflect the *intended* design, not the
-current behavior.
+**Status:** not part of the current API or pipeline. It will only be exposed
+after LoopInfo, canonicalization, trip-count proof, remainder generation and
+the semantic tests below are implemented.
 
 **Supported Loop Patterns:**
 - Simple counted loops with constant bounds
@@ -339,17 +335,22 @@ anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx);
 void anvil_pass_manager_destroy(anvil_pass_manager_t *pm);
 
 /* Set optimization level (enables/disables passes accordingly) */
-void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level);
+anvil_error_t anvil_pass_manager_set_level(anvil_pass_manager_t *pm,
+                                            anvil_opt_level_t level);
 anvil_opt_level_t anvil_pass_manager_get_level(anvil_pass_manager_t *pm);
 
 /* Enable/disable individual passes */
-void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
-void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_enable(anvil_pass_manager_t *pm,
+                                         anvil_pass_id_t pass);
+anvil_error_t anvil_pass_manager_disable(anvil_pass_manager_t *pm,
+                                          anvil_pass_id_t pass);
 bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
 
-/* Run passes */
-bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func);
-bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod);
+/* Run passes: unchanged, changed, or error (also stored on the context) */
+anvil_pass_result_t anvil_pass_manager_run_func(anvil_pass_manager_t *pm,
+                                                 anvil_func_t *func);
+anvil_pass_result_t anvil_pass_manager_run_module(anvil_pass_manager_t *pm,
+                                                   anvil_module_t *mod);
 
 /* Register custom pass */
 anvil_error_t anvil_pass_manager_register(anvil_pass_manager_t *pm, 
@@ -374,16 +375,15 @@ anvil_error_t anvil_module_optimize(anvil_module_t *mod);
 
 ```c
 /* Can be called directly for custom pipelines */
-bool anvil_pass_const_fold(anvil_func_t *func);
-bool anvil_pass_dce(anvil_func_t *func);
-bool anvil_pass_simplify_cfg(anvil_func_t *func);
-bool anvil_pass_strength_reduce(anvil_func_t *func);
-bool anvil_pass_loop_unroll(anvil_func_t *func);   /* declared; not in pipeline */
-bool anvil_pass_copy_prop(anvil_func_t *func);
-bool anvil_pass_dead_store(anvil_func_t *func);
-bool anvil_pass_load_elim(anvil_func_t *func);
-bool anvil_pass_cse(anvil_func_t *func);
-bool anvil_pass_store_load_prop(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_copy_prop(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_dead_store(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_load_elim(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_cse(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_store_load_prop(anvil_func_t *func);
 ```
 
 ### Pass Information Structure
@@ -397,7 +397,7 @@ typedef struct {
     anvil_opt_level_t min_level;
 } anvil_pass_info_t;
 
-typedef bool (*anvil_pass_func_t)(anvil_func_t *func);
+typedef anvil_pass_result_t (*anvil_pass_func_t)(anvil_func_t *func);
 ```
 
 ## Usage Examples
@@ -410,8 +410,7 @@ typedef bool (*anvil_pass_func_t)(anvil_func_t *func);
 
 int main(void)
 {
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_S390);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_S390);
     
     /* Enable O2 optimization */
     anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
@@ -459,7 +458,7 @@ anvil_pass_manager_run_module(pm, mod);
 
 ```c
 /* Define custom pass function */
-bool my_peephole_pass(anvil_func_t *func)
+anvil_pass_result_t my_peephole_pass(anvil_func_t *func)
 {
     bool changed = false;
     
@@ -469,12 +468,12 @@ bool my_peephole_pass(anvil_func_t *func)
         }
     }
     
-    return changed;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 
 /* Register with pass manager */
 anvil_pass_info_t my_pass = {
-    .id = ANVIL_PASS_COUNT,  /* Use next available ID */
+    .id = ANVIL_PASS_CUSTOM,
     .name = "peephole",
     .description = "Custom peephole optimizations",
     .run = my_peephole_pass,
@@ -541,10 +540,9 @@ fixpoint iteration:
 5. Store-Load Propagation (`store_load_prop`)
 6. Dead Store Elimination (`dead_store`)
 7. Redundant Load Elimination (`load_elim`)
-8. Loop Unrolling (`loop_unroll`) — **disabled** (its `run` pointer is `NULL`)
-9. CFG Simplification (`simplify_cfg`)
-10. Dead Code Elimination (`dce`)
-11. Custom passes (in registration order)
+8. CFG Simplification (`simplify_cfg`)
+9. Dead Code Elimination (`dce`)
+10. Custom passes (in registration order)
 
 Only passes that are enabled for the current optimization level (or enabled
 individually) actually run; the order above is the sequence within each fixpoint
@@ -552,7 +550,14 @@ iteration.
 
 ### Fixpoint Iteration
 
-The pass manager runs all enabled passes in a loop until no pass reports any changes, or a maximum iteration count (10) is reached. This allows passes to enable further optimizations in subsequent passes.
+The pass manager verifies the current function immediately after every built-in or custom
+pass, including passes that report no change. It iterates until no pass reports
+changes. The fixpoint bound defaults to 10 and can be changed with
+`anvil_pass_manager_set_iteration_limit()`. If the pipeline still changes IR at
+the configured bound, execution returns `ANVIL_PASS_RUN_ERROR`; reaching the
+bound is never reported as successful.
+Custom passes run only when the current level reaches their `min_level`.
+Manually enabled built-in passes still run at O0.
 
 ### Thread Safety
 
@@ -572,7 +577,6 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/store_load_prop.c` | Store-load propagation |
 | `src/opt/dead_store.c` | Dead store elimination |
 | `src/opt/load_elim.c` | Redundant load elimination |
-| `src/opt/loop_unroll.c` | Loop unrolling |
 | `src/opt/ctx_opt.c` | Context integration |
 | `src/opt/cse.c` | Common subexpression elimination |
 
@@ -588,6 +592,6 @@ work across the function. There is no SSA-construction / promotion step, so the
   dead store, redundant load) clean up obvious cases.
 - **Global Value Numbering (GVN)** — only local CSE exists.
 - **Loop-Invariant Code Motion (LICM)**
-- **Loop unrolling** — present but disabled (no-op, see above).
+- **Loop unrolling**
 - **Inlining**
 - **Tail call optimization**

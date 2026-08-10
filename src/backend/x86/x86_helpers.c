@@ -41,6 +41,7 @@ int x86_type_size(anvil_type_t *type)
     switch (type->kind) {
         case ANVIL_TYPE_VOID:
             return 0;
+        case ANVIL_TYPE_I1:
         case ANVIL_TYPE_I8:
         case ANVIL_TYPE_U8:
             return 1;
@@ -85,6 +86,7 @@ int x86_type_align(anvil_type_t *type)
     switch (type->kind) {
         case ANVIL_TYPE_VOID:
             return 1;
+        case ANVIL_TYPE_I1:
         case ANVIL_TYPE_I8:
         case ANVIL_TYPE_U8:
             return 1;

@@ -11,7 +11,6 @@
 
 #include "arm64_internal.h"
 #include "anvil/anvil_arm64_mir.h"
-#include "opt/arm64_opt.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -282,6 +281,8 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
                                           char **output, size_t *len)
 {
     if (!be || !mod || !output) return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len) *len = 0;
 
     arm64_backend_t *priv = be->priv;
 
@@ -311,29 +312,39 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     /* Emit globals and strings */
     arm64_emit_globals(priv, mod);
     arm64_emit_strings(priv);
+    if (priv->code.failed || priv->data.failed) return ANVIL_ERR_NOMEM;
     
     /* Combine output */
     anvil_strbuf_t result;
     anvil_strbuf_init(&result);
+    if (result.failed) return ANVIL_ERR_NOMEM;
     char *code_str = anvil_strbuf_detach(&priv->code, NULL);
     char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (code_str) {
-        anvil_strbuf_append(&result, code_str);
+    if (!code_str || !data_str) {
         free(code_str);
-    }
-    if (data_str) {
-        anvil_strbuf_append(&result, data_str);
         free(data_str);
+        anvil_strbuf_destroy(&result);
+        return ANVIL_ERR_NOMEM;
+    }
+    anvil_strbuf_append(&result, code_str);
+    anvil_strbuf_append(&result, data_str);
+    free(code_str);
+    free(data_str);
+    if (result.failed) {
+        anvil_strbuf_destroy(&result);
+        return ANVIL_ERR_NOMEM;
     }
     
     *output = anvil_strbuf_detach(&result, len);
-    return ANVIL_OK;
+    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
 }
 
 static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
                                         char **output, size_t *len)
 {
     if (!be || !func || !output) return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len) *len = 0;
     
     arm64_backend_t *priv = be->priv;
     
@@ -342,25 +353,10 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
     
     anvil_error_t err = arm64_emit_func(priv, func);
     if (err != ANVIL_OK) return err;
+    if (priv->code.failed) return ANVIL_ERR_NOMEM;
     
     *output = anvil_strbuf_detach(&priv->code, len);
-    return ANVIL_OK;
-}
-
-/* ============================================================================
- * IR Preparation/Lowering
- * ============================================================================ */
-
-static anvil_error_t arm64_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
-{
-    if (!be || !mod) return ANVIL_ERR_INVALID_ARG;
-    
-    arm64_backend_t *priv = be->priv;
-    
-    /* Run ARM64-specific optimizations */
-    arm64_opt_module(priv, mod);
-    
-    return ANVIL_OK;
+    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
 }
 
 /* ============================================================================
@@ -373,7 +369,6 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .init = arm64_init,
     .cleanup = arm64_cleanup,
     .reset = arm64_reset,
-    .prepare_ir = arm64_prepare_ir,
     .codegen_module = arm64_codegen_module,
     .codegen_func = arm64_codegen_func,
     .get_arch_info = arm64_get_arch_info

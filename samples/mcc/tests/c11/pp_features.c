@@ -3,18 +3,6 @@
  * Tests C11 specific preprocessor additions
  */
 
-/* _Pragma operator (C99/C11) */
-#define STRINGIFY(x) #x
-#define PRAGMA(x) _Pragma(STRINGIFY(x))
-
-/* Diagnostic pragmas */
-#define DISABLE_WARNING(w) PRAGMA(GCC diagnostic ignored STRINGIFY(w))
-#define ENABLE_WARNING(w) PRAGMA(GCC diagnostic warning STRINGIFY(w))
-
-/* Push/pop diagnostic state */
-#define PUSH_WARNINGS PRAGMA(GCC diagnostic push)
-#define POP_WARNINGS PRAGMA(GCC diagnostic pop)
-
 /* C11: _Static_assert in preprocessor context */
 #define STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #define COMPILE_TIME_ASSERT(cond) _Static_assert(cond, #cond)
@@ -23,13 +11,9 @@
 #if __STDC_VERSION__ >= 201112L
 #define HAS_STATIC_ASSERT 1
 #define HAS_GENERIC 1
-#define HAS_NORETURN 1
-#define HAS_ALIGNAS 1
 #else
 #define HAS_STATIC_ASSERT 0
 #define HAS_GENERIC 0
-#define HAS_NORETURN 0
-#define HAS_ALIGNAS 0
 #endif
 
 /* Feature test macros */

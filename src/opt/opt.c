@@ -11,6 +11,7 @@
 struct anvil_pass_manager {
     anvil_ctx_t *ctx;
     anvil_opt_level_t level;
+    unsigned iteration_limit;
     bool enabled[ANVIL_PASS_COUNT];
 
     /* Custom passes */
@@ -18,6 +19,8 @@ struct anvil_pass_manager {
     size_t num_custom;
     size_t cap_custom;
 };
+
+#define ANVIL_DEFAULT_PASS_ITERATION_LIMIT 10u
 
 /* Execution order of the built-in passes. The order here is independent of
  * the enum values — run passes that expose opportunities first and let DCE
@@ -33,9 +36,8 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
     ANVIL_PASS_STORE_LOAD_PROP,    /* 5. Memory passes — do them together */
     ANVIL_PASS_DEAD_STORE,
     ANVIL_PASS_LOAD_ELIM,
-    ANVIL_PASS_LOOP_UNROLL,        /* 6. (disabled — run=NULL) */
-    ANVIL_PASS_SIMPLIFY_CFG,       /* 7. Clean up CFG after the rewrites */
-    ANVIL_PASS_DCE,                /* 8. DCE mops up everything NOP'd above */
+    ANVIL_PASS_SIMPLIFY_CFG,       /* 6. Clean up CFG after the rewrites */
+    ANVIL_PASS_DCE,                /* 7. DCE mops up everything NOP'd above */
 };
 
 /* Built-in pass definitions
@@ -45,7 +47,7 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
  *   Og (DEBUG)      - Debug-friendly: copy_prop, store_load_prop (minimal IR cleanup)
  *   O1 (BASIC)      - Basic: const_fold, dce, copy_prop, store_load_prop
  *   O2 (STANDARD)   - Standard: O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse
- *   O3 (AGGRESSIVE) - Aggressive: O2 + loop_unroll
+ *   O3 (AGGRESSIVE) - Currently the same verified pass set as O2
  */
 static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
@@ -105,13 +107,6 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .min_level = ANVIL_OPT_DEBUG  /* Og+ */
     },
     {
-        .id = ANVIL_PASS_LOOP_UNROLL,
-        .name = "loop-unroll",
-        .description = "Loop unrolling",
-        .run = NULL,  /* Disabled - needs more testing */
-        .min_level = ANVIL_OPT_AGGRESSIVE
-    },
-    {
         .id = ANVIL_PASS_COMMON_SUBEXPR,
         .name = "cse",
         .description = "Common subexpression elimination",
@@ -128,11 +123,12 @@ anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx)
 {
     if (!ctx) return NULL;
     
-    anvil_pass_manager_t *pm = calloc(1, sizeof(anvil_pass_manager_t));
+    anvil_pass_manager_t *pm = anvil_ctx_calloc(ctx, 1, sizeof(*pm));
     if (!pm) return NULL;
     
     pm->ctx = ctx;
     pm->level = ANVIL_OPT_NONE;
+    pm->iteration_limit = ANVIL_DEFAULT_PASS_ITERATION_LIMIT;
     
     /* All passes disabled by default */
     for (int i = 0; i < ANVIL_PASS_COUNT; i++) {
@@ -145,20 +141,32 @@ anvil_pass_manager_t *anvil_pass_manager_create(anvil_ctx_t *ctx)
 void anvil_pass_manager_destroy(anvil_pass_manager_t *pm)
 {
     if (!pm) return;
+    for (size_t i = 0; i < pm->num_custom; i++) {
+        free((char *)pm->custom_passes[i].name);
+        free((char *)pm->custom_passes[i].description);
+    }
     free(pm->custom_passes);
     free(pm);
 }
 
-void anvil_pass_manager_set_level(anvil_pass_manager_t *pm, anvil_opt_level_t level)
+anvil_error_t anvil_pass_manager_set_level(anvil_pass_manager_t *pm,
+                                            anvil_opt_level_t level)
 {
-    if (!pm) return;
+    if (!pm) return ANVIL_ERR_INVALID_ARG;
+    if ((unsigned)level > (unsigned)ANVIL_OPT_AGGRESSIVE) {
+        anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                        "Invalid optimization level %d", (int)level);
+        return ANVIL_ERR_INVALID_ARG;
+    }
     
     pm->level = level;
     
     /* Enable/disable passes based on level */
     for (int i = 0; i < ANVIL_PASS_COUNT; i++) {
-        pm->enabled[i] = (level >= builtin_passes[i].min_level);
+        pm->enabled[i] = builtin_passes[i].run != NULL &&
+                         level >= builtin_passes[i].min_level;
     }
+    return ANVIL_OK;
 }
 
 anvil_opt_level_t anvil_pass_manager_get_level(anvil_pass_manager_t *pm)
@@ -166,33 +174,111 @@ anvil_opt_level_t anvil_pass_manager_get_level(anvil_pass_manager_t *pm)
     return pm ? pm->level : ANVIL_OPT_NONE;
 }
 
-void anvil_pass_manager_enable(anvil_pass_manager_t *pm, anvil_pass_id_t pass)
+anvil_error_t anvil_pass_manager_set_iteration_limit(
+    anvil_pass_manager_t *pm, unsigned limit)
 {
-    if (!pm || pass >= ANVIL_PASS_COUNT) return;
-    pm->enabled[pass] = true;
+    if (!pm || limit == 0) {
+        if (pm && pm->ctx) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                            "Pass iteration limit must be greater than zero");
+        }
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    pm->iteration_limit = limit;
+    return ANVIL_OK;
 }
 
-void anvil_pass_manager_disable(anvil_pass_manager_t *pm, anvil_pass_id_t pass)
+unsigned anvil_pass_manager_get_iteration_limit(
+    const anvil_pass_manager_t *pm)
 {
-    if (!pm || pass >= ANVIL_PASS_COUNT) return;
+    return pm ? pm->iteration_limit : 0;
+}
+
+anvil_error_t anvil_pass_manager_enable(anvil_pass_manager_t *pm,
+                                         anvil_pass_id_t pass)
+{
+    if (!pm) return ANVIL_ERR_INVALID_ARG;
+    if ((unsigned)pass >= (unsigned)ANVIL_PASS_COUNT ||
+        builtin_passes[pass].run == NULL) {
+        anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                        "Invalid optimization pass ID %d", (int)pass);
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    pm->enabled[pass] = true;
+    return ANVIL_OK;
+}
+
+anvil_error_t anvil_pass_manager_disable(anvil_pass_manager_t *pm,
+                                          anvil_pass_id_t pass)
+{
+    if (!pm) return ANVIL_ERR_INVALID_ARG;
+    if ((unsigned)pass >= (unsigned)ANVIL_PASS_COUNT) {
+        anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                        "Invalid optimization pass ID %d", (int)pass);
+        return ANVIL_ERR_INVALID_ARG;
+    }
     pm->enabled[pass] = false;
+    return ANVIL_OK;
 }
 
 bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pass)
 {
-    if (!pm || pass >= ANVIL_PASS_COUNT) return false;
+    if (!pm || (unsigned)pass >= (unsigned)ANVIL_PASS_COUNT) return false;
     return pm->enabled[pass];
 }
 
-bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func)
+static anvil_pass_result_t run_one_pass(anvil_pass_manager_t *pm,
+                                        anvil_func_t *func,
+                                        const anvil_pass_info_t *pass)
 {
-    if (!pm || !func) return false;
-    if (func->is_declaration) return false;  /* Skip declarations */
+    anvil_pass_result_t result = pass->run(func);
+    if (anvil_ctx_get_last_error(pm->ctx) != ANVIL_OK) {
+        return ANVIL_PASS_RUN_ERROR;
+    }
+    if (result != ANVIL_PASS_RUN_ERROR &&
+        result != ANVIL_PASS_RUN_UNCHANGED &&
+        result != ANVIL_PASS_RUN_CHANGED) {
+        anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_OP,
+                        "Optimization pass '%s' returned invalid status %d",
+                        pass->name, (int)result);
+        return ANVIL_PASS_RUN_ERROR;
+    }
+    if (result == ANVIL_PASS_RUN_ERROR) {
+        if (anvil_ctx_get_last_error(pm->ctx) == ANVIL_OK) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_OP,
+                            "Optimization pass '%s' (%s) failed",
+                            pass->name, pass->description);
+        }
+        return result;
+    }
+
+    char verify_error[256] = { 0 };
+    if (!anvil_func_verify(func, verify_error, sizeof(verify_error))) {
+        anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_OP,
+                        "Optimization pass '%s' produced invalid IR: %s",
+                        pass->name, verify_error[0] ? verify_error : "invalid IR");
+        return ANVIL_PASS_RUN_ERROR;
+    }
+    return result;
+}
+
+anvil_pass_result_t anvil_pass_manager_run_func(anvil_pass_manager_t *pm,
+                                                 anvil_func_t *func)
+{
+    if (!pm || !func || !func->parent || func->parent->ctx != pm->ctx) {
+        if (pm && pm->ctx) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                            "Pass manager/function context mismatch");
+        }
+        return ANVIL_PASS_RUN_ERROR;
+    }
+    anvil_ctx_clear_error(pm->ctx);
+    if (func->is_declaration) return ANVIL_PASS_RUN_UNCHANGED;
     
     bool changed = false;
     bool any_changed;
-    int iterations = 0;
-    const int max_iterations = 10;  /* Prevent infinite loops */
+    unsigned iterations = 0;
+    const unsigned max_iterations = pm->iteration_limit;
     
     /* Run passes until fixpoint or max iterations */
     do {
@@ -202,7 +288,11 @@ bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func)
         for (int idx = 0; idx < ANVIL_PASS_COUNT; idx++) {
             int i = pass_exec_order[idx];
             if (pm->enabled[i] && builtin_passes[i].run) {
-                if (builtin_passes[i].run(func)) {
+                anvil_pass_result_t result = run_one_pass(
+                    pm, func, &builtin_passes[i]);
+                if (result == ANVIL_PASS_RUN_ERROR)
+                    return ANVIL_PASS_RUN_ERROR;
+                if (result == ANVIL_PASS_RUN_CHANGED) {
                     any_changed = true;
                     changed = true;
                 }
@@ -211,51 +301,108 @@ bool anvil_pass_manager_run_func(anvil_pass_manager_t *pm, anvil_func_t *func)
         
         /* Run custom passes */
         for (size_t i = 0; i < pm->num_custom; i++) {
-            if (pm->custom_passes[i].run) {
-                if (pm->custom_passes[i].run(func)) {
-                    any_changed = true;
-                    changed = true;
-                }
+            if (pm->level < pm->custom_passes[i].min_level) continue;
+            anvil_pass_result_t result = run_one_pass(
+                pm, func, &pm->custom_passes[i]);
+            if (result == ANVIL_PASS_RUN_ERROR)
+                return ANVIL_PASS_RUN_ERROR;
+            if (result == ANVIL_PASS_RUN_CHANGED) {
+                any_changed = true;
+                changed = true;
             }
         }
         
         iterations++;
-    } while (any_changed && iterations < max_iterations);
-    
-    return changed;
+        if (any_changed && iterations == max_iterations) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_OP,
+                            "Optimization pipeline did not converge after %u iterations",
+                            max_iterations);
+            return ANVIL_PASS_RUN_ERROR;
+        }
+    } while (any_changed);
+
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 
-bool anvil_pass_manager_run_module(anvil_pass_manager_t *pm, anvil_module_t *mod)
+anvil_pass_result_t anvil_pass_manager_run_module(anvil_pass_manager_t *pm,
+                                                   anvil_module_t *mod)
 {
-    if (!pm || !mod) return false;
+    if (!pm || !mod || mod->ctx != pm->ctx) {
+        if (pm && pm->ctx) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                            "Pass manager/module context mismatch");
+        }
+        return ANVIL_PASS_RUN_ERROR;
+    }
     
     bool changed = false;
     
     /* Run passes on each function */
     for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        if (anvil_pass_manager_run_func(pm, func)) {
+        anvil_pass_result_t result = anvil_pass_manager_run_func(pm, func);
+        if (result == ANVIL_PASS_RUN_ERROR)
+            return ANVIL_PASS_RUN_ERROR;
+        if (result == ANVIL_PASS_RUN_CHANGED) {
             changed = true;
         }
     }
-    
-    return changed;
+
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 
 anvil_error_t anvil_pass_manager_register(anvil_pass_manager_t *pm,
                                            const anvil_pass_info_t *pass)
 {
-    if (!pm || !pass) return ANVIL_ERR_INVALID_ARG;
+    if (!pm || !pass || pass->id != ANVIL_PASS_CUSTOM || !pass->run ||
+        !pass->name || !pass->name[0] || !pass->description ||
+        (unsigned)pass->min_level > (unsigned)ANVIL_OPT_AGGRESSIVE) {
+        if (pm && pm->ctx) {
+            anvil_set_error(pm->ctx, ANVIL_ERR_INVALID_ARG,
+                            "Invalid custom optimization pass descriptor");
+        }
+        return ANVIL_ERR_INVALID_ARG;
+    }
+
+    char *name = anvil_ctx_strdup(pm->ctx, pass->name);
+    if (!name) return ANVIL_ERR_NOMEM;
+    char *description = anvil_ctx_strdup(pm->ctx, pass->description);
+    if (!description) {
+        free(name);
+        return ANVIL_ERR_NOMEM;
+    }
     
     /* Grow array if needed */
     if (pm->num_custom >= pm->cap_custom) {
+        if (pm->cap_custom > SIZE_MAX / 2) {
+            free(name);
+            free(description);
+            anvil_set_error(pm->ctx, ANVIL_ERR_NOMEM,
+                            "Custom pass table capacity overflow");
+            return ANVIL_ERR_NOMEM;
+        }
         size_t new_cap = pm->cap_custom ? pm->cap_custom * 2 : 4;
-        anvil_pass_info_t *new_passes = realloc(pm->custom_passes,
-                                                 new_cap * sizeof(anvil_pass_info_t));
-        if (!new_passes) return ANVIL_ERR_NOMEM;
+        if (new_cap > SIZE_MAX / sizeof(*pm->custom_passes)) {
+            free(name);
+            free(description);
+            anvil_set_error(pm->ctx, ANVIL_ERR_NOMEM,
+                            "Custom pass table size overflow");
+            return ANVIL_ERR_NOMEM;
+        }
+        anvil_pass_info_t *new_passes = anvil_ctx_realloc(
+            pm->ctx, pm->custom_passes,
+            new_cap * sizeof(*pm->custom_passes));
+        if (!new_passes) {
+            free(name);
+            free(description);
+            return ANVIL_ERR_NOMEM;
+        }
         pm->custom_passes = new_passes;
         pm->cap_custom = new_cap;
     }
     
-    pm->custom_passes[pm->num_custom++] = *pass;
+    pm->custom_passes[pm->num_custom] = *pass;
+    pm->custom_passes[pm->num_custom].name = name;
+    pm->custom_passes[pm->num_custom].description = description;
+    pm->num_custom++;
     return ANVIL_OK;
 }

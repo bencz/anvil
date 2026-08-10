@@ -179,11 +179,6 @@ static inline bool pp_has_concat(mcc_preprocessor_t *pp)
     return pp_has_feature(pp, MCC_FEAT_PP_CONCAT);
 }
 
-static inline bool pp_has_include_next(mcc_preprocessor_t *pp)
-{
-    return pp_has_feature(pp, MCC_FEAT_PP_INCLUDE_NEXT);
-}
-
 static inline bool pp_has_warning_directive(mcc_preprocessor_t *pp)
 {
     return pp_has_feature(pp, MCC_FEAT_PP_WARNING);

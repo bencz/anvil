@@ -35,43 +35,10 @@ int classify(int c)
     }
 }
 
-/* GNU: Labels as values */
-void *label_ptr;
-
-void jump_table(int n)
-{
-    static void *table[] = { &&label1, &&label2, &&label3 };
-    if (n >= 0 && n < 3) {
-        goto *table[n];
-    }
-    return;
-    
-label1:
-    x = 1;
-    return;
-label2:
-    x = 2;
-    return;
-label3:
-    x = 3;
-    return;
-}
-
-/* GNU: __attribute__ */
-int deprecated_func(void) __attribute__((deprecated));
-void noreturn_func(void) __attribute__((noreturn));
-int pure_func(int x) __attribute__((pure));
-
-struct __attribute__((packed)) packed_struct {
-    char a;
-    int b;
-    char c;
-};
-
-struct __attribute__((aligned(16))) aligned_struct {
-    int x;
-    int y;
-};
+/* MCC deliberately does not advertise labels-as-values/computed goto yet:
+ * ANVIL IR has no block-address/indirect-branch primitive.  GNU attributes are
+ * likewise excluded until record layout and call-site metadata can preserve
+ * their semantics.  These constructs must be rejected, never token-skipped. */
 
 int main(void)
 {

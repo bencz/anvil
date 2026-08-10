@@ -3,6 +3,7 @@
  */
 
 #include <anvil/anvil_machine.h>
+#include <anvil/anvil_internal.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +43,23 @@ static void test_machine_ir_tracks_vregs_and_instructions(void)
     CHECK(anvil_mir_num_instrs(fn) == 2, "MachineIR should track instruction count");
 
     anvil_mir_func_destroy(fn);
+}
+
+static void test_strbuf_failure_is_sticky_and_detach_is_atomic(void)
+{
+    anvil_strbuf_t buffer;
+    anvil_strbuf_init(&buffer);
+    CHECK(buffer.data != NULL, "string buffer should initialize for failure test");
+    if (!buffer.data) return;
+    anvil_strbuf_append(&buffer, "prefix");
+    buffer.failed = true; /* Deterministic fault injection after partial output. */
+    anvil_strbuf_append(&buffer, "must-not-escape");
+    size_t len = 123;
+    char *detached = anvil_strbuf_detach(&buffer, &len);
+    CHECK(detached == NULL && len == 0,
+          "failed string buffer must not detach partial assembly");
+    CHECK(buffer.data == NULL && buffer.len == 0 && buffer.cap == 0,
+          "failed detach must release and reset the partial buffer");
 }
 
 static void test_machine_ir_tracks_blocks_and_branch_targets(void)
@@ -171,6 +189,229 @@ static void test_machine_ir_verifier_rejects_register_class_mismatch(void)
     anvil_mir_func_destroy(fn);
 }
 
+static void test_machine_ir_verifier_rejects_use_before_def(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_use_before_def");
+    anvil_mir_vreg_t value = anvil_mir_add_vreg(fn);
+    anvil_mir_vreg_t uses[] = { value };
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, uses, 1),
+          "use-before-def test should build malformed MIR");
+    char error[160] = { 0 };
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "before definite assignment") != NULL,
+          "verifier must diagnose same-block use before definition");
+    anvil_mir_func_destroy(fn);
+}
+
+static void test_machine_ir_verifier_tracks_definitions_across_diamond(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_def_diamond");
+    anvil_mir_block_t entry = anvil_mir_current_block(fn);
+    anvil_mir_block_t left = anvil_mir_add_block(fn, "left");
+    anvil_mir_block_t right = anvil_mir_add_block(fn, "right");
+    anvil_mir_block_t merge = anvil_mir_add_block(fn, "merge");
+    anvil_mir_vreg_t cond = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t value = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    CHECK(anvil_mir_set_current_block(fn, entry) &&
+          anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, cond, 1) &&
+          anvil_mir_add_cond_branch(fn, cond, left, right),
+          "diamond entry should be valid");
+    CHECK(anvil_mir_set_current_block(fn, left) &&
+          anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, value, 7) &&
+          anvil_mir_add_branch(fn, merge),
+          "diamond left should define the merged value");
+    CHECK(anvil_mir_set_current_block(fn, right) &&
+          anvil_mir_add_branch(fn, merge),
+          "diamond right should omit the merged definition");
+    anvil_mir_vreg_t uses[] = { value };
+    CHECK(anvil_mir_set_current_block(fn, merge) &&
+          anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, uses, 1),
+          "diamond merge should use the conditional definition");
+    char error[160] = { 0 };
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "before definite assignment") != NULL,
+          "definition on only one diamond arm must not be definite at merge");
+
+    CHECK(anvil_mir_set_current_block(fn, right),
+          "diamond right should be selectable for repair");
+    /* Insertion after its terminator is deliberately impossible to repair in
+       place; build a second graph to prove multiple edge definitions. */
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_parallel_defs_diamond");
+    entry = anvil_mir_current_block(fn);
+    left = anvil_mir_add_block(fn, "left");
+    right = anvil_mir_add_block(fn, "right");
+    merge = anvil_mir_add_block(fn, "merge");
+    cond = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 8);
+    value = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_current_block(fn, entry);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, cond, 1);
+    anvil_mir_add_cond_branch(fn, cond, left, right);
+    anvil_mir_set_current_block(fn, left);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, value, 7);
+    anvil_mir_add_branch(fn, merge);
+    anvil_mir_set_current_block(fn, right);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, value, 9);
+    anvil_mir_add_branch(fn, merge);
+    uses[0] = value;
+    anvil_mir_set_current_block(fn, merge);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, uses, 1);
+    CHECK(anvil_mir_verify(fn, error, sizeof(error)),
+          "multiple PHI-edge-style definitions on all paths must be accepted");
+    anvil_mir_func_destroy(fn);
+}
+
+static void test_machine_ir_verifier_rejects_unreachable_and_width_mismatch(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_unreachable");
+    anvil_mir_block_t dead = anvil_mir_add_block(fn, "dead");
+    anvil_mir_set_current_block(fn, 0);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0);
+    anvil_mir_set_current_block(fn, dead);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0);
+    char error[160] = { 0 };
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "unreachable") != NULL,
+          "verifier must reject unreachable MIR blocks");
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_width_mismatch");
+    anvil_mir_vreg_t i32 = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t i64 = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t copy_use[] = { i32 };
+    anvil_mir_vreg_t ret_use[] = { i64 };
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, i32, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, i64, copy_use, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, ret_use, 1);
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "mismatch") != NULL,
+          "verifier must reject same-class copies with unequal widths");
+    anvil_mir_func_destroy(fn);
+}
+
+static void test_machine_ir_verifier_handles_loops_and_rejects_other(void)
+{
+    char error[160] = { 0 };
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_invalid_loop_def");
+    anvil_mir_block_t header = anvil_mir_add_block(fn, "header");
+    anvil_mir_block_t body = anvil_mir_add_block(fn, "body");
+    anvil_mir_vreg_t value = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_current_block(fn, 0);
+    anvil_mir_add_branch(fn, header);
+    anvil_mir_set_current_block(fn, header);
+    anvil_mir_vreg_t value_use[] = { value };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
+                        ANVIL_MIR_NO_VREG, value_use, 1);
+    anvil_mir_add_branch(fn, body);
+    anvil_mir_set_current_block(fn, body);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, value, 1);
+    anvil_mir_add_branch(fn, header);
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "before definite assignment") != NULL,
+          "a backedge definition must not satisfy the loop entry path");
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_valid_loop_phi_cycle");
+    header = anvil_mir_add_block(fn, "header");
+    body = anvil_mir_add_block(fn, "body");
+    anvil_mir_vreg_t a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t temp = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_current_block(fn, 0);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, a, 1);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, b, 2);
+    anvil_mir_add_branch(fn, header);
+    anvil_mir_set_current_block(fn, header);
+    anvil_mir_vreg_t live[] = { a, b };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
+                        ANVIL_MIR_NO_VREG, live, 2);
+    anvil_mir_add_branch(fn, body);
+    anvil_mir_set_current_block(fn, body);
+    anvil_mir_vreg_t use_a[] = { a };
+    anvil_mir_vreg_t use_b[] = { b };
+    anvil_mir_vreg_t use_temp[] = { temp };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, temp, use_a, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, a, use_b, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, b, use_temp, 1);
+    anvil_mir_add_branch(fn, header);
+    CHECK(anvil_mir_verify(fn, error, sizeof(error)),
+          "loop-carried parallel-copy cycles with entry definitions are valid");
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_reject_invalid_opcode");
+    value = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, value, 1);
+    value_use[0] = value;
+    anvil_mir_add_instr(fn, (anvil_mir_opcode_t)UINT32_MAX,
+                        ANVIL_MIR_NO_VREG, value_use, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                        ANVIL_MIR_NO_VREG, NULL, 0);
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "invalid opcode") != NULL,
+          "generic verifier must reject opcodes outside the formal enum");
+    anvil_mir_func_destroy(fn);
+}
+
+static void test_machine_ir_verifier_models_liveins_and_abi_bundles(void)
+{
+    char error[192] = { 0 };
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_fixed_not_livein");
+    anvil_mir_vreg_t result = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_fixed_reg(fn, result, 0);
+    anvil_mir_vreg_t result_use[] = { result };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
+                        ANVIL_MIR_NO_VREG, result_use, 1);
+    anvil_mir_add_instr_symbol(fn, ANVIL_MIR_OP_CALL, result,
+                               NULL, 0, "callee");
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                        ANVIL_MIR_NO_VREG, result_use, 1);
+    CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
+          strstr(error, "before definite assignment") != NULL,
+          "a fixed call result must not be treated as an ABI live-in");
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_explicit_livein");
+    result = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_fixed_reg(fn, result, 0);
+    anvil_mir_set_live_in(fn, result, true);
+    result_use[0] = result;
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                        ANVIL_MIR_NO_VREG, result_use, 1);
+    CHECK(anvil_mir_verify(fn, error, sizeof(error)),
+          "an explicitly marked ABI input must be definite at entry");
+    anvil_mir_func_destroy(fn);
+
+    fn = anvil_mir_func_create("mir_multi_result_bundle");
+    anvil_mir_vreg_t lo = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t hi = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_set_fixed_reg(fn, lo, 0);
+    anvil_mir_set_fixed_reg(fn, hi, 1);
+    anvil_mir_add_instr_symbol(fn, ANVIL_MIR_OP_CALL,
+                               ANVIL_MIR_NO_VREG, NULL, 0, "pair_result");
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL_RESULT, lo, NULL, 0);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL_RESULT, hi, NULL, 0);
+    anvil_mir_vreg_t pair_uses[] = { lo, hi };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
+                        ANVIL_MIR_NO_VREG, pair_uses, 2);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET_VALUE_PART,
+                        ANVIL_MIR_NO_VREG, result_use, 1);
+    anvil_mir_vreg_t hi_use[] = { hi };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET_VALUE_PART,
+                        ANVIL_MIR_NO_VREG, hi_use, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                        ANVIL_MIR_NO_VREG, NULL, 0);
+    CHECK(anvil_mir_verify(fn, error, sizeof(error)),
+          "contiguous multi-part call-result and return bundles must verify");
+    anvil_mir_func_destroy(fn);
+}
+
 static void test_machine_ir_coalesces_redundant_nonfixed_copies(void)
 {
     anvil_mir_func_t *fn = anvil_mir_func_create("mir_copy_coalesce");
@@ -197,17 +438,11 @@ static void test_machine_ir_coalesces_redundant_nonfixed_copies(void)
     CHECK(anvil_mir_coalesce_copies(fn),
           "MachineIR copy coalescing pass should run");
 
-    anvil_mir_instr_info_t copy_info;
-    CHECK(anvil_mir_get_instr_info(fn, 1, &copy_info),
-          "coalesced copy instruction should remain inspectable");
-    CHECK(copy_info.op == ANVIL_MIR_OP_OTHER &&
-          copy_info.def == ANVIL_MIR_NO_VREG &&
-          copy_info.num_uses == 0,
-          "redundant copy should be removed from the dataflow");
-
-    CHECK(anvil_mir_get_instr_use(fn, 2, 0) == src,
+    CHECK(anvil_mir_num_instrs(fn) == 3,
+          "redundant copy should be physically removed, not changed to OTHER");
+    CHECK(anvil_mir_get_instr_use(fn, 1, 0) == src,
           "coalescing should rewrite dst uses to source vreg");
-    CHECK(anvil_mir_get_instr_use(fn, 2, 1) == src,
+    CHECK(anvil_mir_get_instr_use(fn, 1, 1) == src,
           "coalescing should preserve existing source uses");
 
     anvil_mir_func_destroy(fn);
@@ -249,6 +484,67 @@ static void test_machine_ir_coalescing_preserves_fixed_register_copies(void)
     anvil_mir_func_destroy(fn);
 }
 
+static void test_machine_ir_coalescing_does_not_cross_nondominating_blocks(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_copy_diamond");
+    CHECK(fn != NULL, "MachineIR function should be created for diamond coalescing");
+    if (!fn) return;
+
+    anvil_mir_block_t entry = anvil_mir_current_block(fn);
+    anvil_mir_block_t left = anvil_mir_add_block(fn, "left");
+    anvil_mir_block_t right = anvil_mir_add_block(fn, "right");
+    anvil_mir_block_t exit = anvil_mir_add_block(fn, "exit");
+    anvil_mir_vreg_t cond = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t src = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t dst = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t sum = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+
+    CHECK(anvil_mir_set_current_block(fn, entry),
+          "diamond entry block should be selectable");
+    CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, cond, 1),
+          "diamond should define its condition");
+    CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, src, 7),
+          "diamond should define the copy source");
+    CHECK(anvil_mir_add_cond_branch(fn, cond, left, right),
+          "diamond entry should branch to both arms");
+
+    CHECK(anvil_mir_set_current_block(fn, left),
+          "diamond left block should be selectable");
+    anvil_mir_vreg_t copy_uses[] = { src };
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, dst, copy_uses, 1),
+          "diamond left arm should define the copy destination");
+    CHECK(anvil_mir_add_branch(fn, exit),
+          "diamond left arm should reach exit");
+
+    CHECK(anvil_mir_set_current_block(fn, right),
+          "diamond right block should be selectable");
+    anvil_mir_vreg_t add_uses[] = { dst, src };
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, sum, add_uses, 2),
+          "diamond right arm should contain the nondominated destination use");
+    CHECK(anvil_mir_add_branch(fn, exit),
+          "diamond right arm should reach exit");
+
+    CHECK(anvil_mir_set_current_block(fn, exit),
+          "diamond exit block should be selectable");
+    anvil_mir_vreg_t ret_uses[] = { src };
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG,
+                              ret_uses, 1),
+          "diamond exit should terminate");
+
+    CHECK(anvil_mir_coalesce_copies(fn),
+          "MachineIR coalescing should inspect a diamond CFG");
+
+    anvil_mir_instr_info_t copy_info;
+    CHECK(anvil_mir_get_instr_info(fn, 3, &copy_info),
+          "diamond copy should remain inspectable");
+    CHECK(copy_info.op == ANVIL_MIR_OP_COPY,
+          "coalescing must retain a copy with a use outside its block");
+    CHECK(anvil_mir_get_instr_use(fn, 5, 0) == dst,
+          "coalescing must not rewrite a use the copy does not dominate");
+
+    anvil_mir_func_destroy(fn);
+}
+
 static void test_linear_scan_allocates_register_classes_independently(void)
 {
     anvil_mir_func_t *fn = anvil_mir_func_create("mir_classes");
@@ -261,7 +557,7 @@ static void test_linear_scan_allocates_register_classes_independently(void)
 
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, g0, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, f0, NULL, 0);
-    anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG, both, 2);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, both, 2);
 
     anvil_regalloc_class_config_t configs[] = {
         { ANVIL_MIR_REG_GPR, 1, NULL },
@@ -305,7 +601,7 @@ static void test_linear_scan_respects_fixed_physical_registers(void)
 
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, fixed, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, normal, NULL, 0);
-    anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG, both, 2);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, both, 2);
 
     anvil_regalloc_class_config_t configs[] = {
         { ANVIL_MIR_REG_GPR, 2, NULL },
@@ -454,7 +750,7 @@ static void test_linear_scan_extends_loop_carried_values_to_backedge_exit(void)
     anvil_mir_vreg_t carried_uses[] = { carried };
     CHECK(anvil_mir_set_current_block(fn, header),
           "header should be selectable for loop liveness test");
-    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG,
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG,
                               carried_uses, 1),
           "header should consume loop-carried value");
     CHECK(anvil_mir_add_branch(fn, body),
@@ -467,7 +763,7 @@ static void test_linear_scan_extends_loop_carried_values_to_backedge_exit(void)
           "body should update loop-carried value for the backedge");
     CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, local, NULL, 0),
           "body should define a local value after the backedge update");
-    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG,
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG,
                               local_uses, 1),
           "body should consume local value while carried value is live-out");
     CHECK(anvil_mir_add_branch(fn, header),
@@ -537,7 +833,7 @@ static void test_materialize_spills_inserts_loads_stores_and_scratch_temps(void)
           "spill materialization should define second spill candidate");
     CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, sum, add_uses, 2),
           "spill materialization should use two spill candidates together");
-    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG,
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG,
                               all_uses, 3),
           "spill materialization should keep all values live");
     CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG,
@@ -662,7 +958,7 @@ static void test_materialize_spills_rejects_insufficient_scratch_registers(void)
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, s0, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, s1, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, sum, add_uses, 2);
-    anvil_mir_add_instr(fn, ANVIL_MIR_OP_OTHER, ANVIL_MIR_NO_VREG, all_uses, 3);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, all_uses, 3);
 
     int alloc_regs[] = { 0 };
     anvil_regalloc_class_config_t alloc_configs[] = {
@@ -684,15 +980,134 @@ static void test_materialize_spills_rejects_insufficient_scratch_registers(void)
     anvil_mir_func_destroy(fn);
 }
 
+static void test_materialize_spills_allows_unrelated_fixed_scratch_class(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_cross_class_scratch");
+    CHECK(fn != NULL, "cross-class scratch MIR should be created");
+    if (!fn) return;
+
+    anvil_mir_vreg_t callee = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t fp = anvil_mir_add_vreg_ex(
+        fn, ANVIL_MIR_REG_FPR, 32);
+    anvil_mir_vreg_t fp_use[] = { fp };
+    anvil_mir_vreg_t callee_use[] = { callee };
+    CHECK(anvil_mir_set_fixed_reg(fn, callee, 11),
+          "indirect callee should model fixed scratch GPR R11");
+    CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, callee, NULL, 0) &&
+          anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, fp, NULL, 0) &&
+          anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
+                              ANVIL_MIR_NO_VREG, fp_use, 1) &&
+          anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL,
+                              ANVIL_MIR_NO_VREG, callee_use, 1) &&
+          anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
+                              ANVIL_MIR_NO_VREG, NULL, 0),
+          "cross-class scratch regression should build its instruction stream");
+
+    int gpr_alloc[] = { 3 };
+    anvil_regalloc_class_config_t alloc[] = {
+        { ANVIL_MIR_REG_GPR, 1, gpr_alloc },
+        { ANVIL_MIR_REG_FPR, 0, NULL },
+    };
+    CHECK(anvil_regalloc_linear_scan_classes(fn, alloc, 2),
+          "cross-class scratch regression should allocate with an FPR spill");
+    CHECK(anvil_mir_num_spills(fn) == 1,
+          "cross-class scratch regression should have exactly one FPR spill");
+
+    int gpr_scratch[] = { 10, 11, 15 };
+    int fpr_scratch[] = { 8, 9, 10 };
+    anvil_regalloc_class_config_t scratch[] = {
+        { ANVIL_MIR_REG_GPR, 3, gpr_scratch },
+        { ANVIL_MIR_REG_FPR, 3, fpr_scratch },
+    };
+    CHECK(anvil_mir_materialize_spills(fn, scratch, 2),
+          "a fixed scratch GPR must not block materializing an unrelated FPR spill");
+    CHECK(anvil_mir_verify(fn, NULL, 0),
+          "cross-class materialized spill MIR should remain structurally valid");
+    anvil_mir_func_destroy(fn);
+}
+
+static void test_machine_ir_rejects_non_boolean_compare_and_conditions(void)
+{
+    anvil_mir_func_t *cmp = anvil_mir_func_create("bad_cmp_width");
+    CHECK(cmp != NULL, "bad-width compare MIR should be created");
+    if (cmp) {
+        anvil_mir_vreg_t a = anvil_mir_add_vreg_ex(cmp, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t b = anvil_mir_add_vreg_ex(cmp, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t bad = anvil_mir_add_vreg_ex(cmp, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t uses[] = { a, b };
+        CHECK(anvil_mir_add_instr_imm(cmp, ANVIL_MIR_OP_MOV, a, 1) &&
+              anvil_mir_add_instr_imm(cmp, ANVIL_MIR_OP_MOV, b, 2) &&
+              anvil_mir_add_instr(cmp, ANVIL_MIR_OP_CMP_EQ, bad, uses, 2) &&
+              anvil_mir_add_instr(cmp, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "bad-width compare stream should build");
+        CHECK(!anvil_mir_verify(cmp, NULL, 0),
+              "integer compares must define a normalized GPR8 boolean");
+        anvil_mir_func_destroy(cmp);
+    }
+
+    anvil_mir_func_t *branch = anvil_mir_func_create("bad_branch_width");
+    CHECK(branch != NULL, "bad-width branch MIR should be created");
+    if (branch) {
+        anvil_mir_block_t entry = anvil_mir_current_block(branch);
+        anvil_mir_block_t yes = anvil_mir_add_block(branch, "yes");
+        anvil_mir_block_t no = anvil_mir_add_block(branch, "no");
+        anvil_mir_vreg_t bad = anvil_mir_add_vreg_ex(
+            branch, ANVIL_MIR_REG_GPR, 32);
+        CHECK(anvil_mir_set_current_block(branch, entry) &&
+              anvil_mir_add_instr_imm(branch, ANVIL_MIR_OP_MOV, bad, 1) &&
+              anvil_mir_add_cond_branch(branch, bad, yes, no) &&
+              anvil_mir_set_current_block(branch, yes) &&
+              anvil_mir_add_instr(branch, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0) &&
+              anvil_mir_set_current_block(branch, no) &&
+              anvil_mir_add_instr(branch, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "bad-width branch stream should build");
+        CHECK(!anvil_mir_verify(branch, NULL, 0),
+              "conditional branches must consume a GPR8 boolean");
+        anvil_mir_func_destroy(branch);
+    }
+
+    anvil_mir_func_t *select = anvil_mir_func_create("bad_select_width");
+    CHECK(select != NULL, "bad-width select MIR should be created");
+    if (select) {
+        anvil_mir_vreg_t cond = anvil_mir_add_vreg_ex(
+            select, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t a = anvil_mir_add_vreg_ex(select, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t b = anvil_mir_add_vreg_ex(select, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t out = anvil_mir_add_vreg_ex(select, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t uses[] = { cond, a, b };
+        CHECK(anvil_mir_add_instr_imm(select, ANVIL_MIR_OP_MOV, cond, 1) &&
+              anvil_mir_add_instr_imm(select, ANVIL_MIR_OP_MOV, a, 2) &&
+              anvil_mir_add_instr_imm(select, ANVIL_MIR_OP_MOV, b, 3) &&
+              anvil_mir_add_instr(select, ANVIL_MIR_OP_SELECT, out, uses, 3) &&
+              anvil_mir_add_instr(select, ANVIL_MIR_OP_RET,
+                                  ANVIL_MIR_NO_VREG, NULL, 0),
+              "bad-width select stream should build");
+        CHECK(!anvil_mir_verify(select, NULL, 0),
+              "select must consume a GPR8 boolean condition");
+        anvil_mir_func_destroy(select);
+    }
+}
+
 int main(void)
 {
     test_machine_ir_tracks_vregs_and_instructions();
+    test_strbuf_failure_is_sticky_and_detach_is_atomic();
     test_machine_ir_tracks_blocks_and_branch_targets();
     test_machine_ir_verifier_accepts_valid_function();
     test_machine_ir_verifier_rejects_unterminated_blocks();
     test_machine_ir_verifier_rejects_register_class_mismatch();
+    test_machine_ir_verifier_rejects_use_before_def();
+    test_machine_ir_verifier_tracks_definitions_across_diamond();
+    test_machine_ir_verifier_rejects_unreachable_and_width_mismatch();
+    test_machine_ir_verifier_handles_loops_and_rejects_other();
+    test_machine_ir_verifier_models_liveins_and_abi_bundles();
     test_machine_ir_coalesces_redundant_nonfixed_copies();
     test_machine_ir_coalescing_preserves_fixed_register_copies();
+    test_machine_ir_coalescing_does_not_cross_nondominating_blocks();
     test_linear_scan_allocates_register_classes_independently();
     test_linear_scan_respects_fixed_physical_registers();
     test_linear_scan_uses_explicit_allocatable_register_list();
@@ -702,6 +1117,8 @@ int main(void)
     test_machine_ir_invalidates_allocations_after_new_vreg();
     test_materialize_spills_inserts_loads_stores_and_scratch_temps();
     test_materialize_spills_rejects_insufficient_scratch_registers();
+    test_materialize_spills_allows_unrelated_fixed_scratch_class();
+    test_machine_ir_rejects_non_boolean_compare_and_conditions();
 
     if (failures) {
         fprintf(stderr, "%d MachineIR/regalloc regression test(s) failed\n", failures);

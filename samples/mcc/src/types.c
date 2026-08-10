@@ -27,15 +27,23 @@ static const char *type_kind_names[] = {
 mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
 {
     mcc_type_context_t *tctx = mcc_alloc(ctx, sizeof(mcc_type_context_t));
+    if (!tctx) return NULL;
     tctx->ctx = ctx;
     
-    /* Get architecture info from ANVIL using shared function */
+    /* ANVIL's target DataLayout is the single source of truth. */
     anvil_arch_t anvil_arch = mcc_arch_to_anvil(ctx->options.arch);
-    const anvil_arch_info_t *arch_info = anvil_arch_get_info(anvil_arch);
-    
-    /* Get pointer and word size from architecture */
-    int ptr_size = arch_info ? arch_info->ptr_size : 4;
-    int word_size = arch_info ? arch_info->word_size : 4;
+    anvil_ctx_t *layout_ctx = anvil_ctx_create_for_target(anvil_arch);
+    if (!layout_ctx) {
+        mcc_fatal(ctx, "Failed to create target DataLayout");
+        return NULL;
+    }
+    const anvil_data_layout_t *layout = anvil_ctx_get_data_layout(layout_ctx);
+    if (!layout) {
+        anvil_ctx_destroy(layout_ctx);
+        mcc_fatal(ctx, "Target has no DataLayout");
+        return NULL;
+    }
+    int ptr_size = (int)layout->pointer.size;
     
     /* Determine long size based on data model:
      * - ILP32 (32-bit): long = 4 bytes (x86, S/370, S/370-XA, S/390, PPC32)
@@ -55,81 +63,88 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     
     tctx->type_char = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_char->kind = TYPE_CHAR;
-    tctx->type_char->size = 1;
-    tctx->type_char->align = 1;
+    tctx->type_char->size = layout->i8.size;
+    tctx->type_char->align = layout->i8.abi_align;
     
     tctx->type_schar = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_schar->kind = TYPE_CHAR;
     tctx->type_schar->is_unsigned = false;
-    tctx->type_schar->size = 1;
-    tctx->type_schar->align = 1;
+    tctx->type_schar->size = layout->i8.size;
+    tctx->type_schar->align = layout->i8.abi_align;
     
     tctx->type_uchar = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_uchar->kind = TYPE_CHAR;
     tctx->type_uchar->is_unsigned = true;
-    tctx->type_uchar->size = 1;
-    tctx->type_uchar->align = 1;
+    tctx->type_uchar->size = layout->i8.size;
+    tctx->type_uchar->align = layout->i8.abi_align;
     
     tctx->type_short = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_short->kind = TYPE_SHORT;
-    tctx->type_short->size = 2;
-    tctx->type_short->align = 2;
+    tctx->type_short->size = layout->i16.size;
+    tctx->type_short->align = layout->i16.abi_align;
     
     tctx->type_ushort = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ushort->kind = TYPE_SHORT;
     tctx->type_ushort->is_unsigned = true;
-    tctx->type_ushort->size = 2;
-    tctx->type_ushort->align = 2;
+    tctx->type_ushort->size = layout->i16.size;
+    tctx->type_ushort->align = layout->i16.abi_align;
     
     tctx->type_int = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_int->kind = TYPE_INT;
-    tctx->type_int->size = 4;
-    tctx->type_int->align = 4;
+    tctx->type_int->size = layout->i32.size;
+    tctx->type_int->align = layout->i32.abi_align;
     
     tctx->type_uint = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_uint->kind = TYPE_INT;
     tctx->type_uint->is_unsigned = true;
-    tctx->type_uint->size = 4;
-    tctx->type_uint->align = 4;
+    tctx->type_uint->size = layout->i32.size;
+    tctx->type_uint->align = layout->i32.abi_align;
     
     /* long size depends on architecture */
     tctx->type_long = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_long->kind = TYPE_LONG;
     tctx->type_long->size = long_size;
-    tctx->type_long->align = long_size;
+    tctx->type_long->align = long_size == 8
+        ? layout->i64.abi_align : layout->i32.abi_align;
     
     tctx->type_ulong = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ulong->kind = TYPE_LONG;
     tctx->type_ulong->is_unsigned = true;
     tctx->type_ulong->size = long_size;
-    tctx->type_ulong->align = long_size;
+    tctx->type_ulong->align = long_size == 8
+        ? layout->i64.abi_align : layout->i32.abi_align;
     
     /* C99 long long types - always 8 bytes */
     tctx->type_llong = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_llong->kind = TYPE_LONG_LONG;
-    tctx->type_llong->size = 8;
-    tctx->type_llong->align = (word_size >= 8) ? 8 : word_size;
+    tctx->type_llong->size = layout->i64.size;
+    tctx->type_llong->align = layout->i64.abi_align;
     
     tctx->type_ullong = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ullong->kind = TYPE_LONG_LONG;
     tctx->type_ullong->is_unsigned = true;
-    tctx->type_ullong->size = 8;
-    tctx->type_ullong->align = (word_size >= 8) ? 8 : word_size;
+    tctx->type_ullong->size = layout->i64.size;
+    tctx->type_ullong->align = layout->i64.abi_align;
     
     tctx->type_float = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_float->kind = TYPE_FLOAT;
-    tctx->type_float->size = 4;
-    tctx->type_float->align = 4;
+    tctx->type_float->size = layout->f32.size;
+    tctx->type_float->align = layout->f32.abi_align;
     
     tctx->type_double = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_double->kind = TYPE_DOUBLE;
-    tctx->type_double->size = 8;
-    tctx->type_double->align = (word_size >= 8) ? 8 : word_size;
+    tctx->type_double->size = layout->f64.size;
+    tctx->type_double->align = layout->f64.abi_align;
     
     tctx->type_ldouble = mcc_alloc(ctx, sizeof(mcc_type_t));
     tctx->type_ldouble->kind = TYPE_LONG_DOUBLE;
-    tctx->type_ldouble->size = 8;
-    tctx->type_ldouble->align = (word_size >= 8) ? 8 : word_size;
+    tctx->type_ldouble->size = layout->f64.size;
+    tctx->type_ldouble->align = layout->f64.abi_align;
+
+    tctx->type_bool = mcc_alloc(ctx, sizeof(mcc_type_t));
+    tctx->type_bool->kind = TYPE_BOOL;
+    tctx->type_bool->size = layout->i1.size;
+    tctx->type_bool->align = layout->i1.abi_align;
     
     /* C99 Complex types (size is 2x the base type) */
     tctx->type_cfloat = mcc_alloc(ctx, sizeof(mcc_type_t));
@@ -149,6 +164,8 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     
     /* Store pointer size for use in mcc_type_pointer */
     tctx->ptr_size = ptr_size;
+    tctx->ptr_align = layout->pointer.abi_align;
+    anvil_ctx_destroy(layout_ctx);
     
     return tctx;
 }
@@ -174,6 +191,7 @@ mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx) { return tctx->type_ullong
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx) { return tctx->type_float; }
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx) { return tctx->type_double; }
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx) { return tctx->type_ldouble; }
+mcc_type_t *mcc_type_bool(mcc_type_context_t *tctx) { return tctx->type_bool; }
 mcc_type_t *mcc_type_complex_float(mcc_type_context_t *tctx) { return tctx->type_cfloat; }
 mcc_type_t *mcc_type_complex_double(mcc_type_context_t *tctx) { return tctx->type_cdouble; }
 mcc_type_t *mcc_type_complex_ldouble(mcc_type_context_t *tctx) { return tctx->type_cldouble; }
@@ -185,13 +203,19 @@ mcc_type_t *mcc_type_pointer(mcc_type_context_t *tctx, mcc_type_t *pointee)
     type->kind = TYPE_POINTER;
     type->data.pointer.pointee = pointee;
     type->size = tctx->ptr_size;  /* Use architecture-specific pointer size */
-    type->align = tctx->ptr_size;
+    type->align = tctx->ptr_align;
     return type;
 }
 
 mcc_type_t *mcc_type_array(mcc_type_context_t *tctx, mcc_type_t *element, size_t length)
 {
+    if (!tctx || !element || (element->size != 0 &&
+        length > SIZE_MAX / element->size)) {
+        if (tctx) mcc_error(tctx->ctx, "array type size overflow");
+        return NULL;
+    }
     mcc_type_t *type = mcc_alloc(tctx->ctx, sizeof(mcc_type_t));
+    if (!type) return NULL;
     type->kind = TYPE_ARRAY;
     type->data.array.element = element;
     type->data.array.length = length;
@@ -255,11 +279,22 @@ mcc_type_t *mcc_type_enum(mcc_type_context_t *tctx, const char *tag)
 }
 
 /* Type completion */
-void mcc_type_complete_struct(mcc_type_t *type, mcc_struct_field_t *fields, int num_fields)
+static bool checked_type_align_up(mcc_type_context_t *tctx, size_t value,
+                                  size_t align, size_t *result)
 {
-    type->data.record.fields = fields;
-    type->data.record.num_fields = num_fields;
-    type->data.record.is_complete = true;
+    if (!align || (align & (align - 1)) != 0 ||
+        value > SIZE_MAX - (align - 1)) {
+        mcc_error(tctx->ctx, "record layout overflow or invalid alignment");
+        return false;
+    }
+    *result = (value + align - 1) & ~(align - 1);
+    return true;
+}
+
+bool mcc_type_complete_struct(mcc_type_context_t *tctx, mcc_type_t *type,
+                              mcc_struct_field_t *fields, int num_fields)
+{
+    if (!tctx || !type || num_fields < 0) return false;
 
     /* Calculate size and alignment. Bitfield layout (bit_offset) is not
      * fully implemented — a full bitfield lowering would need codegen
@@ -270,38 +305,62 @@ void mcc_type_complete_struct(mcc_type_t *type, mcc_struct_field_t *fields, int 
     size_t max_align = 1;
 
     for (mcc_struct_field_t *f = fields; f; f = f->next) {
+        if (!f->type || !f->type->align) {
+            mcc_error(tctx->ctx, "record field has incomplete layout");
+            return false;
+        }
         size_t align = f->type->align;
         if (align > max_align) max_align = align;
 
-        /* Align offset */
-        offset = (offset + align - 1) & ~(align - 1);
-        f->offset = (int)offset;
+        if (!checked_type_align_up(tctx, offset, align, &offset) ||
+            f->type->size > SIZE_MAX - offset) return false;
         offset += f->type->size;
     }
 
-    /* Final alignment */
-    type->size = (offset + max_align - 1) & ~(max_align - 1);
-    type->align = max_align;
-}
-
-void mcc_type_complete_union(mcc_type_t *type, mcc_struct_field_t *fields, int num_fields)
-{
+    size_t total;
+    if (!checked_type_align_up(tctx, offset, max_align, &total)) return false;
+    offset = 0;
+    for (mcc_struct_field_t *f = fields; f; f = f->next) {
+        if (!checked_type_align_up(tctx, offset, f->type->align, &offset))
+            return false;
+        f->offset = offset;
+        offset += f->type->size;
+    }
     type->data.record.fields = fields;
     type->data.record.num_fields = num_fields;
     type->data.record.is_complete = true;
+    type->size = total;
+    type->align = max_align;
+    return true;
+}
+
+bool mcc_type_complete_union(mcc_type_context_t *tctx, mcc_type_t *type,
+                             mcc_struct_field_t *fields, int num_fields)
+{
+    if (!tctx || !type || num_fields < 0) return false;
     
     /* Calculate size and alignment (max of all fields) */
     size_t max_size = 0;
     size_t max_align = 1;
     
     for (mcc_struct_field_t *f = fields; f; f = f->next) {
+        if (!f->type || !f->type->align) {
+            mcc_error(tctx->ctx, "union field has incomplete layout");
+            return false;
+        }
         f->offset = 0;
         if (f->type->size > max_size) max_size = f->type->size;
         if (f->type->align > max_align) max_align = f->type->align;
     }
     
-    type->size = (max_size + max_align - 1) & ~(max_align - 1);
+    size_t total;
+    if (!checked_type_align_up(tctx, max_size, max_align, &total)) return false;
+    type->data.record.fields = fields;
+    type->data.record.num_fields = num_fields;
+    type->data.record.is_complete = true;
+    type->size = total;
     type->align = max_align;
+    return true;
 }
 
 void mcc_type_complete_enum(mcc_type_t *type)

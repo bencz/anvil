@@ -31,8 +31,15 @@ mcc_codegen_t *mcc_codegen_create(mcc_context_t *ctx, mcc_symtab_t *symtab,
     cg->symtab = symtab;
     cg->types = types;
     
-    /* Create ANVIL context */
-    cg->anvil_ctx = anvil_ctx_create();
+    /* Target selection must precede all target-sized ANVIL types/modules.
+     * Invalid MCC enum values must never become a silent host/x86-64 target. */
+    anvil_arch_t target = mcc_arch_to_anvil(ctx->options.arch);
+    if (target == ANVIL_ARCH_NONE) {
+        mcc_error(ctx, "invalid target architecture '%s'",
+                  mcc_arch_name(ctx->options.arch));
+        return NULL;
+    }
+    cg->anvil_ctx = anvil_ctx_create_for_target(target);
     if (!cg->anvil_ctx) {
         mcc_fatal(ctx, "Failed to create ANVIL context");
         return NULL;
@@ -52,14 +59,34 @@ void mcc_codegen_destroy(mcc_codegen_t *cg)
  * Public API - Configuration
  * ============================================================ */
 
-void mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
+bool mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
 {
-    anvil_ctx_set_target(cg->anvil_ctx, mcc_arch_to_anvil(arch));
+    if (!cg || !cg->anvil_ctx) return false;
+    anvil_arch_t target = mcc_arch_to_anvil(arch);
+    if (target == ANVIL_ARCH_NONE) {
+        mcc_error(cg->mcc_ctx, "invalid target architecture '%s'",
+                  mcc_arch_name(arch));
+        return false;
+    }
+    if (anvil_ctx_get_target(cg->anvil_ctx) != target) {
+        anvil_error_t err = anvil_ctx_set_target(cg->anvil_ctx, target);
+        if (err != ANVIL_OK) {
+            mcc_error(cg->mcc_ctx, "failed to select ANVIL target: %s",
+                      anvil_ctx_get_error(cg->anvil_ctx));
+            return false;
+        }
+    }
     
     /* Set Darwin ABI for macOS ARM64 */
     if (codegen_arch_is_darwin(arch)) {
-        anvil_ctx_set_abi(cg->anvil_ctx, ANVIL_ABI_DARWIN);
+        anvil_error_t err = anvil_ctx_set_abi(cg->anvil_ctx, ANVIL_ABI_DARWIN);
+        if (err != ANVIL_OK) {
+            mcc_error(cg->mcc_ctx, "failed to select ANVIL ABI: %s",
+                      anvil_ctx_get_error(cg->anvil_ctx));
+            return false;
+        }
     }
+    return true;
 }
 
 void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level)
@@ -86,9 +113,12 @@ void mcc_codegen_set_opt_level(mcc_codegen_t *cg, mcc_opt_level_t level)
 anvil_value_t *codegen_find_local(mcc_codegen_t *cg, const char *name)
 {
     if (!name) return NULL;
-    for (size_t i = 0; i < cg->num_locals; i++) {
-        if (cg->locals[i].name && strcmp(cg->locals[i].name, name) == 0) {
-            return cg->locals[i].value;
+    /* The most recently introduced binding is the innermost C scope. */
+    for (size_t i = cg->num_locals; i > 0; i--) {
+        size_t index = i - 1;
+        if (cg->locals[index].name &&
+            strcmp(cg->locals[index].name, name) == 0) {
+            return cg->locals[index].value;
         }
     }
     return NULL;

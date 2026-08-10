@@ -13,6 +13,7 @@
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,10 +28,10 @@
 #define make_const_int    anvil_opt_make_const_int
 #define make_const_float  anvil_opt_make_const_float
 
-/* Mark instruction for deletion by setting op to NOP */
+/* Remove a folded instruction after its result has been replaced. */
 static void mark_dead(anvil_instr_t *instr)
 {
-    instr->op = ANVIL_OP_NOP;
+    anvil_opt_erase_instr(instr);
 }
 
 static unsigned type_int_bits(const anvil_type_t *type)
@@ -273,48 +274,18 @@ static anvil_value_t *try_fold_binop_float(anvil_ctx_t *ctx, anvil_op_t op,
                                             anvil_value_t *lhs, anvil_value_t *rhs,
                                             anvil_type_t *type)
 {
-    /* Both operands must be constants for full folding */
-    if (is_const_float(lhs) && is_const_float(rhs)) {
-        double a = get_const_float(lhs);
-        double b = get_const_float(rhs);
-        double result;
-        
-        switch (op) {
-            case ANVIL_OP_FADD: result = a + b; break;
-            case ANVIL_OP_FSUB: result = a - b; break;
-            case ANVIL_OP_FMUL: result = a * b; break;
-            case ANVIL_OP_FDIV:
-                if (b == 0.0) return NULL;
-                result = a / b;
-                break;
-            default: return NULL;
-        }
-        
-        return make_const_float(ctx, type, result);
-    }
-    
-    /* Algebraic identities */
-    switch (op) {
-        case ANVIL_OP_FADD:
-            break;
-            
-        case ANVIL_OP_FSUB:
-            if (is_zero(rhs)) return lhs;
-            break;
-            
-        case ANVIL_OP_FMUL:
-            if (is_one(rhs)) return lhs;
-            if (is_one(lhs)) return rhs;
-            break;
-            
-        case ANVIL_OP_FDIV:
-            if (is_one(rhs)) return lhs;
-            break;
-            
-        default:
-            break;
-    }
-    
+    (void)ctx;
+    (void)op;
+    (void)lhs;
+    (void)rhs;
+    (void)type;
+
+    /* The IR currently has strict FP semantics and no fast-math/no-sNaN or
+     * exception flags. Host evaluation would erase target exceptions, compute
+     * f32 through double (which can double-round), and is not an evaluator for
+     * IBM HFP. Even x*1 and x/1 can observably quiet an sNaN. Leave all binary
+     * FP operations intact until the target-format evaluator and formal flags
+     * exist. */
     return NULL;
 }
 
@@ -330,14 +301,14 @@ static anvil_value_t *try_fold_cmp(anvil_ctx_t *ctx, anvil_op_t op,
             case ANVIL_OP_CMP_GE:
             case ANVIL_OP_CMP_ULE:
             case ANVIL_OP_CMP_UGE:
-                return anvil_const_i8(ctx, 1);  /* true */
+                return anvil_const_i1(ctx, true);
                 
             case ANVIL_OP_CMP_NE:
             case ANVIL_OP_CMP_LT:
             case ANVIL_OP_CMP_GT:
             case ANVIL_OP_CMP_ULT:
             case ANVIL_OP_CMP_UGT:
-                return anvil_const_i8(ctx, 0);  /* false */
+                return anvil_const_i1(ctx, false);
                 
             default:
                 break;
@@ -366,10 +337,46 @@ static anvil_value_t *try_fold_cmp(anvil_ctx_t *ctx, anvil_op_t op,
             default: return NULL;
         }
         
-        return anvil_const_i8(ctx, result ? 1 : 0);
+        return anvil_const_i1(ctx, result);
     }
     
     return NULL;
+}
+
+static anvil_value_t *try_fold_fcmp(anvil_ctx_t *ctx,
+                                     anvil_fcmp_pred_t predicate,
+                                     anvil_value_t *lhs,
+                                     anvil_value_t *rhs)
+{
+    if (!is_const_float(lhs) || !is_const_float(rhs)) return NULL;
+    if (anvil_ctx_get_fp_format(ctx) != ANVIL_FP_IEEE754) return NULL;
+
+    double a = get_const_float(lhs);
+    double b = get_const_float(rhs);
+    bool unordered = isnan(a) || isnan(b);
+    bool ordered = !unordered;
+    bool result;
+
+    switch (predicate) {
+        case ANVIL_FCMP_FALSE: result = false; break;
+        case ANVIL_FCMP_OEQ: result = ordered && a == b; break;
+        case ANVIL_FCMP_OGT: result = ordered && a > b; break;
+        case ANVIL_FCMP_OGE: result = ordered && a >= b; break;
+        case ANVIL_FCMP_OLT: result = ordered && a < b; break;
+        case ANVIL_FCMP_OLE: result = ordered && a <= b; break;
+        case ANVIL_FCMP_ONE: result = ordered && a != b; break;
+        case ANVIL_FCMP_ORD: result = ordered; break;
+        case ANVIL_FCMP_UEQ: result = unordered || a == b; break;
+        case ANVIL_FCMP_UGT: result = unordered || a > b; break;
+        case ANVIL_FCMP_UGE: result = unordered || a >= b; break;
+        case ANVIL_FCMP_ULT: result = unordered || a < b; break;
+        case ANVIL_FCMP_ULE: result = unordered || a <= b; break;
+        case ANVIL_FCMP_UNE: result = unordered || a != b; break;
+        case ANVIL_FCMP_UNO: result = unordered; break;
+        case ANVIL_FCMP_TRUE: result = true; break;
+        default: return NULL;
+    }
+    return anvil_const_i1(ctx, result);
 }
 
 /* Try to fold unary operations */
@@ -380,18 +387,26 @@ static anvil_value_t *try_fold_unop(anvil_ctx_t *ctx, anvil_op_t op,
         int64_t v = get_const_int(val);
         
         switch (op) {
-            case ANVIL_OP_NEG: return make_const_int(ctx, type, -v);
+            case ANVIL_OP_NEG: {
+                unsigned bits = type_int_bits(type);
+                uint64_t result = (UINT64_C(0) - (uint64_t)v) &
+                                  mask_for_bits(bits);
+                return make_const_int(ctx, type, (int64_t)result);
+            }
             case ANVIL_OP_NOT: return make_const_int(ctx, type, ~v);
             default: break;
         }
     }
     
     if (is_const_float(val)) {
+        /* HFP is not host IEEE. Sign-only folds are enabled only when the
+         * selected target format is unambiguously IEEE 754. */
+        if (anvil_ctx_get_fp_format(ctx) != ANVIL_FP_IEEE754) return NULL;
         double v = get_const_float(val);
         
         switch (op) {
             case ANVIL_OP_FNEG: return make_const_float(ctx, type, -v);
-            case ANVIL_OP_FABS: return make_const_float(ctx, type, v < 0 ? -v : v);
+            case ANVIL_OP_FABS: return make_const_float(ctx, type, fabs(v));
             default: break;
         }
     }
@@ -400,11 +415,13 @@ static anvil_value_t *try_fold_unop(anvil_ctx_t *ctx, anvil_op_t op,
 }
 
 /* Main constant folding pass */
-bool anvil_pass_const_fold(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
 {
-    if (!func || !func->parent || !func->parent->ctx) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
     
     anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
     bool changed = false;
     
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
@@ -441,6 +458,10 @@ bool anvil_pass_const_fold(anvil_func_t *func)
                     case ANVIL_OP_FMUL:
                     case ANVIL_OP_FDIV:
                         folded = try_fold_binop_float(ctx, instr->op, lhs, rhs, instr->result->type);
+                        break;
+
+                    case ANVIL_OP_FCMP:
+                        folded = try_fold_fcmp(ctx, instr->fcmp_pred, lhs, rhs);
                         break;
                         
                     case ANVIL_OP_CMP_EQ:
@@ -486,5 +507,7 @@ bool anvil_pass_const_fold(anvil_func_t *func)
         }
     }
     
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

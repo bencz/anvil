@@ -17,7 +17,10 @@ bool sema_analyze_compound_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
     
     for (size_t i = 0; i < stmt->data.compound_stmt.num_stmts; i++) {
         mcc_ast_node_t *s = stmt->data.compound_stmt.stmts[i];
-        if (s->kind == AST_VAR_DECL || s->kind == AST_FUNC_DECL || s->kind == AST_DECL_LIST) {
+        if (s->kind == AST_VAR_DECL || s->kind == AST_FUNC_DECL ||
+            s->kind == AST_DECL_LIST || s->kind == AST_TYPEDEF_DECL ||
+            s->kind == AST_STRUCT_DECL || s->kind == AST_UNION_DECL ||
+            s->kind == AST_ENUM_DECL || s->kind == AST_STATIC_ASSERT) {
             sema_analyze_decl(sema, s);
         } else {
             sema_analyze_stmt(sema, s);
@@ -202,6 +205,19 @@ static bool analyze_case_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
         mcc_error_at(sema->ctx, stmt->location,
                      "case expression is not a constant");
     }
+
+    if (stmt->data.case_stmt.end_expr) {
+        sema_analyze_expr(sema, stmt->data.case_stmt.end_expr);
+        int64_t end_val;
+        if (!sema_eval_const_expr(sema, stmt->data.case_stmt.end_expr,
+                                  &end_val)) {
+            mcc_error_at(sema->ctx, stmt->location,
+                         "case range end is not a constant");
+        } else if (end_val < case_val) {
+            mcc_error_at(sema->ctx, stmt->location,
+                         "case range has an empty range");
+        }
+    }
     
     sema_analyze_stmt(sema, stmt->data.case_stmt.stmt);
     return true;
@@ -244,10 +260,11 @@ static bool analyze_continue_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
 static bool analyze_goto_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt)
 {
     mcc_symbol_t *label = mcc_symtab_lookup_label(sema->symtab, stmt->data.goto_stmt.label);
-    if (!label) {
-        /* Forward reference - will be checked at end of function */
-        /* TODO: Track forward references and verify at function end */
-    }
+    /* lookup_label creates the unique function-scope forward declaration.
+     * Preserve the first use location so an unresolved target is diagnosed at
+     * the actual goto when the function analysis completes. */
+    if (label && !label->is_defined && !label->location.filename)
+        label->location = stmt->location;
     return true;
 }
 

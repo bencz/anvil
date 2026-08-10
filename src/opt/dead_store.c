@@ -20,47 +20,17 @@
 
 #define same_pointer anvil_opt_same_pointer
 
-/* Check if instruction may read from pointer p */
-static bool may_read_ptr(anvil_instr_t *instr, anvil_value_t *ptr)
+/* Check if an instruction may observe the value written by a store.
+ *
+ * Without alias analysis, a load through a different SSA pointer is not proof
+ * that the locations are disjoint: function parameters, GEPs and bitcasts may
+ * still alias.  A later overwrite may kill the store only after every
+ * intervening potential read has been ruled out, so conservatively treat every
+ * load and call as a read barrier. */
+static bool may_read_memory(anvil_instr_t *instr)
 {
     if (!instr) return false;
-    
-    /* Load from same pointer */
-    if (instr->op == ANVIL_OP_LOAD) {
-        if (instr->num_operands > 0 && same_pointer(instr->operands[0], ptr)) {
-            return true;
-        }
-    }
-    
-    /* Call may read any memory */
-    if (instr->op == ANVIL_OP_CALL) {
-        return true;
-    }
-    
-    return false;
-}
-
-/* Check if instruction may write to pointer p (used for future extensions) */
-static bool may_write_ptr(anvil_instr_t *instr, anvil_value_t *ptr)
-    __attribute__((unused));
-
-static bool may_write_ptr(anvil_instr_t *instr, anvil_value_t *ptr)
-{
-    if (!instr) return false;
-    
-    /* Store to same pointer */
-    if (instr->op == ANVIL_OP_STORE) {
-        if (instr->num_operands > 1 && same_pointer(instr->operands[1], ptr)) {
-            return true;
-        }
-    }
-    
-    /* Call may write any memory */
-    if (instr->op == ANVIL_OP_CALL) {
-        return true;
-    }
-    
-    return false;
+    return instr->op == ANVIL_OP_LOAD || instr->op == ANVIL_OP_CALL;
 }
 
 /* Check if a store is dead (overwritten before read) within the same block */
@@ -73,8 +43,8 @@ static bool is_dead_store(anvil_instr_t *store)
     
     /* Look at subsequent instructions in the same block */
     for (anvil_instr_t *instr = store->next; instr; instr = instr->next) {
-        /* If we read from this pointer, store is not dead */
-        if (may_read_ptr(instr, ptr)) {
+        /* Any potentially aliasing read observes the first store. */
+        if (may_read_memory(instr)) {
             return false;
         }
         
@@ -83,11 +53,6 @@ static bool is_dead_store(anvil_instr_t *store)
             instr->num_operands > 1 && 
             same_pointer(instr->operands[1], ptr)) {
             return true;
-        }
-        
-        /* If we hit a call, be conservative */
-        if (instr->op == ANVIL_OP_CALL) {
-            return false;
         }
         
         /* If we hit a branch, stop (cross-block analysis not done here) */
@@ -101,9 +66,13 @@ static bool is_dead_store(anvil_instr_t *store)
 }
 
 /* Main dead store elimination pass */
-bool anvil_pass_dead_store(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_dead_store(anvil_func_t *func)
 {
-    if (!func || !func->blocks) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (!func->blocks) return ANVIL_PASS_RUN_UNCHANGED;
     
     bool changed = false;
     
@@ -115,8 +84,7 @@ bool anvil_pass_dead_store(anvil_func_t *func)
             anvil_instr_t *next = instr->next;
             
             if (instr->op == ANVIL_OP_STORE && is_dead_store(instr)) {
-                /* Mark as NOP (will be cleaned by DCE) */
-                instr->op = ANVIL_OP_NOP;
+                anvil_opt_erase_instr(instr);
                 changed = true;
             }
             
@@ -124,5 +92,7 @@ bool anvil_pass_dead_store(anvil_func_t *func)
         }
     }
     
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

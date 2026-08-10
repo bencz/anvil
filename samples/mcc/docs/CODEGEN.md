@@ -232,14 +232,16 @@ C types are mapped to ANVIL types:
 | `int`, `enum` | `anvil_type_i32` or `anvil_type_u32` | 4 bytes |
 | `long` | `anvil_type_i32/u32` or `i64/u64` | 4/8 bytes, target data-model dependent |
 | `long long` | `anvil_type_i64` or `anvil_type_u64` | 8 bytes |
-| `_Bool` | `anvil_type_u8` | 1 byte |
+| `_Bool` | `anvil_type_i1` | 1-byte storage, first-class boolean value |
 | `float` | `anvil_type_f32` | 4 bytes |
-| `double`, `long double` | `anvil_type_f64` | 8 bytes (`long double` is treated as `double`) |
+| `double` | `anvil_type_f64` | target DataLayout |
+| `long double` | unsupported | rejected explicitly |
 | `void` | `anvil_type_void` | 0 bytes |
 | `T*` | `anvil_type_ptr` | 4/8 bytes |
 | `T[N]` | `anvil_type_array` | `sizeof(T) * N` |
 | local VLA | `anvil_build_alloca_dyn` of element type | runtime count |
-| `struct S` / `union U` | `anvil_type_struct` (anonymous bitfield padding fields skipped) | field layout from MCC type info |
+| `struct S` | identified Anvil struct | ANVIL DataLayout |
+| `union U` | maximally aligned zero-offset storage struct | max member size/alignment |
 | function type | `anvil_type_func` and callable `ptr<func>` values | target pointer size |
 | `typedef` | unwrapped to its underlying type (`codegen_type_unwrap`) | per underlying type |
 
@@ -923,9 +925,13 @@ cbnz x9, .body    ; Direct branch on boolean
 
 **Savings:** 2 instructions per loop iteration.
 
-### Anonymous Bitfield Handling in Structs
+### Bit-fields
 
-When generating struct types, anonymous bitfield padding fields are skipped:
+Bit-fields are rejected. Treating each field as an independent storage unit
+would miscompile packing, zero-width fields, signed extraction and writes, so
+MCC does not advertise partial lowering.
+
+<!-- Historical sketch retained only as non-operative background:
 
 ```c
 /* In codegen_type.c - codegen_type() */
@@ -947,3 +953,4 @@ case TYPE_UNION: {
     return anvil_type_struct(cg->anvil_ctx, NULL, field_types, num_named_fields);
 }
 ```
+-->

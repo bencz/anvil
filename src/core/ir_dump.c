@@ -56,10 +56,8 @@ static const char *op_name(anvil_op_t op)
         [ANVIL_OP_ADD] = "add",
         [ANVIL_OP_SUB] = "sub",
         [ANVIL_OP_MUL] = "mul",
-        [ANVIL_OP_DIV] = "div",
         [ANVIL_OP_SDIV] = "sdiv",
         [ANVIL_OP_UDIV] = "udiv",
-        [ANVIL_OP_MOD] = "mod",
         [ANVIL_OP_SMOD] = "smod",
         [ANVIL_OP_UMOD] = "umod",
         [ANVIL_OP_NEG] = "neg",
@@ -125,6 +123,7 @@ static const char *type_kind_name(anvil_type_kind_t kind)
 {
     switch (kind) {
         case ANVIL_TYPE_VOID: return "void";
+        case ANVIL_TYPE_I1: return "i1";
         case ANVIL_TYPE_I8: return "i8";
         case ANVIL_TYPE_I16: return "i16";
         case ANVIL_TYPE_I32: return "i32";
@@ -197,6 +196,7 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
     
     switch (type->kind) {
         case ANVIL_TYPE_VOID:
+        case ANVIL_TYPE_I1:
         case ANVIL_TYPE_I8:
         case ANVIL_TYPE_I16:
         case ANVIL_TYPE_I32:
@@ -234,12 +234,12 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
             if (type->data.struc.name) {
                 fprintf(out, "%%%s", type->data.struc.name);
             } else {
-                fprintf(out, "{");
+                fprintf(out, "%s{", type->data.struc.packed ? "<" : "");
                 for (size_t i = 0; i < type->data.struc.num_fields; i++) {
                     if (i > 0) fprintf(out, ", ");
                     anvil_dump_type(out, type->data.struc.fields[i]);
                 }
-                fprintf(out, "}");
+                fprintf(out, "}%s", type->data.struc.packed ? ">" : "");
             }
             break;
             
@@ -272,7 +272,12 @@ void anvil_dump_value(FILE *out, anvil_value_t *val)
     
     switch (val->kind) {
         case ANVIL_VAL_CONST_INT:
-            fprintf(out, "%lld", (long long)val->data.i);
+            if (val->type && anvil_type_is_integer(val->type) &&
+                !anvil_type_is_signed(val->type)) {
+                fprintf(out, "%llu", (unsigned long long)val->data.u);
+            } else {
+                fprintf(out, "%lld", (long long)val->data.i);
+            }
             break;
             
         case ANVIL_VAL_CONST_FLOAT:
@@ -347,6 +352,17 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
     
     /* Print operation */
     fprintf(out, "%s", op_name(instr->op));
+    if (instr->op == ANVIL_OP_FCMP) {
+        static const char *predicates[] = {
+            "false", "oeq", "ogt", "oge", "olt", "ole", "one", "ord",
+            "ueq", "ugt", "uge", "ult", "ule", "une", "uno", "true"
+        };
+        if ((unsigned)instr->fcmp_pred <
+            sizeof(predicates) / sizeof(predicates[0]))
+            fprintf(out, " %s", predicates[instr->fcmp_pred]);
+        else
+            fprintf(out, " <invalid-predicate>");
+    }
 
     if (instr->op == ANVIL_OP_SWITCH) {
         anvil_value_t *selector =
@@ -383,6 +399,29 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
         fprintf(out, " ");
         anvil_dump_type(out, instr->result->type);
     }
+    if (instr->op == ANVIL_OP_GEP && instr->aux_type) {
+        fprintf(out, " source ");
+        anvil_dump_type(out, instr->aux_type);
+    }
+
+    /* PHI operands are pairs, not a generic operand list followed by a
+     * second copy of the same values. */
+    if (instr->op == ANVIL_OP_PHI) {
+        for (size_t i = 0; i < instr->num_phi_incoming; i++) {
+            fprintf(out, "%s[", i == 0 ? " " : ", ");
+            if (i < instr->num_operands) {
+                anvil_dump_value(out, instr->operands[i]);
+            } else {
+                fprintf(out, "?");
+            }
+            fprintf(out, ", %%%s]",
+                    instr->phi_blocks && instr->phi_blocks[i] &&
+                    instr->phi_blocks[i]->name
+                        ? instr->phi_blocks[i]->name : "?");
+        }
+        fprintf(out, "\n");
+        return;
+    }
     
     /* Print operands */
     for (size_t i = 0; i < instr->num_operands; i++) {
@@ -399,19 +438,6 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
         }
         if (instr->false_block) {
             fprintf(out, ", label %%%s", instr->false_block->name ? instr->false_block->name : "?");
-        }
-    }
-    
-    /* Print PHI incoming values */
-    if (instr->op == ANVIL_OP_PHI && instr->num_phi_incoming > 0) {
-        for (size_t i = 0; i < instr->num_phi_incoming; i++) {
-            fprintf(out, " [");
-            if (i < instr->num_operands) {
-                anvil_dump_value(out, instr->operands[i]);
-            }
-            fprintf(out, ", %%%s]", 
-                instr->phi_blocks && instr->phi_blocks[i] ? 
-                    (instr->phi_blocks[i]->name ? instr->phi_blocks[i]->name : "?") : "?");
         }
     }
     
@@ -473,17 +499,18 @@ void anvil_dump_func(FILE *out, anvil_func_t *func)
     /* Function name and parameters */
     fprintf(out, " @%s(", func->name ? func->name : "?");
     
-    if (func->params) {
-        for (size_t i = 0; i < func->num_params; i++) {
+    if (func->type && func->type->kind == ANVIL_TYPE_FUNC) {
+        for (size_t i = 0; i < func->type->data.func.num_params; i++) {
             if (i > 0) fprintf(out, ", ");
-            anvil_value_t *param = func->params[i];
-            if (param && param->type) {
-                anvil_dump_type(out, param->type);
+            anvil_dump_type(out, func->type->data.func.params[i]);
+            if (func->params && i < func->num_params && func->params[i]) {
                 fprintf(out, " ");
+                anvil_dump_value(out, func->params[i]);
             }
-            if (param) {
-                anvil_dump_value(out, param);
-            }
+        }
+        if (func->type->data.func.variadic) {
+            if (func->type->data.func.num_params > 0) fprintf(out, ", ");
+            fprintf(out, "...");
         }
     }
     fprintf(out, ")");
@@ -543,6 +570,27 @@ void anvil_dump_module(FILE *out, anvil_module_t *mod)
     
     fprintf(out, "; ModuleID = '%s'\n", mod->name ? mod->name : "?");
     fprintf(out, "; Functions: %zu, Globals: %zu\n\n", mod->num_funcs, mod->num_globals);
+
+    /* Identified types are declarations in their own right. Printing the
+     * nominal name at use sites without its body loses recursive layout. */
+    if (mod->ctx) {
+        for (anvil_type_t *type = mod->ctx->types; type; type = type->ctx_next) {
+            if (type->kind != ANVIL_TYPE_STRUCT ||
+                !type->data.struc.identified) continue;
+            fprintf(out, "%%%s = type ", type->data.struc.name);
+            if (!type->data.struc.complete) {
+                fprintf(out, "opaque\n");
+                continue;
+            }
+            fprintf(out, "%s{", type->data.struc.packed ? "<" : "");
+            for (size_t i = 0; i < type->data.struc.num_fields; i++) {
+                if (i) fprintf(out, ", ");
+                anvil_dump_type(out, type->data.struc.fields[i]);
+            }
+            fprintf(out, "}%s\n", type->data.struc.packed ? ">" : "");
+        }
+        if (mod->ctx->named_struct_count) fprintf(out, "\n");
+    }
     
     /* Print globals */
     for (anvil_global_t *g = mod->globals; g; g = g->next) {

@@ -53,13 +53,12 @@ static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
     anvil_value_t *stored_val = store->operands[0];
     anvil_value_t *load_result = load->result;
     
-    int replaced = load->next
-        ? anvil_opt_replace_uses_in_block_after(load, load_result, stored_val)
-        : 0;
+    anvil_func_t *func = load->parent ? load->parent->parent : NULL;
+    int replaced = anvil_opt_replace_uses_in_func(func, load_result, stored_val);
 
     if (replaced > 0) {
-        /* Eliminate the load */
-        load->op = ANVIL_OP_NOP;
+        /* Eliminate the load while preserving valid IR immediately. */
+        anvil_opt_erase_instr(load);
         return true;
     }
     
@@ -69,9 +68,13 @@ static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
 /* Main store-load propagation pass.
  * The pass manager runs a global fixpoint across all passes, so we only do one
  * sweep here — the former internal do-while loop duplicated that work. */
-bool anvil_pass_store_load_prop(anvil_func_t *func)
+anvil_pass_result_t anvil_pass_store_load_prop(anvil_func_t *func)
 {
-    if (!func || !func->blocks) return false;
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_PASS_RUN_ERROR;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (!func->blocks) return ANVIL_PASS_RUN_UNCHANGED;
 
     bool changed = false;
 
@@ -90,5 +93,7 @@ bool anvil_pass_store_load_prop(anvil_func_t *func)
         }
     }
 
-    return changed;
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

@@ -20,21 +20,20 @@
  * - C89: ANSI X3.159-1989 (American National Standard)
  * - C90: ISO/IEC 9899:1990 (International Standard, identical to C89)
  * - C99: ISO/IEC 9899:1999
- * - C11: ISO/IEC 9899:2011 (future support)
- * - C17: ISO/IEC 9899:2018 (future support)
- * - C23: ISO/IEC 9899:2024 (future support)
+ * MCC accepts these mode names for implemented, explicitly feature-gated
+ * subsets; accepting a mode is not a claim of complete conformance.
  */
 typedef enum {
     MCC_STD_DEFAULT = 0,    /* Use compiler default (currently C89) */
     MCC_STD_C89,            /* ANSI C89 / ISO C90 */
     MCC_STD_C90,            /* Alias for C89 (ISO version) */
     MCC_STD_C99,            /* ISO C99 */
-    MCC_STD_C11,            /* ISO C11 (future) */
-    MCC_STD_C17,            /* ISO C17 (future) */
-    MCC_STD_C23,            /* ISO C23 (future) */
+    MCC_STD_C11,            /* Implemented ISO C11 subset */
+    MCC_STD_C17,            /* Implemented ISO C17 subset */
+    MCC_STD_C23,            /* Implemented ISO C23 subset */
     MCC_STD_GNU89,          /* GNU extensions to C89 */
     MCC_STD_GNU99,          /* GNU extensions to C99 */
-    MCC_STD_GNU11,          /* GNU extensions to C11 (future) */
+    MCC_STD_GNU11,          /* Implemented GNU C11 subset */
     MCC_STD_COUNT
 } mcc_c_std_t;
 
@@ -169,7 +168,7 @@ typedef enum {
     MCC_FEAT_PP_DEFINE = 80,        /* #define */
     MCC_FEAT_PP_UNDEF,              /* #undef */
     MCC_FEAT_PP_INCLUDE,            /* #include */
-    MCC_FEAT_PP_INCLUDE_NEXT,       /* #include_next (GNU) */
+    MCC_FEAT_RESERVED_83,
     MCC_FEAT_PP_IF,                 /* #if */
     MCC_FEAT_PP_IFDEF,              /* #ifdef */
     MCC_FEAT_PP_IFNDEF,             /* #ifndef */

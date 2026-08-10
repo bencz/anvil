@@ -356,6 +356,22 @@ mcc_type_t *sema_analyze_subscript_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
  * Member Expression Analysis
  * ============================================================ */
 
+static size_t count_promoted_members(mcc_type_t *type, const char *name)
+{
+    if (!type || !mcc_type_is_record(type)) return 0;
+
+    size_t count = 0;
+    for (mcc_struct_field_t *field = type->data.record.fields;
+         field; field = field->next) {
+        if (field->name) {
+            if (strcmp(field->name, name) == 0) count++;
+        } else if (field->type && mcc_type_is_record(field->type)) {
+            count += count_promoted_members(field->type, name);
+        }
+    }
+    return count;
+}
+
 mcc_type_t *sema_analyze_member_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
     mcc_type_t *obj_type = sema_analyze_expr(sema, expr->data.member_expr.object);
@@ -376,12 +392,18 @@ mcc_type_t *sema_analyze_member_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
         return NULL;
     }
     
-    mcc_struct_field_t *field = mcc_type_find_field(obj_type, expr->data.member_expr.member);
+    size_t matches = count_promoted_members(
+        obj_type, expr->data.member_expr.member);
+    if (matches > 1) {
+        mcc_error_at(sema->ctx, expr->location,
+                     "member '%s' is ambiguous through anonymous records",
+                     expr->data.member_expr.member);
+        return NULL;
+    }
+
+    mcc_struct_field_t *field = mcc_type_find_field(
+        obj_type, expr->data.member_expr.member);
     if (!field) {
-        /* C11: Check anonymous struct/union members */
-        if (sema_has_anonymous_struct(sema)) {
-            /* TODO: Search in anonymous members */
-        }
         mcc_error_at(sema->ctx, expr->location,
                      SEMA_ERR_NO_MEMBER, expr->data.member_expr.member);
         return NULL;
@@ -523,6 +545,15 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
             expr->type = mcc_type_ulong(sema->types);
             return expr->type;
 
+        case AST_NULL_PTR:
+            /* MCC has no distinct nullptr_t yet.  Represent the value as
+             * void * for the existing conversion machinery; the AST kind,
+             * rather than this surrogate type, retains its null-constant
+             * semantics. */
+            expr->type = mcc_type_pointer(sema->types,
+                                          mcc_type_void(sema->types));
+            return expr->type;
+
         case AST_STMT_EXPR: {
             /* GNU statement expression: ({ ... ; expr; }). Its type is the
              * type of the last expression statement in the compound.
@@ -553,16 +584,20 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
              * association by type, and fall back to default otherwise. */
             mcc_type_t *ctrl = sema_analyze_expr(sema, expr->data.generic_expr.controlling_expr);
             mcc_type_t *result = NULL;
+            mcc_ast_node_t *selected = NULL;
             mcc_generic_assoc_t *a = expr->data.generic_expr.associations;
             for (; a; a = a->next) {
                 if (a->type && ctrl && mcc_type_is_compatible(a->type, ctrl)) {
-                    result = sema_analyze_expr(sema, a->expr);
+                    selected = a->expr;
+                    result = sema_analyze_expr(sema, selected);
                     break;
                 }
             }
             if (!result && expr->data.generic_expr.default_expr) {
-                result = sema_analyze_expr(sema, expr->data.generic_expr.default_expr);
+                selected = expr->data.generic_expr.default_expr;
+                result = sema_analyze_expr(sema, selected);
             }
+            expr->data.generic_expr.selected_expr = selected;
             expr->type = result;
             return result;
         }

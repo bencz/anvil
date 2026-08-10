@@ -11,6 +11,10 @@
 
 #include "mcc.h"
 
+/* Resolve parser-deferred typeof(expression) nodes after the referenced
+ * declaration scope exists. */
+mcc_type_t *sema_resolve_type(mcc_sema_t *sema, mcc_type_t *type);
+
 /* ============================================================
  * Internal Function Declarations
  * ============================================================ */

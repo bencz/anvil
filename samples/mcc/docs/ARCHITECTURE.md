@@ -224,30 +224,11 @@ Semantic analysis performs type checking and symbol resolution:
 ./mcc -dump-sema file.c
 ```
 
-### 6. AST Optimization (`src/opt/`)
+### 6. Optimization
 
-The AST optimizer is organized into modular files:
-
-| File | Description |
-|------|-------------|
-| `opt_internal.h` | Internal header with structures and function declarations |
-| `ast_opt.c` | Main module - pass manager and initialization |
-| `opt_helpers.c` | Helper functions (constant evaluation, traversal) |
-| `opt_const.c` | Constant-related passes (folding, trivial simplifications) |
-| `opt_simplify.c` | Simplification passes (strength reduction, algebraic) |
-| `opt_dead.c` | Dead code elimination passes |
-| `opt_propagate.c` | Propagation passes (constant, copy) |
-| `opt_cse.c` | Common subexpression elimination |
-| `opt_loop.c` | Loop optimizations (simplification, unrolling, LICM) |
-| `opt_inline.c` | Function inlining and tail call optimization |
-| `opt_stubs.c` | Stub implementations (vectorize only) |
-
-The AST optimizer performs source-level transformations:
-
-- **Constant folding**: Evaluate constant expressions at compile time
-- **Constant propagation**: Replace variables with known constant values
-- **Copy propagation**: Replace variables with their source copies
-- **Dead code elimination**: Remove unreachable or effectless code
+MCC performs no source-AST optimization. It forwards `-O0`, `-Og`, and
+`-O1` through `-O3` to ANVIL's verified IR/MIR optimizer. See
+`docs/OPTIMIZATION.md` for the rationale and requirements for adding passes.
 - **Strength reduction**: Replace expensive operations with cheaper ones (uses semantic type info)
 - **Algebraic simplification**: Apply algebraic identities
 - **Loop simplification**: Remove dead loops, simplify constant-condition loops
@@ -256,7 +237,6 @@ The AST optimizer performs source-level transformations:
 - **Inlining candidates**: Identify small functions suitable for inlining
 
 **Key data structures:**
-- `mcc_ast_opt_t`: Optimizer state (context, level, enabled passes)
 - `mcc_opt_passes_t`: Bitset of enabled optimization passes
 - `mcc_opt_pass_id_t`: Pass identifier enum
 

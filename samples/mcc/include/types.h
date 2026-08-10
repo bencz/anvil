@@ -28,6 +28,7 @@ typedef enum {
     TYPE_UNION,
     TYPE_ENUM,
     TYPE_TYPEDEF,       /* Reference to typedef'd type */
+    TYPE_TYPEOF_EXPR,   /* Deferred typeof(expression), resolved by sema */
     
     TYPE_COUNT
 } mcc_type_kind_t;
@@ -56,12 +57,22 @@ typedef enum {
 typedef struct mcc_type mcc_type_t;
 typedef struct mcc_struct_field mcc_struct_field_t;
 typedef struct mcc_func_param mcc_func_param_t;
+typedef struct mcc_record_assert mcc_record_assert_t;
+
+/* A C11 static assertion declared inside a struct/union body. It belongs to
+ * the record declaration but is not a physical field. */
+struct mcc_record_assert {
+    struct mcc_ast_node *expr;
+    const char *message;
+    mcc_location_t location;
+    mcc_record_assert_t *next;
+};
 
 /* Struct/union field */
 struct mcc_struct_field {
     const char *name;
     mcc_type_t *type;
-    int offset;                 /* Byte offset (computed) */
+    size_t offset;              /* Byte offset (computed) */
     int bitfield_width;         /* 0 if not a bitfield */
     mcc_struct_field_t *next;
 };
@@ -124,6 +135,7 @@ struct mcc_type {
         struct {
             const char *tag;    /* NULL for anonymous */
             mcc_struct_field_t *fields;
+            mcc_record_assert_t *static_asserts;
             int num_fields;
             bool is_complete;   /* Has definition? */
         } record;               /* Used for both struct and union */
@@ -141,6 +153,11 @@ struct mcc_type {
             const char *name;
             mcc_type_t *underlying;
         } typedef_ref;
+
+        struct {
+            struct mcc_ast_node *expr;
+            bool unqualified;
+        } typeof_expr;
     } data;
     
     /* For type caching */
@@ -158,6 +175,7 @@ typedef struct mcc_type_context {
     
     /* Architecture-specific sizes */
     int ptr_size;               /* Pointer size from ANVIL arch info */
+    size_t ptr_align;           /* Pointer ABI alignment from DataLayout */
     
     /* Cached primitive types */
     mcc_type_t *type_void;
@@ -175,6 +193,7 @@ typedef struct mcc_type_context {
     mcc_type_t *type_float;
     mcc_type_t *type_double;
     mcc_type_t *type_ldouble;
+    mcc_type_t *type_bool;
     mcc_type_t *type_cfloat;    /* C99 float _Complex */
     mcc_type_t *type_cdouble;   /* C99 double _Complex */
     mcc_type_t *type_cldouble;  /* C99 long double _Complex */
@@ -204,6 +223,7 @@ mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx);  /* C99 unsigned long lon
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx);
+mcc_type_t *mcc_type_bool(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_complex_float(mcc_type_context_t *tctx);   /* C99 float _Complex */
 mcc_type_t *mcc_type_complex_double(mcc_type_context_t *tctx);  /* C99 double _Complex */
 mcc_type_t *mcc_type_complex_ldouble(mcc_type_context_t *tctx); /* C99 long double _Complex */
@@ -219,8 +239,10 @@ mcc_type_t *mcc_type_union(mcc_type_context_t *tctx, const char *tag);
 mcc_type_t *mcc_type_enum(mcc_type_context_t *tctx, const char *tag);
 
 /* Type completion */
-void mcc_type_complete_struct(mcc_type_t *type, mcc_struct_field_t *fields, int num_fields);
-void mcc_type_complete_union(mcc_type_t *type, mcc_struct_field_t *fields, int num_fields);
+bool mcc_type_complete_struct(mcc_type_context_t *tctx, mcc_type_t *type,
+                              mcc_struct_field_t *fields, int num_fields);
+bool mcc_type_complete_union(mcc_type_context_t *tctx, mcc_type_t *type,
+                             mcc_struct_field_t *fields, int num_fields);
 void mcc_type_complete_enum(mcc_type_t *type);
 
 /* Type qualifiers */

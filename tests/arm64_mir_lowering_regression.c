@@ -618,8 +618,9 @@ static void test_arm64_lowers_div_mod_and_cmp_predicates_without_losing_semantic
     CHECK(mod != NULL, "module should be created for predicate lowering");
     if (mod) {
         anvil_type_t *i64 = anvil_type_i64(ctx);
-        anvil_type_t *params[] = { i64, i64 };
-        anvil_type_t *fn_type = anvil_type_func(ctx, i64, params, 2, false);
+        anvil_type_t *u64 = anvil_type_u64(ctx);
+        anvil_type_t *params[] = { i64, i64, u64, u64 };
+        anvil_type_t *fn_type = anvil_type_func(ctx, i64, params, 4, false);
         anvil_func_t *fn = anvil_func_create(mod, "predicates",
                                              fn_type, ANVIL_LINK_EXTERNAL);
         CHECK(fn != NULL, "predicate lowering function should be created");
@@ -627,17 +628,23 @@ static void test_arm64_lowers_div_mod_and_cmp_predicates_without_losing_semantic
             anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
             anvil_value_t *a = anvil_func_get_param(fn, 0);
             anvil_value_t *b = anvil_func_get_param(fn, 1);
+            anvil_value_t *ua = anvil_func_get_param(fn, 2);
+            anvil_value_t *ub = anvil_func_get_param(fn, 3);
             anvil_value_t *sd = anvil_build_sdiv(ctx, a, b, "sd");
-            anvil_value_t *ud = anvil_build_udiv(ctx, a, b, "ud");
+            anvil_value_t *ud = anvil_build_udiv(ctx, ua, ub, "ud");
             anvil_value_t *sm = anvil_build_smod(ctx, a, b, "sm");
-            anvil_value_t *um = anvil_build_umod(ctx, a, b, "um");
+            anvil_value_t *um = anvil_build_umod(ctx, ua, ub, "um");
             anvil_value_t *lt = anvil_build_cmp_lt(ctx, a, b, "lt");
-            anvil_value_t *ult = anvil_build_cmp_ult(ctx, a, b, "ult");
-            anvil_value_t *acc0 = anvil_build_add(ctx, sd, ud, "acc0");
-            anvil_value_t *acc1 = anvil_build_add(ctx, sm, um, "acc1");
+            anvil_value_t *ult = anvil_build_cmp_ult(ctx, ua, ub, "ult");
+            anvil_value_t *ud_i = anvil_build_bitcast(ctx, ud, i64, "ud_i");
+            anvil_value_t *um_i = anvil_build_bitcast(ctx, um, i64, "um_i");
+            anvil_value_t *lt_i = anvil_build_zext(ctx, lt, i64, "lt_i");
+            anvil_value_t *ult_i = anvil_build_zext(ctx, ult, i64, "ult_i");
+            anvil_value_t *acc0 = anvil_build_add(ctx, sd, ud_i, "acc0");
+            anvil_value_t *acc1 = anvil_build_add(ctx, sm, um_i, "acc1");
             anvil_value_t *acc2 = anvil_build_add(ctx, acc0, acc1, "acc2");
-            anvil_value_t *acc3 = anvil_build_add(ctx, acc2, lt, "acc3");
-            anvil_value_t *acc4 = anvil_build_add(ctx, acc3, ult, "acc4");
+            anvil_value_t *acc3 = anvil_build_add(ctx, acc2, lt_i, "acc3");
+            anvil_value_t *acc4 = anvil_build_add(ctx, acc3, ult_i, "acc4");
             anvil_build_ret(ctx, acc4);
 
             anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(fn);
@@ -686,6 +693,7 @@ static void test_arm64_lowers_div_mod_and_cmp_predicates_without_losing_semantic
                                    "predicate assembly should use unsigned lo condition");
                     free(asm_text);
                 }
+                anvil_mir_func_destroy(mir);
             }
         }
     }
@@ -1150,7 +1158,7 @@ static void test_arm64_regalloc_materializes_machineir_spills(void)
 
     for (size_t i = 0; i < NUM_VALUES; i++) {
         anvil_mir_vreg_t uses[] = { values[i] };
-        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_OTHER,
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE,
                                   ANVIL_MIR_NO_VREG, uses, 1),
               "ARM64 spill pressure value should stay live until use");
     }
@@ -1241,6 +1249,11 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
     anvil_mir_vreg_t fneg = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_FPR, 64);
 
     CHECK(anvil_mir_set_current_block(mir, entry), "entry should be selected");
+    CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, x0, 1) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, x1, 2) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, d0, 0) &&
+          anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, d1, 0),
+          "manual emitter operands should have explicit definitions");
     CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, imm, 42),
           "emitter test should add MOV immediate");
     anvil_mir_vreg_t uses2[] = { x0, imm };
@@ -1339,6 +1352,11 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
                               ret_uses, 1),
           "emitter test should add ret");
 
+    char mir_error[256] = { 0 };
+    bool mir_legal = anvil_arm64_verify_mir_legal(
+        mir, mir_error, sizeof(mir_error));
+    if (!mir_legal) fprintf(stderr, "[DIAG] %s\n", mir_error);
+    CHECK(mir_legal, "manual ARM64 emitter MIR should verify before regalloc");
     CHECK(anvil_arm64_regalloc_mir(mir),
           "ARM64 MIR emitter test should allocate registers");
 
@@ -1419,7 +1437,7 @@ static void test_arm64_emits_materialized_spills_with_frame_slots(void)
     }
     for (size_t i = 0; i < NUM_VALUES; i++) {
         anvil_mir_vreg_t uses[] = { values[i] };
-        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_OTHER,
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE,
                                   ANVIL_MIR_NO_VREG, uses, 1),
               "spill emitter value should stay live");
     }

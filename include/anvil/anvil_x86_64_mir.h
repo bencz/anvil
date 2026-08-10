@@ -22,6 +22,7 @@ bool anvil_x86_64_verify_mir_legal(const anvil_mir_func_t *mir,
                                    char *error,
                                    size_t error_len);
 bool anvil_x86_64_regalloc_mir(anvil_mir_func_t *mir);
+bool anvil_x86_64_regalloc_mir_abi(anvil_mir_func_t *mir, anvil_abi_t abi);
 bool anvil_x86_64_emit_mir(const anvil_mir_func_t *mir,
                            char **output,
                            size_t *len);

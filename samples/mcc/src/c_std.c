@@ -56,33 +56,33 @@ static const mcc_c_std_info_t c_std_info_table[] = {
         .is_gnu = false
     },
     
-    /* C11 (future) */
+    /* Implemented C11 subset */
     {
         .std = MCC_STD_C11,
         .name = "c11",
-        .description = "ISO C11",
+        .description = "Implemented subset of ISO C11",
         .year = 2011,
         .iso_name = "ISO/IEC 9899:2011",
         .base_std = MCC_STD_C11,
         .is_gnu = false
     },
     
-    /* C17 (future) */
+    /* Implemented C17 subset (same implemented surface as C11) */
     {
         .std = MCC_STD_C17,
         .name = "c17",
-        .description = "ISO C17",
+        .description = "Implemented subset of ISO C17",
         .year = 2017,
         .iso_name = "ISO/IEC 9899:2018",
         .base_std = MCC_STD_C17,
         .is_gnu = false
     },
     
-    /* C23 (future) */
+    /* Implemented C23 subset */
     {
         .std = MCC_STD_C23,
         .name = "c23",
-        .description = "ISO C23",
+        .description = "Implemented subset of ISO C23",
         .year = 2023,
         .iso_name = "ISO/IEC 9899:2024",
         .base_std = MCC_STD_C23,
@@ -111,11 +111,11 @@ static const mcc_c_std_info_t c_std_info_table[] = {
         .is_gnu = true
     },
     
-    /* GNU11 (future) */
+    /* Implemented GNU11 subset */
     {
         .std = MCC_STD_GNU11,
         .name = "gnu11",
-        .description = "GNU dialect of C11",
+        .description = "Implemented subset of GNU C11",
         .year = 2011,
         .iso_name = NULL,
         .base_std = MCC_STD_C11,
@@ -199,9 +199,9 @@ static void init_c89_features(mcc_c_features_t *f)
         MCC_FEAT_TYPEDEF, MCC_FEAT_CONST, MCC_FEAT_VOLATILE,
         MCC_FEAT_SIGNED, MCC_FEAT_UNSIGNED, MCC_FEAT_VOID,
         MCC_FEAT_CHAR, MCC_FEAT_SHORT, MCC_FEAT_INT, MCC_FEAT_LONG,
-        MCC_FEAT_FLOAT, MCC_FEAT_DOUBLE, MCC_FEAT_LONG_DOUBLE,
+        MCC_FEAT_FLOAT, MCC_FEAT_DOUBLE,
         MCC_FEAT_STRUCT_INIT, MCC_FEAT_ARRAY_INIT, MCC_FEAT_UNION_INIT,
-        MCC_FEAT_BITFIELDS, MCC_FEAT_INCOMPLETE_TYPES
+        MCC_FEAT_INCOMPLETE_TYPES
     };
     set_features(f, c89_types, sizeof(c89_types)/sizeof(c89_types[0]));
     
@@ -259,7 +259,7 @@ static void init_c99_features(mcc_c_features_t *f)
     
     /* C99 Types */
     static const mcc_feature_id_t c99_types[] = {
-        MCC_FEAT_LONG_LONG, MCC_FEAT_BOOL, MCC_FEAT_COMPLEX, MCC_FEAT_IMAGINARY,
+        MCC_FEAT_LONG_LONG, MCC_FEAT_BOOL,
         MCC_FEAT_RESTRICT, MCC_FEAT_INLINE, MCC_FEAT_STDINT_TYPES, MCC_FEAT_STDBOOL
     };
     set_features(f, c99_types, sizeof(c99_types)/sizeof(c99_types[0]));
@@ -274,7 +274,7 @@ static void init_c99_features(mcc_c_features_t *f)
     
     /* C99 Preprocessor */
     static const mcc_feature_id_t c99_pp[] = {
-        MCC_FEAT_PP_VARIADIC, MCC_FEAT_PP_VA_ARGS, MCC_FEAT_PP_PRAGMA_OP, MCC_FEAT_PP_EMPTY_ARGS
+        MCC_FEAT_PP_VARIADIC, MCC_FEAT_PP_VA_ARGS, MCC_FEAT_PP_EMPTY_ARGS
     };
     set_features(f, c99_pp, sizeof(c99_pp)/sizeof(c99_pp[0]));
     
@@ -294,11 +294,12 @@ static void init_c11_features(mcc_c_features_t *f)
     /* Start with C99 */
     init_c99_features(f);
     
-    /* C11 Features */
+    /* Only features with parser, semantic checks and lowering. Alignment
+     * specifiers, atomics, TLS and noreturn metadata are intentionally absent:
+     * accepting their syntax without implementing their semantics is unsafe. */
     static const mcc_feature_id_t c11_features[] = {
-        MCC_FEAT_ALIGNAS, MCC_FEAT_ALIGNOF, MCC_FEAT_NORETURN, MCC_FEAT_STATIC_ASSERT,
-        MCC_FEAT_GENERIC, MCC_FEAT_ATOMIC, MCC_FEAT_THREAD_LOCAL,
-        MCC_FEAT_CHAR16_T, MCC_FEAT_CHAR32_T, MCC_FEAT_UNICODE_LIT, MCC_FEAT_ANONYMOUS_STRUCT
+        MCC_FEAT_ALIGNOF, MCC_FEAT_STATIC_ASSERT, MCC_FEAT_GENERIC,
+        MCC_FEAT_ANONYMOUS_STRUCT
     };
     set_features(f, c11_features, sizeof(c11_features)/sizeof(c11_features[0]));
 }
@@ -320,15 +321,12 @@ static void init_c23_features(mcc_c_features_t *f)
     /* Start with C17 */
     init_c17_features(f);
     
-    /* C23 Features */
+    /* Selected, end-to-end C23 features. */
     static const mcc_feature_id_t c23_features[] = {
-        MCC_FEAT_NULLPTR, MCC_FEAT_CONSTEXPR, MCC_FEAT_TYPEOF, MCC_FEAT_TYPEOF_UNQUAL,
-        MCC_FEAT_AUTO_TYPE, MCC_FEAT_BOOL_KEYWORD, MCC_FEAT_TRUE_FALSE, MCC_FEAT_STATIC_ASSERT_MSG,
+        MCC_FEAT_NULLPTR, MCC_FEAT_TYPEOF, MCC_FEAT_TYPEOF_UNQUAL,
+        MCC_FEAT_BOOL_KEYWORD, MCC_FEAT_TRUE_FALSE,
         MCC_FEAT_BINARY_LIT, MCC_FEAT_DIGIT_SEP,
-        MCC_FEAT_ATTR_SYNTAX, MCC_FEAT_ATTR_DEPRECATED, MCC_FEAT_ATTR_FALLTHROUGH,
-        MCC_FEAT_ATTR_MAYBE_UNUSED, MCC_FEAT_ATTR_NODISCARD, MCC_FEAT_ATTR_NORETURN,
-        MCC_FEAT_UNREACHABLE, MCC_FEAT_CHAR8_T, MCC_FEAT_UTF8_CHAR_LIT,
-        MCC_FEAT_PP_VA_OPT, MCC_FEAT_PP_ELIFDEF, MCC_FEAT_PP_ELIFNDEF, MCC_FEAT_PP_EMBED
+        MCC_FEAT_PP_VA_OPT, MCC_FEAT_PP_ELIFDEF, MCC_FEAT_PP_ELIFNDEF
     };
     set_features(f, c23_features, sizeof(c23_features)/sizeof(c23_features[0]));
 }
@@ -338,17 +336,15 @@ static void init_c23_features(mcc_c_features_t *f)
  */
 static void init_gnu_features(mcc_c_features_t *f)
 {
+    /* Advertise only extensions with parser, semantic analysis and lowering.
+     * In particular, labels-as-values/computed-goto require an indirect-branch
+     * IR primitive, and GNU attributes require layout/call metadata that MCC
+     * does not yet have.  Treating either as supported and discarding tokens
+     * was a false capability. */
     static const mcc_feature_id_t gnu_features[] = {
-        MCC_FEAT_GNU_EXT, MCC_FEAT_GNU_ASM, MCC_FEAT_GNU_ATTR, MCC_FEAT_GNU_TYPEOF,
-        MCC_FEAT_GNU_STMT_EXPR, MCC_FEAT_GNU_LABEL_ADDR, MCC_FEAT_GNU_CASE_RANGE,
-        MCC_FEAT_GNU_ZERO_ARRAY, MCC_FEAT_GNU_EMPTY_STRUCT, MCC_FEAT_GNU_NESTED_FUNC,
-        MCC_FEAT_GNU_BUILTIN, MCC_FEAT_GNU_ALIGNOF, MCC_FEAT_GNU_EXTENSION, MCC_FEAT_GNU_INLINE,
-        MCC_FEAT_GNU_COMPLEX, MCC_FEAT_GNU_REAL_IMAG, MCC_FEAT_GNU_VECTOR,
-        MCC_FEAT_GNU_INIT_PRIORITY, MCC_FEAT_GNU_VISIBILITY, MCC_FEAT_GNU_CLEANUP,
-        MCC_FEAT_GNU_PACKED, MCC_FEAT_GNU_ALIGNED, MCC_FEAT_GNU_SECTION, MCC_FEAT_GNU_WEAK,
-        MCC_FEAT_GNU_ALIAS, MCC_FEAT_GNU_DEPRECATED, MCC_FEAT_GNU_UNUSED, MCC_FEAT_GNU_FORMAT,
-        MCC_FEAT_GNU_NONNULL, MCC_FEAT_GNU_SENTINEL, MCC_FEAT_GNU_MALLOC, MCC_FEAT_GNU_PURE,
-        MCC_FEAT_PP_INCLUDE_NEXT, MCC_FEAT_PP_WARNING, MCC_FEAT_LINE_COMMENT
+        MCC_FEAT_GNU_EXT, MCC_FEAT_GNU_TYPEOF, MCC_FEAT_GNU_STMT_EXPR,
+        MCC_FEAT_GNU_CASE_RANGE, MCC_FEAT_GNU_ZERO_ARRAY,
+        MCC_FEAT_LINE_COMMENT
     };
     set_features(f, gnu_features, sizeof(gnu_features)/sizeof(gnu_features[0]));
 }
@@ -376,8 +372,9 @@ static const mcc_predefined_macro_t c11_predefined_macros[] = {
     { "__STDC__", "1" },
     { "__STDC_VERSION__", "201112L" },
     { "__STDC_HOSTED__", "1" },
-    { "__STDC_UTF_16__", "1" },
-    { "__STDC_UTF_32__", "1" },
+    { "__STDC_NO_ATOMICS__", "1" },
+    { "__STDC_NO_COMPLEX__", "1" },
+    { "__STDC_NO_THREADS__", "1" },
     { NULL, NULL }
 };
 
@@ -386,8 +383,9 @@ static const mcc_predefined_macro_t c17_predefined_macros[] = {
     { "__STDC__", "1" },
     { "__STDC_VERSION__", "201710L" },
     { "__STDC_HOSTED__", "1" },
-    { "__STDC_UTF_16__", "1" },
-    { "__STDC_UTF_32__", "1" },
+    { "__STDC_NO_ATOMICS__", "1" },
+    { "__STDC_NO_COMPLEX__", "1" },
+    { "__STDC_NO_THREADS__", "1" },
     { NULL, NULL }
 };
 
@@ -396,8 +394,9 @@ static const mcc_predefined_macro_t c23_predefined_macros[] = {
     { "__STDC__", "1" },
     { "__STDC_VERSION__", "202311L" },
     { "__STDC_HOSTED__", "1" },
-    { "__STDC_UTF_16__", "1" },
-    { "__STDC_UTF_32__", "1" },
+    { "__STDC_NO_ATOMICS__", "1" },
+    { "__STDC_NO_COMPLEX__", "1" },
+    { "__STDC_NO_THREADS__", "1" },
     { NULL, NULL }
 };
 

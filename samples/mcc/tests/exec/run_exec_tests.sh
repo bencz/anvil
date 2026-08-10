@@ -100,6 +100,21 @@ else
     exit 1
 fi
 
+# Compiler-library regression: invalid MCC architecture enums map to the
+# explicit no-target sentinel, never silently to the host/x86-64 backend.
+TARGET_UNIT="$OUTPUT_DIR/context_target_unit"
+mkdir -p "$OUTPUT_DIR"
+if ! "$CC" -std=c99 -I"$MCC_DIR/include" -I"$MCC_DIR/../../include" \
+        "$SCRIPT_DIR/../unit/context_target.c" \
+        "$MCC_DIR/obj/context.o" "$MCC_DIR/obj/c_std.o" \
+        "$MCC_DIR/../../lib/libanvil.a" -o "$TARGET_UNIT" 2>/dev/null || \
+   ! "$TARGET_UNIT" >/dev/null 2>&1; then
+    echo "FAIL (invalid target mapping regression)"
+    rm -f "$TARGET_UNIT"
+    exit 1
+fi
+rm -f "$TARGET_UNIT"
+
 # Detect architecture
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -133,6 +148,19 @@ run_test() {
     local result="PASS"
     local error_msg=""
 
+    # Detect the requested dialect before compiling either side so native and
+    # MCC are compared under the same language rules.
+    local std="c99"
+    if [[ "$name" == *"_c89"* ]]; then
+        std="c89"
+    elif [[ "$name" == *"_c11"* ]]; then
+        std="c11"
+    elif [[ "$name" == *"_c23"* ]]; then
+        std="c23"
+    elif [[ "$name" == *"_gnu"* ]]; then
+        std="gnu99"
+    fi
+
     if [ -n "$opt" ]; then
         printf "  %-35s %-5s " "$name" "$opt"
     else
@@ -140,7 +168,7 @@ run_test() {
     fi
 
     # Step 1: Compile with native compiler and run
-    if ! $CC -o "$native_bin" "$src" -lc 2>/dev/null; then
+    if ! $CC -std="$std" -o "$native_bin" "$src" -lc 2>/dev/null; then
         echo -e "${YELLOW}SKIP${NC} (native compile failed)"
         return 0
     fi
@@ -153,16 +181,6 @@ run_test() {
         return 0
     fi
     rm -f "$native_bin"
-
-    # Detect C standard from filename or default to c99
-    local std="c99"
-    if [[ "$name" == *"_c89"* ]]; then
-        std="c89"
-    elif [[ "$name" == *"_c99"* ]]; then
-        std="c99"
-    elif [[ "$name" == *"_c11"* ]]; then
-        std="c11"
-    fi
 
     # Step 2: Compile with MCC (may crash with trace trap but still generate output)
     local mcc_opts="-arch=$MCC_ARCH -std=$std -I$MCC_DIR/includes"

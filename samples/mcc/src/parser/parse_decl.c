@@ -163,19 +163,12 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
         return td;
     }
     
-    /* GNU: asm label and/or trailing attributes before initializer. */
-    parse_gnu_asm_label(p);
-    parse_gnu_attributes(p);
-
     /* Parse initializer for variable */
     mcc_ast_node_t *init = NULL;
     if (parse_match(p, TOK_ASSIGN)) {
         init = parse_initializer(p);
     }
 
-    /* GNU attributes can also appear after the initializer. */
-    parse_gnu_attributes(p);
-    
     /* Create first variable declaration */
     mcc_ast_node_t *var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
     var->data.var_decl.name = name;
@@ -215,19 +208,14 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
     
     /* Parse additional declarations */
     while (parse_match(p, TOK_COMMA)) {
-        /* GNU attributes can precede each declarator too. */
-        parse_gnu_attributes(p);
         /* Parse next declarator */
         parse_declarator_result_t next_decl = parse_declarator(p, base, false);
-        parse_gnu_asm_label(p);
-        parse_gnu_attributes(p);
 
         /* Parse initializer for this variable */
         mcc_ast_node_t *next_init = NULL;
         if (parse_match(p, TOK_ASSIGN)) {
             next_init = parse_initializer(p);
         }
-        parse_gnu_attributes(p);
         
         /* Create variable declaration node */
         mcc_ast_node_t *next_var = mcc_ast_create(p->ctx, AST_VAR_DECL, loc);
@@ -281,8 +269,8 @@ static mcc_attribute_t *parse_attributes(mcc_parser_t *p)
     
     while (parse_check(p, TOK_LBRACKET2)) {
         if (!parse_has_feature(p, MCC_FEAT_ATTR_SYNTAX)) {
-            mcc_warning_at(p->ctx, p->peek->location,
-                "attribute syntax [[...]] is a C23 feature");
+            mcc_error_at(p->ctx, p->peek->location,
+                "C23 attributes are not implemented by MCC");
         }
         parse_advance(p);  /* Skip [[ */
         
@@ -329,26 +317,12 @@ static mcc_attribute_t *parse_attributes(mcc_parser_t *p)
     return attrs;
 }
 
-/* Skip C23 attributes [[...]] (for places where we don't need to store them) */
-static void parse_skip_attributes(mcc_parser_t *p)
-{
-    mcc_attribute_t *attrs = parse_attributes(p);
-    (void)attrs;  /* Attributes parsed but not used here */
-}
-
 mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
 {
     mcc_location_t loc = p->peek->location;
 
-    /* GNU: consume any leading __attribute__((...)) — tolerant, currently a no-op */
-    parse_gnu_attributes(p);
-
     /* C23: Parse attributes [[...]] */
     mcc_attribute_t *attrs = parse_attributes(p);
-
-    /* GNU attributes can also appear between the C23 attribute list and
-     * the declaration specifiers. */
-    parse_gnu_attributes(p);
     
     /* C11: _Static_assert */
     if (parse_check(p, TOK__STATIC_ASSERT) || parse_check(p, TOK_STATIC_ASSERT)) {
@@ -526,11 +500,6 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     parse_declarator_result_t decl_result = parse_declarator(p, base_type, false);
     const char *name = decl_result.name;
     mcc_type_t *decl_type = decl_result.type;
-
-    /* GNU: declarator may be followed by __attribute__((...)) and/or
-     * asm("label") — consume and ignore tolerantly. */
-    parse_gnu_asm_label(p);
-    parse_gnu_attributes(p);
 
     /* Check if this is a function type (function declaration/definition) */
     if (decl_type->kind == TYPE_FUNCTION) {

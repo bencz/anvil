@@ -16,8 +16,11 @@ anvil_pass_manager_t *anvil_ctx_get_pass_manager(anvil_ctx_t *ctx)
     /* Create pass manager if it doesn't exist */
     if (!ctx->pass_manager) {
         ctx->pass_manager = anvil_pass_manager_create(ctx);
-        if (ctx->pass_manager) {
-            anvil_pass_manager_set_level(ctx->pass_manager, (anvil_opt_level_t)ctx->opt_level);
+        if (ctx->pass_manager && anvil_pass_manager_set_level(
+                ctx->pass_manager,
+                (anvil_opt_level_t)ctx->opt_level) != ANVIL_OK) {
+            anvil_pass_manager_destroy(ctx->pass_manager);
+            ctx->pass_manager = NULL;
         }
     }
     
@@ -28,12 +31,19 @@ anvil_pass_manager_t *anvil_ctx_get_pass_manager(anvil_ctx_t *ctx)
 anvil_error_t anvil_ctx_set_opt_level(anvil_ctx_t *ctx, anvil_opt_level_t level)
 {
     if (!ctx) return ANVIL_ERR_INVALID_ARG;
+    if ((unsigned)level > (unsigned)ANVIL_OPT_AGGRESSIVE) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                        "Invalid optimization level %d", (int)level);
+        return ANVIL_ERR_INVALID_ARG;
+    }
     
     ctx->opt_level = (int)level;
     
     /* Update pass manager if it exists */
     if (ctx->pass_manager) {
-        anvil_pass_manager_set_level(ctx->pass_manager, level);
+        anvil_error_t err = anvil_pass_manager_set_level(
+            ctx->pass_manager, level);
+        if (err != ANVIL_OK) return err;
     }
     
     return ANVIL_OK;
@@ -51,15 +61,16 @@ anvil_error_t anvil_module_optimize(anvil_module_t *mod)
 {
     if (!mod || !mod->ctx) return ANVIL_ERR_INVALID_ARG;
     
-    /* Skip if no optimization enabled */
-    if (mod->ctx->opt_level == ANVIL_OPT_NONE) {
-        return ANVIL_OK;
-    }
-    
     anvil_pass_manager_t *pm = anvil_ctx_get_pass_manager(mod->ctx);
     if (!pm) return ANVIL_ERR_NOMEM;
-    
-    anvil_pass_manager_run_module(pm, mod);
-    
+
+    /* O0 disables the default pipeline, but manually enabled built-ins and
+     * custom passes whose min_level is O0 must still run. */
+    anvil_pass_result_t result = anvil_pass_manager_run_module(pm, mod);
+    if (result == ANVIL_PASS_RUN_ERROR) {
+        anvil_error_t err = anvil_ctx_get_last_error(mod->ctx);
+        return err == ANVIL_OK ? ANVIL_ERR_INVALID_OP : err;
+    }
+
     return ANVIL_OK;
 }

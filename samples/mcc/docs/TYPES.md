@@ -44,9 +44,9 @@ typedef enum {
 } mcc_type_kind_t;
 ```
 
-The `_Complex` kinds are defined and constructed (`mcc_type_complex_float`/`_double`/`_ldouble`),
-sized as twice their component type. `TYPE_TYPEDEF` is the type-system representation of a typedef
-reference; it carries the name and the underlying type.
+The `_Complex` kinds remain reserved in the internal enum, but the parser
+rejects complex/imaginary types because arithmetic and ABI lowering are not
+implemented. `TYPE_TYPEDEF` carries the name and underlying type.
 
 ## Type Qualifiers
 
@@ -296,7 +296,8 @@ mcc_type_t *mcc_type_decay(mcc_type_context_t *types, mcc_type_t *type);  /* arr
 
 ## Type Sizes and Alignment
 
-Type sizes are determined by the target architecture using ANVIL's `anvil_arch_get_info()`. MCC supports multiple data models:
+Type size and ABI alignment come from ANVIL's target `DataLayout`; MCC does not
+maintain an independent alignment heuristic.
 
 ### Data Models
 
@@ -332,10 +333,10 @@ Note: Even with 24-bit or 31-bit addressing, pointers are stored in 32-bit regis
 | `_Bool` | 1 | 1 | C99 |
 | `float` | 4 | 4 | C89 |
 | `double` | 8 | 8 | C89 |
-| `long double` | 8 | 16* | C89 |
 | `pointer` | 4 | 8 | C89 |
 
-*Darwin LP64 uses 8 bytes for `long double`.
+`long double` is rejected until ANVIL has a compatible target representation
+and calling-convention lowering.
 
 ## Integer Promotions
 
@@ -515,10 +516,9 @@ This ensures proper type compatibility checking for C99 `long long` and C99/C23 
 
 ### Anonymous Field Lookup
 
-The `mcc_type_find_field()` function handles unnamed fields in two ways: anonymous
-bitfield padding (e.g. `unsigned int : 0;`) is skipped, while anonymous struct/union
-members (C11) are recursed into so that an inner member can be found through the outer
-type:
+The `mcc_type_find_field()` function recursively searches C11 anonymous
+struct/union members. Bit-fields are rejected until ABI packing and masked
+access are implemented.
 
 ```c
 /* In types.c */

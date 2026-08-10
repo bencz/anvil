@@ -5,6 +5,7 @@
 CC = gcc
 AR = ar
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O2
+DEPFLAGS = -MMD -MP
 LDFLAGS = -L./lib
 ARFLAGS = rcs
 
@@ -51,10 +52,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
-	$(SRC_DIR)/backend/arm64/arm64_mir.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_opt.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_peephole.c \
-	$(SRC_DIR)/backend/arm64/opt/arm64_branch.c
+	$(SRC_DIR)/backend/arm64/arm64_mir.c
 
 OPT_SRCS = \
 	$(SRC_DIR)/opt/opt.c \
@@ -77,6 +75,7 @@ ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS) $(MACHINE_SRCS)
 
 # Object files
 OBJS = $(ALL_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+DEPS = $(OBJS:.o=.d)
 
 # Examples (all .c files in examples directory)
 EXAMPLES = \
@@ -89,7 +88,6 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/array_test \
 	$(BUILD_DIR)/examples/struct_test \
 	$(BUILD_DIR)/examples/optimization_test \
-	$(BUILD_DIR)/examples/loop_unroll_test \
 	$(BUILD_DIR)/examples/memory_opt_test \
 	$(BUILD_DIR)/examples/cse_test \
 	$(BUILD_DIR)/examples/global_test \
@@ -105,9 +103,11 @@ TESTS = \
 	$(BUILD_DIR)/tests/x86_64_mir_lowering_regression \
 	$(BUILD_DIR)/tests/x86_mir_lowering_regression \
 	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
-	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression
+	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression \
+	$(BUILD_DIR)/tests/fcmp_backend_regression \
+	$(BUILD_DIR)/tests/typed_gep_backend_regression
 
-.PHONY: all clean lib examples tests install examples-runtime test-examples clean-examples-runtime examples-advanced test-examples-advanced clean-examples-advanced
+.PHONY: all clean lib examples tests test-win64-abi test-fcmp-i1-runtime test-sanitize test-valgrind install examples-runtime test-examples clean-examples-runtime examples-advanced test-examples-advanced clean-examples-advanced
 
 all: lib examples
 
@@ -120,7 +120,9 @@ $(LIB_PATH): $(OBJS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(DEPS)
 
 examples: lib $(EXAMPLES)
 
@@ -129,11 +131,38 @@ $(BUILD_DIR)/examples/%: $(EXAMPLES_DIR)/%.c $(LIB_PATH)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
 
-tests: lib $(TESTS)
+tests: lib $(TESTS) $(BUILD_DIR)/tests/win64_abi_codegen $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
 	@for test in $(TESTS); do \
 		echo "Running $$test"; \
 		$$test || exit 1; \
 	done
+	@BUILD_DIR=$(BUILD_DIR) bash tests/run_win64_abi.sh
+	@BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
+
+# Build every object in an isolated tree so sanitizer flags cannot be mixed
+# with the normal archive. LeakSanitizer is disabled here because it cannot
+# operate under the ptrace sandbox; leak conformance has its own Valgrind gate.
+test-sanitize:
+	ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	$(MAKE) CC=/usr/bin/clang \
+		BUILD_DIR=build/sanitize LIB_DIR=lib/sanitize \
+		CFLAGS="-Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+		LDFLAGS="-L./lib/sanitize -fsanitize=address,undefined" tests
+
+test-valgrind: tests
+	@for test in $(TESTS); do \
+		echo "Valgrind $$test"; \
+		valgrind --quiet --leak-check=full --show-leak-kinds=definite,indirect \
+			--errors-for-leak-kinds=definite,indirect --error-exitcode=1 \
+			$$test || exit 1; \
+	done
+
+test-win64-abi: $(BUILD_DIR)/tests/win64_abi_codegen
+	BUILD_DIR=$(BUILD_DIR) bash tests/run_win64_abi.sh
+
+test-fcmp-i1-runtime: $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
+	BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
 
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_PATH)
 	@mkdir -p $(dir $@)

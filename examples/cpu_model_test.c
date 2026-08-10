@@ -99,8 +99,7 @@ static void test_ppc64_models(void)
 {
     printf("\n=== PowerPC 64-bit CPU Models ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_PPC64);
     
     anvil_cpu_model_t ppc64_models[] = {
         ANVIL_CPU_PPC64_970,
@@ -128,8 +127,7 @@ static void test_zarch_models(void)
 {
     printf("\n=== z/Architecture CPU Models ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ZARCH);
     
     anvil_cpu_model_t zarch_models[] = {
         ANVIL_CPU_ZARCH_Z900,
@@ -159,8 +157,7 @@ static void test_arm64_models(void)
 {
     printf("\n=== ARM64 CPU Models ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_ARM64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ARM64);
     
     anvil_cpu_model_t arm64_models[] = {
         ANVIL_CPU_ARM64_GENERIC,
@@ -190,8 +187,7 @@ static void test_x86_64_models(void)
 {
     printf("\n=== x86-64 CPU Models ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
     
     anvil_cpu_model_t x86_64_models[] = {
         ANVIL_CPU_X86_64_GENERIC,
@@ -222,8 +218,7 @@ static void test_feature_override(void)
 {
     printf("\n=== Feature Override Test ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_PPC64);
     anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER7);
     
     printf("POWER7 default features:\n");
@@ -252,8 +247,7 @@ static void test_codegen_with_cpu(void)
 {
     printf("\n=== Code Generation with CPU Model ===\n\n");
     
-    anvil_ctx_t *ctx = anvil_ctx_create();
-    anvil_ctx_set_target(ctx, ANVIL_ARCH_PPC64);
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_PPC64);
     anvil_ctx_set_cpu(ctx, ANVIL_CPU_PPC64_POWER9);
     
     printf("Generating code for: %s\n", anvil_cpu_model_name(anvil_ctx_get_cpu(ctx)));
