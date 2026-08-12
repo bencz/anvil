@@ -170,6 +170,29 @@ test-codegen-all-arch: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64
 test-exec: $(TARGET)
 	@$(TESTDIR)/exec/run_exec_tests.sh
 
+# Target DataLayout differential: the same C source must preserve its declared
+# layout contract at every optimization level for representative ILP32 ABIs
+# (including the i64-alignment difference between i386 and PPC32) and LP64.
+test-layout-matrix: $(TARGET) | $(TEST_OUTPUT_DIR)
+	@set -e; \
+	for target in x86 ppc32 x86_64; do \
+		case "$$target" in \
+			x86) defs='-DEXPECT_PROBE_SIZE=20 -DEXPECT_PROBE_ALIGN=4 -DEXPECT_LL_OFFSET=4 -DEXPECT_DOUBLE_OFFSET=12 -DEXPECT_ARRAY_SIZE=12 -DEXPECT_PTR_OFFSET=8' ;; \
+			ppc32) defs='-DEXPECT_PROBE_SIZE=24 -DEXPECT_PROBE_ALIGN=8 -DEXPECT_LL_OFFSET=8 -DEXPECT_DOUBLE_OFFSET=16 -DEXPECT_ARRAY_SIZE=12 -DEXPECT_PTR_OFFSET=8' ;; \
+			x86_64) defs='-DEXPECT_PROBE_SIZE=24 -DEXPECT_PROBE_ALIGN=8 -DEXPECT_LL_OFFSET=8 -DEXPECT_DOUBLE_OFFSET=16 -DEXPECT_ARRAY_SIZE=16 -DEXPECT_PTR_OFFSET=8' ;; \
+		esac; \
+		for opt in O0 Og O1 O2 O3; do \
+			out='$(TEST_OUTPUT_DIR)/layout_contract.'"$$target"'.'"$$opt"'.s'; \
+			./$(TARGET) -std=c11 -arch="$$target" -"$$opt" $$defs \
+				-I includes -o "$$out" $(TESTDIR)/exec/layout_contract_c11.c \
+				>/dev/null; \
+			test -s "$$out"; \
+		done; \
+	done
+	@$(TESTDIR)/exec/run_exec_tests.sh --all-opts \
+		$(TESTDIR)/exec/layout_contract_c11.c
+	@echo "MCC target/optimizer layout matrix passed"
+
 test-run: $(TARGET) | $(TEST_OUTPUT_DIR)
 	@echo "=== Execution Tests ==="
 	@echo "Note: These tests compile and run code on the host system."

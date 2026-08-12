@@ -223,7 +223,7 @@ int main(void)
 * Structs: `anvil_type_struct(ctx, name, fields, num_fields)`
 * Functions: `anvil_type_func(ctx, ret_type, params, num_params, variadic)`
 
-Function definitions/declarations are exposed as callable address values. In practice, `anvil_func_get_value(func)` has type `ptr<func>`, so it can be stored in memory, loaded back, and called indirectly. Direct and indirect calls use the same `anvil_build_call()` API; the function type passed to the builder describes the callee signature.
+Function definitions/declarations are exposed as callable address values. In practice, `anvil_func_get_value(func)` has type `ptr<func>`, so it can be stored in memory, loaded back, and called indirectly. `anvil_build_call_checked()` derives both signature and immutable effective calling convention from that `func`/`ptr<func>` type. It returns `true` with a NULL result for a successful void call, eliminating the old NULL ambiguity.
 
 ## Calling Conventions
 
@@ -440,7 +440,8 @@ anvil_build_store(ctx, anvil_func_get_value(add_fn), slot);
 
 anvil_value_t *loaded = anvil_build_load(ctx, fn_ptr_type, slot, "loaded_fn");
 anvil_value_t *args[] = { anvil_const_i32(ctx, 3), anvil_const_i32(ctx, 4) };
-anvil_value_t *result = anvil_build_call(ctx, fn_type, loaded, args, 2, "result");
+anvil_value_t *result = NULL;
+anvil_build_call_checked(ctx, loaded, args, 2, "result", &result);
 ```
 
 Backend emitters choose the concrete call instruction. In the current ARM64 reference backend, direct calls emit `bl`, while loaded function pointers are copied to `x16` and emitted as `blr x16`.

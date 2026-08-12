@@ -7,14 +7,20 @@
  */
 
 #include "pp_internal.h"
+#include <limits.h>
 
 /* ============================================================
  * Include Stack Management
  * ============================================================ */
 
-void pp_push_include(mcc_preprocessor_t *pp)
+bool pp_push_include(mcc_preprocessor_t *pp)
 {
+    if (!pp || !pp->lexer || pp->include_depth == INT_MAX) {
+        if (pp) mcc_fatal(pp->ctx, "include stack overflow");
+        return false;
+    }
     mcc_include_file_t *inc = mcc_alloc(pp->ctx, sizeof(mcc_include_file_t));
+    if (!inc) return false;
     inc->filename = pp->lexer->filename;
     inc->content = pp->lexer->source;
     inc->pos = pp->lexer->source + pp->lexer->pos;
@@ -24,6 +30,7 @@ void pp_push_include(mcc_preprocessor_t *pp)
     inc->next = pp->include_stack;
     pp->include_stack = inc;
     pp->include_depth++;
+    return true;
 }
 
 bool pp_pop_include(mcc_preprocessor_t *pp)
@@ -166,24 +173,40 @@ void pp_process_include(mcc_preprocessor_t *pp)
     }
 
     /* Read file contents */
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        mcc_error(pp->ctx, "Failed to seek include file: %s", path);
+        fclose(f);
+        return;
+    }
     long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (size < 0 || (uintmax_t)size >= (uintmax_t)SIZE_MAX ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        mcc_error(pp->ctx, "Invalid include file size: %s", path);
+        fclose(f);
+        return;
+    }
 
-    char *content = mcc_alloc(pp->ctx, size + 1);
-    if (fread(content, 1, size, f) != (size_t)size) {
+    size_t content_size = (size_t)size;
+    char *content = mcc_alloc(pp->ctx, content_size + 1);
+    if (!content) {
+        fclose(f);
+        return;
+    }
+    if (fread(content, 1, content_size, f) != content_size) {
         mcc_error(pp->ctx, "Failed to read include file: %s", path);
         fclose(f);
         return;
     }
-    content[size] = '\0';
+    content[content_size] = '\0';
     fclose(f);
 
     /* Save current lexer state */
-    pp_push_include(pp);
+    if (!pp_push_include(pp)) return;
 
     /* Initialize lexer with new file */
-    mcc_lexer_init_string(pp->lexer, content, mcc_strdup(pp->ctx, path));
+    char *stored_path = mcc_strdup(pp->ctx, path);
+    if (!stored_path) return;
+    mcc_lexer_init_string(pp->lexer, content, stored_path);
 }
 
 /* Register the current file as #pragma once. Called from pp_process_pragma. */
@@ -198,13 +221,20 @@ void pp_mark_pragma_once(mcc_preprocessor_t *pp)
     }
 
     if (pp->num_pragma_once >= pp->cap_pragma_once) {
+        if (pp->cap_pragma_once > SIZE_MAX / 2) {
+            mcc_fatal(pp->ctx, "pragma-once table capacity overflow");
+            return;
+        }
         size_t ncap = pp->cap_pragma_once ? pp->cap_pragma_once * 2 : 8;
-        pp->pragma_once_files = mcc_realloc(pp->ctx, pp->pragma_once_files,
-            pp->cap_pragma_once * sizeof(*pp->pragma_once_files),
-            ncap * sizeof(*pp->pragma_once_files));
+        void *grown = mcc_realloc_array(pp->ctx, pp->pragma_once_files,
+            pp->cap_pragma_once, ncap, sizeof(*pp->pragma_once_files));
+        if (!grown) return;
+        pp->pragma_once_files = grown;
         pp->cap_pragma_once = ncap;
     }
-    pp->pragma_once_files[pp->num_pragma_once++] = mcc_strdup(pp->ctx, path);
+    char *stored_path = mcc_strdup(pp->ctx, path);
+    if (!stored_path) return;
+    pp->pragma_once_files[pp->num_pragma_once++] = stored_path;
 }
 
 /* ============================================================
@@ -213,10 +243,17 @@ void pp_mark_pragma_once(mcc_preprocessor_t *pp)
 
 void mcc_preprocessor_add_include_path(mcc_preprocessor_t *pp, const char *path)
 {
+    if (!pp || !path || pp->num_include_paths == SIZE_MAX) {
+        if (pp) mcc_fatal(pp->ctx, "include path table capacity overflow");
+        return;
+    }
     size_t n = pp->num_include_paths;
-    const char **new_paths = mcc_realloc(pp->ctx, (void*)pp->include_paths,
-                                          n * sizeof(char*), (n + 1) * sizeof(char*));
-    new_paths[n] = mcc_strdup(pp->ctx, path);
+    const char **new_paths = mcc_realloc_array(pp->ctx,
+        (void *)pp->include_paths, n, n + 1, sizeof(*new_paths));
+    if (!new_paths) return;
+    char *stored_path = mcc_strdup(pp->ctx, path);
+    if (!stored_path) return;
+    new_paths[n] = stored_path;
     pp->include_paths = new_paths;
     pp->num_include_paths = n + 1;
 }

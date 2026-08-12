@@ -356,9 +356,9 @@ static void test_x86_64_lowers_stack_call_args(void)
             for (size_t i = 0; i < 10; i++) {
                 args[i] = anvil_const_i64(ctx, (int64_t)i + 1);
             }
-            anvil_value_t *call = anvil_build_call(ctx, i64,
-                                                   anvil_func_get_value(callee),
-                                                   args, 10, "call");
+            anvil_value_t *call = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                     args, 10, "call", &call);
             anvil_build_ret(ctx, call);
 
             anvil_mir_func_t *mir = anvil_x86_64_lower_func_to_mir(caller);
@@ -509,8 +509,9 @@ static void test_win64_variadic_fp_shadow_and_nonvolatile_xmm(void)
             anvil_const_f32(ctx, 2.5f), anvil_const_f64(ctx, 3.75),
             anvil_const_i64(ctx, 9)
         };
-        anvil_value_t *call = anvil_build_call(ctx, i64,
-            anvil_func_get_value(callee), args, 5, "call");
+        anvil_value_t *call = NULL;
+        anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 5,
+                                 "call", &call);
         anvil_build_ret(ctx, call);
 
         anvil_mir_func_t *mir = anvil_x86_64_lower_func_to_mir(caller);

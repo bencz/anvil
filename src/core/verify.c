@@ -144,9 +144,13 @@ static bool verify_value_ref(const anvil_module_t *mod,
         case ANVIL_VAL_CONST_STRING:
         case ANVIL_VAL_CONST_NULL:
         case ANVIL_VAL_CONST_ARRAY:
+        case ANVIL_VAL_CONST_STRUCT:
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
             {
                 anvil_const_dag_status_t dag =
-                    anvil_value_check_constant_dag(value, mod->ctx);
+                    anvil_value_check_constant_dag_for_module(value, mod->ctx,
+                                                              mod);
                 if (dag == ANVIL_CONST_DAG_VALID) return true;
                 if (dag == ANVIL_CONST_DAG_NOMEM)
                     return verify_fail(error, error_len,
@@ -514,10 +518,11 @@ static bool verify_ssa_use(const anvil_func_t *func,
                            char *error,
                            size_t error_len)
 {
-    if (value && value->kind == ANVIL_VAL_CONST_ARRAY) {
-        for (size_t i = 0; i < value->data.array.num_elements; i++) {
+    if (value && (value->kind == ANVIL_VAL_CONST_ARRAY ||
+                  value->kind == ANVIL_VAL_CONST_STRUCT)) {
+        for (size_t i = 0; i < value->data.aggregate.num_elements; i++) {
             if (!verify_ssa_use(func, cfg, use,
-                                value->data.array.elements[i],
+                                value->data.aggregate.elements[i],
                                 error, error_len)) {
                 return false;
             }
@@ -548,10 +553,11 @@ static bool verify_phi_value_dominates_edge(const anvil_func_t *func,
                                             char *error,
                                             size_t error_len)
 {
-    if (value && value->kind == ANVIL_VAL_CONST_ARRAY) {
-        for (size_t i = 0; i < value->data.array.num_elements; i++) {
+    if (value && (value->kind == ANVIL_VAL_CONST_ARRAY ||
+                  value->kind == ANVIL_VAL_CONST_STRUCT)) {
+        for (size_t i = 0; i < value->data.aggregate.num_elements; i++) {
             if (!verify_phi_value_dominates_edge(
-                    func, cfg, phi, value->data.array.elements[i], pred,
+                    func, cfg, phi, value->data.aggregate.elements[i], pred,
                     error, error_len)) {
                 return false;
             }
@@ -933,9 +939,24 @@ static bool verify_call(const anvil_module_t *mod,
     if (!verify_value_ref(mod, func, callee, error, error_len)) return false;
 
     anvil_type_t *fn_type = callee_func_type(callee);
-    if (!fn_type) {
+    if (!fn_type || fn_type->owner_ctx != mod->ctx ||
+        !fn_type->data.func.ret ||
+        fn_type->data.func.ret->owner_ctx != mod->ctx ||
+        fn_type->data.func.ret->kind == ANVIL_TYPE_FUNC ||
+        (fn_type->data.func.ret->kind != ANVIL_TYPE_VOID &&
+         !anvil_sem_type_is_sized(fn_type->data.func.ret)) ||
+        (fn_type->data.func.num_params > 0 &&
+         !fn_type->data.func.params)) {
         return verify_fail(error, error_len,
-                           "call in function %s targets a non-function value",
+                           "call in function %s targets a non-function or malformed signature",
+                           func_name(func));
+    }
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!anvil_cc_resolve(mod->ctx, fn_type->data.func.cc, &effective_cc) ||
+        effective_cc != fn_type->data.func.cc ||
+        instr->call_cc != effective_cc) {
+        return verify_fail(error, error_len,
+                           "call in function %s has an invalid or mismatched calling convention",
                            func_name(func));
     }
 
@@ -952,7 +973,10 @@ static bool verify_call(const anvil_module_t *mod,
         anvil_value_t *arg = instr->operands[i + 1];
         if (!verify_value_ref(mod, func, arg, error, error_len)) return false;
         if (i < num_fixed &&
-            !type_equal(arg->type, fn_type->data.func.params[i])) {
+            (!fn_type->data.func.params[i] ||
+             fn_type->data.func.params[i]->owner_ctx != mod->ctx ||
+             !anvil_sem_type_is_sized(fn_type->data.func.params[i]) ||
+             !type_equal(arg->type, fn_type->data.func.params[i]))) {
             return verify_fail(error, error_len,
                                "call in function %s has argument type mismatch",
                                func_name(func));
@@ -1353,6 +1377,14 @@ static bool verify_function_shape(const anvil_func_t *func,
                            "function %s has non-function type",
                            func_name(func));
     }
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!anvil_cc_resolve(func->parent->ctx, func->type->data.func.cc,
+                          &effective_cc) ||
+        effective_cc != func->type->data.func.cc) {
+        return verify_fail(error, error_len,
+                           "function %s has a calling convention incompatible with its target",
+                           func_name(func));
+    }
     if (!func->parent->ctx || func->owner_ctx != func->parent->ctx ||
         func->type->owner_ctx != func->parent->ctx ||
         !func->value || func->value->owner_ctx != func->parent->ctx ||
@@ -1382,6 +1414,26 @@ static bool verify_function_shape(const anvil_func_t *func,
         return verify_fail(error, error_len,
                            "function %s has a malformed function type",
                            func_name(func));
+    }
+    anvil_type_t *return_type = func->type->data.func.ret;
+    if (!return_type || return_type->owner_ctx != func->parent->ctx ||
+        return_type->kind == ANVIL_TYPE_FUNC ||
+        (return_type->kind != ANVIL_TYPE_VOID &&
+         !anvil_sem_type_is_sized(return_type))) {
+        return verify_fail(error, error_len,
+                           "function %s has an invalid return type",
+                           func_name(func));
+    }
+    for (size_t i = 0; i < func->type->data.func.num_params; i++) {
+        anvil_type_t *param_type = func->type->data.func.params[i];
+        if (!param_type || param_type->owner_ctx != func->parent->ctx ||
+            param_type->kind == ANVIL_TYPE_VOID ||
+            param_type->kind == ANVIL_TYPE_FUNC ||
+            !anvil_sem_type_is_sized(param_type)) {
+            return verify_fail(error, error_len,
+                               "function %s has an invalid parameter type",
+                               func_name(func));
+        }
     }
     if (func->is_declaration) {
         return true;
@@ -1510,8 +1562,8 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
                                mod->name ? mod->name : "<anon>");
         }
         anvil_const_dag_status_t dag = global->value->data.global.init
-            ? anvil_value_check_constant_dag(global->value->data.global.init,
-                                             mod->ctx)
+            ? anvil_value_check_constant_dag_for_module(
+                  global->value->data.global.init, mod->ctx, mod)
             : ANVIL_CONST_DAG_VALID;
         if (dag == ANVIL_CONST_DAG_NOMEM) {
             return verify_fail(error, error_len,

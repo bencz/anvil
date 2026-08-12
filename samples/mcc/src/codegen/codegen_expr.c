@@ -80,7 +80,7 @@ static anvil_value_t *codegen_const_int_for_mcc_type(mcc_codegen_t *cg,
                 ? anvil_const_u32(cg->anvil_ctx, (uint32_t)val)
                 : anvil_const_i32(cg->anvil_ctx, (int32_t)val);
         case TYPE_LONG: {
-            size_t sz = codegen_sizeof(cg, type);
+            size_t sz = mcc_type_sizeof(type);
             if (sz == 8) {
                 return type->is_unsigned
                     ? anvil_const_u64(cg->anvil_ctx, (uint64_t)val)
@@ -614,7 +614,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     anvil_value_t *lhs_int = anvil_build_ptrtoint(cg->anvil_ctx, lhs, i64, "ptr.lhs");
                     anvil_value_t *rhs_int = anvil_build_ptrtoint(cg->anvil_ctx, rhs, i64, "ptr.rhs");
                     anvil_value_t *diff = anvil_build_sub(cg->anvil_ctx, lhs_int, rhs_int, "ptr.diff");
-                    int elem_size = pointee ? codegen_sizeof(cg, pointee) : 1;
+                    size_t elem_size = pointee ? mcc_type_sizeof(pointee) : 1;
                     if (elem_size > 1) {
                         diff = anvil_build_sdiv(cg->anvil_ctx, diff,
                                                 anvil_const_i64(cg->anvil_ctx, elem_size),
@@ -1001,7 +1001,12 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             anvil_value_t **args = NULL;
             mcc_func_param_t *param = callee_type ? callee_type->data.function.params : NULL;
             if (num_args > 0) {
+                if (num_args > SIZE_MAX / sizeof(anvil_value_t *)) {
+                    mcc_error(cg->mcc_ctx, "call argument table overflow");
+                    return NULL;
+                }
                 args = mcc_alloc(cg->mcc_ctx, num_args * sizeof(anvil_value_t*));
+                if (!args) return NULL;
                 for (size_t i = 0; i < num_args; i++) {
                     mcc_ast_node_t *arg_node = expr->data.call_expr.args[i];
                     mcc_type_t *target_type = NULL;
@@ -1021,9 +1026,12 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 }
             }
             
-            anvil_type_t *func_type = codegen_type(cg,
-                callee_type ? callee_type : expr->data.call_expr.func->type);
-            return anvil_build_call(cg->anvil_ctx, func_type, func, args, num_args, "call");
+            anvil_value_t *result = NULL;
+            if (!anvil_build_call_checked(cg->anvil_ctx, func, args,
+                                          num_args, "call", &result)) {
+                return NULL;
+            }
+            return result;
         }
         
         case AST_SUBSCRIPT_EXPR: {
@@ -1048,9 +1056,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         case AST_SIZEOF_EXPR: {
             size_t size;
             if (expr->data.sizeof_expr.type_arg) {
-                size = codegen_sizeof(cg, expr->data.sizeof_expr.type_arg);
+                size = mcc_type_sizeof(expr->data.sizeof_expr.type_arg);
             } else if (expr->data.sizeof_expr.expr_arg) {
-                size = codegen_sizeof(cg, expr->data.sizeof_expr.expr_arg->type);
+                size = mcc_type_sizeof(expr->data.sizeof_expr.expr_arg->type);
             } else {
                 size = 0;
             }
@@ -1062,7 +1070,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (!type && expr->data.alignof_expr.expr_arg)
                 type = expr->data.alignof_expr.expr_arg->type;
             if (!type) return NULL;
-            size_t align = anvil_type_align(codegen_type(cg, type));
+            size_t align = mcc_type_alignof(type);
             return codegen_const_int_for_mcc_type(cg, expr->type,
                                                   (int64_t)align);
         }

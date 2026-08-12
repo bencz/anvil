@@ -9,6 +9,7 @@
 
 #include "x86_64_internal.h"
 #include "anvil/anvil_x86_64_mir.h"
+#include "../gnu_data.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -78,9 +79,10 @@ static bool x64_abi_supported(anvil_abi_t abi)
 static anvil_abi_t x64_resolve_abi(anvil_ctx_t *ctx, anvil_func_t *func)
 {
     anvil_abi_t abi = ctx ? ctx->abi : ANVIL_ABI_DEFAULT;
-    if (func) {
-        if (func->cc == ANVIL_CC_WIN64) abi = ANVIL_ABI_WIN64;
-        else if (func->cc == ANVIL_CC_SYSV) abi = ANVIL_ABI_SYSV;
+    if (func && func->type && func->type->kind == ANVIL_TYPE_FUNC) {
+        if (func->type->data.func.cc == ANVIL_CC_WIN64) abi = ANVIL_ABI_WIN64;
+        else if (func->type->data.func.cc == ANVIL_CC_SYSV &&
+                 abi != ANVIL_ABI_DARWIN) abi = ANVIL_ABI_SYSV;
     }
     if (abi == ANVIL_ABI_DEFAULT) abi = ANVIL_ABI_SYSV;
     return abi;
@@ -142,9 +144,9 @@ static anvil_error_t x64_emit_func(x64_backend_t *be, anvil_func_t *func)
     return ANVIL_OK;
 }
 
-static void x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
+static bool x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
 {
-    if (mod->num_globals == 0) return;
+    if (mod->num_globals == 0) return true;
 
     const char *prefix = x64_symbol_prefix(be);
 
@@ -153,16 +155,35 @@ static void x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
         if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
         actual_globals++;
     }
-    if (actual_globals == 0) return;
+    if (actual_globals == 0) return true;
+
+    anvil_gnu_string_pool_t strings;
+    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
 
     anvil_strbuf_append(&be->data, "\t.data\n");
 
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
         if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
 
-        anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix, g->value->name);
+        anvil_value_t *global = g->value;
+        if (!global || !global->name || !global->type) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
+        }
+        if (global->data.global.is_declaration) {
+            anvil_strbuf_appendf(&be->data, "\t.extern %s%s\n", prefix,
+                                 global->name);
+            continue;
+        }
+        if (global->data.global.linkage == ANVIL_LINK_EXTERNAL ||
+            global->data.global.linkage == ANVIL_LINK_COMMON) {
+            anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix,
+                                 global->name);
+        } else if (global->data.global.linkage == ANVIL_LINK_WEAK) {
+            anvil_strbuf_appendf(&be->data, "\t.weak %s%s\n", prefix,
+                                 global->name);
+        }
 
-        int size = g->value->type ? x64_type_size(g->value->type) : 8;
         int align = g->value->type ? x64_type_align(g->value->type) : 8;
 
         if (x64_is_darwin(be)) {
@@ -174,71 +195,23 @@ static void x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
 
         anvil_strbuf_appendf(&be->data, "%s%s:\n", prefix, g->value->name);
 
-        if (g->value->data.global.init) {
-            anvil_value_t *init = g->value->data.global.init;
-            if (init->kind == ANVIL_VAL_CONST_INT) {
-                switch (size) {
-                    case 1: anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)init->data.i); break;
-                    case 2: anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)init->data.i); break;
-                    case 4: anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)init->data.i); break;
-                    default: anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)init->data.i); break;
-                }
-            } else if (init->kind == ANVIL_VAL_CONST_FLOAT) {
-                if (size == 4) {
-                    float fval = (float)init->data.f;
-                    uint32_t bits;
-                    memcpy(&bits, &fval, sizeof(bits));
-                    anvil_strbuf_appendf(&be->data, "\t.long 0x%x\n", bits);
-                } else {
-                    double dval = init->data.f;
-                    uint64_t bits;
-                    memcpy(&bits, &dval, sizeof(bits));
-                    anvil_strbuf_appendf(&be->data, "\t.quad 0x%llx\n", (unsigned long long)bits);
-                }
-            } else if (init->kind == ANVIL_VAL_CONST_ARRAY) {
-                int elem_size = 8;
-                bool is_float_array = false;
-                if (g->value->type && g->value->type->kind == ANVIL_TYPE_ARRAY &&
-                    g->value->type->data.array.elem) {
-                    elem_size = x64_type_size(g->value->type->data.array.elem);
-                    is_float_array = x64_type_is_float(g->value->type->data.array.elem);
-                }
-                for (size_t i = 0; i < init->data.array.num_elements; i++) {
-                    anvil_value_t *elem = init->data.array.elements[i];
-                    if (is_float_array && elem && elem->kind == ANVIL_VAL_CONST_FLOAT) {
-                        if (elem_size == 4) {
-                            float fval = (float)elem->data.f;
-                            uint32_t bits;
-                            memcpy(&bits, &fval, sizeof(bits));
-                            anvil_strbuf_appendf(&be->data, "\t.long 0x%x\n", bits);
-                        } else {
-                            double dval = elem->data.f;
-                            uint64_t bits;
-                            memcpy(&bits, &dval, sizeof(bits));
-                            anvil_strbuf_appendf(&be->data, "\t.quad 0x%llx\n", (unsigned long long)bits);
-                        }
-                    } else {
-                        int64_t val = 0;
-                        if (elem && elem->kind == ANVIL_VAL_CONST_INT) {
-                            val = elem->data.i;
-                        }
-                        switch (elem_size) {
-                            case 1: anvil_strbuf_appendf(&be->data, "\t.byte %lld\n", (long long)val); break;
-                            case 2: anvil_strbuf_appendf(&be->data, "\t.short %lld\n", (long long)val); break;
-                            case 4: anvil_strbuf_appendf(&be->data, "\t.long %lld\n", (long long)val); break;
-                            default: anvil_strbuf_appendf(&be->data, "\t.quad %lld\n", (long long)val); break;
-                        }
-                    }
-                }
-            } else {
-                anvil_strbuf_appendf(&be->data, "\t.zero %d\n", size);
-            }
-        } else {
-            anvil_strbuf_appendf(&be->data, "\t.zero %d\n", size);
+        if (!anvil_gnu_emit_constant(&be->data, global->type,
+                                     global->data.global.init, 8, prefix,
+                                     &strings, NULL, NULL)) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
         }
     }
 
     anvil_strbuf_append(&be->data, "\n");
+    const char *string_section = x64_is_darwin(be)
+        ? "\t.section __TEXT,__cstring,cstring_literals"
+        : (be->ctx && be->ctx->abi == ANVIL_ABI_WIN64
+               ? "\t.section .rdata,\"dr\"" : "\t.section .rodata");
+    bool ok = anvil_gnu_string_pool_emit(&be->data, &strings,
+                                          string_section);
+    anvil_gnu_string_pool_destroy(&strings);
+    return ok && !be->data.failed;
 }
 
 static anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod,
@@ -272,7 +245,11 @@ static anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod
         if (err != ANVIL_OK) return err;
     }
 
-    x64_emit_globals(priv, mod);
+    if (!x64_emit_globals(priv, mod)) {
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
+                        "x86-64 global initializer is not representable");
+        return ANVIL_ERR_CODEGEN;
+    }
 
     if (priv->code.failed || priv->data.failed) return ANVIL_ERR_NOMEM;
 

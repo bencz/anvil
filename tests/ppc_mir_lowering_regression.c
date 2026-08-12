@@ -355,10 +355,9 @@ static void test_ppc_stack_call_args_use_variant_word_size(void)
                         ? anvil_const_i32(ctx, (int32_t)i + 1)
                         : anvil_const_i64(ctx, (int64_t)i + 1);
                 }
-                anvil_value_t *call =
-                    anvil_build_call(ctx, callee_type,
-                                     anvil_func_get_value(callee),
-                                     args, 10, "call");
+                anvil_value_t *call = NULL;
+                anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                         args, 10, "call", &call);
                 anvil_build_ret(ctx, call);
 
                 anvil_mir_func_t *mir =
@@ -442,8 +441,8 @@ static void test_ppc64le_emits_indirect_call_through_ctr(void)
                 anvil_const_i64(ctx, 3),
                 anvil_const_i64(ctx, 4)
             };
-            anvil_value_t *called =
-                anvil_build_call(ctx, callee_type, loaded, args, 2, "called");
+            anvil_value_t *called = NULL;
+            anvil_build_call_checked(ctx, loaded, args, 2, "called", &called);
             anvil_build_ret(ctx, called);
 
             anvil_mir_func_t *mir =
@@ -1071,8 +1070,8 @@ static void test_ppc_single_precision_ops_and_dynamic_alloca_backchain(void)
         anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, count, 3);
         anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_DYN_ALLOCA,
                                      first, count_use, 1, 4);
-        anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                   ANVIL_MIR_NO_VREG, NULL, 0, "nested");
+        anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0, "nested",
+                           ANVIL_CC_SYSV, false, 0);
         anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_DYN_ALLOCA,
                                      second, count_use, 1, 4);
         anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,

@@ -41,7 +41,7 @@ install: $(TARGET)
 # ============================================================
 
 # Run all tests (syntax + codegen + cross-standard)
-test-all: test-unit test-build-deps test-syntax test-negative test-codegen test-cross
+test-all: test-unit test-build-deps test-syntax test-negative test-codegen test-cross test-layout-matrix
 	@echo ""
 	@echo "=========================================="
 	@echo "All tests complete!"
@@ -105,3 +105,4 @@ help:
 .PHONY: test-codegen-x86_64 test-codegen-arm64 test-codegen-arm64-macos
 .PHONY: test-codegen-ppc32 test-codegen-ppc64 test-codegen-ppc64le test-codegen-s370 test-codegen-all-arch
 .PHONY: test-run clean-tests
+.PHONY: test-layout-matrix

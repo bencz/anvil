@@ -9,6 +9,7 @@
 
 #include "anvil/anvil_ppc_mir.h"
 #include "anvil/anvil_internal.h"
+#include "../gnu_data.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -796,6 +797,22 @@ static anvil_mir_vreg_t lower_symbol_address(ppc_mir_lower_t *lower,
     return vreg;
 }
 
+static anvil_mir_vreg_t lower_reloc_address(ppc_mir_lower_t *lower,
+                                             anvil_value_t *value)
+{
+    const char *symbol = value && value->data.reloc.symbol
+                             ? value->data.reloc.symbol->name : NULL;
+    if (!symbol || !symbol[0]) return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(
+        lower->mir, ANVIL_MIR_REG_GPR,
+        (uint16_t)(lower->desc->word_size * 8), false);
+    if (vreg == ANVIL_MIR_NO_VREG ||
+        !anvil_mir_add_instr_symbol_imm(
+            lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol,
+            value->data.reloc.addend)) return ANVIL_MIR_NO_VREG;
+    return vreg;
+}
+
 static anvil_mir_vreg_t lower_string_address(ppc_mir_lower_t *lower,
                                              anvil_value_t *value)
 {
@@ -833,6 +850,9 @@ static anvil_mir_vreg_t lower_value(ppc_mir_lower_t *lower,
             return lower_const_value(lower, value);
         case ANVIL_VAL_CONST_STRING:
             return lower_string_address(lower, value);
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+            return lower_reloc_address(lower, value);
         case ANVIL_VAL_FUNC:
             if (value->data.func && value->data.func->name) {
                 return lower_symbol_address(lower, value->data.func->name);
@@ -1367,6 +1387,7 @@ static anvil_mir_block_t create_switch_chain_block(ppc_mir_lower_t *lower,
 static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands == 0) return false;
+    if (instr->call_cc != ANVIL_CC_SYSV) return false;
 
     anvil_value_t *callee = instr->operands[0];
     anvil_type_t *fn_type = call_func_type(callee);
@@ -1473,8 +1494,8 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         }
     }
 
-    ok = anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL, call_def,
-                                    call_uses, num_call_uses, symbol);
+    ok = anvil_mir_add_call(lower->mir, call_def, call_uses, num_call_uses,
+                            symbol, instr->call_cc, false, 0);
     free(call_uses);
     if (!ok) return false;
 
@@ -1812,8 +1833,8 @@ static bool ppc_lower_i64_pair_to_fp(ppc_mir_lower_t *lower,
                                arg_hi, hi_uses, 1) &&
            anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY,
                                arg_lo, lo_uses, 1) &&
-           anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                      call_result, call_uses, 2, helper) &&
+           anvil_mir_add_call(lower->mir, call_result, call_uses, 2, helper,
+                              ANVIL_CC_SYSV, false, 0) &&
            anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY,
                                local_result, result_uses, 1) &&
            map_put(lower, instr->result, local_result);
@@ -1852,8 +1873,8 @@ static bool ppc_lower_fp_to_i64_pair(ppc_mir_lower_t *lower,
     }
     return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY,
                                arg, arg_copy_uses, 1) &&
-           anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                      ret_hi, call_uses, 1, helper) &&
+           anvil_mir_add_call(lower->mir, ret_hi, call_uses, 1, helper,
+                              ANVIL_CC_SYSV, false, 0) &&
            anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT,
                                ret_lo, NULL, 0) &&
            wide_pair_put(lower, instr->result, ret_hi, ret_lo, is_unsigned);
@@ -2617,7 +2638,9 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func,
                                               anvil_ppc_variant_t variant)
 {
     const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
-    if (!desc || !func || func->is_declaration) return NULL;
+    if (!desc || !func || func->is_declaration || !func->type ||
+        func->type->kind != ANVIL_TYPE_FUNC ||
+        func->type->data.func.cc != ANVIL_CC_SYSV) return NULL;
 
     ppc_mir_lower_t lower;
     memset(&lower, 0, sizeof(lower));
@@ -2861,6 +2884,11 @@ static bool ppc_legal_call(const anvil_ppc_target_desc_t *desc,
                            char *error,
                            size_t error_len)
 {
+    if (instr->call_cc != ANVIL_CC_SYSV) {
+        return ppc_legal_fail(error, error_len,
+                              "PowerPC MIR call %zu uses an unsupported calling convention",
+                              instr_index);
+    }
     if (instr->def != ANVIL_MIR_NO_VREG) {
         const anvil_mir_vreg_info_t *def =
             ppc_legal_vreg_info(desc, mir, instr->def, instr_index,
@@ -4288,15 +4316,26 @@ static void ppc_emit_symbol_addr(ppc_mir_emit_t *emit,
     const char *dst = ppc_gpr_names[assignment->phys_reg];
 
     if (ppc_is_64(emit)) {
-        anvil_strbuf_appendf(&emit->code, "\taddis %s, r2, %s@toc@ha\n",
+        anvil_strbuf_appendf(&emit->code, "\taddis %s, r2, %s",
                              dst, info->symbol);
-        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s@toc@l\n",
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@toc@ha\n");
+        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s",
                              dst, dst, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@toc@l\n");
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tlis %s, %s@ha\n",
-                             dst, info->symbol);
-        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s@l\n",
+        anvil_strbuf_appendf(&emit->code, "\tlis %s, %s", dst, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@ha\n");
+        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s",
                              dst, dst, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@l\n");
     }
 }
 
@@ -4982,103 +5021,13 @@ bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir,
     return *output != NULL;
 }
 
-static void ppc_emit_data_zero(anvil_strbuf_t *out, size_t size)
+static bool ppc_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod,
+                             const anvil_ppc_target_desc_t *desc)
 {
-    if (size == 0) size = 1;
-    anvil_strbuf_appendf(out, "\t.zero %zu\n", size);
-}
+    if (!mod || !desc || mod->num_globals == 0) return mod && desc;
 
-static void ppc_emit_data_int(anvil_strbuf_t *out, size_t size, int64_t value)
-{
-    switch (size) {
-        case 1:
-            anvil_strbuf_appendf(out, "\t.byte %lld\n", (long long)value);
-            break;
-        case 2:
-            anvil_strbuf_appendf(out, "\t.short %lld\n", (long long)value);
-            break;
-        case 4:
-            anvil_strbuf_appendf(out, "\t.long %lld\n", (long long)value);
-            break;
-        default:
-            anvil_strbuf_appendf(out, "\t.quad %lld\n", (long long)value);
-            break;
-    }
-}
-
-static void ppc_emit_data_float(anvil_strbuf_t *out, size_t size, double value)
-{
-    if (size == 4) {
-        float f = (float)value;
-        uint32_t bits = 0;
-        memcpy(&bits, &f, sizeof(bits));
-        anvil_strbuf_appendf(out, "\t.long 0x%x\n", bits);
-        return;
-    }
-
-    uint64_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    anvil_strbuf_appendf(out, "\t.quad 0x%llx\n",
-                         (unsigned long long)bits);
-}
-
-static void ppc_emit_global_initializer(anvil_strbuf_t *out,
-                                        anvil_type_t *type,
-                                        anvil_value_t *init)
-{
-    size_t size = type ? anvil_type_size(type) : 0;
-    if (size == 0) size = 1;
-
-    if (!init) {
-        ppc_emit_data_zero(out, size);
-        return;
-    }
-
-    switch (init->kind) {
-        case ANVIL_VAL_CONST_INT:
-            ppc_emit_data_int(out, size, init->data.i);
-            return;
-        case ANVIL_VAL_CONST_NULL:
-            ppc_emit_data_zero(out, size);
-            return;
-        case ANVIL_VAL_CONST_FLOAT:
-            ppc_emit_data_float(out, size, init->data.f);
-            return;
-        case ANVIL_VAL_CONST_STRING:
-            ppc_emit_escaped_string(out, init->data.str);
-            return;
-        case ANVIL_VAL_CONST_ARRAY:
-            if (type && type->kind == ANVIL_TYPE_ARRAY && type->data.array.elem) {
-                anvil_type_t *elem_type = type->data.array.elem;
-                for (size_t i = 0; i < init->data.array.num_elements; i++) {
-                    ppc_emit_global_initializer(out, elem_type,
-                                                init->data.array.elements[i]);
-                }
-                size_t emitted = init->data.array.num_elements *
-                                 anvil_type_size(elem_type);
-                if (emitted < size) ppc_emit_data_zero(out, size - emitted);
-                return;
-            }
-            break;
-        case ANVIL_VAL_GLOBAL:
-        case ANVIL_VAL_FUNC:
-            if (init->name) {
-                anvil_strbuf_appendf(out, "\t.%s %s\n",
-                                     size <= 4 ? "long" : "quad",
-                                     init->name);
-                return;
-            }
-            break;
-        default:
-            break;
-    }
-
-    ppc_emit_data_zero(out, size);
-}
-
-static void ppc_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod)
-{
-    if (!mod || mod->num_globals == 0) return;
+    anvil_gnu_string_pool_t strings;
+    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
 
     bool emitted_header = false;
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
@@ -5092,16 +5041,38 @@ static void ppc_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod)
             emitted_header = true;
         }
 
+        if (!g->value->name || !g->value->type) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
+        }
+        if (g->value->data.global.is_declaration) {
+            anvil_strbuf_appendf(out, "\t.extern %s\n", g->value->name);
+            continue;
+        }
+
         size_t align = g->value->type ? anvil_type_align(g->value->type) : 1;
         if (align == 0) align = 1;
-        anvil_strbuf_appendf(out, "\t.globl %s\n", g->value->name);
+        if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL ||
+            g->value->data.global.linkage == ANVIL_LINK_COMMON)
+            anvil_strbuf_appendf(out, "\t.globl %s\n", g->value->name);
+        else if (g->value->data.global.linkage == ANVIL_LINK_WEAK)
+            anvil_strbuf_appendf(out, "\t.weak %s\n", g->value->name);
         anvil_strbuf_appendf(out, "\t.align %zu\n", align);
         anvil_strbuf_appendf(out, "%s:\n", g->value->name);
-        ppc_emit_global_initializer(out, g->value->type,
-                                    g->value->data.global.init);
+        if (!anvil_gnu_emit_constant(out, g->value->type,
+                                     g->value->data.global.init,
+                                     (size_t)desc->word_size, "", &strings,
+                                     NULL, NULL)) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
+        }
     }
 
     if (emitted_header) anvil_strbuf_append(out, "\n");
+    bool ok = anvil_gnu_string_pool_emit(out, &strings,
+                                         "\t.section .rodata");
+    anvil_gnu_string_pool_destroy(&strings);
+    return ok && !out->failed;
 }
 
 static const char *ppc_variant_display_name(anvil_ppc_variant_t variant)
@@ -5212,9 +5183,13 @@ anvil_error_t anvil_ppc_codegen_module(anvil_backend_t *be,
         }
     }
 
-    ppc_emit_globals(&result, mod);
+    if (!ppc_emit_globals(&result, mod, desc)) {
+        anvil_strbuf_destroy(&result);
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
+                        "PowerPC global initializer is not representable");
+        return ANVIL_ERR_CODEGEN;
+    }
 
-    (void)desc;
     if (result.failed) {
         anvil_strbuf_destroy(&result);
         return ANVIL_ERR_NOMEM;

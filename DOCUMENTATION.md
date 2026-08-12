@@ -243,7 +243,10 @@ anvil_build_store(ctx, anvil_func_get_value(func), slot);
 
 anvil_value_t *loaded = anvil_build_load(ctx, fn_ptr_type, slot, "loaded_fn");
 anvil_value_t *args[] = { param0, param1 };
-anvil_value_t *result = anvil_build_call(ctx, func_type, loaded, args, 2, "result");
+anvil_value_t *result = NULL;
+if (!anvil_build_call_checked(ctx, loaded, args, 2, "result", &result)) {
+    /* inspect anvil_ctx_get_last_error(ctx) */
+}
 ```
 
 ### Basic Block (anvil_block_t)
@@ -555,9 +558,9 @@ anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
 bool anvil_switch_add_case(anvil_instr_t *switch_instr,
                            anvil_value_t *case_value,
                            anvil_block_t *dest);
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type,
-                                 anvil_value_t *callee, anvil_value_t **args,
-                                 size_t num_args, const char *name);
+bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
+                               anvil_value_t **args, size_t num_args,
+                               const char *name, anvil_value_t **result);
 bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
 bool anvil_build_ret_void(anvil_ctx_t *ctx);
 ```
@@ -604,6 +607,13 @@ anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
+anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx, anvil_type_t *struct_type,
+                                   anvil_value_t **fields, size_t num_fields);
+anvil_value_t *anvil_const_symbol_addr(anvil_value_t *symbol);
+anvil_value_t *anvil_const_gep(anvil_value_t *base,
+                                anvil_type_t *source_type,
+                                anvil_value_t **indices,
+                                size_t num_indices);
 
 // Set initializer for global variable
 bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);

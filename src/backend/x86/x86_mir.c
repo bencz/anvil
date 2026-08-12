@@ -88,15 +88,10 @@ static const anvil_x86_plat_desc_t x86_plat_descs[] = {
 
 const anvil_x86_cc_desc_t *anvil_x86_get_cc_desc(anvil_cc_t cc)
 {
-    if (cc == ANVIL_CC_DEFAULT) cc = ANVIL_CC_CDECL;
-    if (cc == ANVIL_CC_SYSV || cc == ANVIL_CC_WIN64 ||
-        cc == ANVIL_CC_MVS || cc == ANVIL_CC_XPLINK) {
-        cc = ANVIL_CC_CDECL;
-    }
     for (size_t i = 0; i < sizeof(x86_cc_descs) / sizeof(x86_cc_descs[0]); i++) {
         if (x86_cc_descs[i].cc == cc) return &x86_cc_descs[i];
     }
-    return &x86_cc_descs[0];
+    return NULL;
 }
 
 const anvil_x86_plat_desc_t *anvil_x86_get_plat_desc(anvil_abi_t abi)
@@ -710,6 +705,21 @@ static anvil_mir_vreg_t lower_symbol_address(x86_mir_lower_t *lower,
     return vreg;
 }
 
+static anvil_mir_vreg_t lower_reloc_address(x86_mir_lower_t *lower,
+                                             anvil_value_t *value)
+{
+    const char *symbol = value && value->data.reloc.symbol
+                             ? value->data.reloc.symbol->name : NULL;
+    if (!symbol || !symbol[0]) return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(
+        lower->mir, ANVIL_MIR_REG_GPR, 32, false);
+    if (vreg == ANVIL_MIR_NO_VREG ||
+        !anvil_mir_add_instr_symbol_imm(
+            lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol,
+            value->data.reloc.addend)) return ANVIL_MIR_NO_VREG;
+    return vreg;
+}
+
 static anvil_mir_vreg_t lower_string_address(x86_mir_lower_t *lower,
                                              anvil_value_t *value)
 {
@@ -747,6 +757,9 @@ static anvil_mir_vreg_t lower_value(x86_mir_lower_t *lower,
             return lower_const_value(lower, value);
         case ANVIL_VAL_CONST_STRING:
             return lower_string_address(lower, value);
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+            return lower_reloc_address(lower, value);
         case ANVIL_VAL_FUNC:
             if (value->data.func && value->data.func->name) {
                 return lower_symbol_address(lower, value->data.func->name);
@@ -1260,7 +1273,8 @@ static anvil_mir_block_t create_switch_chain_block(x86_mir_lower_t *lower,
 
 static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
 {
-    const anvil_x86_cc_desc_t *desc = lower->desc;
+    const anvil_x86_cc_desc_t *desc = anvil_x86_get_cc_desc(instr->call_cc);
+    if (!desc) return false;
     if (instr->num_operands == 0) return false;
 
     anvil_value_t *callee = instr->operands[0];
@@ -1369,9 +1383,9 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
         }
     }
 
-    bool emit_ok = anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                              call_def, call_uses,
-                                              num_call_uses, symbol);
+    bool emit_ok = anvil_mir_add_call(lower->mir, call_def, call_uses,
+                                      num_call_uses, symbol, instr->call_cc,
+                                      false, 0);
     free(call_uses);
     if (!emit_ok) return false;
 
@@ -2342,16 +2356,13 @@ static bool lower_instr(x86_mir_lower_t *lower, anvil_instr_t *instr)
     }
 }
 
-static anvil_cc_t x86_lower_cc(anvil_func_t *func)
-{
-    return func ? func->cc : ANVIL_CC_DEFAULT;
-}
-
 anvil_mir_func_t *anvil_x86_lower_func_to_mir(anvil_func_t *func)
 {
-    if (!func || func->is_declaration) return NULL;
+    if (!func || func->is_declaration || !func->type ||
+        func->type->kind != ANVIL_TYPE_FUNC) return NULL;
 
-    const anvil_x86_cc_desc_t *desc = anvil_x86_get_cc_desc(x86_lower_cc(func));
+    const anvil_x86_cc_desc_t *desc = anvil_x86_get_cc_desc(
+        func->type->data.func.cc);
     if (!desc) return NULL;
 
     x86_mir_lower_t lower;
@@ -2584,6 +2595,11 @@ static bool x86_legal_call(const anvil_mir_func_t *mir,
                            char *error,
                            size_t error_len)
 {
+    if (!anvil_x86_get_cc_desc(instr->call_cc)) {
+        return x86_legal_fail(error, error_len,
+                              "x86 MIR call %zu uses an unsupported calling convention",
+                              instr_index);
+    }
     if (instr->def != ANVIL_MIR_NO_VREG) {
         const anvil_mir_vreg_info_t *def =
             x86_legal_vreg_info(mir, instr->def, instr_index,
@@ -2817,6 +2833,7 @@ bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
 
 typedef struct {
     const anvil_mir_func_t *mir;
+    const anvil_func_t *source_func;
     const anvil_x86_cc_desc_t *desc;
     const anvil_x86_plat_desc_t *plat;
     anvil_syntax_t syntax;
@@ -3088,11 +3105,30 @@ static void x86_emit_func_header(x86_mir_emit_t *emit)
         anvil_strbuf_append(&emit->code, "\t.p2align 4\n");
         anvil_strbuf_appendf(&emit->code, "%s%s:\n", prefix, name);
     } else if (emit->plat->is_coff) {
+        char decorated[256];
+        int argument_bytes = 0;
+        if (emit->source_func && emit->source_func->type &&
+            emit->source_func->type->kind == ANVIL_TYPE_FUNC) {
+            anvil_type_t *type = emit->source_func->type;
+            for (size_t i = 0; i < type->data.func.num_params; i++) {
+                argument_bytes += x86_stack_arg_slot_size(
+                    type->data.func.params[i]);
+            }
+        }
+        if (emit->desc->decor == X86_DECOR_STDCALL)
+            snprintf(decorated, sizeof(decorated), "_%s@%d", name,
+                     argument_bytes);
+        else if (emit->desc->decor == X86_DECOR_FASTCALL)
+            snprintf(decorated, sizeof(decorated), "@%s@%d", name,
+                     argument_bytes);
+        else
+            snprintf(decorated, sizeof(decorated), "%s%s", prefix, name);
         anvil_strbuf_append(&emit->code, "\t.text\n");
-        anvil_strbuf_appendf(&emit->code, "\t.globl %s%s\n", prefix, name);
-        anvil_strbuf_appendf(&emit->code, "\t.def %s%s; .scl 2; .type 32; .endef\n",
-                             prefix, name);
-        anvil_strbuf_appendf(&emit->code, "%s%s:\n", prefix, name);
+        anvil_strbuf_appendf(&emit->code, "\t.globl %s\n", decorated);
+        anvil_strbuf_appendf(&emit->code,
+                             "\t.def %s; .scl 2; .type 32; .endef\n",
+                             decorated);
+        anvil_strbuf_appendf(&emit->code, "%s:\n", decorated);
     } else {
         anvil_strbuf_append(&emit->code, "\t.text\n");
         anvil_strbuf_appendf(&emit->code, "\t.globl %s%s\n", prefix, name);
@@ -3816,8 +3852,10 @@ static void x86_emit_symbol_addr(x86_mir_emit_t *emit,
 
     const char *prefix = x86_symbol_ref_prefix(emit, info->symbol);
     const char *dst = x86_gpr_name(dst_phys, 4);
-    anvil_strbuf_appendf(&emit->code, "\tmovl $%s%s, %%%s\n",
-                         prefix, info->symbol, dst);
+    anvil_strbuf_appendf(&emit->code, "\tmovl $%s%s", prefix, info->symbol);
+    if (info->has_imm && info->imm != 0)
+        anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+    anvil_strbuf_appendf(&emit->code, ", %%%s\n", dst);
 }
 
 static void x86_emit_load(x86_mir_emit_t *emit,
@@ -3979,16 +4017,18 @@ static void x86_emit_call_stack_arg(x86_mir_emit_t *emit,
 static int x86_call_stack_bytes(x86_mir_emit_t *emit, size_t call_index)
 {
     int max_end = 0;
-    size_t block = 0;
     anvil_mir_instr_info_t call_info;
     if (!anvil_mir_get_instr_info(emit->mir, call_index, &call_info)) return 0;
-    block = call_info.block;
 
-    for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
+    /* CALL_STACK_ARG belongs to the next CALL in the same block.  Walking
+       backward to the previous call avoids folding an earlier call's frame
+       into this call's stdcall/fastcall decoration. */
+    for (size_t i = call_index; i-- > 0;) {
         anvil_mir_instr_info_t info;
         if (!anvil_mir_get_instr_info(emit->mir, i, &info)) return 0;
+        if (info.block != call_info.block) continue;
+        if (info.op == ANVIL_MIR_OP_CALL) break;
         if (info.op != ANVIL_MIR_OP_CALL_STACK_ARG) continue;
-        if (info.block != block) continue;
         if (!info.has_imm) continue;
         int end = (int)info.imm + 4;
         if (end > max_end) max_end = end;
@@ -4000,15 +4040,18 @@ static void x86_emit_call(x86_mir_emit_t *emit,
                           size_t instr_index,
                           const anvil_mir_instr_info_t *info)
 {
+    const anvil_x86_cc_desc_t *call_desc =
+        anvil_x86_get_cc_desc(info->call_cc);
+    if (!call_desc) { emit->failed = true; return; }
     bool direct = info->symbol && info->symbol[0];
     size_t arg_start = direct ? 0 : 1;
 
     for (size_t u = arg_start; u < info->num_uses; u++) {
         size_t idx = u - arg_start;
-        if ((int)idx >= emit->desc->num_reg_int_args) break;
+        if ((int)idx >= call_desc->num_reg_int_args) break;
         anvil_mir_vreg_t arg = anvil_mir_get_instr_use(emit->mir, instr_index, u);
         int arg_phys = x86_phys_of(emit, arg);
-        int reg = emit->desc->reg_int_args[idx];
+        int reg = call_desc->reg_int_args[idx];
         if (emit->failed) return;
         if (arg_phys != reg) {
             anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n",
@@ -4020,14 +4063,16 @@ static void x86_emit_call(x86_mir_emit_t *emit,
     if (direct) {
         const char *prefix = x86_symbol_ref_prefix(emit, info->symbol);
         char decorated[256];
-        if (emit->plat->is_coff && emit->desc->decor == X86_DECOR_STDCALL) {
+        int stack_bytes = x86_call_stack_bytes(emit, instr_index);
+        if (emit->plat->is_coff && call_desc->decor == X86_DECOR_STDCALL) {
             snprintf(decorated, sizeof(decorated), "%s%s@%d",
-                     prefix, info->symbol, x86_call_stack_bytes(emit, instr_index));
+                     prefix, info->symbol, stack_bytes);
             anvil_strbuf_appendf(&emit->code, "\tcall %s\n", decorated);
         } else if (emit->plat->is_coff &&
-                   emit->desc->decor == X86_DECOR_FASTCALL) {
+                   call_desc->decor == X86_DECOR_FASTCALL) {
             snprintf(decorated, sizeof(decorated), "@%s@%d",
-                     info->symbol, x86_call_stack_bytes(emit, instr_index));
+                     info->symbol,
+                     stack_bytes + (int)(info->num_uses * 4));
             anvil_strbuf_appendf(&emit->code, "\tcall %s\n", decorated);
         } else {
             anvil_strbuf_appendf(&emit->code, "\tcall %s%s\n", prefix, info->symbol);
@@ -4047,9 +4092,9 @@ static void x86_emit_call(x86_mir_emit_t *emit,
     if (info->def != ANVIL_MIR_NO_VREG) {
         int def_phys = x86_phys_of(emit, info->def);
         if (emit->failed) return;
-        if (def_phys != emit->desc->int_ret_reg) {
+        if (def_phys != call_desc->int_ret_reg) {
             anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n",
-                                 x86_reg32_names[emit->desc->int_ret_reg],
+                                 x86_reg32_names[call_desc->int_ret_reg],
                                  x86_gpr_name(def_phys, 4));
         }
     }
@@ -4451,14 +4496,17 @@ bool anvil_x86_emit_mir_abi(const anvil_mir_func_t *mir,
     if (len) *len = 0;
     if (!anvil_x86_verify_mir_legal(mir, NULL, 0)) return false;
 
-    const anvil_x86_cc_desc_t *desc =
-        anvil_x86_get_cc_desc(func ? func->cc : ANVIL_CC_CDECL);
+    if (func && (!func->type || func->type->kind != ANVIL_TYPE_FUNC))
+        return false;
+    const anvil_x86_cc_desc_t *desc = anvil_x86_get_cc_desc(
+        func ? func->type->data.func.cc : ANVIL_CC_CDECL);
     const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(abi);
     if (!desc || !plat) return false;
 
     x86_mir_emit_t emit;
     memset(&emit, 0, sizeof(emit));
     emit.mir = mir;
+    emit.source_func = func;
     emit.desc = desc;
     emit.plat = plat;
     emit.syntax = syntax == ANVIL_SYNTAX_DEFAULT ? ANVIL_SYNTAX_GAS : syntax;

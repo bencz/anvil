@@ -444,6 +444,21 @@ static anvil_mir_vreg_t lower_symbol_address(arm64_mir_lower_t *lower,
     return vreg;
 }
 
+static anvil_mir_vreg_t lower_reloc_address(arm64_mir_lower_t *lower,
+                                             anvil_value_t *value)
+{
+    const char *symbol = value && value->data.reloc.symbol
+                             ? value->data.reloc.symbol->name : NULL;
+    if (!symbol || !symbol[0]) return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(
+        lower->mir, ANVIL_MIR_REG_GPR, 64, false);
+    if (vreg == ANVIL_MIR_NO_VREG ||
+        !anvil_mir_add_instr_symbol_imm(
+            lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol,
+            value->data.reloc.addend)) return ANVIL_MIR_NO_VREG;
+    return vreg;
+}
+
 static anvil_mir_vreg_t lower_string_address(arm64_mir_lower_t *lower,
                                              anvil_value_t *value)
 {
@@ -481,6 +496,9 @@ static anvil_mir_vreg_t lower_value(arm64_mir_lower_t *lower,
             return lower_const_value(lower, value);
         case ANVIL_VAL_CONST_STRING:
             return lower_string_address(lower, value);
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+            return lower_reloc_address(lower, value);
         case ANVIL_VAL_FUNC:
             if (value->data.func && value->data.func->name) {
                 return lower_symbol_address(lower, value->data.func->name);
@@ -989,6 +1007,7 @@ static anvil_mir_block_t create_switch_chain_block(arm64_mir_lower_t *lower,
 static bool lower_call(arm64_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands == 0) return false;
+    if (instr->call_cc != ANVIL_CC_SYSV) return false;
 
     anvil_value_t *callee = instr->operands[0];
     anvil_type_t *fn_type = call_func_type(callee);
@@ -1098,8 +1117,8 @@ static bool lower_call(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         }
     }
 
-    ok = anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL, call_def,
-                                    call_uses, num_call_uses, symbol);
+    ok = anvil_mir_add_call(lower->mir, call_def, call_uses, num_call_uses,
+                            symbol, instr->call_cc, false, 0);
     free(call_uses);
     if (!ok) return false;
 
@@ -1770,7 +1789,9 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
 
 anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
 {
-    if (!func || func->is_declaration) return NULL;
+    if (!func || func->is_declaration || !func->type ||
+        func->type->kind != ANVIL_TYPE_FUNC ||
+        func->type->data.func.cc != ANVIL_CC_SYSV) return NULL;
 
     arm64_mir_lower_t lower;
     memset(&lower, 0, sizeof(lower));
@@ -1965,6 +1986,11 @@ static bool arm64_legal_call(const anvil_mir_func_t *mir,
                              char *error,
                              size_t error_len)
 {
+    if (instr->call_cc != ANVIL_CC_SYSV) {
+        return arm64_legal_fail(error, error_len,
+                                "ARM64 MIR call %zu uses an unsupported calling convention",
+                                instr_index);
+    }
     if (instr->def != ANVIL_MIR_NO_VREG) {
         const anvil_mir_vreg_info_t *def =
             arm64_legal_vreg_info(mir, instr->def, instr_index,
@@ -3030,15 +3056,27 @@ static void mir_emit_symbol_addr(arm64_mir_emit_t *emit,
 
     const char *prefix = mir_symbol_ref_prefix(emit, info->symbol);
     if (emit->is_darwin) {
-        anvil_strbuf_appendf(&emit->code, "\tadrp %s, %s%s@PAGE\n",
+        anvil_strbuf_appendf(&emit->code, "\tadrp %s, %s%s",
                              dst, prefix, info->symbol);
-        anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %s%s@PAGEOFF\n",
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@PAGE\n");
+        anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %s%s",
                              dst, dst, prefix, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "@PAGEOFF\n");
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tadrp %s, %s%s\n",
+        anvil_strbuf_appendf(&emit->code, "\tadrp %s, %s%s",
                              dst, prefix, info->symbol);
-        anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, :lo12:%s%s\n",
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "\n");
+        anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, :lo12:%s%s",
                              dst, dst, prefix, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_append(&emit->code, "\n");
     }
 }
 

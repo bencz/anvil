@@ -1,0 +1,2 @@
+ArithmeticError := Error [
+]

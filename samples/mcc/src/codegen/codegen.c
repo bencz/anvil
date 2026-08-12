@@ -19,6 +19,17 @@ bool codegen_arch_is_darwin(mcc_arch_t arch)
     return arch == MCC_ARCH_ARM64_MACOS;
 }
 
+static bool codegen_next_capacity(mcc_codegen_t *cg, size_t current,
+                                  size_t initial, size_t *next)
+{
+    if (!cg || !next || initial == 0 || current > SIZE_MAX / 2) {
+        if (cg) mcc_fatal(cg->mcc_ctx, "codegen table capacity overflow");
+        return false;
+    }
+    *next = current ? current * 2 : initial;
+    return true;
+}
+
 /* ============================================================
  * Public API - Create/Destroy
  * ============================================================ */
@@ -26,7 +37,9 @@ bool codegen_arch_is_darwin(mcc_arch_t arch)
 mcc_codegen_t *mcc_codegen_create(mcc_context_t *ctx, mcc_symtab_t *symtab,
                                    mcc_type_context_t *types)
 {
+    if (!ctx || !symtab || !types) return NULL;
     mcc_codegen_t *cg = mcc_alloc(ctx, sizeof(mcc_codegen_t));
+    if (!cg) return NULL;
     cg->mcc_ctx = ctx;
     cg->symtab = symtab;
     cg->types = types;
@@ -127,10 +140,12 @@ anvil_value_t *codegen_find_local(mcc_codegen_t *cg, const char *name)
 void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value)
 {
     if (cg->num_locals >= cg->cap_locals) {
-        size_t new_cap = cg->cap_locals ? cg->cap_locals * 2 : 16;
-        cg->locals = mcc_realloc(cg->mcc_ctx, cg->locals,
-                                  cg->cap_locals * sizeof(cg->locals[0]),
-                                  new_cap * sizeof(cg->locals[0]));
+        size_t new_cap;
+        if (!codegen_next_capacity(cg, cg->cap_locals, 16, &new_cap)) return;
+        void *grown = mcc_realloc_array(cg->mcc_ctx, cg->locals,
+            cg->cap_locals, new_cap, sizeof(cg->locals[0]));
+        if (!grown) return;
+        cg->locals = grown;
         cg->cap_locals = new_cap;
     }
     cg->locals[cg->num_locals].name = name;
@@ -161,13 +176,16 @@ anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, an
     
     /* Create new global */
     anvil_value_t *global = anvil_module_add_global(cg->anvil_mod, name, type, ANVIL_LINK_EXTERNAL);
+    if (!global) return NULL;
     
     /* Add to cache */
     if (cg->num_globals >= cg->cap_globals) {
-        size_t new_cap = cg->cap_globals ? cg->cap_globals * 2 : 8;
-        cg->globals = mcc_realloc(cg->mcc_ctx, cg->globals,
-                                   cg->cap_globals * sizeof(cg->globals[0]),
-                                   new_cap * sizeof(cg->globals[0]));
+        size_t new_cap;
+        if (!codegen_next_capacity(cg, cg->cap_globals, 8, &new_cap)) return NULL;
+        void *grown = mcc_realloc_array(cg->mcc_ctx, cg->globals,
+            cg->cap_globals, new_cap, sizeof(cg->globals[0]));
+        if (!grown) return NULL;
+        cg->globals = grown;
         cg->cap_globals = new_cap;
     }
     cg->globals[cg->num_globals].name = name;
@@ -192,13 +210,16 @@ anvil_value_t *codegen_get_string_literal(mcc_codegen_t *cg, const char *str)
     
     /* Create string constant */
     anvil_value_t *strval = anvil_const_string(cg->anvil_ctx, str);
+    if (!strval) return NULL;
     
     /* Add to pool */
     if (cg->num_strings >= cg->cap_strings) {
-        size_t new_cap = cg->cap_strings ? cg->cap_strings * 2 : 8;
-        cg->strings = mcc_realloc(cg->mcc_ctx, cg->strings,
-                                   cg->cap_strings * sizeof(cg->strings[0]),
-                                   new_cap * sizeof(cg->strings[0]));
+        size_t new_cap;
+        if (!codegen_next_capacity(cg, cg->cap_strings, 8, &new_cap)) return NULL;
+        void *grown = mcc_realloc_array(cg->mcc_ctx, cg->strings,
+            cg->cap_strings, new_cap, sizeof(cg->strings[0]));
+        if (!grown) return NULL;
+        cg->strings = grown;
         cg->cap_strings = new_cap;
     }
     cg->strings[cg->num_strings].str = str;
@@ -222,12 +243,15 @@ anvil_block_t *codegen_get_label_block(mcc_codegen_t *cg, const char *name)
     
     /* Create new block */
     anvil_block_t *block = anvil_block_create(cg->current_func, name);
+    if (!block) return NULL;
     
     if (cg->num_labels >= cg->cap_labels) {
-        size_t new_cap = cg->cap_labels ? cg->cap_labels * 2 : 8;
-        cg->labels = mcc_realloc(cg->mcc_ctx, cg->labels,
-                                  cg->cap_labels * sizeof(cg->labels[0]),
-                                  new_cap * sizeof(cg->labels[0]));
+        size_t new_cap;
+        if (!codegen_next_capacity(cg, cg->cap_labels, 8, &new_cap)) return NULL;
+        void *grown = mcc_realloc_array(cg->mcc_ctx, cg->labels,
+            cg->cap_labels, new_cap, sizeof(cg->labels[0]));
+        if (!grown) return NULL;
+        cg->labels = grown;
         cg->cap_labels = new_cap;
     }
     cg->labels[cg->num_labels].name = name;
@@ -270,10 +294,12 @@ anvil_func_t *codegen_find_func(mcc_codegen_t *cg, mcc_symbol_t *sym)
 void codegen_add_func(mcc_codegen_t *cg, mcc_symbol_t *sym, anvil_func_t *func)
 {
     if (cg->num_funcs >= cg->cap_funcs) {
-        size_t new_cap = cg->cap_funcs ? cg->cap_funcs * 2 : 16;
-        cg->funcs = mcc_realloc(cg->mcc_ctx, cg->funcs,
-                                 cg->cap_funcs * sizeof(cg->funcs[0]),
-                                 new_cap * sizeof(cg->funcs[0]));
+        size_t new_cap;
+        if (!codegen_next_capacity(cg, cg->cap_funcs, 16, &new_cap)) return;
+        void *grown = mcc_realloc_array(cg->mcc_ctx, cg->funcs,
+            cg->cap_funcs, new_cap, sizeof(cg->funcs[0]));
+        if (!grown) return;
+        cg->funcs = grown;
         cg->cap_funcs = new_cap;
     }
     cg->funcs[cg->num_funcs].sym = sym;

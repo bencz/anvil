@@ -346,8 +346,9 @@ wrong):
   allocatable/scratch/fixed, decoration, stack alignment) live in a descriptor table
   selected by `anvil_abi_t` / `anvil_cc_t`. The x86_64 backend selects SysV/Darwin/
   Win64 descriptors this way, and the x86 backend selects cdecl/stdcall/fastcall
-  descriptors; `func->cc` (set via `anvil_func_set_cc`) is consumed to pick the
-  descriptor.
+  descriptors. The effective convention is immutable in
+  `func->type->data.func.cc`; each CALL copies it into `instr->call_cc`, so an
+  indirect VTable call cannot inherit the caller's ABI accidentally.
 
 For the full design rationale and instruction-level details, see
 [`BACKENDS.md`](BACKENDS.md) and [`ARM64_REFACTOR.md`](ARM64_REFACTOR.md) rather than

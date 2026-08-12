@@ -23,13 +23,16 @@ The following are rejected or diagnosed, rather than parsed and discarded:
   storage and noreturn semantics;
 - C99 complex and imaginary arithmetic;
 - bit-fields and ABI-compatible `long double`;
+- `sizeof` on a VLA (retaining the declaration-time evaluated bound is not
+  implemented; MCC never reevaluates it with incorrect side effects);
 - C23 `[[attributes]]`, `constexpr`, inferred `auto`, `char8_t`/`u8` character
   literals, `#embed` and message-less `static_assert`;
 - `_Pragma`, `#include_next`, GNU attributes, labels-as-values and computed
   `goto`.
 
-`#pragma once` is implemented. Other `#pragma` directives produce an explicit
-diagnostic. Unsupported constructs live in `tests/negative` and `make
+`#pragma once` is implemented. Other `#pragma` directives are hard errors
+because ignoring layout/ABI pragmas would silently miscompile the program.
+Unsupported constructs live in `tests/negative` and `make
 test-negative` requires every one of them to fail.
 
 ## Predefined macros

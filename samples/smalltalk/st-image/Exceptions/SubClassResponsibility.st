@@ -1,0 +1,2 @@
+SubClassResponsibility := Error [
+]

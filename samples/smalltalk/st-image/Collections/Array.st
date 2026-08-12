@@ -1,0 +1,3 @@
+Array := ArrayedCollection [
+    <shape: indexedValues>
+]

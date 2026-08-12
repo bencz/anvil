@@ -517,21 +517,123 @@ anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t coun
     return type;
 }
 
-anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
-                               anvil_type_t **params, size_t num_params, bool variadic)
+bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
+                      anvil_cc_t *effective)
 {
-    if (!ctx || !ctx->target_configured || (ret && ret->owner_ctx != ctx) ||
-        (num_params > 0 && !params) ||
-        num_params > SIZE_MAX / sizeof(anvil_type_t *)) {
-        if (ctx && !ctx->target_configured)
-            anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
-                            "Select a target before creating types");
+    if (effective) *effective = ANVIL_CC_DEFAULT;
+    if (!ctx || !ctx->target_configured || !effective ||
+        (unsigned)requested > (unsigned)ANVIL_CC_MVS) {
+        return false;
+    }
+
+    anvil_abi_t abi = ctx->abi;
+    switch (ctx->arch) {
+        case ANVIL_ARCH_X86:
+            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
+                abi != ANVIL_ABI_DARWIN && abi != ANVIL_ABI_WIN64)
+                return false; /* WIN64 names the repository's COFF platform
+                                 selector for both x86 widths. */
+            if (requested == ANVIL_CC_DEFAULT || requested == ANVIL_CC_CDECL)
+                *effective = ANVIL_CC_CDECL;
+            else if (requested == ANVIL_CC_STDCALL ||
+                     requested == ANVIL_CC_FASTCALL)
+                *effective = requested;
+            else
+                return false;
+            return true;
+
+        case ANVIL_ARCH_X86_64:
+            if (abi == ANVIL_ABI_WIN64) {
+                if (requested != ANVIL_CC_DEFAULT &&
+                    requested != ANVIL_CC_CDECL &&
+                    requested != ANVIL_CC_WIN64) return false;
+                *effective = ANVIL_CC_WIN64;
+                return true;
+            }
+            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
+                abi != ANVIL_ABI_DARWIN) return false;
+            if (requested != ANVIL_CC_DEFAULT &&
+                requested != ANVIL_CC_CDECL &&
+                requested != ANVIL_CC_SYSV) return false;
+            *effective = ANVIL_CC_SYSV;
+            return true;
+
+        case ANVIL_ARCH_ARM64:
+        case ANVIL_ARCH_PPC32:
+        case ANVIL_ARCH_PPC64:
+        case ANVIL_ARCH_PPC64LE:
+            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
+                abi != ANVIL_ABI_DARWIN) return false;
+            if (requested != ANVIL_CC_DEFAULT &&
+                requested != ANVIL_CC_CDECL &&
+                requested != ANVIL_CC_SYSV) return false;
+            *effective = ANVIL_CC_SYSV;
+            return true;
+
+        case ANVIL_ARCH_S370:
+        case ANVIL_ARCH_S370_XA:
+        case ANVIL_ARCH_S390:
+        case ANVIL_ARCH_ZARCH:
+            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_MVS)
+                return false;
+            if (requested != ANVIL_CC_DEFAULT && requested != ANVIL_CC_MVS)
+                return false;
+            *effective = ANVIL_CC_MVS;
+            return true;
+
+        case ANVIL_ARCH_NONE:
+        case ANVIL_ARCH_COUNT:
+            return false;
+    }
+    return false;
+}
+
+anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
+                                  anvil_type_t **params, size_t num_params,
+                                  bool variadic, anvil_cc_t cc)
+{
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!ctx) return NULL;
+    if (!ctx->target_configured) {
+        anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
+                        "Select a target before creating types");
+        return NULL;
+    }
+    if ((ret && (ret->owner_ctx != ctx || ret->kind == ANVIL_TYPE_FUNC ||
+                 (ret->kind != ANVIL_TYPE_VOID &&
+                  !anvil_sem_type_is_sized(ret))))) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                        "Function return type must be void or a sized type from its context");
+        return NULL;
+    }
+    if ((num_params > 0 && !params)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                        "Function parameter array is missing");
+        return NULL;
+    }
+    if (num_params > SIZE_MAX / sizeof(anvil_type_t *)) {
+        anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                        "Function parameter array size overflows size_t");
+        return NULL;
+    }
+    if (!anvil_cc_resolve(ctx, cc, &effective_cc)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                        "Calling convention is incompatible with the selected target/ABI");
+        return NULL;
+    }
+    if (variadic && (effective_cc == ANVIL_CC_STDCALL ||
+                     effective_cc == ANVIL_CC_FASTCALL)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                        "Variadic x86 functions require the caller-cleanup CDECL convention");
         return NULL;
     }
     for (size_t i = 0; i < num_params; i++) {
         if (!params[i] || params[i]->owner_ctx != ctx ||
             params[i]->kind == ANVIL_TYPE_VOID ||
-            params[i]->kind == ANVIL_TYPE_FUNC) {
+            params[i]->kind == ANVIL_TYPE_FUNC ||
+            !anvil_sem_type_is_sized(params[i])) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Function parameter must be a sized non-function type from its context");
             return NULL;
         }
     }
@@ -542,6 +644,7 @@ anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
     type->data.func.ret = ret ? ret : ctx->type_void;
     type->data.func.num_params = num_params;
     type->data.func.variadic = variadic;
+    type->data.func.cc = effective_cc;
     
     if (num_params > 0) {
         type->data.func.params = anvil_ctx_calloc(ctx, num_params,
@@ -563,6 +666,20 @@ anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
     type_register(ctx, type);
     anvil_ctx_freeze_target(ctx);
     return type;
+}
+
+anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
+                               anvil_type_t **params, size_t num_params,
+                               bool variadic)
+{
+    return anvil_type_func_cc(ctx, ret, params, num_params, variadic,
+                              ANVIL_CC_DEFAULT);
+}
+
+anvil_cc_t anvil_type_func_cc_value(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_FUNC
+               ? type->data.func.cc : ANVIL_CC_DEFAULT;
 }
 
 typedef struct type_pair {
@@ -629,6 +746,7 @@ static bool types_equal_graph(const anvil_type_t *lhs,
         case ANVIL_TYPE_FUNC:
             if (lhs->data.func.num_params != rhs->data.func.num_params ||
                 lhs->data.func.variadic != rhs->data.func.variadic ||
+                lhs->data.func.cc != rhs->data.func.cc ||
                 !types_equal_graph(lhs->data.func.ret, rhs->data.func.ret,
                                    &pair)) {
                 return false;

@@ -15,6 +15,21 @@ static mcc_type_t *codegen_type_unwrap(mcc_type_t *type)
     return type;
 }
 
+static anvil_type_t *codegen_check_object_layout(mcc_codegen_t *cg,
+                                                  mcc_type_t *source,
+                                                  anvil_type_t *lowered)
+{
+    if (!lowered) return NULL;
+    if (source && anvil_type_size(lowered) == source->size &&
+        anvil_type_align(lowered) == source->align) return lowered;
+    mcc_error(cg->mcc_ctx,
+              "C/ANVIL DataLayout mismatch lowering '%s' (%zu/%zu vs %zu/%zu)",
+              source ? mcc_type_kind_name(source->kind) : "missing",
+              source ? source->size : 0, source ? source->align : 0,
+              anvil_type_size(lowered), anvil_type_align(lowered));
+    return NULL;
+}
+
 bool codegen_type_pass_by_reference(mcc_type_t *type)
 {
     type = codegen_type_unwrap(type);
@@ -24,10 +39,141 @@ bool codegen_type_pass_by_reference(mcc_type_t *type)
 anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
     anvil_type_t *value_type = codegen_type(cg, type);
+    if (!value_type) return NULL;
     if (codegen_type_pass_by_reference(type)) {
         return anvil_type_ptr(cg->anvil_ctx, value_type);
     }
     return value_type;
+}
+
+static anvil_type_t *codegen_record_fail(mcc_codegen_t *cg,
+                                         mcc_type_t *type,
+                                         const char *message)
+{
+    type->anvil_lowering = false;
+    type->anvil_lower_failed = true;
+    if (message) mcc_error(cg->mcc_ctx, "%s", message);
+    return NULL;
+}
+
+static anvil_type_t *codegen_record_type(mcc_codegen_t *cg, mcc_type_t *type)
+{
+    if (type->anvil_lower_failed) {
+        mcc_error(cg->mcc_ctx, "record type lowering previously failed");
+        return NULL;
+    }
+
+    anvil_type_t *record_type = type->anvil_cached;
+    if (!record_type) {
+        char record_name[64];
+        snprintf(record_name, sizeof(record_name), "mcc.%s.%p",
+                 type->kind == TYPE_UNION ? "union" : "struct",
+                 (void *)type);
+        record_type = anvil_type_named_struct(cg->anvil_ctx, record_name);
+        if (!record_type) {
+            return codegen_record_fail(cg, type,
+                                       "failed to create ANVIL record type");
+        }
+        type->anvil_cached = record_type;
+    }
+
+    /* An incomplete tag intentionally lowers to an opaque identified struct.
+     * If that same C tag is completed later, revisit it and install the body.
+     * During recursive lowering the cached opaque type breaks the cycle. */
+    if (!type->data.record.is_complete || type->anvil_body_lowered ||
+        type->anvil_lowering) {
+        return record_type;
+    }
+    type->anvil_lowering = true;
+
+    size_t num_fields = 0;
+    for (mcc_struct_field_t *field = type->data.record.fields; field;
+         field = field->next) {
+        if (field->bitfield_width != 0) {
+            return codegen_record_fail(cg, type,
+                                       "bit-field lowering is not implemented");
+        }
+        if (field->name || (field->type && mcc_type_is_record(field->type))) {
+            if (num_fields == SIZE_MAX) {
+                return codegen_record_fail(cg, type,
+                                           "record field count overflow");
+            }
+            num_fields++;
+        }
+    }
+
+    size_t field_capacity = num_fields;
+    if (type->kind == TYPE_UNION && num_fields != 0) {
+        if (field_capacity == SIZE_MAX) {
+            return codegen_record_fail(cg, type,
+                                       "union storage field count overflow");
+        }
+        field_capacity++;
+    }
+    anvil_type_t **field_types = field_capacity
+        ? mcc_alloc_array(cg->mcc_ctx, field_capacity, sizeof(*field_types))
+        : NULL;
+    if (field_capacity && !field_types) {
+        return codegen_record_fail(cg, type, NULL);
+    }
+
+    size_t index = 0;
+    for (mcc_struct_field_t *field = type->data.record.fields; field;
+         field = field->next) {
+        if (field->name || (field->type && mcc_type_is_record(field->type))) {
+            field_types[index] = codegen_type(cg, field->type);
+            if (!field_types[index]) {
+                return codegen_record_fail(cg, type, NULL);
+            }
+            index++;
+        }
+    }
+    if (index != num_fields) {
+        return codegen_record_fail(cg, type,
+                                   "record field count changed during lowering");
+    }
+
+    size_t body_fields = num_fields;
+    if (type->kind == TYPE_UNION && num_fields != 0) {
+        anvil_type_t *anchor = field_types[0];
+        size_t max_size = anvil_type_size(anchor);
+        size_t max_align = anvil_type_align(anchor);
+        for (size_t field = 1; field < num_fields; field++) {
+            size_t field_size = anvil_type_size(field_types[field]);
+            size_t field_align = anvil_type_align(field_types[field]);
+            if (field_size > max_size) max_size = field_size;
+            if (field_align > max_align) {
+                max_align = field_align;
+                anchor = field_types[field];
+            }
+        }
+        field_types[0] = anchor;
+        body_fields = 1;
+        size_t anchor_size = anvil_type_size(anchor);
+        if (anchor_size < max_size) {
+            field_types[1] = anvil_type_array(cg->anvil_ctx,
+                anvil_type_u8(cg->anvil_ctx), max_size - anchor_size);
+            if (!field_types[1]) {
+                return codegen_record_fail(cg, type, NULL);
+            }
+            body_fields = 2;
+        }
+    }
+
+    if (!anvil_type_struct_set_body(record_type, field_types, body_fields,
+                                    false)) {
+        mcc_error(cg->mcc_ctx, "failed to lower %s layout: %s",
+                  type->kind == TYPE_UNION ? "union" : "struct",
+                  anvil_ctx_get_error(cg->anvil_ctx));
+        return codegen_record_fail(cg, type, NULL);
+    }
+    type->anvil_lowering = false;
+    type->anvil_body_lowered = true;
+    if (!codegen_check_object_layout(cg, type, record_type)) {
+        type->anvil_lower_failed = true;
+        return NULL;
+    }
+    return record_type;
 }
 
 /* Convert MCC type to ANVIL type */
@@ -55,17 +201,18 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
             return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
                                      : anvil_type_i32(cg->anvil_ctx);
         case TYPE_LONG: {
-            /* `long` is LP64 on most modern Unix targets (64-bit) but
-             * ILP32 on Windows and 32-bit systems. Pick based on the
-             * target arch's pointer size. */
-            const anvil_arch_info_t *ai = anvil_ctx_get_arch_info(cg->anvil_ctx);
-            bool lp64 = ai && ai->ptr_size == 8;
-            if (lp64) {
+            /* The frontend's target DataLayout already selected ILP32/LP64.
+             * Never infer this again from the host or a backend default. */
+            if (type->size == anvil_type_size(anvil_type_i64(cg->anvil_ctx))) {
                 return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
                                          : anvil_type_i64(cg->anvil_ctx);
             }
-            return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
-                                     : anvil_type_i32(cg->anvil_ctx);
+            if (type->size == anvil_type_size(anvil_type_i32(cg->anvil_ctx))) {
+                return type->is_unsigned ? anvil_type_u32(cg->anvil_ctx)
+                                         : anvil_type_i32(cg->anvil_ctx);
+            }
+            mcc_error(cg->mcc_ctx, "unsupported target layout for C long");
+            return NULL;
         }
         case TYPE_LONG_LONG:
             return type->is_unsigned ? anvil_type_u64(cg->anvil_ctx)
@@ -73,106 +220,57 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_FLOAT:
             return anvil_type_f32(cg->anvil_ctx);
         case TYPE_DOUBLE:
-        case TYPE_LONG_DOUBLE:
             return anvil_type_f64(cg->anvil_ctx);
+        case TYPE_LONG_DOUBLE:
+            mcc_error(cg->mcc_ctx,
+                      "long double ABI lowering is not implemented by MCC");
+            return NULL;
         case TYPE_BOOL:
             return anvil_type_i1(cg->anvil_ctx);
-        case TYPE_POINTER:
-            return anvil_type_ptr(cg->anvil_ctx,
-                codegen_type(cg, type->data.pointer.pointee));
-        case TYPE_ARRAY:
-            return anvil_type_array(cg->anvil_ctx,
-                codegen_type(cg, type->data.array.element),
-                type->data.array.length);
-        case TYPE_STRUCT:
-        case TYPE_UNION: {
-            if (type->anvil_cached) return type->anvil_cached;
-
-            char record_name[64];
-            snprintf(record_name, sizeof(record_name), "mcc.%s.%p",
-                     type->kind == TYPE_UNION ? "union" : "struct",
-                     (void *)type);
-            anvil_type_t *record_type = anvil_type_named_struct(
-                cg->anvil_ctx, record_name);
-            if (!record_type) return NULL;
-            type->anvil_cached = record_type;
-            if (!type->data.record.is_complete) return record_type;
-
-            /* Anonymous record members occupy physical storage. Only unnamed
-             * non-record bitfields are padding. */
-            int num_named_fields = 0;
-            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
-                if (f->name || (f->type && mcc_type_is_record(f->type) &&
-                                f->bitfield_width == 0)) num_named_fields++;
-            }
-
-            if (num_named_fields < 0 ||
-                (size_t)num_named_fields > SIZE_MAX / sizeof(anvil_type_t *)) {
-                mcc_error(cg->mcc_ctx, "record field table size overflow");
-                return NULL;
-            }
-            anvil_type_t **field_types = mcc_alloc(cg->mcc_ctx,
-                (num_named_fields > 0 ? (size_t)num_named_fields : 1) *
-                sizeof(anvil_type_t *));
-            if (!field_types) return NULL;
-
-            int i = 0;
-            for (mcc_struct_field_t *f = type->data.record.fields; f; f = f->next) {
-                if (f->name || (f->type && mcc_type_is_record(f->type) &&
-                                f->bitfield_width == 0)) {
-                    field_types[i++] = codegen_type(cg, f->type);
-                    if (!field_types[i - 1]) return NULL;
-                }
-            }
-
-            if (type->kind == TYPE_UNION && num_named_fields > 0) {
-                anvil_type_t *anchor = field_types[0];
-                size_t max_size = anvil_type_size(anchor);
-                size_t max_align = anvil_type_align(anchor);
-                for (int field = 1; field < num_named_fields; field++) {
-                    size_t field_size = anvil_type_size(field_types[field]);
-                    size_t field_align = anvil_type_align(field_types[field]);
-                    if (field_size > max_size) max_size = field_size;
-                    if (field_align > max_align) {
-                        max_align = field_align;
-                        anchor = field_types[field];
-                    }
-                }
-                field_types[0] = anchor;
-                size_t anchor_size = anvil_type_size(anchor);
-                size_t storage_fields = 1;
-                if (anchor_size < max_size) {
-                    field_types[1] = anvil_type_array(cg->anvil_ctx,
-                        anvil_type_u8(cg->anvil_ctx), max_size - anchor_size);
-                    if (!field_types[1]) return NULL;
-                    storage_fields = 2;
-                }
-                if (!anvil_type_struct_set_body(record_type, field_types,
-                                                storage_fields, false)) {
-                    mcc_error(cg->mcc_ctx, "failed to lower union layout: %s",
-                              anvil_ctx_get_error(cg->anvil_ctx));
-                    return NULL;
-                }
-                return record_type;
-            }
-
-            if (!anvil_type_struct_set_body(record_type, field_types,
-                                            (size_t)num_named_fields, false)) {
-                mcc_error(cg->mcc_ctx, "failed to lower struct layout: %s",
-                          anvil_ctx_get_error(cg->anvil_ctx));
-                return NULL;
-            }
-            return record_type;
+        case TYPE_POINTER: {
+            anvil_type_t *pointee = codegen_type(cg,
+                type->data.pointer.pointee);
+            if (!pointee) return NULL;
+            return codegen_check_object_layout(cg, type,
+                anvil_type_ptr(cg->anvil_ctx, pointee));
         }
+        case TYPE_ARRAY: {
+            anvil_type_t *element = codegen_type(cg, type->data.array.element);
+            if (!element) return NULL;
+            return codegen_check_object_layout(cg, type,
+                anvil_type_array(cg->anvil_ctx, element,
+                                 type->data.array.length));
+        }
+        case TYPE_STRUCT:
+        case TYPE_UNION:
+            return codegen_record_type(cg, type);
         case TYPE_FUNCTION: {
             anvil_type_t *ret_type = codegen_type(cg, type->data.function.return_type);
+            if (!ret_type) return NULL;
             int num_params = type->data.function.num_params;
-            anvil_type_t **param_types = mcc_alloc(cg->mcc_ctx,
-                (num_params > 0 ? num_params : 1) * sizeof(anvil_type_t*));
+            if (num_params < 0 ||
+                (size_t)num_params > SIZE_MAX / sizeof(anvil_type_t *)) {
+                mcc_error(cg->mcc_ctx, "function parameter table overflow");
+                return NULL;
+            }
+            anvil_type_t **param_types = mcc_alloc_array(cg->mcc_ctx,
+                num_params > 0 ? (size_t)num_params : 1, sizeof(*param_types));
+            if (!param_types) return NULL;
             
             int i = 0;
             for (mcc_func_param_t *p = type->data.function.params; p; p = p->next, i++) {
+                if (i >= num_params) {
+                    mcc_error(cg->mcc_ctx,
+                              "function parameter count does not match list");
+                    return NULL;
+                }
                 param_types[i] = codegen_param_type(cg, p->type);
+                if (!param_types[i]) return NULL;
+            }
+            if (i != num_params) {
+                mcc_error(cg->mcc_ctx,
+                          "function parameter count does not match list");
+                return NULL;
             }
             
             return anvil_type_func(cg->anvil_ctx, ret_type, param_types, num_params,
@@ -222,16 +320,4 @@ anvil_value_t *codegen_const_int_for_type(mcc_codegen_t *cg, anvil_type_t *anvil
                       "unsupported Anvil integer width for constant");
             return NULL;
     }
-}
-
-/* Get sizeof for a type using ANVIL arch info for pointer size */
-size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
-{
-    if (!type) {
-        mcc_error(cg->mcc_ctx, "sizeof requires a resolved C type");
-        return 0;
-    }
-    anvil_type_t *lowered = codegen_type(cg, type);
-    if (!lowered) return 0;
-    return anvil_type_size(lowered);
 }

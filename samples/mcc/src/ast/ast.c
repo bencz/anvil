@@ -138,7 +138,9 @@ const char *mcc_attr_kind_names[] = {
  */
 mcc_ast_node_t *mcc_ast_create(mcc_context_t *ctx, mcc_ast_kind_t kind, mcc_location_t loc)
 {
+    if (!ctx || kind >= AST_NODE_COUNT) return NULL;
     mcc_ast_node_t *node = mcc_alloc(ctx, sizeof(mcc_ast_node_t));
+    if (!node) return NULL;
     node->kind = kind;
     node->location = loc;
     return node;

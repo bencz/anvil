@@ -221,10 +221,8 @@ mcc/
 
 ### Current Limitations
 
-- Full `_Complex`/`_Imaginary` code generation
-- Designated initializers
-- Compound literals
-- Complete bitfield layout/codegen semantics
+- `_Complex`/`_Imaginary`, ABI-compatible `long double`, bit-fields, packed
+  records and unimplemented pragmas are rejected rather than partially lowered
 - Full external C runtime implementation; bundled headers mostly provide declarations
 
 ## License

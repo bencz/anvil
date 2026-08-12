@@ -536,9 +536,8 @@ static void test_mainframe_frame_allocation_separates_nested_calls(void)
         CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_STORE,
                                   ANVIL_MIR_NO_VREG, store_uses, 2),
               "mainframe local frame test should store into its frame");
-        CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                         ANVIL_MIR_NO_VREG, NULL, 0,
-                                         "nested_callee"),
+        CHECK(anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0,
+                                 "nested_callee", ANVIL_CC_MVS, false, 0),
               "mainframe frame test should contain a nested call");
         CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                                   ANVIL_MIR_NO_VREG, NULL, 0),
@@ -593,8 +592,9 @@ static void test_mainframe_materializes_call_values_before_bundle(void)
         anvil_value_t *args[] = {
             anvil_const_i32(ctx, 11), anvil_const_i32(ctx, 22)
         };
-        anvil_value_t *result = anvil_build_call(ctx, i32,
-            anvil_func_get_value(callee), args, 2, "result");
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 2,
+                                 "result", &result);
         CHECK(result && anvil_build_ret(ctx, result),
               "mainframe constant-argument call should build");
         anvil_mir_func_t *mir = anvil_mainframe_lower_func_to_mir(
@@ -684,16 +684,16 @@ static void test_s390_call_bundles_layout_f64_and_mark_each_call(void)
     CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
                                        ANVIL_MIR_NO_VREG, arg1, 1, 1),
           "first call should contain argument one");
-    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee_two"),
+    CHECK(anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0, "callee_two",
+                             ANVIL_CC_MVS, false, 0),
           "first call should terminate its argument bundle");
     CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, f2, 0),
           "second call f64 value should be defined after the first call");
     CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
                                        ANVIL_MIR_NO_VREG, arg2, 1, 0),
           "second call should contain one argument");
-    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee_one"),
+    CHECK(anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0, "callee_one",
+                             ANVIL_CC_MVS, false, 0),
           "second call should terminate its argument bundle");
     CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                               ANVIL_MIR_NO_VREG, NULL, 0),
@@ -728,6 +728,74 @@ static void test_s390_call_bundles_layout_f64_and_mark_each_call(void)
     anvil_mir_func_destroy(mir);
 }
 
+static void test_zarch_spilled_call_arguments_preserve_bundle(void)
+{
+    enum { ARG_COUNT = 12 };
+    anvil_mir_func_t *mir = anvil_mir_func_create("zarch_spilled_call_bundle");
+    CHECK(mir != NULL, "z/Architecture spilled-call MIR should be created");
+    if (!mir) return;
+
+    anvil_mir_vreg_t args[ARG_COUNT];
+    bool built = true;
+    for (size_t i = 0; i < ARG_COUNT; i++) {
+        args[i] = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 64);
+        built = built && args[i] != ANVIL_MIR_NO_VREG &&
+                anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, args[i],
+                                        (int64_t)(i + 1));
+    }
+    for (size_t i = 0; i < ARG_COUNT; i++) {
+        built = built && anvil_mir_add_instr_imm_uses(
+            mir, ANVIL_MIR_OP_CALL_STACK_ARG, ANVIL_MIR_NO_VREG,
+            &args[i], 1, (int64_t)i);
+    }
+    built = built && anvil_mir_add_call(
+        mir, ANVIL_MIR_NO_VREG, NULL, 0, "spill_target",
+        ANVIL_CC_MVS, false, 0) &&
+        anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                            ANVIL_MIR_NO_VREG, NULL, 0);
+    CHECK(built, "z/Architecture high-pressure call bundle should build");
+
+    CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_ZARCH),
+          "spill reloads interleaved with call arguments must remain legal");
+    CHECK(anvil_mir_num_spills(mir) >= ARG_COUNT - 9,
+          "twelve simultaneously-live arguments must exercise real spilling");
+
+    bool in_bundle = false;
+    bool saw_interleaved_reload = false;
+    for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
+        anvil_mir_instr_info_t info;
+        CHECK(anvil_mir_get_instr_info(mir, i, &info),
+              "materialized z/Architecture MIR should remain inspectable");
+        if (!anvil_mir_get_instr_info(mir, i, &info)) break;
+        if (info.op == ANVIL_MIR_OP_CALL_STACK_ARG) in_bundle = true;
+        else if (in_bundle && info.op == ANVIL_MIR_OP_SPILL_LOAD)
+            saw_interleaved_reload = true;
+        else if (in_bundle && info.op == ANVIL_MIR_OP_CALL)
+            in_bundle = false;
+    }
+    CHECK(saw_interleaved_reload,
+          "regression must contain a spill reload inside the logical call bundle");
+
+    char legal_error[192] = { 0 };
+    CHECK(anvil_mainframe_verify_mir_legal(
+              mir, ANVIL_MAINFRAME_VARIANT_ZARCH,
+              legal_error, sizeof(legal_error)),
+          "post-allocation spilled call bundle should pass mainframe legality");
+    char *asm_text = NULL;
+    size_t asm_len = 0;
+    CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_ZARCH,
+                                   &asm_text, &asm_len),
+          "post-allocation spilled call bundle should emit HLASM");
+    CHECK(asm_text &&
+          count_occurrences(asm_text, "         LA    R0,") == ARG_COUNT,
+          "every spilled or resident argument must reach the outgoing value area");
+    CHECK(asm_text &&
+          count_occurrences(asm_text, "         OIHH  R0,X'8000'") == 1,
+          "the logical bundle must retain exactly one final-argument marker");
+    free(asm_text);
+    anvil_mir_func_destroy(mir);
+}
+
 static void test_mainframe_rejects_malformed_call_bundle(void)
 {
     anvil_mir_func_t *mir = anvil_mir_func_create("bad_call_bundle");
@@ -741,8 +809,8 @@ static void test_mainframe_rejects_malformed_call_bundle(void)
     CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_CALL_STACK_ARG,
                                        ANVIL_MIR_NO_VREG, uses, 1, 1),
           "generic MIR should represent a malformed first argument index");
-    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                     ANVIL_MIR_NO_VREG, NULL, 0, "callee"),
+    CHECK(anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0, "callee",
+                             ANVIL_CC_MVS, false, 0),
           "malformed bundle should still have a call");
     CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                               ANVIL_MIR_NO_VREG, NULL, 0),
@@ -795,8 +863,8 @@ static void test_mainframe_dynamic_alloca_updates_stack_chain(void)
         CHECK(anvil_mir_add_instr_imm_uses(mir, ANVIL_MIR_OP_DYN_ALLOCA,
                                            address, uses, 1, 24),
               "dynamic alloca should retain its element size");
-        CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL,
-                                         ANVIL_MIR_NO_VREG, NULL, 0, "nested"),
+        CHECK(anvil_mir_add_call(mir, ANVIL_MIR_NO_VREG, NULL, 0, "nested",
+                                 ANVIL_CC_MVS, false, 0),
               "dynamic alloca regression should include a nested call");
         CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                                   ANVIL_MIR_NO_VREG, NULL, 0),
@@ -1208,6 +1276,89 @@ static void test_mainframe_phi_swap_uses_parallel_copy(void)
     }
 }
 
+static void test_zarch_shared_phi_literal_is_entry_dominated(void)
+{
+    anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_ZARCH);
+    if (!ctx) return;
+
+    anvil_module_t *mod = anvil_module_create(ctx, "zarch_phi_literal_dom");
+    anvil_type_t *i1 = anvil_type_i1(ctx);
+    anvil_type_t *i64 = anvil_type_i64(ctx);
+    anvil_type_t *params[] = { i1 };
+    anvil_func_t *fn = anvil_func_create(
+        mod, "shared_phi_literal",
+        anvil_type_func(ctx, i64, params, 1u, false),
+        ANVIL_LINK_EXTERNAL);
+    CHECK(mod && fn, "shared-PHI-literal source function should be created");
+    if (mod && fn) {
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_block_t *left = anvil_block_create(fn, "left");
+        anvil_block_t *right = anvil_block_create(fn, "right");
+        anvil_block_t *join = anvil_block_create(fn, "join");
+        anvil_value_t *shared = anvil_const_i64(ctx, 0);
+
+        anvil_set_insert_point(ctx, entry);
+        CHECK(anvil_build_br_cond(ctx, anvil_func_get_param(fn, 0),
+                                  left, right),
+              "shared-PHI-literal entry should branch");
+        anvil_set_insert_point(ctx, left);
+        CHECK(anvil_build_br(ctx, join),
+              "shared-PHI-literal left edge should branch to join");
+        anvil_set_insert_point(ctx, right);
+        CHECK(anvil_build_br(ctx, join),
+              "shared-PHI-literal right edge should branch to join");
+        anvil_set_insert_point(ctx, join);
+        anvil_value_t *phi = anvil_build_phi(ctx, i64, "shared");
+        CHECK(phi && shared && anvil_phi_add_incoming(phi, shared, left) &&
+              anvil_phi_add_incoming(phi, shared, right) &&
+              anvil_build_ret(ctx, phi),
+              "both PHI edges should consume the same IR literal object");
+
+        char source_error[256] = { 0 };
+        CHECK(anvil_module_verify(mod, source_error, sizeof(source_error)),
+              source_error[0] ? source_error
+                              : "shared-PHI-literal source IR should verify");
+        anvil_mir_func_t *mir = anvil_mainframe_lower_func_to_mir(
+            fn, ANVIL_MAINFRAME_VARIANT_ZARCH);
+        CHECK(mir != NULL,
+              "shared literal used by disjoint PHI edges must dominate both edges");
+        if (mir) {
+            bool saw_entry_i64_zero = false;
+            for (size_t index = 0u; index < anvil_mir_num_instrs(mir);
+                 index++) {
+                anvil_mir_instr_info_t info;
+                if (!anvil_mir_get_instr_info(mir, index, &info)) continue;
+                const anvil_mir_vreg_info_t *vreg =
+                    info.def == ANVIL_MIR_NO_VREG ? NULL
+                    : anvil_mir_get_vreg_info(mir, info.def);
+                if (info.op == ANVIL_MIR_OP_MOV && info.block == 0u &&
+                    info.has_imm && info.imm == 0 && vreg &&
+                    vreg->reg_class == ANVIL_MIR_REG_GPR &&
+                    vreg->size_bits == 64u) {
+                    saw_entry_i64_zero = true;
+                }
+            }
+            CHECK(saw_entry_i64_zero,
+                  "shared PHI literal must be materialized in the entry block");
+            CHECK(anvil_mainframe_regalloc_mir(
+                      mir, ANVIL_MAINFRAME_VARIANT_ZARCH),
+                  "entry-dominated PHI literal should survive register allocation");
+            char *text = NULL;
+            size_t length = 0u;
+            CHECK(anvil_mainframe_emit_mir(
+                      mir, ANVIL_MAINFRAME_VARIANT_ZARCH, &text, &length),
+                  "entry-dominated PHI literal should emit complete HLASM");
+            CHECK(text != NULL && length != 0u,
+                  "entry-dominated PHI literal should produce nonempty HLASM");
+            free(text);
+            anvil_mir_func_destroy(mir);
+        }
+    }
+
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_decimal_types_and_hlasm_constants_are_first_class(void)
 {
     anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_ZARCH);
@@ -1362,6 +1513,28 @@ static void test_mainframe_internal_labels_do_not_truncate(void)
     }
 }
 
+static void test_mainframe_string_literals_preserve_ir_bytes(void)
+{
+    anvil_mir_func_t *mir = anvil_mir_func_create("string_bytes");
+    const char *label = NULL;
+    CHECK(mir && anvil_mir_add_string_literal(mir, "A\n\200", &label) >= 0 &&
+          label && anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
+                                       ANVIL_MIR_NO_VREG, NULL, 0),
+          "mainframe byte-exact string MIR should construct");
+    if (!mir) return;
+    CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_S390),
+          "mainframe byte-exact string MIR should allocate");
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
+                                   &text, &len),
+          "mainframe byte-exact string MIR should emit");
+    CHECK(text && strstr(text, "DC    X'410A8000'"),
+          "mainframe string literals must retain control/high bytes and NUL");
+    free(text);
+    anvil_mir_func_destroy(mir);
+}
+
 int main(void)
 {
     test_mainframe_frame_allocation_separates_nested_calls();
@@ -1371,8 +1544,10 @@ int main(void)
     test_mainframe_unsigned_divmod_and_not64_are_real();
     test_mainframe_numeric_conversions_use_target_isa();
     test_mainframe_phi_swap_uses_parallel_copy();
+    test_zarch_shared_phi_literal_is_entry_dominated();
     test_mainframe_fp_parameters_use_gpr_address_scratch();
     test_s390_call_bundles_layout_f64_and_mark_each_call();
+    test_zarch_spilled_call_arguments_preserve_bundle();
     test_mainframe_rejects_malformed_call_bundle();
     test_mainframe_descriptors_model_real_variants();
     test_s370_lowers_i32_add_through_mvs_parameter_list();
@@ -1385,6 +1560,7 @@ int main(void)
     test_decimal_types_and_hlasm_constants_are_first_class();
     test_mainframe_emits_interleaved_block_ownership_correctly();
     test_mainframe_internal_labels_do_not_truncate();
+    test_mainframe_string_literals_preserve_ir_bytes();
 
     if (failures != 0) {
         fprintf(stderr, "%d mainframe MachineIR regression checks failed\n", failures);

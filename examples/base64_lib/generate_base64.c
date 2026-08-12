@@ -144,7 +144,9 @@ int main(int argc, char **argv)
         }
         
         anvil_value_t *malloc_args[] = { alloc_size_ext };
-        anvil_value_t *output_void = anvil_build_call(ctx, ptr_void, malloc_func, malloc_args, 1, "output_void");
+        anvil_value_t *output_void = NULL;
+        anvil_build_call_checked(ctx, malloc_func, malloc_args, 1,
+                                 "output_void", &output_void);
         anvil_value_t *output = anvil_build_bitcast(ctx, output_void, ptr_i8, "output");
         
         /* Store output length if pointer provided */

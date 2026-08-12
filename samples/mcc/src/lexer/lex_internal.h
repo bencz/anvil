@@ -46,7 +46,7 @@ mcc_token_t *lex_make_token(mcc_lexer_t *lex, mcc_token_type_t type);
 typedef enum {
     LEX_COMMENT_NONE,       /* No comment found */
     LEX_COMMENT_LINE,       /* // comment processed */
-    LEX_COMMENT_BLOCK       /* /* comment processed */
+    LEX_COMMENT_BLOCK       /* Block comment processed */
 } lex_comment_result_t;
 
 lex_comment_result_t lex_try_skip_comment(mcc_lexer_t *lex);

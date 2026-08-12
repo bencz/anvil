@@ -4,6 +4,7 @@
  */
 
 #include "mcc.h"
+#include <limits.h>
 
 #define SYMBOL_TABLE_SIZE 256
 #define TAG_TABLE_SIZE 64
@@ -32,16 +33,23 @@ static unsigned hash_string(const char *s)
 
 mcc_symtab_t *mcc_symtab_create(mcc_context_t *ctx, mcc_type_context_t *types)
 {
+    if (!ctx || !types) return NULL;
     mcc_symtab_t *symtab = mcc_alloc(ctx, sizeof(mcc_symtab_t));
+    if (!symtab) return NULL;
     symtab->ctx = ctx;
     symtab->types = types;
     
     /* Create global scope */
     mcc_scope_t *global = mcc_alloc(ctx, sizeof(mcc_scope_t));
+    if (!global) return NULL;
     global->table_size = SYMBOL_TABLE_SIZE;
-    global->symbols = mcc_alloc(ctx, SYMBOL_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    global->symbols = mcc_alloc_array(ctx, SYMBOL_TABLE_SIZE,
+                                      sizeof(*global->symbols));
+    if (!global->symbols) return NULL;
     global->tag_table_size = TAG_TABLE_SIZE;
-    global->tags = mcc_alloc(ctx, TAG_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    global->tags = mcc_alloc_array(ctx, TAG_TABLE_SIZE,
+                                   sizeof(*global->tags));
+    if (!global->tags) return NULL;
     global->is_file_scope = true;
     global->depth = 0;
     
@@ -58,12 +66,18 @@ void mcc_symtab_destroy(mcc_symtab_t *symtab)
 
 void mcc_symtab_push_scope(mcc_symtab_t *symtab)
 {
+    if (!symtab || !symtab->current) return;
     mcc_scope_t *scope = mcc_alloc(symtab->ctx, sizeof(mcc_scope_t));
+    if (!scope) return;
     scope->parent = symtab->current;
     scope->table_size = SYMBOL_TABLE_SIZE;
-    scope->symbols = mcc_alloc(symtab->ctx, SYMBOL_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    scope->symbols = mcc_alloc_array(symtab->ctx, SYMBOL_TABLE_SIZE,
+                                     sizeof(*scope->symbols));
+    if (!scope->symbols) return;
     scope->tag_table_size = TAG_TABLE_SIZE;
-    scope->tags = mcc_alloc(symtab->ctx, TAG_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    scope->tags = mcc_alloc_array(symtab->ctx, TAG_TABLE_SIZE,
+                                  sizeof(*scope->tags));
+    if (!scope->tags) return;
     scope->is_block_scope = true;
     scope->depth = symtab->current->depth + 1;
     scope->stack_offset = symtab->current->stack_offset;
@@ -73,14 +87,22 @@ void mcc_symtab_push_scope(mcc_symtab_t *symtab)
 
 void mcc_symtab_push_function_scope(mcc_symtab_t *symtab)
 {
+    if (!symtab || !symtab->current) return;
     mcc_scope_t *scope = mcc_alloc(symtab->ctx, sizeof(mcc_scope_t));
+    if (!scope) return;
     scope->parent = symtab->current;
     scope->table_size = SYMBOL_TABLE_SIZE;
-    scope->symbols = mcc_alloc(symtab->ctx, SYMBOL_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    scope->symbols = mcc_alloc_array(symtab->ctx, SYMBOL_TABLE_SIZE,
+                                     sizeof(*scope->symbols));
+    if (!scope->symbols) return;
     scope->tag_table_size = TAG_TABLE_SIZE;
-    scope->tags = mcc_alloc(symtab->ctx, TAG_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    scope->tags = mcc_alloc_array(symtab->ctx, TAG_TABLE_SIZE,
+                                  sizeof(*scope->tags));
+    if (!scope->tags) return;
     scope->label_table_size = LABEL_TABLE_SIZE;
-    scope->labels = mcc_alloc(symtab->ctx, LABEL_TABLE_SIZE * sizeof(mcc_symbol_t*));
+    scope->labels = mcc_alloc_array(symtab->ctx, LABEL_TABLE_SIZE,
+                                    sizeof(*scope->labels));
+    if (!scope->labels) return;
     scope->is_function_scope = true;
     scope->depth = symtab->current->depth + 1;
     scope->stack_offset = 0;
@@ -109,6 +131,7 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
                                  mcc_sym_kind_t kind, mcc_type_t *type,
                                  mcc_location_t loc)
 {
+    if (!symtab || !symtab->current || !name) return NULL;
     /* Check for redefinition in current scope */
     mcc_symbol_t *existing = mcc_symtab_lookup_current(symtab, name);
     if (existing) {
@@ -139,8 +162,10 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
     }
     
     mcc_symbol_t *sym = mcc_alloc(symtab->ctx, sizeof(mcc_symbol_t));
+    if (!sym) return NULL;
     sym->kind = kind;
     sym->name = mcc_strdup(symtab->ctx, name);
+    if (!sym->name) return NULL;
     sym->type = type;
     sym->location = loc;
     
@@ -154,10 +179,24 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
             size_t align = type ? type->align : 4;
             
             /* Align stack offset */
-            symtab->current->stack_offset = 
-                (symtab->current->stack_offset + align - 1) & ~(align - 1);
+            size_t current_offset = symtab->current->stack_offset < 0
+                ? SIZE_MAX : (size_t)symtab->current->stack_offset;
+            if (align == 0 || (align & (align - 1)) != 0 ||
+                current_offset > (size_t)INT_MAX ||
+                align - 1 > (size_t)INT_MAX - current_offset) {
+                mcc_error_at(symtab->ctx, loc,
+                             "invalid or overflowing stack-slot alignment");
+                return NULL;
+            }
+            current_offset = (current_offset + align - 1) & ~(align - 1);
+            symtab->current->stack_offset = (int)current_offset;
             sym->data.stack_offset = symtab->current->stack_offset;
-            symtab->current->stack_offset += size;
+            if (size > (size_t)INT_MAX - current_offset) {
+                mcc_error_at(symtab->ctx, loc,
+                             "stack-frame size overflow for '%s'", name);
+                return NULL;
+            }
+            symtab->current->stack_offset += (int)size;
         }
     } else if (kind == SYM_FUNC) {
         sym->data.global_name = sym->name;
@@ -200,6 +239,7 @@ mcc_symbol_t *mcc_symtab_define_tag(mcc_symtab_t *symtab, const char *name,
                                      mcc_sym_kind_t kind, mcc_type_t *type,
                                      mcc_location_t loc)
 {
+    if (!symtab || !symtab->current || !name) return NULL;
     mcc_symbol_t *existing = mcc_symtab_lookup_tag_current(symtab, name);
     if (existing) {
         /* Allow incomplete type completion */
@@ -216,8 +256,10 @@ mcc_symbol_t *mcc_symtab_define_tag(mcc_symtab_t *symtab, const char *name,
     }
     
     mcc_symbol_t *sym = mcc_alloc(symtab->ctx, sizeof(mcc_symbol_t));
+    if (!sym) return NULL;
     sym->kind = kind;
     sym->name = mcc_strdup(symtab->ctx, name);
+    if (!sym->name) return NULL;
     sym->type = type;
     sym->location = loc;
     
@@ -256,6 +298,7 @@ mcc_symbol_t *mcc_symtab_lookup_tag_current(mcc_symtab_t *symtab, const char *na
 mcc_symbol_t *mcc_symtab_define_label(mcc_symtab_t *symtab, const char *name,
                                        mcc_location_t loc)
 {
+    if (!symtab || !name) return NULL;
     /* Find function scope */
     mcc_scope_t *func_scope = symtab->current;
     while (func_scope && !func_scope->is_function_scope) {
@@ -282,8 +325,10 @@ mcc_symbol_t *mcc_symtab_define_label(mcc_symtab_t *symtab, const char *name,
     }
     
     mcc_symbol_t *sym = mcc_alloc(symtab->ctx, sizeof(mcc_symbol_t));
+    if (!sym) return NULL;
     sym->kind = SYM_LABEL;
     sym->name = mcc_strdup(symtab->ctx, name);
+    if (!sym->name) return NULL;
     sym->location = loc;
     sym->is_defined = true;
     
@@ -296,6 +341,7 @@ mcc_symbol_t *mcc_symtab_define_label(mcc_symtab_t *symtab, const char *name,
 
 mcc_symbol_t *mcc_symtab_lookup_label(mcc_symtab_t *symtab, const char *name)
 {
+    if (!symtab || !name) return NULL;
     /* Find function scope */
     mcc_scope_t *func_scope = symtab->current;
     while (func_scope && !func_scope->is_function_scope) {
@@ -315,8 +361,10 @@ mcc_symbol_t *mcc_symtab_lookup_label(mcc_symtab_t *symtab, const char *name)
     
     /* Create forward reference */
     mcc_symbol_t *sym = mcc_alloc(symtab->ctx, sizeof(mcc_symbol_t));
+    if (!sym) return NULL;
     sym->kind = SYM_LABEL;
     sym->name = mcc_strdup(symtab->ctx, name);
+    if (!sym->name) return NULL;
     sym->is_defined = false;
     
     sym->next = func_scope->labels[h];

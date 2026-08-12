@@ -41,10 +41,10 @@ mcc_ast_node_t *parse_compound_stmt(mcc_parser_t *p)
 
         if (stmt) {
             if (num_stmts >= cap_stmts) {
-                cap_stmts = cap_stmts ? cap_stmts * 2 : 8;
-                stmts = mcc_realloc(p->ctx, stmts,
-                                    num_stmts * sizeof(mcc_ast_node_t*),
-                                    cap_stmts * sizeof(mcc_ast_node_t*));
+                void *grown = parse_grow_array(p, stmts, num_stmts,
+                    &cap_stmts, sizeof(*stmts), 8);
+                if (!grown) return NULL;
+                stmts = grown;
             }
             stmts[num_stmts++] = stmt;
         }
@@ -61,6 +61,7 @@ mcc_ast_node_t *parse_compound_stmt(mcc_parser_t *p)
     parse_typedef_scope_leave(p);
     
     mcc_ast_node_t *node = mcc_ast_create(p->ctx, AST_COMPOUND_STMT, loc);
+    if (!node) return NULL;
     node->data.compound_stmt.stmts = stmts;
     node->data.compound_stmt.num_stmts = num_stmts;
     return node;

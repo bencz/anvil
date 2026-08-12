@@ -1,0 +1,2 @@
+ZeroDivide := ArithmeticError [
+]

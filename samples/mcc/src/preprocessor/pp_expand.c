@@ -19,6 +19,7 @@
  */
 
 #include "pp_internal.h"
+#include <limits.h>
 
 /* ============================================================
  * Token List Operations
@@ -38,26 +39,6 @@ static mcc_token_t *copy_token_list(mcc_preprocessor_t *pp, mcc_token_t *list)
     return head;
 }
 
-/* Append token list b to the end of token list a */
-static mcc_token_t *append_token_lists(mcc_token_t *a, mcc_token_t *b)
-{
-    if (!a) return b;
-    if (!b) return a;
-    
-    mcc_token_t *tail = a;
-    while (tail->next) tail = tail->next;
-    tail->next = b;
-    return a;
-}
-
-/* Get the last token in a list */
-static mcc_token_t *get_last_token(mcc_token_t *list)
-{
-    if (!list) return NULL;
-    while (list->next) list = list->next;
-    return list;
-}
-
 /* ============================================================
  * Hide Set (Blue Paint) Management
  * 
@@ -75,6 +56,7 @@ typedef struct pp_hide_set {
 static pp_hide_set_t *hide_set_create(mcc_preprocessor_t *pp)
 {
     pp_hide_set_t *hs = mcc_alloc(pp->ctx, sizeof(pp_hide_set_t));
+    if (!hs) return NULL;
     hs->names = NULL;
     hs->count = 0;
     hs->capacity = 0;
@@ -85,10 +67,13 @@ static pp_hide_set_t *hide_set_copy(mcc_preprocessor_t *pp, pp_hide_set_t *src)
 {
     if (!src) return NULL;
     pp_hide_set_t *hs = mcc_alloc(pp->ctx, sizeof(pp_hide_set_t));
+    if (!hs) return NULL;
     hs->count = src->count;
     hs->capacity = src->capacity;
     if (src->names && src->count > 0) {
-        hs->names = mcc_alloc(pp->ctx, hs->capacity * sizeof(char*));
+        hs->names = mcc_alloc_array(pp->ctx, hs->capacity,
+                                    sizeof(*hs->names));
+        if (!hs->names) return NULL;
         memcpy(hs->names, src->names, hs->count * sizeof(char*));
     } else {
         hs->names = NULL;
@@ -107,10 +92,15 @@ static void hide_set_add(mcc_preprocessor_t *pp, pp_hide_set_t *hs, const char *
     
     /* Grow if needed */
     if (hs->count >= hs->capacity) {
+        if (hs->capacity > SIZE_MAX / 2) {
+            mcc_fatal(pp->ctx, "macro hide-set capacity overflow");
+            return;
+        }
         size_t new_cap = hs->capacity ? hs->capacity * 2 : 4;
-        hs->names = mcc_realloc(pp->ctx, hs->names, 
-                                 hs->capacity * sizeof(char*),
-                                 new_cap * sizeof(char*));
+        void *grown = mcc_realloc_array(pp->ctx, hs->names,
+            hs->capacity, new_cap, sizeof(*hs->names));
+        if (!grown) return;
+        hs->names = grown;
         hs->capacity = new_cap;
     }
     
@@ -124,18 +114,6 @@ static bool hide_set_contains(pp_hide_set_t *hs, const char *name)
         if (strcmp(hs->names[i], name) == 0) return true;
     }
     return false;
-}
-
-static pp_hide_set_t *hide_set_union(mcc_preprocessor_t *pp, pp_hide_set_t *a, pp_hide_set_t *b)
-{
-    pp_hide_set_t *result = hide_set_copy(pp, a);
-    if (!result) result = hide_set_create(pp);
-    if (b) {
-        for (size_t i = 0; i < b->count; i++) {
-            hide_set_add(pp, result, b->names[i]);
-        }
-    }
-    return result;
 }
 
 /* ============================================================
@@ -200,7 +178,8 @@ typedef struct {
 } pp_args_t;
 
 /* Collect arguments for a function-like macro from token info list */
-static pp_args_t collect_arguments(mcc_preprocessor_t *pp, mcc_macro_t *macro, pp_token_info_t *tokens)
+static pp_args_t collect_arguments(mcc_preprocessor_t *pp,
+                                   pp_token_info_t *tokens)
 {
     pp_args_t result = {NULL, 0, NULL};
     
@@ -226,9 +205,15 @@ static pp_args_t collect_arguments(mcc_preprocessor_t *pp, mcc_macro_t *macro, p
             if (paren_depth == 0) {
                 /* End of arguments */
                 if (arg_head || num_args > 0) {
-                    args = mcc_realloc(pp->ctx, args,
-                                       num_args * sizeof(mcc_token_t*),
-                                       (num_args + 1) * sizeof(mcc_token_t*));
+                    if (num_args == INT_MAX) {
+                        mcc_fatal(pp->ctx, "macro argument count overflow");
+                        return result;
+                    }
+                    void *grown = mcc_realloc_array(pp->ctx, args,
+                        (size_t)num_args, (size_t)num_args + 1,
+                        sizeof(*args));
+                    if (!grown) return result;
+                    args = grown;
                     args[num_args++] = arg_head;
                 }
                 result.args = args;
@@ -239,9 +224,14 @@ static pp_args_t collect_arguments(mcc_preprocessor_t *pp, mcc_macro_t *macro, p
             paren_depth--;
         } else if (tok->type == TOK_COMMA && paren_depth == 0) {
             /* Next argument */
-            args = mcc_realloc(pp->ctx, args,
-                               num_args * sizeof(mcc_token_t*),
-                               (num_args + 1) * sizeof(mcc_token_t*));
+            if (num_args == INT_MAX) {
+                mcc_fatal(pp->ctx, "macro argument count overflow");
+                return result;
+            }
+            void *grown = mcc_realloc_array(pp->ctx, args,
+                (size_t)num_args, (size_t)num_args + 1, sizeof(*args));
+            if (!grown) return result;
+            args = grown;
             args[num_args++] = arg_head;
             arg_head = arg_tail = NULL;
             cur = cur->next;
@@ -576,7 +566,7 @@ static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
         after_name = check;
         
         /* Collect arguments */
-        pp_args_t collected = collect_arguments(pp, macro, after_name);
+        pp_args_t collected = collect_arguments(pp, after_name);
         args = collected.args;
         num_args = collected.num_args;
         remaining = collected.remaining;
@@ -589,7 +579,9 @@ static pp_token_info_t *expand_macro_invocation(mcc_preprocessor_t *pp,
         
         /* Expand arguments (for non-# and non-## contexts) */
         if (num_args > 0) {
-            expanded_args = mcc_alloc(pp->ctx, num_args * sizeof(mcc_token_t*));
+            expanded_args = mcc_alloc_array(pp->ctx, (size_t)num_args,
+                                            sizeof(*expanded_args));
+            if (!expanded_args) return NULL;
             for (int i = 0; i < num_args; i++) {
                 pp_token_info_t *arg_info = token_list_to_info_list(pp, args[i], NULL);
                 pp_token_info_t *expanded_info = expand_token_list(pp, arg_info, depth + 1);
@@ -721,8 +713,6 @@ void pp_expand_and_emit(mcc_preprocessor_t *pp, mcc_token_t *tokens)
         /* Find a function-like macro in the expanded tokens that could take args */
         /* We look for a pattern: MACRO_NAME followed by non-LPAREN tokens, then LPAREN from lexer */
         mcc_token_t *func_macro = NULL;
-        mcc_token_t *before_func = NULL;
-        
         for (mcc_token_t *t = expanded; t; t = t->next) {
             if (t->type == TOK_IDENT) {
                 mcc_macro_t *macro = pp_lookup_macro(pp, t->text);
@@ -734,7 +724,6 @@ void pp_expand_and_emit(mcc_preprocessor_t *pp, mcc_token_t *tokens)
                     }
                 }
             }
-            before_func = t;
         }
         
         if (!func_macro) break;

@@ -84,6 +84,7 @@ mcc_context_t *mcc_context_create(void)
     }
     
     /* Initialize C standard to default (C89) */
+    ctx->options.arch = MCC_ARCH_COUNT;
     ctx->options.c_std = MCC_STD_DEFAULT;
     update_c_features(ctx);
     
@@ -208,6 +209,30 @@ void *mcc_realloc(mcc_context_t *ctx, void *ptr, size_t old_size, size_t new_siz
         memcpy(new_ptr, ptr, old_size < new_size ? old_size : new_size);
     }
     return new_ptr;
+}
+
+void *mcc_alloc_array(mcc_context_t *ctx, size_t count,
+                      size_t element_size)
+{
+    if (!ctx || element_size == 0 || count > SIZE_MAX / element_size) {
+        if (ctx) mcc_fatal(ctx, "Array allocation size overflow");
+        return NULL;
+    }
+    return mcc_alloc(ctx, count * element_size);
+}
+
+void *mcc_realloc_array(mcc_context_t *ctx, void *ptr,
+                        size_t old_count, size_t new_count,
+                        size_t element_size)
+{
+    if (!ctx || element_size == 0 ||
+        old_count > SIZE_MAX / element_size ||
+        new_count > SIZE_MAX / element_size) {
+        if (ctx) mcc_fatal(ctx, "Array allocation size overflow");
+        return NULL;
+    }
+    return mcc_realloc(ctx, ptr, old_count * element_size,
+                       new_count * element_size);
 }
 
 char *mcc_strdup(mcc_context_t *ctx, const char *str)

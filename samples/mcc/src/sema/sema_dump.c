@@ -1105,6 +1105,8 @@ void mcc_sema_dump_verbose(mcc_sema_t *sema, mcc_ast_node_t *ast, FILE *out)
     fprintf(out, "================================================================================\n\n");
     
     dump_ast_node_with_sema(ast, sema, out, 0);
+
+    dump_statistics(sema, out);
     
     fprintf(out, "\n================================================================================\n");
     fprintf(out, "                              END OF DUMP\n");

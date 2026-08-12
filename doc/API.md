@@ -182,10 +182,9 @@ anvil_ctx_set_abi(ctx, ANVIL_ABI_DARWIN);
 **Targets and ABIs:** The `x86` and `x86_64` backends now honor multiple ABIs. For
 `x86_64`, SysV, Darwin, and Win64 are all selected through the ABI/calling-convention
 descriptor table; for `x86`, the cdecl/stdcall/fastcall conventions are selected the
-same way. The per-function calling convention set with `anvil_func_set_cc()` is
-consumed by both the x86 and x86_64 backends (e.g. `ANVIL_CC_WIN64`/`ANVIL_CC_SYSV`
-on x86_64 select the matching ABI; cdecl/stdcall/fastcall on x86 select the matching
-descriptor).
+same way. `anvil_type_func_cc()` stores the immutable effective convention in
+the function signature; definitions and direct/indirect CALL sites consume that
+same canonical value (SysV/Win64 on x86-64 and cdecl/stdcall/fastcall on x86).
 
 ### anvil_ctx_get_abi
 
@@ -663,21 +662,27 @@ declarations; use the same compatible linkage when supplying the definition.
 anvil_value_t *anvil_func_get_value(anvil_func_t *func);
 ```
 
-Gets a function as a value, for use as the callee of `anvil_build_call`.
+Gets a function as a `ptr<func>` value, for use as the callee of
+`anvil_build_call_checked` or in relocatable VTables.
 
-### anvil_func_set_cc
+### anvil_type_func_cc
 
 ```c
-bool anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
+anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
+                                  anvil_type_t **params, size_t num_params,
+                                  bool variadic, anvil_cc_t cc);
 ```
 
-Sets the calling convention for a function (see `anvil_cc_t`). This is consumed by
-the x86 and x86_64 backends to select the matching ABI/descriptor (cdecl/stdcall/
-fastcall on x86; SysV/Win64 on x86_64). Returns `false` for an invalid
-convention or a function whose module was destroyed.
+Creates an immutable function signature with a first-class calling convention.
+`DEFAULT` and accepted C aliases are canonicalized for the selected target/ABI;
+incompatible conventions are rejected. `anvil_type_func` is the DEFAULT wrapper,
+and `anvil_type_func_cc_value` returns the effective convention. Calling
+convention participates in function-type equality and therefore in `ptr<func>`
+compatibility.
 
 **Parameters:**
-- `func`: Function
+- `ctx`: Target-configured context
+- `ret`, `params`, `num_params`, `variadic`: Function signature
 - `cc`: Calling convention
 
 ### anvil_func_get_entry
@@ -929,6 +934,11 @@ anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
 
 Creates a function type.
 
+The explicit form `anvil_type_func_cc(ctx, ret, params, num_params, variadic,
+cc)` makes the effective calling convention part of the type. The shorter form
+above is a DEFAULT wrapper; DEFAULT and accepted C aliases are canonicalized at
+construction and incompatible target/ABI combinations fail.
+
 **Parameters:**
 - `ctx`: Context
 - `ret`: Return type
@@ -1168,13 +1178,15 @@ bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
 Conditional branch. If `cond` is true, branches to `then_block`, otherwise to `else_block`.
 
 ```c
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type,
-                                 anvil_value_t *callee,
-                                 anvil_value_t **args, size_t num_args,
-                                 const char *name);
+bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
+                               anvil_value_t **args, size_t num_args,
+                               const char *name, anvil_value_t **result);
 ```
-Calls a function. `type` is the function type of the callee, `callee` is the
-function value (from `anvil_func_get_value`) or a function pointer.
+Calls a function directly or indirectly. The signature and effective calling
+convention are derived only from the callee's `func`/`ptr<func>` type; fixed
+arguments and variadic arity are checked before allocation. `result` may be
+NULL. When supplied it is cleared first and remains NULL for a successful void
+call, while the boolean return reports success without ambiguity.
 
 ```c
 anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
@@ -1297,6 +1309,13 @@ anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
+anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx, anvil_type_t *struct_type,
+                                   anvil_value_t **fields, size_t num_fields);
+anvil_value_t *anvil_const_symbol_addr(anvil_value_t *symbol);
+anvil_value_t *anvil_const_gep(anvil_value_t *base,
+                                anvil_type_t *source_type,
+                                anvil_value_t **indices,
+                                size_t num_indices);
 ```
 
 **Example:**
@@ -1309,6 +1328,13 @@ anvil_value_t *null_ptr = anvil_const_null(ctx, anvil_type_ptr(ctx, anvil_type_i
 anvil_value_t *elems[] = { anvil_const_i32(ctx, 1), anvil_const_i32(ctx, 2), anvil_const_i32(ctx, 3) };
 anvil_value_t *arr = anvil_const_array(ctx, anvil_type_i32(ctx), elems, 3);
 ```
+
+Scalar/numeric constant DAGs are context-wide. Symbol addresses and typed
+constant GEPs are relocations owned by the symbol's exact module; arrays and
+structs containing them inherit that ownership and reject mixed modules.
+`anvil_const_gep` validates every integer index through the target DataLayout,
+retains symbol provenance, and checks its signed byte addend against the target
+address width. This is the supported representation for static VTables.
 
 ## Global Variables API
 
@@ -1514,13 +1540,14 @@ typedef enum {
     ANVIL_CC_FASTCALL,      // Fastcall
     ANVIL_CC_SYSV,          // System V AMD64 ABI
     ANVIL_CC_WIN64,         // Windows x64
-    ANVIL_CC_MVS,           // MVS linkage (mainframe)
-    ANVIL_CC_XPLINK         // z/OS XPLINK
+    ANVIL_CC_MVS            // MVS linkage (mainframe)
 } anvil_cc_t;
 ```
 
-Set per-function with `anvil_func_set_cc`. The x86 backend consumes
-cdecl/stdcall/fastcall; the x86_64 backend consumes SysV/Win64.
+Stored immutably in `ANVIL_TYPE_FUNC` through `anvil_type_func_cc`. The
+constructor canonicalizes DEFAULT/C aliases and rejects target-incompatible
+values: x86 supports cdecl/stdcall/fastcall, x86-64 selects SysV or Win64 from
+the target ABI, ARM/PPC use their SysV ABI class, and mainframe uses MVS.
 
 ### anvil_syntax_t
 

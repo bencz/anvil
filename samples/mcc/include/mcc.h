@@ -178,7 +178,12 @@ bool mcc_has_errors(mcc_context_t *ctx);
 
 /* Memory allocation (arena-based) */
 void *mcc_alloc(mcc_context_t *ctx, size_t size);
+void *mcc_alloc_array(mcc_context_t *ctx, size_t count,
+                      size_t element_size);
 void *mcc_realloc(mcc_context_t *ctx, void *ptr, size_t old_size, size_t new_size);
+void *mcc_realloc_array(mcc_context_t *ctx, void *ptr,
+                        size_t old_count, size_t new_count,
+                        size_t element_size);
 char *mcc_strdup(mcc_context_t *ctx, const char *str);
 
 /* Utility */

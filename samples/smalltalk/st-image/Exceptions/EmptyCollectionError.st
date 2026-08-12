@@ -1,0 +1,2 @@
+EmptyCollectionError := Error [
+]

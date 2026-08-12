@@ -36,7 +36,7 @@ mcc_macro_t *pp_lookup_macro(mcc_preprocessor_t *pp, const char *name);
 bool pp_is_expanding(mcc_preprocessor_t *pp, const char *name);
 
 /* Push/pop macro expansion stack */
-void pp_push_expanding(mcc_preprocessor_t *pp, const char *name);
+bool pp_push_expanding(mcc_preprocessor_t *pp, const char *name);
 void pp_pop_expanding(mcc_preprocessor_t *pp);
 
 /* Expand a macro */
@@ -110,7 +110,7 @@ FILE *pp_find_include_file(mcc_preprocessor_t *pp, const char *filename,
                            bool is_system, char *path_out, size_t path_sz);
 
 /* Save current lexer state to include stack */
-void pp_push_include(mcc_preprocessor_t *pp);
+bool pp_push_include(mcc_preprocessor_t *pp);
 
 /* Restore lexer state from include stack */
 bool pp_pop_include(mcc_preprocessor_t *pp);

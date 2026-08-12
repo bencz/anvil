@@ -533,6 +533,21 @@ static anvil_mir_vreg_t lower_symbol_address(x64_mir_lower_t *lower,
     return vreg;
 }
 
+static anvil_mir_vreg_t lower_reloc_address(x64_mir_lower_t *lower,
+                                             anvil_value_t *value)
+{
+    const char *symbol = value && value->data.reloc.symbol
+                             ? value->data.reloc.symbol->name : NULL;
+    if (!symbol || !symbol[0]) return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(
+        lower->mir, ANVIL_MIR_REG_GPR, 64, false);
+    if (vreg == ANVIL_MIR_NO_VREG ||
+        !anvil_mir_add_instr_symbol_imm(
+            lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol,
+            value->data.reloc.addend)) return ANVIL_MIR_NO_VREG;
+    return vreg;
+}
+
 static anvil_mir_vreg_t lower_string_address(x64_mir_lower_t *lower,
                                              anvil_value_t *value)
 {
@@ -570,6 +585,9 @@ static anvil_mir_vreg_t lower_value(x64_mir_lower_t *lower,
             return lower_const_value(lower, value);
         case ANVIL_VAL_CONST_STRING:
             return lower_string_address(lower, value);
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+            return lower_reloc_address(lower, value);
         case ANVIL_VAL_FUNC:
             if (value->data.func && value->data.func->name) {
                 return lower_symbol_address(lower, value->data.func->name);
@@ -1079,7 +1097,14 @@ static int x64_call_num_vector_args(anvil_type_t *fn_type, anvil_instr_t *instr)
 
 static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
 {
-    const anvil_x64_abi_desc_t *desc = lower->desc;
+    const anvil_x64_abi_desc_t *desc = NULL;
+    if (instr->call_cc == ANVIL_CC_WIN64) {
+        desc = anvil_x64_get_abi_desc(ANVIL_ABI_WIN64);
+    } else if (instr->call_cc == ANVIL_CC_SYSV && !lower->desc->is_win64) {
+        /* Darwin uses the SysV register convention with Mach-O spelling. */
+        desc = lower->desc;
+    }
+    if (!desc || desc->is_win64 != lower->desc->is_win64) return false;
     if (instr->num_operands == 0) return false;
 
     anvil_value_t *callee = instr->operands[0];
@@ -1214,13 +1239,9 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
         }
     }
 
-    bool emit_ok = is_variadic
-        ? anvil_mir_add_instr_symbol_imm(lower->mir, ANVIL_MIR_OP_CALL,
-                                         call_def, call_uses,
-                                         num_call_uses, symbol, vector_args)
-        : anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                     call_def, call_uses,
-                                     num_call_uses, symbol);
+    bool emit_ok = anvil_mir_add_call(lower->mir, call_def, call_uses,
+                                      num_call_uses, symbol, instr->call_cc,
+                                      is_variadic, vector_args);
     free(call_uses);
     if (!emit_ok) return false;
 
@@ -1921,9 +1942,10 @@ static anvil_abi_t x64_lower_abi(anvil_func_t *func)
     if (func && func->parent && func->parent->ctx) {
         abi = func->parent->ctx->abi;
     }
-    if (func) {
-        if (func->cc == ANVIL_CC_WIN64) abi = ANVIL_ABI_WIN64;
-        else if (func->cc == ANVIL_CC_SYSV) abi = ANVIL_ABI_SYSV;
+    if (func && func->type && func->type->kind == ANVIL_TYPE_FUNC) {
+        if (func->type->data.func.cc == ANVIL_CC_WIN64) abi = ANVIL_ABI_WIN64;
+        else if (func->type->data.func.cc == ANVIL_CC_SYSV &&
+                 abi != ANVIL_ABI_DARWIN) abi = ANVIL_ABI_SYSV;
     }
     if (abi == ANVIL_ABI_DEFAULT) abi = ANVIL_ABI_SYSV;
     return abi;
@@ -1931,7 +1953,10 @@ static anvil_abi_t x64_lower_abi(anvil_func_t *func)
 
 anvil_mir_func_t *anvil_x86_64_lower_func_to_mir(anvil_func_t *func)
 {
-    if (!func || func->is_declaration) return NULL;
+    if (!func || func->is_declaration || !func->type ||
+        func->type->kind != ANVIL_TYPE_FUNC ||
+        (func->type->data.func.cc != ANVIL_CC_SYSV &&
+         func->type->data.func.cc != ANVIL_CC_WIN64)) return NULL;
 
     const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(x64_lower_abi(func));
     if (!desc) return NULL;
@@ -2130,6 +2155,12 @@ static bool x64_legal_call(const anvil_mir_func_t *mir,
                            char *error,
                            size_t error_len)
 {
+    if (instr->call_cc != ANVIL_CC_SYSV &&
+        instr->call_cc != ANVIL_CC_WIN64) {
+        return x64_legal_fail(error, error_len,
+                              "x86-64 MIR call %zu uses an unsupported calling convention",
+                              instr_index);
+    }
     if (instr->def != ANVIL_MIR_NO_VREG) {
         const anvil_mir_vreg_info_t *def =
             x64_legal_vreg_info(mir, instr->def, instr_index,
@@ -3346,11 +3377,15 @@ static void x64_emit_symbol_addr(x64_mir_emit_t *emit,
     const char *prefix = x64_symbol_ref_prefix(emit, info->symbol);
     const char *dst = x64_gpr_name(dst_phys, 8);
     if (x64_symbol_is_local(info->symbol)) {
-        anvil_strbuf_appendf(&emit->code, "\tleaq %s%s(%%rip), %%%s\n",
-                             prefix, info->symbol, dst);
+        anvil_strbuf_appendf(&emit->code, "\tleaq %s%s", prefix, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_appendf(&emit->code, "(%%rip), %%%s\n", dst);
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tleaq %s%s(%%rip), %%%s\n",
-                             prefix, info->symbol, dst);
+        anvil_strbuf_appendf(&emit->code, "\tleaq %s%s", prefix, info->symbol);
+        if (info->has_imm && info->imm != 0)
+            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
+        anvil_strbuf_appendf(&emit->code, "(%%rip), %%%s\n", dst);
     }
 }
 
@@ -3528,6 +3563,13 @@ static void x64_emit_call(x64_mir_emit_t *emit,
                           size_t instr_index,
                           const anvil_mir_instr_info_t *info)
 {
+    if ((info->call_cc == ANVIL_CC_WIN64 && !emit->desc->is_win64) ||
+        (info->call_cc == ANVIL_CC_SYSV && emit->desc->is_win64) ||
+        (info->call_cc != ANVIL_CC_SYSV &&
+         info->call_cc != ANVIL_CC_WIN64)) {
+        emit->failed = true;
+        return;
+    }
     bool direct = info->symbol && info->symbol[0];
     if (!emit->desc->is_win64 && info->has_imm) {
         if (info->imm < 0 || info->imm > 8) {

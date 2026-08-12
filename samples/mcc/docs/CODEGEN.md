@@ -31,7 +31,8 @@ The code generator is organized into modular files in `src/codegen/`:
 
 **codegen_type.c** (Type Conversion)
 - `codegen_type()`: Convert MCC type to ANVIL type
-- `codegen_sizeof()`: Calculate sizeof using ANVIL arch info for correct pointer sizes
+- validates that every lowered object preserves the frontend's ANVIL-derived
+  size and ABI alignment
 - Handles all type kinds: void, char, short, int, long, float, double, pointer, array, struct, union, function
 
 **codegen_expr.c** (Expression Generation)
@@ -342,13 +343,14 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
              * or a function pointer loaded from memory. */
             anvil_value_t *callee = codegen_expr(cg, expr->data.call_expr.func);
             mcc_type_t *callee_type = codegen_callee_function_type(expr->data.call_expr.func);
-            anvil_type_t *func_type = codegen_type(cg, callee_type);
-
             /* Generate arguments and convert them to the fixed parameter type
              * or to the default variadic argument type. */
             anvil_value_t **args = /* ... */;
-            return anvil_build_call(cg->anvil_ctx, func_type, callee,
-                                    args, num_args, "call");
+            anvil_value_t *result = NULL;
+            if (!anvil_build_call_checked(cg->anvil_ctx, callee, args,
+                                          num_args, "call", &result))
+                return NULL;
+            return result;
         }
         
         case AST_MEMBER_EXPR: {
@@ -807,33 +809,15 @@ The `current_func_name` is set when generating a function:
 cg->current_func_name = func->data.func_decl.name;
 ```
 
-### Architecture-Specific sizeof
+### Target DataLayout and `sizeof`
 
-The `sizeof` operator now uses `codegen_sizeof()` which queries ANVIL for the target architecture's pointer size:
-
-```c
-/* In codegen_type.c */
-size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type)
-{
-    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
-    int ptr_size = arch ? arch->ptr_size : 8;
-    
-    switch (type->kind) {
-        case TYPE_POINTER:
-            return ptr_size;  /* Use target architecture's pointer size */
-        case TYPE_ARRAY:
-            return codegen_sizeof(cg, type->data.array.element) * type->data.array.length;
-        case TYPE_STRUCT:
-        case TYPE_UNION:
-            /* Recalculate with correct pointer sizes */
-            /* ... */
-        default:
-            return type->size;
-    }
-}
-```
-
-This ensures correct `sizeof` results when cross-compiling (e.g., compiling for 32-bit S/370 on a 64-bit host, or for 31-bit S/390 on x86_64).
+`mcc_type_context_create()` selects the requested ANVIL target/ABI and copies
+its public `anvil_data_layout_t`. Primitive, pointer, array, struct, union and
+enum layouts are computed once from that contract during parsing. `sizeof`,
+`_Alignof`, constant evaluation, field offsets and code generation all consume
+that same stored layout. `codegen_type()` additionally compares each composite
+ANVIL type against the frontend size/alignment and rejects any divergence.
+There is no host-size fallback or codegen-side `sizeof` heuristic.
 
 ### Enum Constants in Expressions
 

@@ -6,6 +6,7 @@
  */
 
 #include "codegen_internal.h"
+#include <limits.h>
 
 static anvil_value_t *codegen_zero_initializer(mcc_codegen_t *cg,
                                                 mcc_type_t *type)
@@ -25,8 +26,13 @@ static anvil_value_t *codegen_zero_initializer(mcc_codegen_t *cg,
         return anvil_const_null(cg->anvil_ctx, anvil_type);
     if (type->kind == TYPE_ARRAY) {
         size_t count = type->data.array.length;
+        if (count > SIZE_MAX / sizeof(anvil_value_t *)) {
+            mcc_error(cg->mcc_ctx, "initializer element table overflow");
+            return NULL;
+        }
         anvil_value_t **elements = count
             ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+        if (count && !elements) return NULL;
         for (size_t i = 0; i < count; i++) {
             elements[i] = codegen_zero_initializer(cg, type->data.array.element);
             if (!elements[i]) return NULL;
@@ -75,6 +81,10 @@ static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
     anvil_type_t *anvil_type = codegen_type(cg, type);
     if (type->kind == TYPE_ARRAY) {
         size_t count = type->data.array.length;
+        if (count > SIZE_MAX / sizeof(anvil_value_t *)) {
+            mcc_error(cg->mcc_ctx, "initializer element table overflow");
+            return NULL;
+        }
         if (init->kind == AST_STRING_LIT &&
             type->data.array.element->kind == TYPE_CHAR) {
             size_t string_len = strlen(init->data.string_lit.value);
@@ -83,6 +93,7 @@ static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
                                                    type->data.array.element);
             anvil_value_t **elements = count
                 ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+            if (count && !elements) return NULL;
             for (size_t i = 0; i < count; i++) {
                 unsigned char byte = i < string_len
                     ? (unsigned char)init->data.string_lit.value[i] : 0;
@@ -96,6 +107,7 @@ static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
         if (init->data.init_list.num_exprs > count) return NULL;
         anvil_value_t **elements = count
             ? mcc_alloc(cg->mcc_ctx, count * sizeof(*elements)) : NULL;
+        if (count && !elements) return NULL;
         for (size_t i = 0; i < count; i++) {
             elements[i] = i < init->data.init_list.num_exprs
                 ? codegen_global_initializer(cg, type->data.array.element,
@@ -118,7 +130,7 @@ static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
                 arg = init->data.sizeof_expr.expr_arg->type;
             if (arg)
                 return codegen_const_int_for_type(cg, anvil_type,
-                                                  (int64_t)codegen_sizeof(cg, arg));
+                                                  (int64_t)mcc_type_sizeof(arg));
         }
         if (init->kind == AST_ALIGNOF_EXPR) {
             mcc_type_t *arg = init->data.alignof_expr.type_arg;
@@ -127,7 +139,7 @@ static anvil_value_t *codegen_global_initializer(mcc_codegen_t *cg,
             if (arg)
                 return codegen_const_int_for_type(
                     cg, anvil_type,
-                    (int64_t)anvil_type_align(codegen_type(cg, arg)));
+                    (int64_t)mcc_type_alignof(arg));
         }
     }
     if (mcc_type_is_floating(type) && init->kind == AST_FLOAT_LIT) {
@@ -155,19 +167,29 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
     
     /* Create function type */
     anvil_type_t *ret_type = codegen_type(cg, func->data.func_decl.func_type);
+    if (!ret_type || func->data.func_decl.num_params > (size_t)INT_MAX ||
+        func->data.func_decl.num_params >
+            SIZE_MAX / sizeof(anvil_type_t *)) {
+        if (ret_type) mcc_error(cg->mcc_ctx,
+                                "function parameter table overflow");
+        return;
+    }
     int num_params = (int)func->data.func_decl.num_params;
     anvil_type_t **param_types = NULL;
     
     if (num_params > 0) {
         param_types = mcc_alloc(cg->mcc_ctx, num_params * sizeof(anvil_type_t*));
+        if (!param_types) return;
         for (int i = 0; i < num_params; i++) {
             mcc_ast_node_t *p = func->data.func_decl.params[i];
             param_types[i] = codegen_param_type(cg, p->data.param_decl.param_type);
+            if (!param_types[i]) return;
         }
     }
     
     anvil_type_t *func_type = anvil_type_func(cg->anvil_ctx, ret_type, param_types,
                                                num_params, false);
+    if (!func_type) return;
     
     /* Create function */
     anvil_linkage_t linkage = func->data.func_decl.is_static ? 

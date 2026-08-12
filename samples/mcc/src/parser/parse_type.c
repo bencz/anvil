@@ -12,6 +12,7 @@
  */
 
 #include "parse_internal.h"
+#include <limits.h>
 
 static mcc_type_t *parse_primitive_layout(mcc_parser_t *p, int type_spec,
                                           int long_count, bool is_signed,
@@ -263,7 +264,13 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 parse_advance(p); /* consume ';' */
                 
                 /* Add anonymous member */
+                if (num_fields >= PARSE_MAX_FIELDS) {
+                    mcc_error_at(p->ctx, loc,
+                                 "record exceeds %d fields", PARSE_MAX_FIELDS);
+                    return NULL;
+                }
                 mcc_struct_field_t *field = mcc_alloc(p->ctx, sizeof(mcc_struct_field_t));
+                if (!field) return NULL;
                 field->name = NULL; /* Anonymous */
                 field->type = field_base_type;
                 field->next = NULL;
@@ -395,7 +402,13 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 }
                 
             add_field: ;
+                if (num_fields >= PARSE_MAX_FIELDS) {
+                    mcc_error_at(p->ctx, loc,
+                                 "record exceeds %d fields", PARSE_MAX_FIELDS);
+                    return NULL;
+                }
                 mcc_struct_field_t *field = mcc_alloc(p->ctx, sizeof(mcc_struct_field_t));
+                if (!field) return NULL;
                 field->name = field_name_str;
                 field->type = field_type;
                 field->bitfield_width = bitfield_width;
@@ -477,16 +490,14 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
     /* Get tag name if present */
     const char *tag = NULL;
     if (parse_check(p, TOK_IDENT)) {
-        tag = mcc_strdup(p->ctx, p->peek->text);
+        tag = p->peek->text;
         parse_advance(p);
     }
     
-    mcc_type_t *etype = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-    etype->kind = TYPE_ENUM;
-    etype->data.enumeration.tag = tag;
-    etype->data.enumeration.constants = NULL;
-    etype->data.enumeration.num_constants = 0;
-    etype->data.enumeration.is_complete = false;
+    /* Never bypass the target-aware type constructor: enum has the selected
+     * target's exact int layout, including its ABI alignment. */
+    mcc_type_t *etype = mcc_type_enum(p->types, tag);
+    if (!etype) return NULL;
     
     if (parse_match(p, TOK_LBRACE)) {
         /* Parse enumerators */
@@ -505,19 +516,33 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
                     value = val_expr->data.int_lit.value;
                 }
             }
+            if (value < INT_MIN || value > INT_MAX) {
+                mcc_error_at(p->ctx, name_tok->location,
+                             "enumerator value is not representable as int");
+            }
             
             /* Create enum constant */
             mcc_enum_const_t *econst = mcc_alloc(p->ctx, sizeof(mcc_enum_const_t));
+            if (!econst) return etype;
             econst->name = mcc_strdup(p->ctx, name_tok->text);
+            if (!econst->name) return etype;
             econst->value = value;
             econst->next = NULL;
             
             if (!constants) constants = econst;
             if (const_tail) const_tail->next = econst;
             const_tail = econst;
+            if (num_constants == INT_MAX) {
+                mcc_fatal(p->ctx, "enum constant count overflow");
+                return etype;
+            }
             num_constants++;
             
-            next_value = value + 1;
+            if (value == INT_MAX) {
+                next_value = (int64_t)INT_MAX + 1;
+            } else {
+                next_value = value + 1;
+            }
             
             if (!parse_match(p, TOK_COMMA)) {
                 break;
@@ -847,38 +872,14 @@ done:
     
     /* Handle _Complex types */
     if (is_complex) {
-        type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-        if (!type) return NULL;
-        switch (type_spec) {
-            case 6: /* float _Complex */
-                type->kind = TYPE_COMPLEX_FLOAT;
-                type->size = 8;   /* 2 * sizeof(float) */
-                type->align = 4;
-                break;
-            case 7: /* double _Complex */
-                type->kind = TYPE_COMPLEX_DOUBLE;
-                type->size = 16;  /* 2 * sizeof(double) */
-                type->align = 8;
-                break;
-            case 5: /* long double _Complex (long_count == 1 && type_spec == 7) */
-                if (long_count > 0) {
-                    type->kind = TYPE_COMPLEX_LDOUBLE;
-                    type->size = 16;
-                    type->align = 8;
-                } else {
-                    /* Default to double _Complex */
-                    type->kind = TYPE_COMPLEX_DOUBLE;
-                    type->size = 16;
-                    type->align = 8;
-                }
-                break;
-            default:
-                /* Default to double _Complex */
-                type->kind = TYPE_COMPLEX_DOUBLE;
-                type->size = 16;
-                type->align = 8;
-                break;
-        }
+        mcc_type_t *base = type_spec == 6
+            ? mcc_type_complex_float(p->types)
+            : long_count > 0
+                ? mcc_type_complex_ldouble(p->types)
+                : mcc_type_complex_double(p->types);
+        type = mcc_alloc(p->ctx, sizeof(*type));
+        if (!type || !base) return NULL;
+        *type = *base;
     } else {
         type = parse_primitive_layout(p, type_spec, long_count,
                                       is_signed, is_unsigned);
@@ -888,8 +889,6 @@ done:
     /* Handle long double _Complex specially */
     if (is_complex && long_count > 0 && type_spec == 7) {
         type->kind = TYPE_COMPLEX_LDOUBLE;
-        type->size = 16;
-        type->align = 8;
     }
     if (!is_complex && long_count > 0 && type_spec == 7) {
         mcc_error_at(p->ctx, p->current ? p->current->location
@@ -1014,16 +1013,24 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             }
             /* void* or similar - parse as parameter type */
             mcc_type_t *param_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+            if (!param_type) return NULL;
             param_type->kind = TYPE_VOID;
             param_type = parse_abstract_declarator(p, param_type);
             
             mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            if (!param) return NULL;
             param->name = NULL;
             param->type = param_type;
             param->next = NULL;
             params = param;
             param_tail = param;
             num_params++;
+            if (num_params > PARSE_MAX_PARAMS) {
+                mcc_error_at(p->ctx, p->peek->location,
+                             "function exceeds %d parameters",
+                             PARSE_MAX_PARAMS);
+                return NULL;
+            }
             
             if (!parse_match(p, TOK_COMMA)) {
                 goto end_params;
@@ -1083,9 +1090,12 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                         }
                     }
                     parse_expect(p, TOK_RBRACKET, "]");
-                    if (num_dims < 32) {
-                        array_dims[num_dims++] = dim;
+                    if (num_dims >= 32) {
+                        mcc_error_at(p->ctx, p->peek->location,
+                                     "array declarator exceeds 32 dimensions");
+                        return NULL;
                     }
+                    array_dims[num_dims++] = dim;
                 }
                 
                 if (num_dims > 0) {
@@ -1108,6 +1118,7 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             }
             
             mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            if (!param) return NULL;
             param->name = param_name;
             param->type = param_type;
             param->next = NULL;
@@ -1116,6 +1127,12 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             if (param_tail) param_tail->next = param;
             param_tail = param;
             num_params++;
+            if (num_params > PARSE_MAX_PARAMS) {
+                mcc_error_at(p->ctx, p->peek->location,
+                             "function exceeds %d parameters",
+                             PARSE_MAX_PARAMS);
+                return NULL;
+            }
             
         } while (parse_match(p, TOK_COMMA) && !parse_check(p, TOK_ELLIPSIS));
         
@@ -1129,6 +1146,7 @@ end_params:
     parse_expect(p, TOK_RPAREN, ")");
     
     mcc_type_t *func = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+    if (!func) return NULL;
     func->kind = TYPE_FUNCTION;
     func->data.function.return_type = return_type;
     func->data.function.params = params;
@@ -1339,12 +1357,15 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
                 }
             }
             parse_expect(p, TOK_RBRACKET, "]");
-            if (num_dims < 32) {
-                array_dims[num_dims]  = dim;
-                dim_exprs[num_dims]   = dim_expr;
-                dim_is_vla[num_dims]  = is_vla;
-                num_dims++;
+            if (num_dims >= 32) {
+                mcc_error_at(p->ctx, p->peek->location,
+                             "array declarator exceeds 32 dimensions");
+                return (parse_declarator_result_t){ NULL, result.name };
             }
+            array_dims[num_dims]  = dim;
+            dim_exprs[num_dims]   = dim_expr;
+            dim_is_vla[num_dims]  = is_vla;
+            num_dims++;
         } else if (parse_match(p, TOK_LPAREN)) {
             result.type = parse_function_suffix(p, result.type);
         } else {

@@ -105,9 +105,62 @@ TESTS = \
 	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
 	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression \
 	$(BUILD_DIR)/tests/fcmp_backend_regression \
-	$(BUILD_DIR)/tests/typed_gep_backend_regression
+	$(BUILD_DIR)/tests/typed_gep_backend_regression \
+	$(BUILD_DIR)/tests/call_reloc_core_regression \
+	$(BUILD_DIR)/tests/smalltalk_lexer_regression \
+	$(BUILD_DIR)/tests/smalltalk_ast_regression \
+	$(BUILD_DIR)/tests/smalltalk_parser_regression \
+	$(BUILD_DIR)/tests/smalltalk_value_regression \
+	$(BUILD_DIR)/tests/smalltalk_selector_regression \
+	$(BUILD_DIR)/tests/smalltalk_sema_regression \
+	$(BUILD_DIR)/tests/smalltalk_source_bundle_regression \
+	$(BUILD_DIR)/tests/smalltalk_class_graph_regression \
+	$(BUILD_DIR)/tests/smalltalk_image_layout_regression \
+	$(BUILD_DIR)/tests/smalltalk_image_regression \
+	$(BUILD_DIR)/tests/smalltalk_examples_regression \
+	$(BUILD_DIR)/tests/smalltalk_primitive_regression \
+	$(BUILD_DIR)/tests/smalltalk_runtime_regression \
+	$(BUILD_DIR)/tests/smalltalk_core_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_lookup_regression \
+	$(BUILD_DIR)/tests/smalltalk_send_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_image_runtime_regression \
+	$(BUILD_DIR)/tests/smalltalk_primitive_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_heap_regression \
+	$(BUILD_DIR)/tests/smalltalk_heap_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_float_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_integer_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_integer_primitive_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_stream_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_stream_primitive_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_string_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_string_primitive_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_symbol_intern_regression \
+	$(BUILD_DIR)/tests/smalltalk_control_regression \
+	$(BUILD_DIR)/tests/smalltalk_control_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_control_gc_regression \
+	$(BUILD_DIR)/tests/smalltalk_closure_bridge_regression \
+	$(BUILD_DIR)/tests/smalltalk_block_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_exception_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_reflection_primitives_regression \
+	$(BUILD_DIR)/tests/smalltalk_reflection_lower_regression \
+	$(BUILD_DIR)/tests/smalltalk_exception_lower_regression \
+	$(BUILD_DIR)/tests/smalltalk_dnu_lower_regression \
+	$(BUILD_DIR)/tests/smalltalk_lower_regression \
+	$(BUILD_DIR)/tests/smalltalk_image_emit_regression \
+	$(BUILD_DIR)/tests/smalltalk_aot_compile_regression \
+	$(BUILD_DIR)/tests/smalltalk_artifact_bundle_regression \
+	$(BUILD_DIR)/tests/smalltalk_artifact_materialize_regression \
+	$(BUILD_DIR)/tests/smalltalk_application_materialize_regression \
+	$(BUILD_DIR)/tests/smalltalk_application_aot_regression \
+	$(BUILD_DIR)/tests/smalltalk_aot_toolchain_regression \
+	$(BUILD_DIR)/tests/smalltalk_application_samples_regression \
+	$(BUILD_DIR)/tests/smalltalk_dispatch_regression
 
-.PHONY: all clean lib examples tests test-win64-abi test-fcmp-i1-runtime test-sanitize test-valgrind install examples-runtime test-examples clean-examples-runtime examples-advanced test-examples-advanced clean-examples-advanced
+.PHONY: all clean lib examples tests smalltalk-aotc smalltalk-aot-link \
+	smalltalk-runtime smalltalk-app test-win64-abi test-fcmp-i1-runtime \
+	test-sanitize test-valgrind install examples-runtime test-examples \
+	clean-examples-runtime examples-advanced test-examples-advanced \
+	clean-examples-advanced
 
 all: lib examples
 
@@ -150,7 +203,7 @@ test-sanitize:
 		CFLAGS="-Wall -Wextra -std=c11 -D_GNU_SOURCE -I./include -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDFLAGS="-L./lib/sanitize -fsanitize=address,undefined" tests
 
-test-valgrind: tests
+test-valgrind: lib $(TESTS)
 	@for test in $(TESTS); do \
 		echo "Valgrind $$test"; \
 		valgrind --quiet --leak-check=full --show-leak-kinds=definite,indirect \
@@ -167,6 +220,1345 @@ test-fcmp-i1-runtime: $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
 $(BUILD_DIR)/tests/%: tests/%.c $(LIB_PATH)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_lexer_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/tests/lexer_test.c \
+		samples/smalltalk/include/st_lexer.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/tests/lexer_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_ast_regression: \
+		samples/smalltalk/src/frontend/ast.c samples/smalltalk/tests/ast_test.c \
+		samples/smalltalk/include/st_ast.h samples/smalltalk/include/st_lexer.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/ast.c samples/smalltalk/tests/ast_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_parser_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/tests/parser_test.c \
+		samples/smalltalk/include/st_lexer.h \
+		samples/smalltalk/include/st_ast.h \
+		samples/smalltalk/include/st_parser.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/tests/parser_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_value_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/tests/value_test.c \
+		samples/smalltalk/include/st_value.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/tests/value_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_selector_regression: \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/tests/selector_test.c \
+		samples/smalltalk/include/st_selector.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/tests/selector_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_sema_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/tests/sema_test.c \
+		samples/smalltalk/include/st_lexer.h \
+		samples/smalltalk/include/st_ast.h \
+		samples/smalltalk/include/st_parser.h \
+		samples/smalltalk/include/st_sema.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/tests/sema_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_source_bundle_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/tests/source_bundle_test.c \
+		samples/smalltalk/include/st_lexer.h \
+		samples/smalltalk/include/st_ast.h \
+		samples/smalltalk/include/st_parser.h \
+		samples/smalltalk/include/st_source_bundle.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/tests/source_bundle_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_class_graph_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/class_graph_test.c \
+		samples/smalltalk/include/st_lexer.h \
+		samples/smalltalk/include/st_ast.h \
+		samples/smalltalk/include/st_parser.h \
+		samples/smalltalk/include/st_sema.h \
+		samples/smalltalk/include/st_class_graph.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/class_graph_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_image_layout_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/tests/image_layout_test.c \
+		samples/smalltalk/include/st_image_layout.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/tests/image_layout_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_image_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/image_test.c \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_class_graph.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/image_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_examples_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/examples_test.c \
+		samples/smalltalk/examples/hello/application.manifest \
+		samples/smalltalk/examples/hello/HelloApplication.st \
+		samples/smalltalk/examples/closures/application.manifest \
+		samples/smalltalk/examples/closures/ClosuresApplication.st \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_class_graph.h \
+		samples/smalltalk/include/st_sema.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/tests/examples_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_primitive_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/tests/primitive_test.c \
+		samples/smalltalk/include/st_lexer.h \
+		samples/smalltalk/include/st_ast.h \
+		samples/smalltalk/include/st_parser.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_primitive.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/tests/primitive_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_runtime_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/tests/runtime_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_dispatch.h \
+		samples/smalltalk/include/st_runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/tests/runtime_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_core_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/tests/core_primitives_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_primitive.h \
+		samples/smalltalk/include/st_core_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/tests/core_primitives_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_lookup_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/tests/lookup_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_lookup.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/tests/lookup_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_send_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/tests/send_bridge_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_lookup.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_control.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/tests/send_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_image_runtime_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/tests/image_runtime_test.c \
+		samples/smalltalk/include/st_image_runtime.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_heap.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/tests/image_runtime_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_primitive_bridge_regression: \
+		samples/smalltalk/src/runtime/primitives/primitive_bridge.c \
+		samples/smalltalk/tests/primitive_bridge_test.c \
+		samples/smalltalk/include/st_primitive_bridge.h \
+		samples/smalltalk/include/st_core_primitives.h \
+		samples/smalltalk/include/st_dispatch.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/primitives/primitive_bridge.c \
+		samples/smalltalk/tests/primitive_bridge_test.c \
+		-o $@ $(LDFLAGS)
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_heap_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/tests/heap_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_heap.h \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/tests/heap_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_heap_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/tests/heap_primitives_test.c \
+		samples/smalltalk/include/st_heap_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/tests/heap_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_float_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/tests/float_primitives_test.c \
+		samples/smalltalk/include/st_float_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/tests/float_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_integer_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/tests/integer_primitives_test.c \
+		samples/smalltalk/tests/integer_differential_oracle.py \
+		samples/smalltalk/src/runtime/primitives/float_primitives_internal.h \
+		samples/smalltalk/include/st_integer_primitives.h \
+		samples/smalltalk/include/st_float_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/tests/integer_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_integer_primitive_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitive_bridge.c \
+		samples/smalltalk/tests/integer_primitive_bridge_test.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives_internal.h \
+		samples/smalltalk/include/st_integer_primitives.h \
+		samples/smalltalk/include/st_send_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitive_bridge.c \
+		samples/smalltalk/tests/integer_primitive_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_stream_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/tests/stream_primitives_test.c \
+		samples/smalltalk/include/st_stream_primitives.h \
+		samples/smalltalk/include/st_float_primitives.h \
+		samples/smalltalk/include/st_heap_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/tests/stream_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_stream_primitive_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitive_bridge.c \
+		samples/smalltalk/tests/stream_primitive_bridge_test.c \
+		samples/smalltalk/include/st_stream_primitive_bridge.h \
+		samples/smalltalk/include/st_stream_primitives.h \
+		samples/smalltalk/include/st_send_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitive_bridge.c \
+		samples/smalltalk/tests/stream_primitive_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_string_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/tests/string_primitives_test.c \
+		samples/smalltalk/include/st_string_primitives.h \
+		samples/smalltalk/include/st_block_primitives.h \
+		samples/smalltalk/tests/block_primitives_aot_harness.c \
+		samples/smalltalk/include/st_stream_primitives.h \
+		samples/smalltalk/include/st_float_primitives.h \
+		samples/smalltalk/include/st_heap_primitives.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/tests/string_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_string_primitive_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitive_bridge.c \
+		samples/smalltalk/tests/string_primitive_bridge_test.c \
+		samples/smalltalk/include/st_string_primitive_bridge.h \
+		samples/smalltalk/include/st_string_primitives.h \
+		samples/smalltalk/include/st_send_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitive_bridge.c \
+		samples/smalltalk/tests/string_primitive_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_symbol_intern_regression: \
+		samples/smalltalk/src/frontend/lexer.c \
+		samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/symbol_intern.c \
+		samples/smalltalk/tests/symbol_intern_test.c \
+		samples/smalltalk/include/st_symbol_intern.h \
+		samples/smalltalk/include/st_image_runtime.h \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_string_primitives.h \
+		samples/smalltalk/include/st_heap.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c \
+		samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/symbol_intern.c \
+		samples/smalltalk/tests/symbol_intern_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_control_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/tests/control_test.c \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_dispatch.h \
+		samples/smalltalk/include/st_value.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/tests/control_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_control_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/tests/control_bridge_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_lookup.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_control_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/tests/control_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_control_gc_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/tests/control_gc_test.c \
+		samples/smalltalk/include/st_value.h \
+		samples/smalltalk/include/st_runtime.h \
+		samples/smalltalk/include/st_lookup.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_control_roots.h \
+		samples/smalltalk/include/st_heap.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/tests/control_gc_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_closure_bridge_regression: \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/tests/closure_bridge_test.c \
+		samples/smalltalk/include/st_closure_bridge.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_heap.h \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_control_bridge.h \
+		samples/smalltalk/include/st_control_roots.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/tests/closure_bridge_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_block_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitive_bridge.c \
+		samples/smalltalk/tests/block_primitives_test.c \
+		samples/smalltalk/include/st_block_primitives.h \
+		samples/smalltalk/include/st_block_primitive_bridge.h \
+		samples/smalltalk/include/st_closure_bridge.h \
+		samples/smalltalk/include/st_source_bundle.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitive_bridge.c \
+		samples/smalltalk/tests/block_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_exception_primitives_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitive_bridge.c \
+		samples/smalltalk/tests/exception_primitives_test.c \
+		samples/smalltalk/include/st_exception_primitives.h \
+		samples/smalltalk/include/st_exception_primitive_bridge.h \
+		samples/smalltalk/include/st_closure_bridge.h \
+		samples/smalltalk/include/st_control.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitive_bridge.c \
+		samples/smalltalk/tests/exception_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_reflection_primitives_regression: \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitive_bridge.c \
+		samples/smalltalk/tests/reflection_primitives_test.c \
+		samples/smalltalk/include/st_heap_primitives.h \
+		samples/smalltalk/include/st_reflection_primitives.h \
+		samples/smalltalk/include/st_reflection_primitive_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitive_bridge.c \
+		samples/smalltalk/tests/reflection_primitives_test.c \
+		-o $@ $(LDFLAGS) -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_reflection_lower_regression: \
+		samples/smalltalk/src/frontend/lexer.c \
+		samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c \
+		samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/tests/reflection_lower_test.c \
+		samples/smalltalk/tests/reflection_primitives_aot_harness.c \
+		samples/smalltalk/include/st_reflection_primitives.h \
+		samples/smalltalk/include/st_lower.h $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c \
+		samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c \
+		samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/tests/reflection_lower_test.c \
+		-o $@ $(LIB_PATH) $(LDFLAGS) -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_exception_lower_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/tests/exception_lower_test.c \
+		samples/smalltalk/tests/exception_primitives_aot_harness.c \
+		samples/smalltalk/include/st_exception_primitives.h \
+		samples/smalltalk/include/st_lower.h $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/tests/exception_lower_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_dnu_lower_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/tests/dnu_lower_test.c \
+		samples/smalltalk/tests/dnu_test.c samples/smalltalk/src/runtime/dnu.c \
+		samples/smalltalk/include/st_dnu.h samples/smalltalk/include/st_lower.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/tests/dnu_lower_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_lower_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitive_bridge.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives_internal.h \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/primitives/primitive_bridge.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitive_bridge.c \
+		samples/smalltalk/tests/lower_test.c \
+		samples/smalltalk/include/st_lower.h \
+		samples/smalltalk/include/st_class_graph.h \
+		samples/smalltalk/include/st_selector.h \
+		samples/smalltalk/include/st_primitive.h \
+		samples/smalltalk/include/st_core_primitives.h \
+		samples/smalltalk/include/st_heap_primitives.h \
+		samples/smalltalk/include/st_stream_primitives.h \
+		samples/smalltalk/include/st_string_primitives.h \
+		samples/smalltalk/include/st_float_primitives.h \
+		samples/smalltalk/include/st_float_primitive_bridge.h \
+		samples/smalltalk/include/st_integer_primitives.h \
+		samples/smalltalk/include/st_primitive_bridge.h \
+		samples/smalltalk/include/st_heap_primitive_bridge.h \
+		samples/smalltalk/include/st_send_bridge.h \
+		samples/smalltalk/include/st_control.h \
+		samples/smalltalk/include/st_control_roots.h \
+		samples/smalltalk/include/st_control_bridge.h \
+		samples/smalltalk/include/st_closure_bridge.h \
+		samples/smalltalk/include/st_dispatch.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/compiler/lower.c \
+		samples/smalltalk/tests/lower_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_image_emit_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/tests/image_emit_test.c \
+		samples/smalltalk/include/st_source_bundle.h \
+		samples/smalltalk/include/st_class_graph.h \
+		samples/smalltalk/include/st_selector.h \
+		samples/smalltalk/include/st_image_emit.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c \
+		samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/tests/image_emit_test.c \
+		-o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_aot_compile_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/runtime/control/control_bridge.c \
+		samples/smalltalk/src/runtime/primitives/primitive_bridge.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/tests/aot_compile_test.c \
+		samples/smalltalk/include/st_aot_compile.h \
+		samples/smalltalk/include/st_lower.h \
+		samples/smalltalk/include/st_image_emit.h \
+		samples/smalltalk/include/st_control_roots.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c \
+		samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/tests/aot_compile_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_artifact_bundle_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/tests/artifact_bundle_test.c \
+		samples/smalltalk/include/st_artifact_bundle.h \
+		samples/smalltalk/include/st_aot_compile.h \
+		samples/smalltalk/include/st_lower.h \
+		samples/smalltalk/include/st_image_emit.h \
+		samples/smalltalk/include/st_control_roots.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/tests/artifact_bundle_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_artifact_materialize_regression: \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/compiler/artifact_materialize.c \
+		samples/smalltalk/tests/artifact_materialize_test.c \
+		samples/smalltalk/include/st_artifact_bundle.h \
+		samples/smalltalk/include/st_artifact_materialize.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/compiler/artifact_materialize.c \
+		samples/smalltalk/tests/artifact_materialize_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_application_materialize_regression: \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/compiler/artifact_materialize.c \
+		samples/smalltalk/src/compiler/artifact_materialize_internal.h \
+		samples/smalltalk/src/compiler/application_materialize.c \
+		samples/smalltalk/tests/application_materialize_test.c \
+		samples/smalltalk/include/st_artifact_bundle.h \
+		samples/smalltalk/include/st_artifact_materialize.h \
+		samples/smalltalk/include/st_application_aot.h \
+		samples/smalltalk/include/st_application_materialize.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/compiler/artifact_materialize.c \
+		samples/smalltalk/src/compiler/application_materialize.c \
+		samples/smalltalk/tests/application_materialize_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_application_aot_regression: \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/src/compiler/application_launch.c \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/application_aot.c \
+		samples/smalltalk/tests/application_aot_test.c \
+		samples/smalltalk/include/st_application_aot.h \
+		samples/smalltalk/include/st_application_launch.h \
+		samples/smalltalk/include/st_product_primitives.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
+		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
+		samples/smalltalk/src/frontend/source_bundle.c \
+		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
+		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/control/control.c \
+		samples/smalltalk/src/runtime/control/control_roots.c \
+		samples/smalltalk/src/runtime/primitives/core_primitives.c \
+		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+		samples/smalltalk/src/runtime/primitives/float_primitives.c \
+		samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+		samples/smalltalk/src/runtime/primitives/string_primitives.c \
+		samples/smalltalk/src/runtime/primitives/block_primitives.c \
+		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c \
+		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
+		samples/smalltalk/src/runtime/image_runtime.c \
+		samples/smalltalk/src/runtime/closure_bridge.c \
+		samples/smalltalk/src/compiler/lower.c samples/smalltalk/src/compiler/image_layout.c \
+		samples/smalltalk/src/compiler/image_emit.c \
+		samples/smalltalk/src/compiler/aot_compile.c \
+		samples/smalltalk/src/compiler/application_launch.c \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/application_aot.c \
+		samples/smalltalk/tests/application_aot_test.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread -lm
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_aot_toolchain_regression: \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/tests/aot_toolchain_test.c \
+		samples/smalltalk/include/st_aot_toolchain.h \
+		samples/smalltalk/include/st_artifact_bundle.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/tests/aot_toolchain_test.c \
+		-o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+$(BUILD_DIR)/tests/smalltalk_application_samples_regression: \
+		$(BUILD_DIR)/samples/smalltalk/st-aotc \
+		$(BUILD_DIR)/samples/smalltalk/st-aot-link \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/src/product/application_startup.c \
+		samples/smalltalk/tests/hello_application_test.c \
+		samples/smalltalk/examples/support/native_main.c \
+		samples/smalltalk/examples/hello/HelloApplication.st \
+		samples/smalltalk/examples/hello/application.manifest \
+		samples/smalltalk/examples/closures/ClosuresApplication.st \
+		samples/smalltalk/examples/closures/application.manifest \
+		samples/smalltalk/include/st_aot_toolchain.h \
+		samples/smalltalk/include/st_application_startup.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		-DST_AOTC_PATH=\"$(abspath $(BUILD_DIR)/samples/smalltalk/st-aotc)\" \
+		-DST_AOT_LINK_PATH=\"$(abspath $(BUILD_DIR)/samples/smalltalk/st-aot-link)\" \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/tests/hello_application_test.c \
+		-o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+SMALLTALK_APPLICATION_COMPILER_SRCS = \
+	samples/smalltalk/src/frontend/lexer.c \
+	samples/smalltalk/src/frontend/ast.c \
+	samples/smalltalk/src/frontend/parser.c \
+	samples/smalltalk/src/frontend/sema.c \
+	samples/smalltalk/src/frontend/source_bundle.c \
+	samples/smalltalk/src/frontend/class_graph.c \
+	samples/smalltalk/src/frontend/selector.c \
+	samples/smalltalk/src/compiler/primitive.c \
+	samples/smalltalk/src/runtime/value.c \
+	samples/smalltalk/src/runtime/runtime.c \
+	samples/smalltalk/src/runtime/heap.c \
+	samples/smalltalk/src/runtime/control/control.c \
+	samples/smalltalk/src/runtime/control/control_roots.c \
+	samples/smalltalk/src/runtime/primitives/core_primitives.c \
+	samples/smalltalk/src/runtime/primitives/heap_primitives.c \
+	samples/smalltalk/src/runtime/primitives/float_primitives.c \
+	samples/smalltalk/src/runtime/primitives/integer_primitives.c \
+	samples/smalltalk/src/runtime/primitives/stream_primitives.c \
+	samples/smalltalk/src/runtime/primitives/string_primitives.c \
+	samples/smalltalk/src/runtime/primitives/block_primitives.c \
+	samples/smalltalk/src/runtime/primitives/exception_primitives.c \
+	samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+	samples/smalltalk/src/runtime/primitives/product_primitives.c \
+	samples/smalltalk/src/runtime/lookup.c \
+	samples/smalltalk/src/runtime/send_bridge.c \
+	samples/smalltalk/src/runtime/image_runtime.c \
+	samples/smalltalk/src/runtime/closure_bridge.c \
+	samples/smalltalk/src/compiler/lower.c \
+	samples/smalltalk/src/compiler/image_layout.c \
+	samples/smalltalk/src/compiler/image_emit.c \
+	samples/smalltalk/src/compiler/aot_compile.c \
+	samples/smalltalk/src/compiler/application_launch.c \
+	samples/smalltalk/src/compiler/artifact_bundle.c \
+	samples/smalltalk/src/compiler/artifact_materialize.c \
+	samples/smalltalk/src/compiler/application_materialize.c \
+	samples/smalltalk/src/product/application_aot.c
+
+smalltalk-aotc: $(BUILD_DIR)/samples/smalltalk/st-aotc
+
+$(BUILD_DIR)/samples/smalltalk/st-aotc: \
+		$(SMALLTALK_APPLICATION_COMPILER_SRCS) \
+		samples/smalltalk/tools/st_aotc.c \
+		samples/smalltalk/include/st_application_aot.h \
+		samples/smalltalk/include/st_application_materialize.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	CCACHE_DISABLE=1 $(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		$(SMALLTALK_APPLICATION_COMPILER_SRCS) \
+		samples/smalltalk/tools/st_aotc.c \
+		-o $@ $(LDFLAGS) -lanvil -pthread -lm
+	@echo "Built $@"
+
+SMALLTALK_PRODUCT_RUNTIME_SRCS = \
+	samples/smalltalk/src/compiler/primitive.c \
+	$(wildcard samples/smalltalk/src/runtime/*.c) \
+	$(wildcard samples/smalltalk/src/runtime/control/*.c) \
+	$(wildcard samples/smalltalk/src/runtime/primitives/*.c) \
+	samples/smalltalk/src/product/application_startup.c
+
+SMALLTALK_PRODUCT_RUNTIME = \
+	$(BUILD_DIR)/samples/smalltalk/smalltalk-runtime.o
+
+smalltalk-runtime: $(SMALLTALK_PRODUCT_RUNTIME)
+
+$(SMALLTALK_PRODUCT_RUNTIME): \
+		$(SMALLTALK_PRODUCT_RUNTIME_SRCS) \
+		$(wildcard samples/smalltalk/include/*.h)
+	@mkdir -p $(dir $@)
+	CCACHE_DISABLE=1 $(CC) $(CFLAGS) -Isamples/smalltalk/include -r \
+		$(SMALLTALK_PRODUCT_RUNTIME_SRCS) -o $@
+	@echo "Built $@"
+
+smalltalk-aot-link: $(BUILD_DIR)/samples/smalltalk/st-aot-link
+
+$(BUILD_DIR)/samples/smalltalk/st-aot-link: \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/tools/st_aot_link.c \
+		samples/smalltalk/include/st_aot_toolchain.h \
+		samples/smalltalk/include/st_artifact_bundle.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	CCACHE_DISABLE=1 $(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/compiler/artifact_bundle.c \
+		samples/smalltalk/src/product/aot_toolchain.c \
+		samples/smalltalk/tools/st_aot_link.c \
+		-o $@ $(LDFLAGS) -lanvil
+	@echo "Built $@"
+
+ST_IMAGE_DIR ?= samples/smalltalk/st-image
+ST_APP_OUTPUT_DIR ?= $(BUILD_DIR)/smalltalk
+ST_ENTRY_SELECTOR ?= run
+
+smalltalk-app: smalltalk-aotc smalltalk-aot-link smalltalk-runtime
+	@test -n "$(ST_APP_DIR)" || \
+		{ echo "ST_APP_DIR is required" >&2; exit 64; }
+	@test -n "$(ST_APP_NAME)" || \
+		{ echo "ST_APP_NAME is required" >&2; exit 64; }
+	@test -n "$(ST_ENTRY_CLASS)" || \
+		{ echo "ST_ENTRY_CLASS is required" >&2; exit 64; }
+	@mkdir -p "$(abspath $(ST_APP_OUTPUT_DIR))"
+	$(BUILD_DIR)/samples/smalltalk/st-aotc \
+		"$(abspath $(ST_IMAGE_DIR))" "$(abspath $(ST_APP_DIR))" \
+		"$(ST_APP_NAME)" "$(ST_ENTRY_CLASS)" "$(ST_ENTRY_SELECTOR)" \
+		"$(abspath $(ST_APP_OUTPUT_DIR))"
+	@mkdir -p \
+		"$(abspath $(ST_APP_OUTPUT_DIR))/$(ST_APP_NAME)/native" \
+		"$(BUILD_DIR)/samples/smalltalk/apps/$(ST_APP_NAME)"
+	CCACHE_DISABLE=1 $(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		'-DST_APPLICATION_LAUNCH_SYMBOL=st_app_$(ST_APP_NAME)_launch_descriptor' \
+		-c samples/smalltalk/examples/support/native_main.c \
+		-o "$(BUILD_DIR)/samples/smalltalk/apps/$(ST_APP_NAME)/native_main.o"
+	$(BUILD_DIR)/samples/smalltalk/st-aot-link \
+		"$(abspath $(ST_APP_OUTPUT_DIR))/$(ST_APP_NAME)/x86_64-sysv-gas-O2" \
+		"$(abspath $(ST_APP_OUTPUT_DIR))/$(ST_APP_NAME)/native" \
+		host "$(ST_APP_NAME)" \
+		"$(abspath $(SMALLTALK_PRODUCT_RUNTIME))" \
+		"$(abspath $(BUILD_DIR)/samples/smalltalk/apps/$(ST_APP_NAME)/native_main.o)"
+	@echo "Executable: $(abspath $(ST_APP_OUTPUT_DIR))/$(ST_APP_NAME)/native/host/$(ST_APP_NAME)"
+
+$(BUILD_DIR)/tests/smalltalk_dispatch_regression: \
+		samples/smalltalk/src/compiler/dispatch.c \
+		samples/smalltalk/tests/dispatch_test.c \
+		samples/smalltalk/include/st_dispatch.h \
+		$(INCLUDE_DIR)/anvil/anvil.h \
+		$(INCLUDE_DIR)/anvil/anvil_internal.h \
+		$(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
+		samples/smalltalk/src/compiler/dispatch.c \
+		samples/smalltalk/tests/dispatch_test.c \
+		-o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
 
 # Runtime examples that generate assembly, assemble/link it, and execute it.

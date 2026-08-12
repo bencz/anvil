@@ -97,6 +97,74 @@ static uint64_t convert_integer(mcc_sema_t *sema, uint64_t value,
 static bool eval_const_bits(mcc_sema_t *sema, mcc_ast_node_t *expr,
                             uint64_t *result);
 
+static bool record_member_offset(mcc_type_t *record, const char *name,
+                                 size_t *offset)
+{
+    record = unwrap_type(record);
+    if (!record || !name || !offset || !mcc_type_is_record(record))
+        return false;
+    for (mcc_struct_field_t *field = record->data.record.fields;
+         field; field = field->next) {
+        if (field->name && strcmp(field->name, name) == 0) {
+            *offset = field->offset;
+            return true;
+        }
+        if (!field->name && field->type && mcc_type_is_record(field->type)) {
+            size_t inner;
+            if (record_member_offset(field->type, name, &inner)) {
+                if (inner > SIZE_MAX - field->offset) return false;
+                *offset = field->offset + inner;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool eval_null_pointer(mcc_sema_t *sema, mcc_ast_node_t *expr,
+                              uint64_t *result)
+{
+    if (!expr || !result) return false;
+    if (expr->kind == AST_NULL_PTR) {
+        *result = 0;
+        return true;
+    }
+    if (expr->kind != AST_CAST_EXPR) return false;
+    mcc_type_t *target = unwrap_type(expr->data.cast_expr.target_type);
+    if (!target || !mcc_type_is_pointer(target)) return false;
+    uint64_t value;
+    if (!eval_const_bits(sema, expr->data.cast_expr.expr, &value) || value != 0)
+        return false;
+    *result = 0;
+    return true;
+}
+
+/* Recognize the null-based address expression used by the standard offsetof
+ * macro.  This is deliberately narrow: arbitrary object addresses are not
+ * integer constant expressions. Nested member designators and promoted
+ * anonymous records compose their exact frontend-computed offsets. */
+static bool eval_offset_address(mcc_sema_t *sema, mcc_ast_node_t *expr,
+                                uint64_t *result)
+{
+    if (!expr || expr->kind != AST_MEMBER_EXPR || !result) return false;
+    mcc_ast_node_t *object = expr->data.member_expr.object;
+    mcc_type_t *record = unwrap_type(object ? object->type : NULL);
+    uint64_t base;
+    if (expr->data.member_expr.is_arrow) {
+        if (!record || !mcc_type_is_pointer(record) ||
+            !eval_null_pointer(sema, object, &base)) return false;
+        record = unwrap_type(record->data.pointer.pointee);
+    } else {
+        if (!eval_offset_address(sema, object, &base)) return false;
+    }
+    size_t field_offset;
+    if (!record_member_offset(record, expr->data.member_expr.member,
+                              &field_offset) ||
+        (uint64_t)field_offset > UINT64_MAX - base) return false;
+    *result = base + (uint64_t)field_offset;
+    return true;
+}
+
 static bool eval_binary(mcc_sema_t *sema, mcc_ast_node_t *expr,
                         uint64_t *result)
 {
@@ -241,6 +309,12 @@ static bool eval_const_bits(mcc_sema_t *sema, mcc_ast_node_t *expr,
             return eval_binary(sema, expr, result);
         case AST_UNARY_EXPR: {
             uint64_t raw;
+            if (expr->data.unary_expr.op == UNOP_ADDR) {
+                if (!eval_offset_address(sema,
+                        expr->data.unary_expr.operand, &raw)) return false;
+                *result = normalize(raw, integer_bits(sema, expr->type));
+                return true;
+            }
             if (!eval_const_bits(sema, expr->data.unary_expr.operand, &raw))
                 return false;
             unsigned bits = integer_bits(sema, expr->type);

@@ -18,9 +18,11 @@ mcc_preprocessor_t *mcc_preprocessor_create(mcc_context_t *ctx)
     
     pp->ctx = ctx;
     pp->lexer = mcc_lexer_create(ctx);
+    if (!pp->lexer) return NULL;
     
     pp->macro_table_size = PP_MACRO_TABLE_SIZE;
     pp->macros = mcc_alloc(ctx, PP_MACRO_TABLE_SIZE * sizeof(mcc_macro_t*));
+    if (!pp->macros) return NULL;
     
     return pp;
 }
@@ -36,7 +38,9 @@ void mcc_preprocessor_destroy(mcc_preprocessor_t *pp)
 
 void pp_emit_token(mcc_preprocessor_t *pp, mcc_token_t *tok)
 {
+    if (!pp || !tok) return;
     tok = mcc_token_copy(pp->ctx, tok);
+    if (!tok) return;
     tok->next = NULL;
     
     /* Apply saved has_space if set */

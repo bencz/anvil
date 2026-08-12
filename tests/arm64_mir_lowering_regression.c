@@ -277,9 +277,9 @@ static void test_arm64_lowers_constants_bitwise_and_mixed_call_abi(void)
             anvil_value_t *masked = anvil_build_and(ctx, x, anvil_const_i64(ctx, 255),
                                                     "masked");
             anvil_value_t *args[] = { masked, y };
-            anvil_value_t *call = anvil_build_call(ctx, callee_type,
-                                                   anvil_func_get_value(callee),
-                                                   args, 2, "call");
+            anvil_value_t *call = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                     args, 2, "call", &call);
             anvil_build_ret(ctx, call);
 
             anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(caller);
@@ -387,9 +387,9 @@ static void test_arm64_lowers_stack_call_args_to_machineir(void)
             for (size_t i = 0; i < 10; i++) {
                 args[i] = anvil_const_i64(ctx, (int64_t)i + 1);
             }
-            anvil_value_t *call = anvil_build_call(ctx, i64,
-                                                   anvil_func_get_value(callee),
-                                                   args, 10, "call");
+            anvil_value_t *call = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                     args, 10, "call", &call);
             anvil_build_ret(ctx, call);
 
             anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(caller);
@@ -471,9 +471,9 @@ static void test_arm64_lowers_fp_stack_call_args_to_machineir(void)
             for (size_t i = 0; i < 10; i++) {
                 args[i] = anvil_const_f64(ctx, (double)i + 0.5);
             }
-            anvil_value_t *call = anvil_build_call(ctx, f64,
-                                                   anvil_func_get_value(callee),
-                                                   args, 10, "call");
+            anvil_value_t *call = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                     args, 10, "call", &call);
             anvil_build_ret(ctx, call);
 
             anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(caller);
@@ -554,9 +554,9 @@ static void test_arm64_lowers_darwin_variadic_args_to_stack_machineir(void)
                 anvil_const_i64(ctx, 20),
                 anvil_const_i64(ctx, 30)
             };
-            anvil_value_t *call = anvil_build_call(ctx, i64,
-                                                   anvil_func_get_value(callee),
-                                                   args, 3, "call");
+            anvil_value_t *call = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee),
+                                     args, 3, "call", &call);
             anvil_build_ret(ctx, call);
 
             anvil_mir_func_t *mir = anvil_arm64_lower_func_to_mir(caller);
@@ -1323,8 +1323,8 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
                               call_arg1_use, 1),
           "emitter test should copy FP call arg");
     anvil_mir_vreg_t call_uses[] = { call_arg0, call_arg1 };
-    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL, call_ret,
-                                     call_uses, 2, "callee"),
+    CHECK(anvil_mir_add_call(mir, call_ret, call_uses, 2, "callee",
+                             ANVIL_CC_SYSV, false, 0),
           "emitter test should add call");
     CHECK(anvil_mir_add_branch(mir, exit_block),
           "emitter test should branch from then to exit");
@@ -1522,8 +1522,8 @@ static void test_arm64_mir_legalizer_rejects_unfixed_call_arguments(void)
           "call result should be fixed to x0");
     CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, arg, 7),
           "bad call-arg test should define argument");
-    CHECK(anvil_mir_add_instr_symbol(mir, ANVIL_MIR_OP_CALL, call_ret,
-                                     call_uses, 1, "callee"),
+    CHECK(anvil_mir_add_call(mir, call_ret, call_uses, 1, "callee",
+                             ANVIL_CC_SYSV, false, 0),
           "generic MIR should accept a call with an unfixed argument vreg");
     CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG,
                               ret_uses, 1),

@@ -167,11 +167,21 @@ struct mcc_type {
      * Opaque to the type system; only codegen_type() populates/reads it.
      * Avoids recomputing struct field layouts on every access. */
     void *anvil_cached;
+    bool anvil_body_lowered;
+    bool anvil_lowering;
+    bool anvil_lower_failed;
 };
 
 /* Type context for caching */
 typedef struct mcc_type_context {
     mcc_context_t *ctx;
+
+    /* Exact target object layout copied from ANVIL when the type context is
+     * created.  This is the only layout contract used by the C frontend;
+     * record/array layout must not grow a second architecture table. */
+    anvil_arch_t arch;
+    anvil_abi_t abi;
+    anvil_data_layout_t layout;
     
     /* Architecture-specific sizes */
     int ptr_size;               /* Pointer size from ANVIL arch info */

@@ -27,6 +27,7 @@ void mcc_lexer_destroy(mcc_lexer_t *lex)
 
 void mcc_lexer_init_string(mcc_lexer_t *lex, const char *source, const char *filename)
 {
+    if (!lex || !source) return;
     lex->source = source;
     lex->source_len = strlen(source);
     lex->pos = 0;
@@ -47,13 +48,31 @@ void mcc_lexer_init_file(mcc_lexer_t *lex, const char *filename)
         return;
     }
     
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        mcc_fatal(lex->ctx, "Cannot seek file: %s", filename);
+        fclose(f);
+        return;
+    }
     long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (size < 0 || (uintmax_t)size >= (uintmax_t)SIZE_MAX ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        mcc_fatal(lex->ctx, "Invalid file size: %s", filename);
+        fclose(f);
+        return;
+    }
     
-    char *buf = mcc_alloc(lex->ctx, size + 1);
-    fread(buf, 1, size, f);
-    buf[size] = '\0';
+    size_t content_size = (size_t)size;
+    char *buf = mcc_alloc(lex->ctx, content_size + 1);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+    if (fread(buf, 1, content_size, f) != content_size) {
+        mcc_fatal(lex->ctx, "Cannot read file: %s", filename);
+        fclose(f);
+        return;
+    }
+    buf[content_size] = '\0';
     fclose(f);
     
     mcc_lexer_init_string(lex, buf, filename);

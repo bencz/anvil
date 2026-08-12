@@ -333,8 +333,11 @@ static void pp_process_pragma(mcc_preprocessor_t *pp)
     }
 
     if (!handled) {
-        mcc_warning_at(pp->ctx, tok->location,
-                       "unsupported #pragma is ignored");
+        /* Silently ignoring pragmas can change ABI and object layout (for
+         * example `#pragma pack`).  Only `once` has implemented semantics;
+         * every other pragma is therefore a hard capability error. */
+        mcc_error_at(pp->ctx, tok->location,
+                     "unsupported #pragma (only #pragma once is implemented)");
     }
     pp_skip_line(pp);
 }

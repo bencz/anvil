@@ -242,8 +242,7 @@ typedef enum {
     ANVIL_CC_FASTCALL,       /* Fastcall */
     ANVIL_CC_SYSV,           /* System V AMD64 ABI */
     ANVIL_CC_WIN64,          /* Windows x64 */
-    ANVIL_CC_MVS,            /* MVS linkage (mainframe) */
-    ANVIL_CC_XPLINK          /* z/OS XPLINK */
+    ANVIL_CC_MVS             /* MVS linkage (mainframe) */
 } anvil_cc_t;
 
 /* Linkage types */
@@ -454,8 +453,15 @@ size_t anvil_type_struct_field_offset(const anvil_type_t *type,
 anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count);
 
 /* Create function type */
+anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
+                                  anvil_type_t **params, size_t num_params,
+                                  bool variadic, anvil_cc_t cc);
+/* Convenience constructor using the target/ABI's canonical default calling
+ * convention.  DEFAULT and accepted C aliases are resolved when the type is
+ * constructed, so function-type equality always includes the effective CC. */
 anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
                                anvil_type_t **params, size_t num_params, bool variadic);
+anvil_cc_t anvil_type_func_cc_value(const anvil_type_t *type);
 
 /* Get type size in bytes */
 size_t anvil_type_size(anvil_type_t *type);
@@ -512,9 +518,6 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
 /* Get function as a value (for use in calls) */
 anvil_value_t *anvil_func_get_value(anvil_func_t *func);
 
-/* Set calling convention */
-bool anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc);
-
 /* Get function parameter */
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index);
 
@@ -563,6 +566,17 @@ anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
+anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx, anvil_type_t *struct_type,
+                                   anvil_value_t **fields, size_t num_fields);
+/* Relocatable constants are owned by the exact module containing `symbol`.
+ * A function address has type ptr<func>; a global address has type ptr<T>. */
+anvil_value_t *anvil_const_symbol_addr(anvil_value_t *symbol);
+/* Constant typed GEP.  Every index must be an integer constant.  The result
+ * retains the base symbol's provenance and a checked signed-byte addend. */
+anvil_value_t *anvil_const_gep(anvil_value_t *base,
+                                anvil_type_t *source_type,
+                                anvil_value_t **indices,
+                                size_t num_indices);
 
 /* Set global variable initializer */
 bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
@@ -619,8 +633,13 @@ anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
 bool anvil_switch_add_case(anvil_instr_t *switch_instr,
                            anvil_value_t *case_value,
                            anvil_block_t *dest);
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *callee,
-                                 anvil_value_t **args, size_t num_args, const char *name);
+/* Build a direct or indirect typed call.  The signature and effective calling
+ * convention are derived solely from callee's func/ptr<func> type.  `result`
+ * may be NULL; when supplied it is cleared first and remains NULL for a
+ * successful void call. */
+bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
+                               anvil_value_t **args, size_t num_args,
+                               const char *name, anvil_value_t **result);
 bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val);
 bool anvil_build_ret_void(anvil_ctx_t *ctx);
 

@@ -57,9 +57,10 @@ int main(int argc, char **argv)
         anvil_const_f64(ctx, -2.5), anvil_const_f64(ctx, 3.75),
         anvil_const_i64(ctx, 99)
     };
-    anvil_value_t *result = anvil_build_call(ctx, i64,
-        anvil_func_get_value(probe), args, 5, "probe_result");
-    if (!result || !anvil_build_ret(ctx, result))
+    anvil_value_t *result = NULL;
+    if (!anvil_build_call_checked(ctx, anvil_func_get_value(probe), args, 5,
+                                  "probe_result", &result) ||
+        !result || !anvil_build_ret(ctx, result))
         return fail("could not build variadic caller");
 
     char *assembly = NULL;

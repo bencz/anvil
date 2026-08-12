@@ -89,6 +89,13 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
                         "Function definition requires a function type from its module context");
         return NULL;
     }
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!anvil_cc_resolve(mod->ctx, type->data.func.cc, &effective_cc) ||
+        effective_cc != type->data.func.cc) {
+        anvil_set_error(mod->ctx, ANVIL_ERR_INVALID_TYPE,
+                        "Function definition has a non-canonical or incompatible calling convention");
+        return NULL;
+    }
     anvil_value_t *existing_value = anvil_module_lookup_symbol(mod, name);
     if (existing_value) {
         if (existing_value->kind != ANVIL_VAL_FUNC ||
@@ -135,7 +142,6 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
     }
     func->type = type;
     func->linkage = linkage;
-    func->cc = ANVIL_CC_DEFAULT;
     func->parent = mod;
     func->id = mod->ctx->next_func_id++;
     func->is_declaration = false;
@@ -220,6 +226,13 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
                         "Function declaration requires a function type from its module context");
         return NULL;
     }
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!anvil_cc_resolve(mod->ctx, type->data.func.cc, &effective_cc) ||
+        effective_cc != type->data.func.cc) {
+        anvil_set_error(mod->ctx, ANVIL_ERR_INVALID_TYPE,
+                        "Function declaration has a non-canonical or incompatible calling convention");
+        return NULL;
+    }
     anvil_value_t *existing_value = anvil_module_lookup_symbol(mod, name);
     if (existing_value) {
         if (existing_value->kind != ANVIL_VAL_FUNC ||
@@ -257,7 +270,6 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
     }
     func->type = type;
     func->linkage = linkage;
-    func->cc = ANVIL_CC_DEFAULT;
     func->parent = mod;
     func->id = mod->ctx->next_func_id++;
     func->is_declaration = true;
@@ -301,25 +313,6 @@ anvil_func_t *anvil_func_declare(anvil_module_t *mod, const char *name,
 anvil_value_t *anvil_func_get_value(anvil_func_t *func)
 {
     return func ? func->value : NULL;
-}
-
-bool anvil_func_set_cc(anvil_func_t *func, anvil_cc_t cc)
-{
-    if (!func) return false;
-    anvil_ctx_t *ctx = func->owner_ctx;
-    if ((unsigned)cc > (unsigned)ANVIL_CC_XPLINK) {
-        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
-                                 "Invalid function calling convention");
-        return false;
-    }
-    if (!ctx || !func->parent || !func->value ||
-        func->value->owner_module != func->parent) {
-        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_OP,
-                                 "Calling convention target function is destroyed");
-        return false;
-    }
-    func->cc = cc;
-    return true;
 }
 
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index)

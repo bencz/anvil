@@ -55,8 +55,9 @@ static mcc_type_t *analyze_float_lit(mcc_sema_t *sema, mcc_ast_node_t *expr)
             type = mcc_type_float(sema->types);
             break;
         case FLOAT_SUFFIX_L:
-            type = mcc_type_long_double(sema->types);
-            break;
+            mcc_error_at(sema->ctx, expr->location,
+                         "long double literals are not implemented by MCC");
+            return NULL;
         default:
             type = mcc_type_double(sema->types);
             break;
@@ -430,16 +431,28 @@ mcc_type_t *sema_analyze_cast_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 
 mcc_type_t *sema_analyze_sizeof_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
+    mcc_type_t *operand_type = expr->data.sizeof_expr.type_arg;
     if (expr->data.sizeof_expr.type_arg) {
         /* sizeof(type) */
-        if (!sema_check_complete_type(sema, expr->data.sizeof_expr.type_arg, expr->location)) {
-            /* VLA is allowed in C99 */
-            if (!sema_has_vla(sema)) {
-                return NULL;
-            }
-        }
     } else if (expr->data.sizeof_expr.expr_arg) {
-        sema_analyze_expr(sema, expr->data.sizeof_expr.expr_arg);
+        operand_type = sema_analyze_expr(sema,
+                                         expr->data.sizeof_expr.expr_arg);
+    }
+    while (operand_type && operand_type->kind == TYPE_TYPEDEF)
+        operand_type = operand_type->data.typedef_ref.underlying;
+    if (!operand_type || mcc_type_is_function(operand_type) ||
+        !sema_check_complete_type(sema, operand_type, expr->location)) {
+        mcc_error_at(sema->ctx, expr->location,
+                     "sizeof requires a complete object type");
+        return NULL;
+    }
+    if (mcc_type_is_array(operand_type) && operand_type->data.array.is_vla) {
+        /* Correct C semantics retain the evaluated VLA bound from its
+         * declaration. MCC currently retains only the source expression;
+         * reevaluating it here would duplicate side effects. Fail closed. */
+        mcc_error_at(sema->ctx, expr->location,
+                     "sizeof on a variable-length array is not implemented");
+        return NULL;
     }
     expr->type = mcc_type_ulong(sema->types); /* size_t */
     return expr->type;
@@ -539,8 +552,20 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
             /* _Alignof(type) yields a size_t constant. If an expression
              * form was used (GNU extension), analyse it first to pin down
              * the type, then drop the expression. */
-            if (expr->data.alignof_expr.expr_arg) {
-                sema_analyze_expr(sema, expr->data.alignof_expr.expr_arg);
+            {
+                mcc_type_t *operand_type = expr->data.alignof_expr.type_arg;
+                if (expr->data.alignof_expr.expr_arg)
+                    operand_type = sema_analyze_expr(
+                        sema, expr->data.alignof_expr.expr_arg);
+                while (operand_type && operand_type->kind == TYPE_TYPEDEF)
+                    operand_type = operand_type->data.typedef_ref.underlying;
+                if (!operand_type || mcc_type_is_function(operand_type) ||
+                    !sema_check_complete_type(sema, operand_type,
+                                              expr->location)) {
+                    mcc_error_at(sema->ctx, expr->location,
+                                 "_Alignof requires a complete object type");
+                    return NULL;
+                }
             }
             expr->type = mcc_type_ulong(sema->types);
             return expr->type;

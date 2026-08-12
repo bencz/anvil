@@ -29,6 +29,9 @@ typedef enum {
     ANVIL_VAL_CONST_NULL,
     ANVIL_VAL_CONST_STRING,
     ANVIL_VAL_CONST_ARRAY,
+    ANVIL_VAL_CONST_STRUCT,
+    ANVIL_VAL_CONST_SYMBOL_ADDR,
+    ANVIL_VAL_CONST_GEP,
     ANVIL_VAL_GLOBAL,
     ANVIL_VAL_FUNC,
     ANVIL_VAL_PARAM,
@@ -40,6 +43,7 @@ typedef enum {
 typedef struct anvil_instr {
     anvil_op_t op;
     anvil_fcmp_pred_t fcmp_pred;
+    anvil_cc_t call_cc;
     anvil_value_t *result;
     anvil_value_t **operands;
     size_t num_operands;
@@ -103,7 +107,15 @@ struct anvil_value {
         struct {
             anvil_value_t **elements;
             size_t num_elements;
-        } array;
+        } aggregate;
+        struct {
+            anvil_value_t *symbol;
+            anvil_value_t *base;
+            anvil_type_t *source_type;
+            anvil_value_t **indices;
+            size_t num_indices;
+            int64_t addend;
+        } reloc;
     } data;
 };
 
@@ -157,6 +169,7 @@ struct anvil_type {
             anvil_type_t **params;
             size_t num_params;
             bool variadic;
+            anvil_cc_t cc;
         } func;
     } data;
 };
@@ -184,7 +197,6 @@ struct anvil_func {
     char *name;
     anvil_type_t *type;
     anvil_linkage_t linkage;
-    anvil_cc_t cc;
     anvil_module_t *parent;
     anvil_ctx_t *owner_ctx;
     struct anvil_func *ctx_next_owned;
@@ -346,6 +358,9 @@ typedef enum {
 } anvil_const_dag_status_t;
 anvil_const_dag_status_t
 anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx);
+anvil_const_dag_status_t anvil_value_check_constant_dag_for_module(
+    const anvil_value_t *value, anvil_ctx_t *ctx,
+    const anvil_module_t *module);
 bool anvil_value_is_constant_dag(const anvil_value_t *value,
                                  anvil_ctx_t *ctx);
 
@@ -358,6 +373,7 @@ bool anvil_instr_add_operands(anvil_instr_t *instr,
                               anvil_value_t *const *values,
                               size_t count);
 bool anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr);
+void anvil_instr_discard_new(anvil_ctx_t *ctx, anvil_instr_t *instr);
 void anvil_ir_free_all(anvil_ctx_t *ctx);
 void anvil_func_free_all(anvil_ctx_t *ctx);
 
@@ -388,6 +404,8 @@ bool anvil_sem_bool_type(const anvil_type_t *type);
 bool anvil_sem_type_is_sized(const anvil_type_t *type);
 anvil_type_t *anvil_sem_memory_object_type(const anvil_value_t *value);
 anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee);
+bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
+                      anvil_cc_t *effective);
 typedef enum {
     ANVIL_GEP_STEP_SCALE,
     ANVIL_GEP_STEP_FIELD_OFFSET

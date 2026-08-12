@@ -18,7 +18,9 @@
 
 mcc_parser_t *mcc_parser_create(mcc_context_t *ctx, mcc_preprocessor_t *pp)
 {
+    if (!ctx || !pp) return NULL;
     mcc_parser_t *p = mcc_alloc(ctx, sizeof(mcc_parser_t));
+    if (!p) return NULL;
     p->ctx = ctx;
     p->pp = pp;
     p->types = mcc_type_context_create(ctx);
@@ -185,10 +187,10 @@ mcc_ast_node_t *mcc_parser_parse(mcc_parser_t *p)
         
         if (decl) {
             if (num_decls >= cap_decls) {
-                cap_decls = cap_decls ? cap_decls * 2 : 8;
-                decls = mcc_realloc(p->ctx, decls,
-                                    num_decls * sizeof(mcc_ast_node_t*),
-                                    cap_decls * sizeof(mcc_ast_node_t*));
+                void *grown = parse_grow_array(p, decls, num_decls,
+                    &cap_decls, sizeof(*decls), 8);
+                if (!grown) return NULL;
+                decls = grown;
             }
             decls[num_decls++] = decl;
         }
@@ -199,6 +201,7 @@ mcc_ast_node_t *mcc_parser_parse(mcc_parser_t *p)
     }
     
     mcc_ast_node_t *tu = mcc_ast_create(p->ctx, AST_TRANSLATION_UNIT, (mcc_location_t){NULL, 0, 0});
+    if (!tu) return NULL;
     tu->data.translation_unit.decls = decls;
     tu->data.translation_unit.num_decls = num_decls;
     return tu;

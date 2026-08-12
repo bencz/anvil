@@ -50,7 +50,7 @@ static bool value_is_constant(const anvil_value_t *value)
 {
     if (!value) return false;
     return value->kind >= ANVIL_VAL_CONST_INT &&
-           value->kind <= ANVIL_VAL_CONST_ARRAY;
+           value->kind <= ANVIL_VAL_CONST_GEP;
 }
 
 static anvil_value_t *constant_register(anvil_ctx_t *ctx, anvil_value_t *value)
@@ -70,10 +70,15 @@ static void value_clear_payload(anvil_value_t *value)
     } else if (value->kind == ANVIL_VAL_CONST_DECIMAL) {
         free(value->data.decimal);
         value->data.decimal = NULL;
-    } else if (value->kind == ANVIL_VAL_CONST_ARRAY) {
-        free(value->data.array.elements);
-        value->data.array.elements = NULL;
-        value->data.array.num_elements = 0;
+    } else if (value->kind == ANVIL_VAL_CONST_ARRAY ||
+               value->kind == ANVIL_VAL_CONST_STRUCT) {
+        free(value->data.aggregate.elements);
+        value->data.aggregate.elements = NULL;
+        value->data.aggregate.num_elements = 0;
+    } else if (value->kind == ANVIL_VAL_CONST_GEP) {
+        free(value->data.reloc.indices);
+        value->data.reloc.indices = NULL;
+        value->data.reloc.num_indices = 0;
     }
 }
 
@@ -83,6 +88,18 @@ static void value_free(anvil_value_t *value)
     value_clear_payload(value);
     free(value->name);
     free(value);
+}
+
+/* Constructors publish values to the context registry immediately so every
+ * partial object remains destroyable.  A failed constructor still owns the
+ * newest registry node exclusively; unlink and destroy it instead of leaving
+ * an unreachable malformed/tombstone constant behind. */
+static void value_discard_new(anvil_ctx_t *ctx, anvil_value_t *value)
+{
+    if (!ctx || !value || ctx->owned_values != value) return;
+    ctx->owned_values = value->ctx_next_owned;
+    value->ctx_next_owned = NULL;
+    value_free(value);
 }
 
 void anvil_value_free_all(anvil_ctx_t *ctx)
@@ -146,6 +163,18 @@ anvil_instr_t *anvil_instr_create(anvil_ctx_t *ctx, anvil_op_t op,
     instr->ctx_next_owned = ctx->owned_instrs;
     ctx->owned_instrs = instr;
     return instr;
+}
+
+void anvil_instr_discard_new(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    if (!ctx || !instr || instr->parent || ctx->owned_instrs != instr) return;
+    ctx->owned_instrs = instr->ctx_next_owned;
+    instr->ctx_next_owned = NULL;
+    if (instr->result) value_discard_new(ctx, instr->result);
+    free(instr->operands);
+    free(instr->phi_blocks);
+    free(instr->switch_blocks);
+    free(instr);
 }
 
 bool anvil_instr_reserve_operands(anvil_instr_t *instr, size_t needed)
@@ -473,8 +502,74 @@ static bool constant_leaf_is_well_typed(const anvil_value_t *value)
     }
 }
 
-anvil_const_dag_status_t
-anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
+static bool constant_symbol_addr_is_well_typed(const anvil_value_t *value)
+{
+    const anvil_value_t *symbol = value->data.reloc.symbol;
+    if (!symbol || !value->owner_module ||
+        symbol->owner_module != value->owner_module ||
+        symbol->owner_ctx != value->owner_ctx ||
+        !symbol->name ||
+        anvil_module_lookup_symbol(value->owner_module, symbol->name) != symbol ||
+        value->data.reloc.base || value->data.reloc.indices ||
+        value->data.reloc.num_indices != 0 ||
+        value->data.reloc.addend != 0 || !value->data.reloc.source_type ||
+        value->type->kind != ANVIL_TYPE_PTR) return false;
+    if (symbol->kind == ANVIL_VAL_FUNC) {
+        return symbol->data.func &&
+               symbol->data.func->parent == value->owner_module &&
+               symbol->type && symbol->type->kind == ANVIL_TYPE_PTR &&
+               symbol->type->data.pointee == value->data.reloc.source_type &&
+               anvil_types_equal(value->type, symbol->type);
+    }
+    return symbol->kind == ANVIL_VAL_GLOBAL &&
+           symbol->type == value->data.reloc.source_type &&
+           anvil_types_equal(value->type->data.pointee, symbol->type);
+}
+
+static bool reloc_addend_fits_target(const anvil_ctx_t *ctx, int64_t addend);
+
+static bool constant_gep_is_well_typed(const anvil_value_t *value)
+{
+    const anvil_value_t *base = value->data.reloc.base;
+    if (!base || !value->owner_module ||
+        (base->kind != ANVIL_VAL_CONST_SYMBOL_ADDR &&
+         base->kind != ANVIL_VAL_CONST_GEP) ||
+        base->owner_module != value->owner_module ||
+        base->owner_ctx != value->owner_ctx ||
+        base->data.reloc.symbol != value->data.reloc.symbol ||
+        !value->data.reloc.source_type ||
+        !anvil_sem_type_is_sized(value->data.reloc.source_type) ||
+        value->data.reloc.source_type->owner_ctx != value->owner_ctx ||
+        !base->type || base->type->kind != ANVIL_TYPE_PTR ||
+        !anvil_types_equal(base->type->data.pointee,
+                           value->data.reloc.source_type) ||
+        !value->type || value->type->kind != ANVIL_TYPE_PTR ||
+        value->data.reloc.num_indices == 0 ||
+        !value->data.reloc.indices ||
+        value->data.reloc.num_indices >
+            SIZE_MAX / sizeof(*value->data.reloc.indices)) return false;
+
+    anvil_type_t *current = value->data.reloc.source_type;
+    int64_t addend = base->data.reloc.addend;
+    for (size_t i = 0; i < value->data.reloc.num_indices; i++) {
+        anvil_value_t *index = value->data.reloc.indices[i];
+        anvil_gep_step_t step;
+        int64_t step_offset;
+        if (!index || index->owner_ctx != value->owner_ctx ||
+            index->owner_module || index->kind != ANVIL_VAL_CONST_INT ||
+            !constant_leaf_is_well_typed(index) ||
+            !anvil_gep_analyze_step(&current, index, i, &step) ||
+            !anvil_gep_const_step_offset(&step, index, &step_offset) ||
+            !anvil_gep_accumulate_offset(&addend, step_offset)) return false;
+    }
+    return reloc_addend_fits_target(value->owner_ctx, addend) &&
+           anvil_types_equal(value->type->data.pointee, current) &&
+           addend == value->data.reloc.addend;
+}
+
+static anvil_const_dag_status_t check_constant_dag_impl(
+    const anvil_value_t *value, anvil_ctx_t *ctx,
+    const anvil_module_t *required_module)
 {
     if (!value || !ctx) return ANVIL_CONST_DAG_INVALID;
 
@@ -499,6 +594,8 @@ anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
         if (!frame->entered) {
             if (!cur || !value_is_constant(cur) || !cur->type ||
                 cur->owner_ctx != ctx || cur->type->owner_ctx != ctx ||
+                (cur->owner_module && required_module &&
+                 cur->owner_module != required_module) ||
                 !anvil_types_equal(cur->type, frame->expected_type)) {
                 valid = false;
                 break;
@@ -522,8 +619,9 @@ anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
             mark->state = 1;
             marks_count++;
 
-            if (cur->kind != ANVIL_VAL_CONST_ARRAY) {
-                if (!constant_leaf_is_well_typed(cur)) {
+            if (cur->kind >= ANVIL_VAL_CONST_INT &&
+                cur->kind <= ANVIL_VAL_CONST_STRING) {
+                if (cur->owner_module || !constant_leaf_is_well_typed(cur)) {
                     valid = false;
                     break;
                 }
@@ -532,27 +630,81 @@ anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
                 continue;
             }
 
-            if (cur->type->kind != ANVIL_TYPE_ARRAY ||
-                cur->data.array.num_elements != cur->type->data.array.count ||
-                (cur->data.array.num_elements > 0 &&
-                 !cur->data.array.elements) ||
-                cur->data.array.num_elements >
+            if (cur->kind == ANVIL_VAL_CONST_SYMBOL_ADDR) {
+                if (!constant_symbol_addr_is_well_typed(cur)) valid = false;
+                mark->state = 2;
+                frames_count--;
+                continue;
+            }
+
+            if (cur->kind == ANVIL_VAL_CONST_GEP) {
+                if (!constant_gep_is_well_typed(cur)) {
+                    valid = false;
+                    break;
+                }
+                frame->entered = true;
+                continue;
+            }
+
+            bool is_array = cur->kind == ANVIL_VAL_CONST_ARRAY;
+            bool is_struct = cur->kind == ANVIL_VAL_CONST_STRUCT;
+            size_t expected_count = is_array
+                ? (cur->type->kind == ANVIL_TYPE_ARRAY
+                       ? cur->type->data.array.count : SIZE_MAX)
+                : (is_struct && cur->type->kind == ANVIL_TYPE_STRUCT &&
+                   cur->type->data.struc.complete
+                       ? cur->type->data.struc.num_fields : SIZE_MAX);
+            if ((!is_array && !is_struct) ||
+                cur->data.aggregate.num_elements != expected_count ||
+                (cur->data.aggregate.num_elements > 0 &&
+                 !cur->data.aggregate.elements) ||
+                cur->data.aggregate.num_elements >
                     SIZE_MAX / sizeof(anvil_value_t *)) {
+                valid = false;
+                break;
+            }
+
+            const anvil_module_t *aggregate_module = NULL;
+            for (size_t i = 0; i < cur->data.aggregate.num_elements; i++) {
+                const anvil_value_t *child = cur->data.aggregate.elements[i];
+                if (!child) { valid = false; break; }
+                if (child->owner_module) {
+                    if (aggregate_module &&
+                        aggregate_module != child->owner_module) {
+                        valid = false;
+                        break;
+                    }
+                    aggregate_module = child->owner_module;
+                }
+            }
+            if (!valid || cur->owner_module != aggregate_module) {
                 valid = false;
                 break;
             }
             frame->entered = true;
         }
 
-        if (frame->next_child == cur->data.array.num_elements) {
+        size_t child_count = cur->kind == ANVIL_VAL_CONST_GEP
+                                 ? 1 : cur->data.aggregate.num_elements;
+        if (frame->next_child == child_count) {
             constant_mark_t *mark = constant_mark_find(marks, marks_capacity, cur);
             mark->state = 2;
             frames_count--;
             continue;
         }
 
-        const anvil_value_t *child =
-            cur->data.array.elements[frame->next_child++];
+        size_t child_index = frame->next_child++;
+        const anvil_value_t *child = cur->kind == ANVIL_VAL_CONST_GEP
+            ? cur->data.reloc.base
+            : cur->data.aggregate.elements[child_index];
+        const anvil_type_t *expected_type;
+        if (cur->kind == ANVIL_VAL_CONST_GEP) {
+            expected_type = child ? child->type : NULL;
+        } else if (cur->kind == ANVIL_VAL_CONST_ARRAY) {
+            expected_type = cur->type->data.array.elem;
+        } else {
+            expected_type = cur->type->data.struc.fields[child_index];
+        }
         if (frames_count == frames_capacity) {
             if (frames_capacity > SIZE_MAX / 2 ||
                 frames_capacity * 2 > SIZE_MAX / sizeof(*frames)) {
@@ -572,7 +724,7 @@ anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
             frames_capacity = new_capacity;
         }
         frames[frames_count++] = (constant_frame_t){
-            child, cur->type->data.array.elem, 0, false
+            child, expected_type, 0, false
         };
     }
 
@@ -581,6 +733,20 @@ anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
     return valid ? ANVIL_CONST_DAG_VALID
                  : (oom ? ANVIL_CONST_DAG_NOMEM
                         : ANVIL_CONST_DAG_INVALID);
+}
+
+anvil_const_dag_status_t
+anvil_value_check_constant_dag(const anvil_value_t *value, anvil_ctx_t *ctx)
+{
+    return check_constant_dag_impl(value, ctx, NULL);
+}
+
+anvil_const_dag_status_t anvil_value_check_constant_dag_for_module(
+    const anvil_value_t *value, anvil_ctx_t *ctx,
+    const anvil_module_t *module)
+{
+    if (!module || module->ctx != ctx) return ANVIL_CONST_DAG_INVALID;
+    return check_constant_dag_impl(value, ctx, module);
 }
 
 bool anvil_value_is_constant_dag(const anvil_value_t *value,
@@ -661,9 +827,21 @@ anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
     }
     for (size_t i = 0; i < num_elements; i++) {
         if (!elements[i] || elements[i]->owner_ctx != ctx ||
+            !value_is_constant(elements[i]) ||
             !anvil_types_equal(elements[i]->type, elem_type)) {
             return NULL;
         }
+    }
+
+    anvil_module_t *owner_module = NULL;
+    for (size_t i = 0; i < num_elements; i++) {
+        if (!elements[i]->owner_module) continue;
+        if (owner_module && owner_module != elements[i]->owner_module) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Array constant mixes relocations from different modules");
+            return NULL;
+        }
+        owner_module = elements[i]->owner_module;
     }
     
     anvil_type_t *arr_type = anvil_type_array(ctx, elem_type, num_elements);
@@ -672,29 +850,231 @@ anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
     if (!v) return NULL;
     
     if (num_elements > 0) {
-        v->data.array.elements =
+        v->data.aggregate.elements =
             anvil_ctx_malloc(ctx, num_elements * sizeof(anvil_value_t *));
-        if (!v->data.array.elements) {
+        if (!v->data.aggregate.elements) {
             anvil_set_error(ctx, ANVIL_ERR_NOMEM,
                             "Out of memory creating array constant");
-            value_clear_payload(v);
+            value_discard_new(ctx, v);
             return NULL;
         }
-        memcpy(v->data.array.elements, elements, num_elements * sizeof(anvil_value_t *));
+        memcpy(v->data.aggregate.elements, elements,
+               num_elements * sizeof(anvil_value_t *));
     } else {
-        v->data.array.elements = NULL;
+        v->data.aggregate.elements = NULL;
     }
-    v->data.array.num_elements = num_elements;
+    v->data.aggregate.num_elements = num_elements;
+    v->owner_module = owner_module;
 
     anvil_const_dag_status_t dag = anvil_value_check_constant_dag(v, ctx);
     if (dag != ANVIL_CONST_DAG_VALID) {
-        value_clear_payload(v);
         if (dag == ANVIL_CONST_DAG_INVALID)
             anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
                             "Array constant is not a well-typed acyclic constant DAG");
+        value_discard_new(ctx, v);
         return NULL;
     }
     return constant_register(ctx, v);
+}
+
+anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx,
+                                   anvil_type_t *struct_type,
+                                   anvil_value_t **fields,
+                                   size_t num_fields)
+{
+    if (!ctx || !struct_type || struct_type->owner_ctx != ctx ||
+        struct_type->kind != ANVIL_TYPE_STRUCT ||
+        !struct_type->data.struc.complete ||
+        num_fields != struct_type->data.struc.num_fields ||
+        (num_fields > 0 && !fields) ||
+        num_fields > SIZE_MAX / sizeof(*fields)) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                                 "Struct constant requires the complete exact struct type");
+        return NULL;
+    }
+
+    anvil_module_t *owner_module = NULL;
+    for (size_t i = 0; i < num_fields; i++) {
+        if (!fields[i] || fields[i]->owner_ctx != ctx ||
+            !value_is_constant(fields[i]) ||
+            !anvil_types_equal(fields[i]->type,
+                               struct_type->data.struc.fields[i])) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Struct constant field type does not match its declaration");
+            return NULL;
+        }
+        if (fields[i]->owner_module) {
+            if (owner_module && owner_module != fields[i]->owner_module) {
+                anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                                "Struct constant mixes relocations from different modules");
+                return NULL;
+            }
+            owner_module = fields[i]->owner_module;
+        }
+    }
+
+    anvil_value_t *value = anvil_value_create(
+        ctx, ANVIL_VAL_CONST_STRUCT, struct_type, NULL);
+    if (!value) return NULL;
+    if (num_fields > 0) {
+        value->data.aggregate.elements = anvil_ctx_malloc(
+            ctx, num_fields * sizeof(*value->data.aggregate.elements));
+        if (!value->data.aggregate.elements) {
+            anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                            "Out of memory creating struct constant");
+            value_discard_new(ctx, value);
+            return NULL;
+        }
+        memcpy(value->data.aggregate.elements, fields,
+               num_fields * sizeof(*fields));
+    }
+    value->data.aggregate.num_elements = num_fields;
+    value->owner_module = owner_module;
+
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag(value, ctx);
+    if (dag != ANVIL_CONST_DAG_VALID) {
+        if (dag == ANVIL_CONST_DAG_INVALID)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Struct constant is not a well-typed acyclic constant DAG");
+        value_discard_new(ctx, value);
+        return NULL;
+    }
+    return constant_register(ctx, value);
+}
+
+anvil_value_t *anvil_const_symbol_addr(anvil_value_t *symbol)
+{
+    if (!symbol || !symbol->owner_ctx || !symbol->owner_module ||
+        (symbol->kind != ANVIL_VAL_GLOBAL &&
+         symbol->kind != ANVIL_VAL_FUNC)) {
+        if (symbol && symbol->owner_ctx)
+            anvil_set_error(symbol->owner_ctx, ANVIL_ERR_INVALID_ARG,
+                            "Relocatable address requires a live module symbol");
+        return NULL;
+    }
+    anvil_ctx_t *ctx = symbol->owner_ctx;
+    anvil_type_t *source_type;
+    anvil_type_t *pointer_type;
+    if (symbol->kind == ANVIL_VAL_FUNC) {
+        if (!symbol->type || symbol->type->kind != ANVIL_TYPE_PTR ||
+            !symbol->type->data.pointee ||
+            symbol->type->data.pointee->kind != ANVIL_TYPE_FUNC) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Function symbol has no callable pointer type");
+            return NULL;
+        }
+        pointer_type = symbol->type;
+        source_type = symbol->type->data.pointee;
+    } else {
+        source_type = symbol->type;
+        pointer_type = anvil_type_ptr(ctx, source_type);
+        if (!pointer_type) return NULL;
+    }
+
+    anvil_value_t *value = anvil_value_create(
+        ctx, ANVIL_VAL_CONST_SYMBOL_ADDR, pointer_type, NULL);
+    if (!value) return NULL;
+    value->owner_module = symbol->owner_module;
+    value->data.reloc.symbol = symbol;
+    value->data.reloc.source_type = source_type;
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag_for_module(
+        value, ctx, symbol->owner_module);
+    if (dag != ANVIL_CONST_DAG_VALID) {
+        if (dag == ANVIL_CONST_DAG_INVALID)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Malformed relocatable symbol address");
+        value_discard_new(ctx, value);
+        return NULL;
+    }
+    return constant_register(ctx, value);
+}
+
+static bool reloc_addend_fits_target(const anvil_ctx_t *ctx, int64_t addend)
+{
+    const anvil_arch_info_t *info = ctx ? anvil_arch_get_info(ctx->arch) : NULL;
+    unsigned bits = info ? (unsigned)info->addr_bits : 0;
+    if (bits == 0 || bits > 64) return false;
+    if (bits == 64) return true;
+    int64_t limit = INT64_C(1) << (bits - 1);
+    return addend >= -limit && addend < limit;
+}
+
+anvil_value_t *anvil_const_gep(anvil_value_t *base,
+                                anvil_type_t *source_type,
+                                anvil_value_t **indices,
+                                size_t num_indices)
+{
+    if (!base) return NULL;
+    anvil_ctx_t *ctx = base->owner_ctx;
+    if (!ctx || !base->owner_module ||
+        (base->kind != ANVIL_VAL_CONST_SYMBOL_ADDR &&
+         base->kind != ANVIL_VAL_CONST_GEP)) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                                 "Constant GEP requires a live relocatable base");
+        return NULL;
+    }
+    if (!source_type || source_type->owner_ctx != ctx ||
+        !base->type || base->type->kind != ANVIL_TYPE_PTR ||
+        !anvil_types_equal(base->type->data.pointee, source_type) ||
+        !anvil_sem_type_is_sized(source_type) ||
+        num_indices == 0 || !indices ||
+        num_indices > SIZE_MAX / sizeof(*indices)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                        "Constant GEP source type does not match its base pointer");
+        return NULL;
+    }
+
+    anvil_type_t *current = source_type;
+    int64_t addend = base->data.reloc.addend;
+    for (size_t i = 0; i < num_indices; i++) {
+        anvil_gep_step_t step;
+        int64_t step_offset;
+        if (!indices[i] || indices[i]->owner_ctx != ctx ||
+            indices[i]->owner_module ||
+            indices[i]->kind != ANVIL_VAL_CONST_INT ||
+            !anvil_gep_analyze_step(&current, indices[i], i, &step) ||
+            !anvil_gep_const_step_offset(&step, indices[i], &step_offset) ||
+            !anvil_gep_accumulate_offset(&addend, step_offset)) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Constant GEP requires valid constant integer indices and a representable addend");
+            return NULL;
+        }
+    }
+    if (!reloc_addend_fits_target(ctx, addend)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                        "Constant GEP addend does not fit the target address width");
+        return NULL;
+    }
+
+    anvil_value_t **saved_indices = NULL;
+    if (num_indices > 0) {
+        saved_indices = anvil_ctx_malloc(ctx,
+                                         num_indices * sizeof(*saved_indices));
+        if (!saved_indices) return NULL;
+        memcpy(saved_indices, indices, num_indices * sizeof(*saved_indices));
+    }
+    anvil_type_t *result_type = anvil_type_ptr(ctx, current);
+    if (!result_type) { free(saved_indices); return NULL; }
+    anvil_value_t *value = anvil_value_create(
+        ctx, ANVIL_VAL_CONST_GEP, result_type, NULL);
+    if (!value) { free(saved_indices); return NULL; }
+    value->owner_module = base->owner_module;
+    value->data.reloc.symbol = base->data.reloc.symbol;
+    value->data.reloc.base = base;
+    value->data.reloc.source_type = source_type;
+    value->data.reloc.indices = saved_indices;
+    value->data.reloc.num_indices = num_indices;
+    value->data.reloc.addend = addend;
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag_for_module(
+        value, ctx, base->owner_module);
+    if (dag != ANVIL_CONST_DAG_VALID) {
+        if (dag == ANVIL_CONST_DAG_INVALID)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Malformed typed constant GEP");
+        value_discard_new(ctx, value);
+        return NULL;
+    }
+    return constant_register(ctx, value);
 }
 
 bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init)
@@ -725,8 +1105,8 @@ bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init)
         }
         return false;
     }
-    anvil_const_dag_status_t dag =
-        anvil_value_check_constant_dag(init, global->owner_ctx);
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag_for_module(
+        init, global->owner_ctx, global->owner_module);
     if (dag != ANVIL_CONST_DAG_VALID) {
         if (dag == ANVIL_CONST_DAG_INVALID)
             anvil_set_error(global->owner_ctx, ANVIL_ERR_INVALID_ARG,

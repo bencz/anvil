@@ -6,6 +6,7 @@
  */
 
 #include "pp_internal.h"
+#include <limits.h>
 
 /* ============================================================
  * Hash Function
@@ -49,14 +50,20 @@ bool pp_is_expanding(mcc_preprocessor_t *pp, const char *name)
     return false;
 }
 
-void pp_push_expanding(mcc_preprocessor_t *pp, const char *name)
+bool pp_push_expanding(mcc_preprocessor_t *pp, const char *name)
 {
+    if (!pp || !name || pp->num_expanding == SIZE_MAX) {
+        if (pp) mcc_fatal(pp->ctx, "macro expansion stack overflow");
+        return false;
+    }
     size_t n = pp->num_expanding;
-    const char **new_stack = mcc_realloc(pp->ctx, (void*)pp->expanding_macros,
-                                          n * sizeof(char*), (n + 1) * sizeof(char*));
+    const char **new_stack = mcc_realloc_array(pp->ctx,
+        (void *)pp->expanding_macros, n, n + 1, sizeof(*new_stack));
+    if (!new_stack) return false;
     new_stack[n] = name;
     pp->expanding_macros = new_stack;
     pp->num_expanding = n + 1;
+    return true;
 }
 
 void pp_pop_expanding(mcc_preprocessor_t *pp)
@@ -102,6 +109,7 @@ mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
     len++; /* Null terminator */
     
     char *buf = mcc_alloc(pp->ctx, len);
+    if (!buf) return NULL;
     char *p = buf;
     *p++ = '"';
     
@@ -123,6 +131,7 @@ mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
     *p = '\0';
     
     mcc_token_t *result = mcc_token_create(pp->ctx);
+    if (!result) return NULL;
     result->type = TOK_STRING_LIT;
     result->text = buf + 1; /* Skip opening quote for value */
     result->text_len = p - buf - 2;
@@ -186,7 +195,7 @@ static mcc_token_t *pp_paste_tokens(mcc_preprocessor_t *pp, mcc_token_t *left, m
 
 void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
 {
-    pp_push_expanding(pp, macro->name);
+    if (!pp_push_expanding(pp, macro->name)) return;
     
     if (macro->is_function_like) {
         /* Read arguments */
@@ -223,9 +232,16 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 if (paren_depth == 0) {
                     /* End of arguments */
                     if (arg_head || num_args > 0) {
-                        args = mcc_realloc(pp->ctx, args,
-                                           num_args * sizeof(mcc_token_t*),
-                                           (num_args + 1) * sizeof(mcc_token_t*));
+                        if (num_args == INT_MAX) {
+                            mcc_fatal(pp->ctx, "macro argument count overflow");
+                            pp_pop_expanding(pp);
+                            return;
+                        }
+                        void *grown = mcc_realloc_array(pp->ctx, args,
+                            (size_t)num_args, (size_t)num_args + 1,
+                            sizeof(*args));
+                        if (!grown) { pp_pop_expanding(pp); return; }
+                        args = grown;
                         args[num_args++] = arg_head;
                     }
                     break;
@@ -233,9 +249,15 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
                 paren_depth--;
             } else if (tok->type == TOK_COMMA && paren_depth == 0) {
                 /* Next argument */
-                args = mcc_realloc(pp->ctx, args,
-                                   num_args * sizeof(mcc_token_t*),
-                                   (num_args + 1) * sizeof(mcc_token_t*));
+                if (num_args == INT_MAX) {
+                    mcc_fatal(pp->ctx, "macro argument count overflow");
+                    pp_pop_expanding(pp);
+                    return;
+                }
+                void *grown = mcc_realloc_array(pp->ctx, args,
+                    (size_t)num_args, (size_t)num_args + 1, sizeof(*args));
+                if (!grown) { pp_pop_expanding(pp); return; }
+                args = grown;
                 args[num_args++] = arg_head;
                 arg_head = arg_tail = NULL;
                 continue;
@@ -260,7 +282,9 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
         /* So we need to temporarily pop the current macro to allow recursive expansion */
         mcc_token_t **expanded_args = NULL;
         if (num_args > 0) {
-            expanded_args = mcc_alloc(pp->ctx, num_args * sizeof(mcc_token_t*));
+            expanded_args = mcc_alloc_array(pp->ctx, (size_t)num_args,
+                                            sizeof(*expanded_args));
+            if (!expanded_args) { pp_pop_expanding(pp); return; }
             
             /* Temporarily pop current macro from expansion stack */
             pp_pop_expanding(pp);
@@ -283,7 +307,7 @@ void pp_expand_macro(mcc_preprocessor_t *pp, mcc_macro_t *macro)
             }
             
             /* Re-push current macro to expansion stack */
-            pp_push_expanding(pp, macro->name);
+            if (!pp_push_expanding(pp, macro->name)) return;
         }
         
         /* Build expanded token list with argument substitution */
@@ -600,6 +624,7 @@ void pp_process_define(mcc_preprocessor_t *pp)
     const char *name = mcc_strdup(pp->ctx, name_tok->text);
     
     mcc_macro_t *macro = mcc_alloc(pp->ctx, sizeof(mcc_macro_t));
+    if (!name || !macro) return;
     macro->name = name;
     macro->def_loc = name_tok->location;
     
@@ -632,7 +657,9 @@ void pp_process_define(mcc_preprocessor_t *pp)
                 }
                 
                 mcc_macro_param_t *param = mcc_alloc(pp->ctx, sizeof(mcc_macro_param_t));
+                if (!param) return;
                 param->name = mcc_strdup(pp->ctx, param_tok->text);
+                if (!param->name) return;
                 
                 if (!param_head) param_head = param;
                 if (param_tail) param_tail->next = param;
@@ -747,7 +774,9 @@ void mcc_preprocessor_define(mcc_preprocessor_t *pp, const char *name, const cha
     
     /* Create new macro */
     mcc_macro_t *macro = mcc_alloc(pp->ctx, sizeof(mcc_macro_t));
+    if (!macro) return;
     macro->name = mcc_strdup(pp->ctx, name);
+    if (!macro->name) return;
     macro->is_function_like = false;
     
     if (value) {

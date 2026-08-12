@@ -55,7 +55,9 @@ static anvil_func_t *build_factorial(anvil_ctx_t *ctx, anvil_module_t *mod)
     
     /* Call factorial(n - 1) recursively */
     anvil_value_t *call_args[] = { n_minus_1 };
-    anvil_value_t *rec_result = anvil_build_call(ctx, i32, func_val, call_args, 1, "rec_result");
+    anvil_value_t *rec_result = NULL;
+    anvil_build_call_checked(ctx, func_val, call_args, 1, "rec_result",
+                             &rec_result);
     
     /* Multiply n * factorial(n - 1) */
     anvil_value_t *product = anvil_build_mul(ctx, n, rec_result, "product");

@@ -19,10 +19,14 @@
 
 mcc_sema_t *mcc_sema_create(mcc_context_t *ctx)
 {
+    if (!ctx) return NULL;
     mcc_sema_t *sema = mcc_alloc(ctx, sizeof(mcc_sema_t));
+    if (!sema) return NULL;
     sema->ctx = ctx;
     sema->types = mcc_type_context_create(ctx);
+    if (!sema->types) return NULL;
     sema->symtab = mcc_symtab_create(ctx, sema->types);
+    if (!sema->symtab) return NULL;
     sema->current_func = NULL;
     sema->current_return_type = NULL;
     sema->loop_depth = 0;

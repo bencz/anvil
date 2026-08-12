@@ -65,6 +65,7 @@ test-negative: $(TARGET)
 		*c23_*) std=c23 ;; \
 		*c11_*|*ambiguous_*) std=c11 ;; \
 		*c99_*) std=c99 ;; \
+		*gnu_*) std=gnu99 ;; \
 		*include_next*|*pragma_operator*) std=gnu99 ;; \
 			*) std=c89 ;; \
 		esac; \
@@ -90,7 +91,8 @@ test-unit:
 		-o $(OBJDIR)/context_target_test
 	@$(OBJDIR)/context_target_test
 	@$(CC) $(CFLAGS) $(TESTDIR)/unit/layout.c src/context.c src/c_std.c \
-		src/types.c $(ANVIL_LIB) -o $(OBJDIR)/layout_test
+		src/types.c src/codegen/codegen_type.c $(ANVIL_LIB) \
+		-o $(OBJDIR)/layout_test
 	@$(OBJDIR)/layout_test
 	@echo "MCC context/allocator unit tests passed"
 

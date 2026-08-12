@@ -17,6 +17,7 @@ typedef struct anvil_mir_instr {
     anvil_mir_block_t false_block;
     bool has_imm;
     int64_t imm;
+    anvil_cc_t call_cc;
     char *symbol;
     int spill_slot;
     int frame_slot;

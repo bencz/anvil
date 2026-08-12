@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "anvil.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -157,6 +159,10 @@ typedef struct {
     anvil_mir_block_t false_block;
     bool has_imm;
     int64_t imm;
+    /* Effective, target-canonical calling convention for CALL.  The
+       immediate remains available for ABI-specific payloads such as the
+       SysV variadic vector-register count. */
+    anvil_cc_t call_cc;
     const char *symbol;
     int spill_slot;
     int frame_slot;
@@ -220,6 +226,14 @@ bool anvil_mir_add_instr_symbol_imm(anvil_mir_func_t *func,
                                     size_t num_uses,
                                     const char *symbol,
                                     int64_t imm);
+bool anvil_mir_add_call(anvil_mir_func_t *func,
+                        anvil_mir_vreg_t def,
+                        const anvil_mir_vreg_t *uses,
+                        size_t num_uses,
+                        const char *symbol,
+                        anvil_cc_t call_cc,
+                        bool has_abi_imm,
+                        int64_t abi_imm);
 int anvil_mir_add_frame_slot(anvil_mir_func_t *func,
                              uint16_t size_bits,
                              uint16_t align_bytes);

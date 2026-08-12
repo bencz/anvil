@@ -1,0 +1,2 @@
+NotFoundError := Error [
+]

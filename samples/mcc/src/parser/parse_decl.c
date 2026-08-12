@@ -69,10 +69,10 @@ mcc_ast_node_t *parse_initializer(mcc_parser_t *p)
                 }
                 
                 if (num_exprs >= cap_exprs) {
-                    cap_exprs = cap_exprs ? cap_exprs * 2 : 4;
-                    exprs = mcc_realloc(p->ctx, exprs,
-                                        num_exprs * sizeof(mcc_ast_node_t*),
-                                        cap_exprs * sizeof(mcc_ast_node_t*));
+                    void *grown = parse_grow_array(p, exprs, num_exprs,
+                        &cap_exprs, sizeof(*exprs), 4);
+                    if (!grown) return NULL;
+                    exprs = grown;
                 }
                 exprs[num_exprs++] = expr;
                 
@@ -191,9 +191,10 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
     
     /* Add first declaration to list */
     if (num_decls >= cap_decls) {
-        cap_decls = cap_decls ? cap_decls * 2 : 4;
-        decls = mcc_realloc(p->ctx, decls, num_decls * sizeof(mcc_ast_node_t*),
-                            cap_decls * sizeof(mcc_ast_node_t*));
+        void *grown = parse_grow_array(p, decls, num_decls,
+            &cap_decls, sizeof(*decls), 4);
+        if (!grown) return NULL;
+        decls = grown;
     }
     decls[num_decls++] = var;
     
@@ -227,9 +228,10 @@ static mcc_ast_node_t *parse_variable_decl_with_attrs(mcc_parser_t *p, mcc_type_
         
         /* Add to list */
         if (num_decls >= cap_decls) {
-            cap_decls = cap_decls ? cap_decls * 2 : 4;
-            decls = mcc_realloc(p->ctx, decls, num_decls * sizeof(mcc_ast_node_t*),
-                                cap_decls * sizeof(mcc_ast_node_t*));
+            void *grown = parse_grow_array(p, decls, num_decls,
+                &cap_decls, sizeof(*decls), 4);
+            if (!grown) return NULL;
+            decls = grown;
         }
         decls[num_decls++] = next_var;
     }
@@ -351,7 +353,6 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     }
     
     /* C11: _Alignas - parse alignment specifier */
-    int alignment = 0;
     while (parse_check(p, TOK__ALIGNAS) || parse_check(p, TOK_ALIGNAS)) {
         if (!parse_has_alignas(p)) {
             mcc_error_at(p->ctx, loc,
@@ -368,15 +369,9 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         
         /* _Alignas can take a type or a constant expression */
         if (parse_is_type_start(p)) {
-            mcc_type_t *type = parse_type_specifier(p);
-            if (type) {
-                alignment = (int)mcc_type_alignof(type);
-            }
+            (void)parse_type_specifier(p);
         } else {
-            mcc_ast_node_t *expr = parse_constant_expr(p);
-            if (expr && expr->kind == AST_INT_LIT) {
-                alignment = (int)expr->data.int_lit.value;
-            }
+            (void)parse_constant_expr(p);
         }
         parse_expect(p, TOK_RPAREN, ")");
     }
@@ -518,10 +513,12 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         mcc_ast_node_t **params = NULL;
         size_t num_params = decl_type->data.function.num_params;
         if (num_params > 0 && decl_type->data.function.params) {
-            params = mcc_alloc(p->ctx, num_params * sizeof(mcc_ast_node_t*));
+            params = mcc_alloc_array(p->ctx, num_params, sizeof(*params));
+            if (!params) return NULL;
             mcc_func_param_t *param = decl_type->data.function.params;
             for (size_t i = 0; i < num_params && param; i++, param = param->next) {
                 mcc_ast_node_t *param_node = mcc_ast_create(p->ctx, AST_PARAM_DECL, loc);
+                if (!param_node) return NULL;
                 param_node->data.param_decl.name = param->name;
                 param_node->data.param_decl.param_type = param->type;
                 params[i] = param_node;

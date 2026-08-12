@@ -768,21 +768,20 @@ static anvil_func_t *make_caller(anvil_ctx_t *ctx, anvil_module_t *mod,
 {
     anvil_type_t *i32 = anvil_type_i32(ctx);
     anvil_type_t *cp[3] = { i32, i32, i32 };
-    anvil_type_t *ct = anvil_type_func(ctx, i32, cp, 3, false);
+    anvil_type_t *ct = anvil_type_func_cc(ctx, i32, cp, 3, false, cc);
     anvil_func_t *callee = anvil_func_declare(mod, "callee3", ct);
     anvil_type_t *params[] = { i32, i32 };
-    anvil_type_t *ft = anvil_type_func(ctx, i32, params, 2, false);
+    anvil_type_t *ft = anvil_type_func_cc(ctx, i32, params, 2, false, cc);
     anvil_func_t *fn = anvil_func_create(mod, name, ft, ANVIL_LINK_EXTERNAL);
     if (!callee || !fn) return NULL;
-    anvil_func_set_cc(fn, cc);
     anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
     anvil_value_t *a = anvil_func_get_param(fn, 0);
     anvil_value_t *b = anvil_func_get_param(fn, 1);
     anvil_value_t *c = anvil_const_i32(ctx, 7);
     anvil_value_t *args[3] = { a, b, c };
-    anvil_value_t *call = anvil_build_call(ctx, i32,
-                                           anvil_func_get_value(callee),
-                                           args, 3, "call");
+    anvil_value_t *call = NULL;
+    anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 3,
+                             "call", &call);
     anvil_build_ret(ctx, call);
     return fn;
 }

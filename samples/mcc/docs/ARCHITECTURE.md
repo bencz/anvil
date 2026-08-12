@@ -442,7 +442,7 @@ Key ANVIL APIs used:
 - `anvil_build_cmp_eq()`, `anvil_build_cmp_lt()`, etc.: Integer comparison
 - `anvil_build_br()`, `anvil_build_br_cond()`: Control flow
 - `anvil_build_switch()`, `anvil_switch_add_case()`: Switch terminators
-- `anvil_build_call(ctx, func_type, callee, args, num_args, name)`: Direct and indirect function calls
+- `anvil_build_call_checked(ctx, callee, args, num_args, name, &result)`: typed direct and indirect calls; signature/CC derive from `ptr<func>`
 - `anvil_build_ret()`: Return
 - `anvil_build_struct_gep()`: Struct field access
 - `anvil_build_gep()`: Array indexing and pointer arithmetic

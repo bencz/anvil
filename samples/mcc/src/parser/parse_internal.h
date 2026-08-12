@@ -11,6 +11,22 @@
 
 #include "mcc.h"
 
+static inline void *parse_grow_array(mcc_parser_t *p, void *array,
+                                     size_t used, size_t *capacity,
+                                     size_t element_size, size_t initial)
+{
+    if (!p || !capacity || !element_size || !initial ||
+        *capacity > SIZE_MAX / 2) {
+        if (p) mcc_fatal(p->ctx, "parser table capacity overflow");
+        return NULL;
+    }
+    size_t next = *capacity ? *capacity * 2 : initial;
+    void *grown = mcc_realloc_array(p->ctx, array, used, next, element_size);
+    if (!grown) return NULL;
+    *capacity = next;
+    return grown;
+}
+
 /* ============================================================
  * Constants
  * ============================================================ */

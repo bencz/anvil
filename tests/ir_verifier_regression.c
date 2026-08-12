@@ -209,9 +209,8 @@ static void test_ir_verifier_rejects_call_signature_mismatch(void)
 
         anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
         anvil_value_t *args[] = { anvil_const_i32(ctx, 42) };
-        anvil_value_t *call =
-            anvil_build_call(ctx, anvil_type_i32(ctx), callee,
-                             args, 1, "call");
+        anvil_value_t *call = NULL;
+        anvil_build_call_checked(ctx, callee, args, 1, "call", &call);
         if (call) call->data.instr->operands[1] = anvil_const_i64(ctx, 42);
         anvil_build_ret(ctx, call);
 
@@ -526,8 +525,8 @@ static void test_ir_verifier_accepts_function_pointer_indirect_call(void)
                 anvil_const_i32(ctx, 3),
                 anvil_const_i32(ctx, 4)
             };
-            anvil_value_t *called =
-                anvil_build_call(ctx, callee_type, loaded, args, 2, "called");
+            anvil_value_t *called = NULL;
+            anvil_build_call_checked(ctx, loaded, args, 2, "called", &called);
             anvil_build_ret(ctx, called);
         }
 
@@ -1081,24 +1080,24 @@ static void test_nested_and_malformed_array_constants(void)
           "array constructor must reject a foreign-context element");
 
     if (matrix) {
-        anvil_value_t *saved = matrix->data.array.elements[0];
-        matrix->data.array.elements[0] = NULL;
+        anvil_value_t *saved = matrix->data.aggregate.elements[0];
+        matrix->data.aggregate.elements[0] = NULL;
         CHECK(!anvil_value_is_constant_dag(matrix, ctx),
               "constant-DAG validation must reject a null nested element");
         memset(error, 0, sizeof(error));
         CHECK(!anvil_module_verify(mod, error, sizeof(error)),
               "verifier must reject a malformed nested array initializer");
-        matrix->data.array.elements[0] = saved;
+        matrix->data.aggregate.elements[0] = saved;
         memset(error, 0, sizeof(error));
         CHECK(anvil_module_verify(mod, error, sizeof(error)),
               "restored nested array initializer should verify again");
 
         anvil_type_t *saved_elem_type = matrix->type->data.array.elem;
         matrix->type->data.array.elem = matrix->type;
-        matrix->data.array.elements[0] = matrix;
+        matrix->data.aggregate.elements[0] = matrix;
         CHECK(!anvil_value_is_constant_dag(matrix, ctx),
               "constant-DAG validation must reject a cycle");
-        matrix->data.array.elements[0] = saved;
+        matrix->data.aggregate.elements[0] = saved;
         matrix->type->data.array.elem = saved_elem_type;
     }
 
@@ -1372,9 +1371,9 @@ static void test_builders_reject_invalid_semantics_transactionally(void)
     CHECK_INVALID_BUILD(anvil_build_store(ctx, i64, slot),
                         "invalid store type must be transactional");
     anvil_value_t *bad_args[] = { i64 };
-    CHECK_INVALID_BUILD(anvil_build_call(ctx, anvil_type_i32(ctx),
-                                         anvil_func_get_value(callee),
-                                         bad_args, 1, "bad") != NULL,
+    CHECK_INVALID_BUILD(anvil_build_call_checked(
+                            ctx, anvil_func_get_value(callee), bad_args, 1,
+                            "bad", NULL),
                         "invalid call signature must be transactional");
     CHECK_INVALID_BUILD(anvil_build_br(ctx, foreign_block),
                         "cross-function branch must be transactional");
@@ -1429,15 +1428,7 @@ static void test_builders_reject_invalid_semantics_transactionally(void)
           "checked void builder must surface OOM without mutating the block");
     anvil_test_disable_alloc_fail(ctx);
 
-    anvil_ctx_clear_error(ctx);
-    CHECK(!anvil_func_set_cc(fn, (anvil_cc_t)-1) &&
-          anvil_ctx_get_last_error(ctx) == ANVIL_ERR_INVALID_ARG,
-          "function calling convention setter must reject invalid enums");
     anvil_module_destroy(mod);
-    anvil_ctx_clear_error(ctx);
-    CHECK(!anvil_func_set_cc(fn, ANVIL_CC_CDECL) &&
-          anvil_ctx_get_last_error(ctx) == ANVIL_ERR_INVALID_OP,
-          "destroyed function handles must be tombstoned and diagnosed");
     anvil_ctx_destroy(foreign_ctx);
     anvil_ctx_destroy(ctx);
 }

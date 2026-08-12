@@ -54,7 +54,7 @@ int main(int argc, char **argv)
     
     /* Call printf(hello_str) */
     anvil_value_t *args[] = { hello_str };
-    anvil_build_call(ctx, printf_type, printf_val, args, 1, "call_printf");
+    anvil_build_call_checked(ctx, printf_val, args, 1, "call_printf", NULL);
     
     /* Return 0 */
     anvil_value_t *zero = anvil_const_i32(ctx, 0);

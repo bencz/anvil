@@ -1,0 +1,6 @@
+HelloApplication := Object [
+
+    run [
+        ^true
+    ]
+]

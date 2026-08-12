@@ -185,6 +185,8 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
                 node->data.alignof_expr.type_arg = parse_type_specifier(p);
                 node->data.alignof_expr.expr_arg = NULL;
             } else {
+                mcc_error_at(p->ctx, p->peek->location,
+                             "_Alignof(expression) GNU semantics are not implemented");
                 node->data.alignof_expr.type_arg = NULL;
                 node->data.alignof_expr.expr_arg = parse_expression(p);
             }
@@ -205,6 +207,8 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
                 node->data.alignof_expr.type_arg = parse_type_specifier(p);
                 node->data.alignof_expr.expr_arg = NULL;
             } else {
+                mcc_error_at(p->ctx, p->peek->location,
+                             "alignof(expression) is not implemented");
                 node->data.alignof_expr.type_arg = NULL;
                 node->data.alignof_expr.expr_arg = parse_expression(p);
             }
@@ -327,12 +331,18 @@ mcc_ast_node_t *parse_postfix(mcc_parser_t *p)
             
             if (!parse_check(p, TOK_RPAREN)) {
                 do {
+                    if (num_args >= PARSE_MAX_ARGS) {
+                        mcc_error_at(p->ctx, p->peek->location,
+                                     "function call exceeds %d arguments",
+                                     PARSE_MAX_ARGS);
+                        return NULL;
+                    }
                     mcc_ast_node_t *arg = parse_assignment_expr(p);
                     if (num_args >= cap_args) {
-                        cap_args = cap_args ? cap_args * 2 : 4;
-                        args = mcc_realloc(p->ctx, args,
-                                           num_args * sizeof(mcc_ast_node_t*),
-                                           cap_args * sizeof(mcc_ast_node_t*));
+                        void *grown = parse_grow_array(p, args, num_args,
+                            &cap_args, sizeof(*args), 4);
+                        if (!grown) return NULL;
+                        args = grown;
                     }
                     args[num_args++] = arg;
                 } while (parse_match(p, TOK_COMMA));

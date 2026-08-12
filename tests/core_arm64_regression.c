@@ -304,7 +304,8 @@ static void test_ir_dump_is_canonical(void)
     char *dump = anvil_module_to_string(mod);
     CHECK(dump != NULL, "module dump should be produced");
     if (dump) {
-        CHECK(strstr(dump, "declare external i32 @variadic_decl(u64, ...)") != NULL,
+        CHECK(strstr(dump,
+                     "declare external cc(sysv) i32 @variadic_decl(u64, ...)") != NULL,
               "declaration dump should include parameter types and variadic marker");
         CHECK(strstr(dump, "18446744073709551615") != NULL,
               "unsigned constants should not be printed as negative values");
@@ -464,7 +465,8 @@ static void test_arm64_emits_stack_arguments_after_x7(void)
         for (size_t i = 0; i < 10; i++) {
             args[i] = anvil_const_i64(ctx, (int64_t)i + 1);
         }
-        anvil_value_t *result = anvil_build_call(ctx, i64, callee, args, 10, "result");
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, callee, args, 10, "result", &result);
         anvil_build_ret(ctx, result);
     }
 
@@ -509,7 +511,8 @@ static void test_arm64_fp_call_uses_fp_registers_and_spills_d0_result(void)
         anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
         anvil_value_t *arg = anvil_func_get_param(caller, 0);
         anvil_value_t *args[] = { arg };
-        anvil_value_t *called = anvil_build_call(ctx, f64, callee, args, 1, "called");
+        anvil_value_t *called = NULL;
+        anvil_build_call_checked(ctx, callee, args, 1, "called", &called);
         anvil_value_t *sum = anvil_build_fadd(ctx, called, arg, "sum");
         anvil_build_ret(ctx, sum);
     }
@@ -596,7 +599,8 @@ static void test_arm64_module_codegen_routes_register_call_function_through_mir(
         anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
         anvil_value_t *x = anvil_func_get_param(caller, 0);
         anvil_value_t *args[] = { x };
-        anvil_value_t *called = anvil_build_call(ctx, i64, callee, args, 1, "called");
+        anvil_value_t *called = NULL;
+        anvil_build_call_checked(ctx, callee, args, 1, "called", &called);
         anvil_value_t *sum = anvil_build_add(ctx, called, x, "sum");
         anvil_build_ret(ctx, sum);
     }
@@ -711,7 +715,8 @@ static void test_arm64_module_codegen_routes_stack_argument_calls_through_mir(vo
         for (size_t i = 0; i < 10; i++) {
             args[i] = anvil_const_i64(ctx, (int64_t)i + 1);
         }
-        anvil_value_t *result = anvil_build_call(ctx, i64, callee, args, 10, "result");
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, callee, args, 10, "result", &result);
         anvil_build_ret(ctx, result);
     }
 
@@ -967,7 +972,7 @@ static void test_arm64_module_codegen_materializes_global_and_string_addresses(v
               strstr(asm_text, ":lo12:mir_global_seed") != NULL,
               "ARM64 MIR should materialize global addresses with PC-relative adrp/add");
         CHECK(strstr(asm_text, "mir_global_seed:\n") != NULL &&
-              strstr(asm_text, "\t.quad 41\n") != NULL,
+              strstr(asm_text, "\t.quad 0x29\n") != NULL,
               "ARM64 module codegen should still emit global data");
         CHECK(strstr(asm_text, ".Lstr_mir_const_string_0:\n") != NULL &&
               strstr(asm_text, "\t.asciz \"anvil-mir\"\n") != NULL,
@@ -1178,7 +1183,8 @@ static void test_arm64_darwin_variadic_calls_route_through_mir(void)
             anvil_const_i64(ctx, 2),
             anvil_const_i64(ctx, 3)
         };
-        anvil_value_t *result = anvil_build_call(ctx, i64, callee, args, 3, "result");
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, callee, args, 3, "result", &result);
         anvil_build_ret(ctx, result);
     }
 
@@ -1306,8 +1312,8 @@ static void test_arm64_module_codegen_lowers_function_pointer_indirect_call(void
             anvil_const_i32(ctx, 3),
             anvil_const_i32(ctx, 4)
         };
-        anvil_value_t *called =
-            anvil_build_call(ctx, callee_type, loaded, args, 2, "called");
+        anvil_value_t *called = NULL;
+        anvil_build_call_checked(ctx, loaded, args, 2, "called", &called);
         anvil_build_ret(ctx, called);
     }
 

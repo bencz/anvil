@@ -82,7 +82,8 @@ Then calls them like any other function:
 ```c
 /* Call malloc(size) */
 anvil_value_t *args[] = { size_arg };
-anvil_value_t *ptr = anvil_build_call(ctx, malloc_func, args, 1, "ptr");
+anvil_value_t *ptr = NULL;
+anvil_build_call_checked(ctx, malloc_func, args, 1, "ptr", &ptr);
 ```
 
 ### Generated Assembly (ARM64 macOS example)
@@ -154,7 +155,7 @@ To add more C library function calls:
 2. Build the call with appropriate arguments:
    ```c
    anvil_value_t *args[] = { arr_void, count_ext, elem_size, cmp_func };
-   anvil_build_call(ctx, qsort_func, args, 4, NULL);
+   anvil_build_call_checked(ctx, qsort_func, args, 4, NULL, NULL);
    ```
 
 ## Troubleshooting

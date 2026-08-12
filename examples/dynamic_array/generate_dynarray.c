@@ -114,8 +114,8 @@ int main(int argc, char **argv)
         
         /* Call malloc */
         anvil_value_t *args[] = { size_arg };
-        anvil_type_t *malloc_ret_type = ptr_void;
-        anvil_value_t *ptr = anvil_build_call(ctx, malloc_ret_type, malloc_func, args, 1, "ptr");
+        anvil_value_t *ptr = NULL;
+        anvil_build_call_checked(ctx, malloc_func, args, 1, "ptr", &ptr);
         
         /* Bitcast void* to int* */
         anvil_value_t *result = anvil_build_bitcast(ctx, ptr, ptr_i32, "result");
@@ -141,7 +141,7 @@ int main(int argc, char **argv)
         
         /* Call free */
         anvil_value_t *args[] = { ptr };
-        anvil_build_call(ctx, void_type, free_func, args, 1, NULL);
+        anvil_build_call_checked(ctx, free_func, args, 1, NULL, NULL);
         
         anvil_build_ret_void(ctx);
     }
@@ -175,14 +175,16 @@ int main(int argc, char **argv)
         
         /* Allocate destination */
         anvil_value_t *malloc_args[] = { size_arg };
-        anvil_value_t *dest_void = anvil_build_call(ctx, ptr_void, malloc_func, malloc_args, 1, "dest_void");
+        anvil_value_t *dest_void = NULL;
+        anvil_build_call_checked(ctx, malloc_func, malloc_args, 1,
+                                 "dest_void", &dest_void);
         
         /* Bitcast for memcpy */
         anvil_value_t *src_void = anvil_build_bitcast(ctx, src, ptr_void, "src_void");
         
         /* Call memcpy(dest, src, size) */
         anvil_value_t *memcpy_args[] = { dest_void, src_void, size_arg };
-        anvil_build_call(ctx, ptr_void, memcpy_func, memcpy_args, 3, NULL);
+        anvil_build_call_checked(ctx, memcpy_func, memcpy_args, 3, NULL, NULL);
         
         /* Bitcast result to int* */
         anvil_value_t *result = anvil_build_bitcast(ctx, dest_void, ptr_i32, "result");

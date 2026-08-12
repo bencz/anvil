@@ -335,6 +335,7 @@ static bool add_instr_full(anvil_mir_func_t *func, anvil_mir_opcode_t op,
     instr->false_block = false_block;
     instr->has_imm = has_imm;
     instr->imm = imm;
+    instr->call_cc = ANVIL_CC_DEFAULT;
     instr->symbol = symbol_copy;
     instr->spill_slot = -1;
     instr->frame_slot = -1;
@@ -354,6 +355,7 @@ bool anvil_mir_add_instr(anvil_mir_func_t *func, anvil_mir_opcode_t op,
                          const anvil_mir_vreg_t *uses,
                          size_t num_uses)
 {
+    if (op == ANVIL_MIR_OP_CALL) return false;
     return add_instr_full(func, op, def, uses, num_uses, false, 0, NULL,
                           ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK);
 }
@@ -361,6 +363,7 @@ bool anvil_mir_add_instr(anvil_mir_func_t *func, anvil_mir_opcode_t op,
 bool anvil_mir_add_instr_imm(anvil_mir_func_t *func, anvil_mir_opcode_t op,
                              anvil_mir_vreg_t def, int64_t imm)
 {
+    if (op == ANVIL_MIR_OP_CALL) return false;
     return add_instr_full(func, op, def, NULL, 0, true, imm, NULL,
                           ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK);
 }
@@ -372,6 +375,7 @@ bool anvil_mir_add_instr_imm_uses(anvil_mir_func_t *func,
                                   size_t num_uses,
                                   int64_t imm)
 {
+    if (op == ANVIL_MIR_OP_CALL) return false;
     return add_instr_full(func, op, def, uses, num_uses, true, imm, NULL,
                           ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK);
 }
@@ -383,6 +387,7 @@ bool anvil_mir_add_instr_symbol(anvil_mir_func_t *func,
                                 size_t num_uses,
                                 const char *symbol)
 {
+    if (op == ANVIL_MIR_OP_CALL) return false;
     return add_instr_full(func, op, def, uses, num_uses, false, 0, symbol,
                           ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK);
 }
@@ -395,9 +400,29 @@ bool anvil_mir_add_instr_symbol_imm(anvil_mir_func_t *func,
                                     const char *symbol,
                                     int64_t imm)
 {
+    if (op == ANVIL_MIR_OP_CALL) return false;
     return add_instr_full(func, op, def, uses, num_uses, true, imm,
                           symbol, ANVIL_MIR_NO_BLOCK,
                           ANVIL_MIR_NO_BLOCK);
+}
+
+bool anvil_mir_add_call(anvil_mir_func_t *func,
+                        anvil_mir_vreg_t def,
+                        const anvil_mir_vreg_t *uses,
+                        size_t num_uses,
+                        const char *symbol,
+                        anvil_cc_t call_cc,
+                        bool has_abi_imm,
+                        int64_t abi_imm)
+{
+    if (call_cc <= ANVIL_CC_DEFAULT || call_cc > ANVIL_CC_MVS) return false;
+    if (!add_instr_full(func, ANVIL_MIR_OP_CALL, def, uses, num_uses,
+                        has_abi_imm, abi_imm, symbol,
+                        ANVIL_MIR_NO_BLOCK, ANVIL_MIR_NO_BLOCK)) {
+        return false;
+    }
+    func->instrs[func->num_instrs - 1].call_cc = call_cc;
+    return true;
 }
 
 static bool reserve_frame_slots(anvil_mir_func_t *func, size_t needed)
@@ -579,6 +604,7 @@ bool anvil_mir_get_instr_info(const anvil_mir_func_t *func, size_t index,
     out_info->false_block = instr->false_block;
     out_info->has_imm = instr->has_imm;
     out_info->imm = instr->imm;
+    out_info->call_cc = instr->call_cc;
     out_info->symbol = instr->symbol;
     out_info->spill_slot = instr->spill_slot;
     out_info->frame_slot = instr->frame_slot;
@@ -1127,6 +1153,12 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                    instr->has_imm && instr->imm >= 0;
 
         case ANVIL_MIR_OP_CALL:
+            if (instr->call_cc <= ANVIL_CC_DEFAULT ||
+                instr->call_cc > ANVIL_CC_MVS) {
+                return mir_verify_fail(error, error_len,
+                    "instruction %zu has an invalid calling convention",
+                    index);
+            }
             if (instr->has_imm && (instr->imm < 0 || instr->imm > 8)) {
                 return mir_verify_fail(error, error_len,
                     "instruction %zu has an invalid variadic vector-register count",
@@ -1897,8 +1929,9 @@ bool anvil_mir_materialize_spills(
     const anvil_regalloc_class_config_t *scratch_configs,
     size_t num_scratch_configs)
 {
-    if (!func || !func->assignments) return false;
+    if (!func) return false;
     if (func->num_spills == 0) return true;
+    if (!func->assignments) return false;
     if (!scratch_configs || num_scratch_configs == 0) return false;
 
     size_t original_vregs = func->num_vregs;

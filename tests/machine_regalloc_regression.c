@@ -366,8 +366,8 @@ static void test_machine_ir_verifier_models_liveins_and_abi_bundles(void)
     anvil_mir_vreg_t result_use[] = { result };
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
                         ANVIL_MIR_NO_VREG, result_use, 1);
-    anvil_mir_add_instr_symbol(fn, ANVIL_MIR_OP_CALL, result,
-                               NULL, 0, "callee");
+    anvil_mir_add_call(fn, result, NULL, 0, "callee", ANVIL_CC_CDECL,
+                       false, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
                         ANVIL_MIR_NO_VREG, result_use, 1);
     CHECK(!anvil_mir_verify(fn, error, sizeof(error)) &&
@@ -393,8 +393,8 @@ static void test_machine_ir_verifier_models_liveins_and_abi_bundles(void)
         fn, ANVIL_MIR_REG_GPR, 32);
     anvil_mir_set_fixed_reg(fn, lo, 0);
     anvil_mir_set_fixed_reg(fn, hi, 1);
-    anvil_mir_add_instr_symbol(fn, ANVIL_MIR_OP_CALL,
-                               ANVIL_MIR_NO_VREG, NULL, 0, "pair_result");
+    anvil_mir_add_call(fn, ANVIL_MIR_NO_VREG, NULL, 0, "pair_result",
+                       ANVIL_CC_CDECL, false, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL_RESULT, lo, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL_RESULT, hi, NULL, 0);
     anvil_mir_vreg_t pair_uses[] = { lo, hi };
@@ -998,8 +998,8 @@ static void test_materialize_spills_allows_unrelated_fixed_scratch_class(void)
           anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, fp, NULL, 0) &&
           anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE,
                               ANVIL_MIR_NO_VREG, fp_use, 1) &&
-          anvil_mir_add_instr(fn, ANVIL_MIR_OP_CALL,
-                              ANVIL_MIR_NO_VREG, callee_use, 1) &&
+          anvil_mir_add_call(fn, ANVIL_MIR_NO_VREG, callee_use, 1, NULL,
+                             ANVIL_CC_SYSV, false, 0) &&
           anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET,
                               ANVIL_MIR_NO_VREG, NULL, 0),
           "cross-class scratch regression should build its instruction stream");

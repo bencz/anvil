@@ -719,9 +719,10 @@ BACKEND_SRCS = \
 
 Different architectures pass parameters differently:
 
-The x86 and x86-64 backends select their convention from `func->cc` (per-function
-override) falling back to `ctx->abi` (module default); platform decoration is
-selected from `ctx->abi`. See the ABI/CC descriptor tables in
+The x86 and x86-64 backends select a definition's convention from the canonical
+`func->type->data.func.cc`; CALL lowering consumes the callee-derived
+`instr->call_cc`. No backend may silently map an incompatible convention.
+Platform decoration is selected from `ctx->abi`. See the ABI/CC descriptor tables in
 `src/backend/x86_64/x86_64_mir.c` (`anvil_x64_abi_desc_t x64_abi_descs[]`) and
 `src/backend/x86/x86_mir.c` (`anvil_x86_cc_desc_t x86_cc_descs[]` /
 `anvil_x86_plat_desc_t x86_plat_descs[]`).
@@ -1177,13 +1178,14 @@ Both x86 backends follow the ARM64 MachineIR contract
 The descriptor struct `anvil_x64_abi_desc_t` and table `x64_abi_descs[]` in
 `x86_64_mir.c` hold one entry per ABI (SysV, Darwin, Win64) with argument
 register sequences, return registers, shadow-space size, symbol prefix, and
-register pools. `x64_lower_abi()` resolves the active ABI: `func->cc`
-(`ANVIL_CC_WIN64` / `ANVIL_CC_SYSV`) overrides `ctx->abi`, defaulting to SysV.
+register pools. Function-type construction resolves the active ABI to
+`ANVIL_CC_WIN64` or `ANVIL_CC_SYSV`; lowering consumes that canonical value.
 
 ### Multi-convention selection (x86 32-bit)
 
 `x86_cc_descs[]` covers cdecl, stdcall, and fastcall; `x86_plat_descs[]` covers
-ELF / Mach-O / Win32 COFF decoration. The emitter consumes `func->cc` for the
+ELF / Mach-O / Win32 COFF decoration. The emitter consumes the canonical
+function-type CC for the
 convention (register args, callee `ret $N` cleanup) and `ctx->abi` for platform
 decoration. Stack cleanup bytes are computed by `x86_compute_ret_pop()`.
 

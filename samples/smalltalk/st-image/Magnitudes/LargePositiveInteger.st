@@ -1,0 +1,6 @@
+LargePositiveInteger := LargeInteger [
+
+    negative [
+        ^false
+    ]
+]

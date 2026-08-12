@@ -503,11 +503,13 @@ static void mf_uppercase(char *dest, const char *src, size_t max_len)
 static bool mf_create_mir_blocks(mf_lower_t *lower)
 {
     lower->num_blocks = lower->func->num_blocks;
+    if (lower->num_blocks == 0) return false;
     lower->blocks = calloc(lower->num_blocks, sizeof(*lower->blocks));
-    if (!lower->blocks && lower->num_blocks) return false;
+    if (!lower->blocks) return false;
 
     size_t idx = 0;
     for (anvil_block_t *block = lower->func->blocks; block; block = block->next) {
+        if (idx >= lower->num_blocks) return false;
         anvil_mir_block_t mir_block = idx == 0
             ? anvil_mir_current_block(lower->mir)
             : anvil_mir_add_block(lower->mir, block->name);
@@ -516,7 +518,7 @@ static bool mf_create_mir_blocks(mf_lower_t *lower)
         lower->blocks[idx].mir_block = mir_block;
         idx++;
     }
-    return true;
+    return idx == lower->num_blocks;
 }
 
 static bool mf_lower_params(mf_lower_t *lower)
@@ -616,6 +618,22 @@ static anvil_mir_vreg_t mf_lower_symbol_address(mf_lower_t *lower,
     return vreg;
 }
 
+static anvil_mir_vreg_t mf_lower_reloc_address(mf_lower_t *lower,
+                                                anvil_value_t *value)
+{
+    const char *symbol = value && value->data.reloc.symbol
+                             ? value->data.reloc.symbol->name : NULL;
+    if (!symbol || !symbol[0]) return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(
+        lower->mir, ANVIL_MIR_REG_GPR,
+        (uint16_t)(lower->desc->ptr_size * 8), false);
+    if (vreg == ANVIL_MIR_NO_VREG ||
+        !anvil_mir_add_instr_symbol_imm(
+            lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol,
+            value->data.reloc.addend)) return ANVIL_MIR_NO_VREG;
+    return vreg;
+}
+
 static anvil_mir_vreg_t mf_lower_value(mf_lower_t *lower, anvil_value_t *value)
 {
     if (!value) return ANVIL_MIR_NO_VREG;
@@ -642,6 +660,14 @@ static anvil_mir_vreg_t mf_lower_value(mf_lower_t *lower, anvil_value_t *value)
             return vreg;
         }
 
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP: {
+            anvil_mir_vreg_t vreg = mf_lower_reloc_address(lower, value);
+            if (vreg == ANVIL_MIR_NO_VREG || !mf_map_put(lower, value, vreg))
+                return ANVIL_MIR_NO_VREG;
+            return vreg;
+        }
+
         case ANVIL_VAL_GLOBAL:
         case ANVIL_VAL_FUNC: {
             anvil_mir_vreg_t vreg =
@@ -657,6 +683,7 @@ static anvil_mir_vreg_t mf_lower_value(mf_lower_t *lower, anvil_value_t *value)
 
         case ANVIL_VAL_CONST_DECIMAL:
         case ANVIL_VAL_CONST_ARRAY:
+        case ANVIL_VAL_CONST_STRUCT:
         case ANVIL_VAL_BLOCK:
             return ANVIL_MIR_NO_VREG;
     }
@@ -720,6 +747,133 @@ static bool mf_unary_op(anvil_op_t op, anvil_mir_opcode_t *out_op)
         case ANVIL_OP_FPTRUNC: *out_op = ANVIL_MIR_OP_FPTRUNC; return true;
         default: return false;
     }
+}
+
+static bool mf_value_needs_materialization(anvil_value_t *value)
+{
+    if (!value) return false;
+    switch (value->kind) {
+        case ANVIL_VAL_CONST_INT:
+        case ANVIL_VAL_CONST_FLOAT:
+        case ANVIL_VAL_CONST_NULL:
+        case ANVIL_VAL_CONST_STRING:
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+        case ANVIL_VAL_GLOBAL:
+        case ANVIL_VAL_FUNC:
+            return true;
+
+        case ANVIL_VAL_CONST_DECIMAL:
+        case ANVIL_VAL_CONST_ARRAY:
+        case ANVIL_VAL_CONST_STRUCT:
+        case ANVIL_VAL_PARAM:
+        case ANVIL_VAL_INSTR:
+        case ANVIL_VAL_BLOCK:
+            return false;
+    }
+    return false;
+}
+
+/* Return true exactly for operands which mf_lower_instr lowers through
+   mf_lower_value.  Materializable values are shared by the source IR, so
+   lowering one lazily in a branch (or in a synthetic PHI edge block) and
+   caching its vreg would make later uses reuse a definition which does not
+   dominate them.  We pre-materialize those values in the MIR entry block.
+
+   This predicate intentionally mirrors the exceptional lowering paths: GEP
+   constant indices and struct field numbers are folded, direct callees are
+   carried by CALL's symbol, and 64-bit constants on narrow mainframes are
+   consumed by the split-word lowering rather than a 64-bit MIR vreg. */
+static bool mf_instr_lowers_operand(mf_lower_t *lower,
+                                    anvil_instr_t *instr,
+                                    size_t operand_index)
+{
+    if (!lower || !instr || operand_index >= instr->num_operands)
+        return false;
+
+    anvil_mir_opcode_t ignored;
+    if (mf_binary_op(instr->op, &ignored)) {
+        bool split_wide_compare =
+            ignored == ANVIL_MIR_OP_CMP_EQ ||
+            ignored == ANVIL_MIR_OP_CMP_NE ||
+            ignored == ANVIL_MIR_OP_CMP_LT ||
+            ignored == ANVIL_MIR_OP_CMP_LE ||
+            ignored == ANVIL_MIR_OP_CMP_GT ||
+            ignored == ANVIL_MIR_OP_CMP_GE ||
+            ignored == ANVIL_MIR_OP_CMP_ULT ||
+            ignored == ANVIL_MIR_OP_CMP_ULE ||
+            ignored == ANVIL_MIR_OP_CMP_UGT ||
+            ignored == ANVIL_MIR_OP_CMP_UGE;
+        if (!lower->desc->has_64bit_gprs && split_wide_compare &&
+            operand_index < 2u &&
+            mf_type_is_64bit_integer(instr->operands[operand_index]->type)) {
+            return false;
+        }
+        return operand_index < 2u;
+    }
+    if (mf_unary_op(instr->op, &ignored)) {
+        if (!lower->desc->has_64bit_gprs && instr->result &&
+            mf_type_is_64bit_integer(instr->result->type)) {
+            return false;
+        }
+        return operand_index == 0u;
+    }
+
+    switch (instr->op) {
+        case ANVIL_OP_PHI:
+            return true;
+        case ANVIL_OP_ALLOCA:
+            return instr->num_operands != 0u && operand_index == 0u;
+        case ANVIL_OP_GEP:
+            return operand_index == 0u ||
+                   instr->operands[operand_index]->kind != ANVIL_VAL_CONST_INT;
+        case ANVIL_OP_STRUCT_GEP:
+        case ANVIL_OP_LOAD:
+        case ANVIL_OP_BR_COND:
+            return operand_index == 0u;
+        case ANVIL_OP_STORE:
+            if (operand_index == 0u && !lower->desc->has_64bit_gprs &&
+                mf_type_is_64bit_integer(instr->operands[0]->type)) {
+                return false;
+            }
+            return operand_index < 2u;
+        case ANVIL_OP_CALL:
+            return operand_index != 0u ||
+                   instr->operands[0]->kind != ANVIL_VAL_FUNC;
+        case ANVIL_OP_RET:
+            return operand_index == 0u;
+        case ANVIL_OP_SWITCH:
+            return true;
+        case ANVIL_OP_SELECT:
+            return operand_index < 3u;
+
+        case ANVIL_OP_NOP:
+        case ANVIL_OP_BR:
+            return false;
+        default:
+            return false;
+    }
+}
+
+static bool mf_materialize_entry_values(mf_lower_t *lower)
+{
+    if (!lower) return false;
+    for (anvil_block_t *block = lower->func->blocks; block;
+         block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr;
+             instr = instr->next) {
+            for (size_t index = 0u; index < instr->num_operands; index++) {
+                anvil_value_t *value = instr->operands[index];
+                if (!mf_instr_lowers_operand(lower, instr, index) ||
+                    !mf_value_needs_materialization(value)) {
+                    continue;
+                }
+                if (mf_lower_value(lower, value) == ANVIL_MIR_NO_VREG)
+                    return false;
+            }
+        }
+    }
+    return true;
 }
 
 static bool mf_add_return_copy(mf_lower_t *lower, anvil_value_t *value)
@@ -1267,6 +1421,7 @@ static bool mf_lower_struct_gep(mf_lower_t *lower, anvil_instr_t *instr)
 static bool mf_lower_call(mf_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands == 0) return false;
+    if (instr->call_cc != ANVIL_CC_MVS) return false;
 
     size_t num_args = instr->num_operands - 1;
     anvil_mir_vreg_t *arg_vregs = num_args
@@ -1309,14 +1464,14 @@ static bool mf_lower_call(mf_lower_t *lower, anvil_instr_t *instr)
     bool ok = false;
     anvil_value_t *callee = instr->operands[0];
     if (callee->kind == ANVIL_VAL_FUNC) {
-        ok = anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_CALL,
-                                        call_def, NULL, 0, callee->name);
+        ok = anvil_mir_add_call(lower->mir, call_def, NULL, 0, callee->name,
+                                instr->call_cc, false, 0);
     } else {
         anvil_mir_vreg_t callee_vreg = mf_lower_value(lower, callee);
         if (callee_vreg == ANVIL_MIR_NO_VREG) return false;
         anvil_mir_vreg_t uses[] = { callee_vreg };
-        ok = anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL,
-                                 call_def, uses, 1);
+        ok = anvil_mir_add_call(lower->mir, call_def, uses, 1, NULL,
+                                instr->call_cc, false, 0);
     }
     if (!ok) return false;
 
@@ -1616,7 +1771,9 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(
 {
     const anvil_mainframe_target_desc_t *desc =
         anvil_mainframe_get_target_desc(variant);
-    if (!func || !desc || !func->entry) return NULL;
+    if (!func || !desc || !func->entry || !func->type ||
+        func->type->kind != ANVIL_TYPE_FUNC ||
+        func->type->data.func.cc != ANVIL_CC_MVS) return NULL;
 
     anvil_mir_func_t *mir = anvil_mir_func_create(func->name);
     if (!mir) return NULL;
@@ -1631,6 +1788,7 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(
     if (ok) ok = anvil_mir_set_current_block(mir, mf_block_get(&lower, func->entry));
     if (ok) ok = mf_lower_params(&lower);
     if (ok) ok = mf_prepare_phi_results(&lower);
+    if (ok) ok = mf_materialize_entry_values(&lower);
 
     for (anvil_block_t *block = func->blocks; ok && block; block = block->next) {
         ok = anvil_mir_set_current_block(mir, mf_block_get(&lower, block));
@@ -1721,7 +1879,7 @@ static bool mf_verify_call_bundles(const anvil_mir_func_t *mir,
 
         size_t expected = 0;
         anvil_mir_block_t block = instr.block;
-        do {
+        for (;;) {
             if (!instr.has_imm || instr.imm != (int64_t)expected ||
                 instr.num_uses != 1 || instr.block != block) {
                 return mf_legal_fail(error, error_len,
@@ -1729,17 +1887,30 @@ static bool mf_verify_call_bundles(const anvil_mir_func_t *mir,
             }
             expected++;
             i++;
+            /* Register allocation materializes a spilled argument immediately
+               before the pseudo-op which consumes it.  After the first
+               argument that places these reloads inside the logical bundle;
+               they are side-effect-free bundle preparation, not a boundary. */
+            while (i < num_instrs &&
+                   anvil_mir_get_instr_info(mir, i, &instr) &&
+                   instr.block == block &&
+                   instr.op == ANVIL_MIR_OP_SPILL_LOAD) {
+                i++;
+            }
             if (i >= num_instrs ||
                 !anvil_mir_get_instr_info(mir, i, &instr)) {
                 return mf_legal_fail(error, error_len,
                     "unterminated call argument bundle");
             }
-        } while (instr.op == ANVIL_MIR_OP_CALL_STACK_ARG &&
-                 instr.block == block);
+            if (instr.op != ANVIL_MIR_OP_CALL_STACK_ARG ||
+                instr.block != block) {
+                break;
+            }
+        }
 
         if (instr.op != ANVIL_MIR_OP_CALL || instr.block != block) {
             return mf_legal_fail(error, error_len,
-                "call argument bundle is not immediately followed by its call");
+                "call argument bundle is not followed by its call");
         }
     }
     return true;
@@ -1824,6 +1995,13 @@ bool anvil_mainframe_verify_mir_legal(
         }
 
         switch (instr.op) {
+            case ANVIL_MIR_OP_CALL:
+                if (instr.call_cc != ANVIL_CC_MVS) {
+                    return mf_legal_fail(error, error_len,
+                        "%s call uses an unsupported calling convention",
+                        desc->name);
+                }
+                break;
             case ANVIL_MIR_OP_SITOFP:
             case ANVIL_MIR_OP_UITOFP:
             case ANVIL_MIR_OP_FPTOSI:
@@ -2023,9 +2201,10 @@ static bool mf_prepare_frame(mf_emit_t *emit)
         size_t count = 0;
         int value_bytes = 0;
         anvil_mir_block_t block = instr.block;
-        while (i < num_instrs) {
-            if (!anvil_mir_get_instr_info(emit->mir, i, &instr)) return false;
-            if (instr.op != ANVIL_MIR_OP_CALL_STACK_ARG || instr.block != block) break;
+        size_t last_arg_index = SIZE_MAX;
+        for (;;) {
+            if (instr.op != ANVIL_MIR_OP_CALL_STACK_ARG ||
+                instr.block != block) return false;
             if (!instr.has_imm || instr.imm != (int64_t)count ||
                 instr.num_uses != 1) {
                 return false;
@@ -2039,14 +2218,27 @@ static bool mf_prepare_frame(mf_emit_t *emit)
             emit->call_arg_value_offsets[i] = value_bytes;
             value_bytes += size;
             count++;
+            last_arg_index = i;
             i++;
+            /* Mirror mf_verify_call_bundles: spill reloads may separate the
+               argument pseudo-ops (and may prepare an indirect callee), but
+               all still belong to this one call's outgoing area. */
+            while (i < num_instrs) {
+                if (!anvil_mir_get_instr_info(emit->mir, i, &instr)) return false;
+                if (instr.block != block ||
+                    instr.op != ANVIL_MIR_OP_SPILL_LOAD) break;
+                i++;
+            }
+            if (i >= num_instrs ||
+                !anvil_mir_get_instr_info(emit->mir, i, &instr)) return false;
+            if (instr.op != ANVIL_MIR_OP_CALL_STACK_ARG ||
+                instr.block != block) break;
         }
-        if (i >= num_instrs ||
-            !anvil_mir_get_instr_info(emit->mir, i, &instr) ||
-            instr.block != block || instr.op != ANVIL_MIR_OP_CALL) {
+        if (instr.block != block || instr.op != ANVIL_MIR_OP_CALL ||
+            last_arg_index == SIZE_MAX) {
             return false;
         }
-        emit->call_arg_is_last[i - 1] = true;
+        emit->call_arg_is_last[last_arg_index] = true;
         emit->call_arg_counts[i] = count;
         if (count > emit->max_call_args) emit->max_call_args = count;
         if (value_bytes > max_call_value_bytes) {
@@ -2859,12 +3051,15 @@ static void mf_emit_symbol_addr(mf_emit_t *emit, anvil_mir_instr_info_t instr)
     char upper[96];
     mf_uppercase(upper, instr.symbol, sizeof(upper));
     if (emit->desc->has_64bit_gprs) {
-        anvil_strbuf_appendf(&emit->code, "         LARL  %-4s,%s\n",
+        anvil_strbuf_appendf(&emit->code, "         LARL  %-4s,%s",
                              mf_vreg_reg_name(emit, instr.def), upper);
     } else {
-        anvil_strbuf_appendf(&emit->code, "         LA    %-4s,%s\n",
+        anvil_strbuf_appendf(&emit->code, "         LA    %-4s,%s",
                              mf_vreg_reg_name(emit, instr.def), upper);
     }
+    if (instr.has_imm && instr.imm != 0)
+        anvil_strbuf_appendf(&emit->code, "%+lld", (long long)instr.imm);
+    anvil_strbuf_append(&emit->code, "\n");
 }
 
 static bool mf_get_uses(const anvil_mir_func_t *mir, size_t index,
@@ -3232,18 +3427,24 @@ static void mf_emit_string_literals(mf_emit_t *emit)
         if (!anvil_mir_get_string_literal_info(emit->mir, i, &info)) continue;
         char upper[96];
         mf_uppercase(upper, info.label, sizeof(upper));
-        anvil_strbuf_appendf(&emit->code, "%-8s DC    C'", upper);
-        const unsigned char *p = (const unsigned char *)(info.value ? info.value : "");
-        while (*p) {
-            if (*p == '\'') {
-                anvil_strbuf_append(&emit->code, "''");
-            } else if (*p >= 32 && *p < 127) {
-                anvil_strbuf_append_char(&emit->code, (char)*p);
-            }
-            p++;
+        const unsigned char *bytes = (const unsigned char *)
+            (info.value ? info.value : "");
+        size_t length = strlen((const char *)bytes) + 1;
+        size_t offset = 0;
+        bool first = true;
+        while (offset < length) {
+            size_t chunk = length - offset;
+            if (chunk > 24) chunk = 24;
+            if (first)
+                anvil_strbuf_appendf(&emit->code, "%-8s DC    X'", upper);
+            else
+                anvil_strbuf_append(&emit->code, "         DC    X'");
+            for (size_t b = 0; b < chunk; b++)
+                anvil_strbuf_appendf(&emit->code, "%02X", bytes[offset + b]);
+            anvil_strbuf_append(&emit->code, "'\n");
+            first = false;
+            offset += chunk;
         }
-        anvil_strbuf_append(&emit->code, "'\n");
-        anvil_strbuf_appendf(&emit->code, "         DC    X'00'\n");
     }
 }
 
@@ -3331,16 +3532,11 @@ bool anvil_mainframe_emit_mir(const anvil_mir_func_t *mir,
 
 static void mf_emit_data_int(anvil_strbuf_t *out, size_t size, int64_t value)
 {
-    if (size <= 1) {
-        anvil_strbuf_appendf(out, "DC    X'%02llX'\n",
-                             (unsigned long long)(value & 0xff));
-    } else if (size <= 2) {
-        anvil_strbuf_appendf(out, "DC    H'%lld'\n", (long long)value);
-    } else if (size <= 4) {
-        anvil_strbuf_appendf(out, "DC    F'%lld'\n", (long long)value);
-    } else {
-        anvil_strbuf_appendf(out, "DC    FD'%lld'\n", (long long)value);
-    }
+    if (size != 1 && size != 2 && size != 4 && size != 8) return;
+    uint64_t bits = (uint64_t)value;
+    if (size < 8) bits &= (UINT64_C(1) << (size * 8)) - 1;
+    anvil_strbuf_appendf(out, "DC    X'%0*llX'\n", (int)(size * 2),
+                         (unsigned long long)bits);
 }
 
 static void mf_emit_data_zero(anvil_strbuf_t *out, size_t size)
@@ -3364,79 +3560,224 @@ static void mf_emit_decimal_initializer(anvil_strbuf_t *out,
     }
 }
 
-static void mf_emit_global_initializer(anvil_strbuf_t *out,
+typedef struct {
+    const anvil_value_t *value;
+    char label[16];
+} mf_global_string_entry_t;
+
+typedef struct {
+    mf_global_string_entry_t *entries;
+    size_t count;
+    size_t capacity;
+} mf_global_string_pool_t;
+
+static const char *mf_global_string_intern(mf_global_string_pool_t *pool,
+                                           const anvil_value_t *value)
+{
+    if (!pool || !value || value->kind != ANVIL_VAL_CONST_STRING ||
+        !value->data.str) return NULL;
+    for (size_t i = 0; i < pool->count; i++)
+        if (pool->entries[i].value == value) return pool->entries[i].label;
+    if (pool->count == pool->capacity) {
+        size_t capacity = pool->capacity ? pool->capacity * 2 : 8;
+        if (capacity < pool->capacity ||
+            capacity > SIZE_MAX / sizeof(*pool->entries)) return NULL;
+        mf_global_string_entry_t *entries = realloc(
+            pool->entries, capacity * sizeof(*entries));
+        if (!entries) return NULL;
+        pool->entries = entries;
+        pool->capacity = capacity;
+    }
+    mf_global_string_entry_t *entry = &pool->entries[pool->count];
+    entry->value = value;
+    int length = snprintf(entry->label, sizeof(entry->label), "AVG%05zu",
+                          pool->count);
+    if (length < 0 || (size_t)length >= sizeof(entry->label)) return NULL;
+    pool->count++;
+    return entry->label;
+}
+
+static bool mf_emit_global_strings(anvil_strbuf_t *out,
+                                   const mf_global_string_pool_t *pool)
+{
+    if (!out || !pool) return false;
+    for (size_t i = 0; i < pool->count; i++) {
+        const unsigned char *bytes = (const unsigned char *)
+            pool->entries[i].value->data.str;
+        size_t length = strlen((const char *)bytes) + 1;
+        size_t offset = 0;
+        bool first = true;
+        while (offset < length) {
+            size_t chunk = length - offset;
+            if (chunk > 24) chunk = 24;
+            if (first)
+                anvil_strbuf_appendf(out, "%-8s DC    X'",
+                                     pool->entries[i].label);
+            else
+                anvil_strbuf_append(out, "         DC    X'");
+            for (size_t b = 0; b < chunk; b++)
+                anvil_strbuf_appendf(out, "%02X", bytes[offset + b]);
+            anvil_strbuf_append(out, "'\n");
+            first = false;
+            offset += chunk;
+        }
+    }
+    return !out->failed;
+}
+
+static bool mf_emit_global_initializer(anvil_strbuf_t *out,
                                        anvil_type_t *type,
                                        anvil_value_t *init,
-                                       anvil_fp_format_t fp_format)
+                                       anvil_fp_format_t fp_format,
+                                       size_t pointer_size,
+                                       mf_global_string_pool_t *strings)
 {
-    if (!type) return;
+    if (!out || !type || type->size == 0) return false;
     if (!init) {
         mf_emit_data_zero(out, type->size);
-        return;
+        return !out->failed;
     }
+    if (!init->type || !anvil_types_equal(type, init->type)) return false;
 
-    switch (type->kind) {
-        case ANVIL_TYPE_I1:
-        case ANVIL_TYPE_I8:
-        case ANVIL_TYPE_I16:
-        case ANVIL_TYPE_I32:
-        case ANVIL_TYPE_I64:
-            mf_emit_data_int(out, type->size, init->data.i);
-            break;
-        case ANVIL_TYPE_U8:
-        case ANVIL_TYPE_U16:
-        case ANVIL_TYPE_U32:
-        case ANVIL_TYPE_U64:
-        case ANVIL_TYPE_PTR:
-            mf_emit_data_int(out, type->size, (int64_t)init->data.u);
-            break;
-        case ANVIL_TYPE_F32:
+    switch (init->kind) {
+        case ANVIL_VAL_CONST_INT:
+            if (!anvil_type_is_integer(type)) return false;
+            mf_emit_data_int(out, type->size,
+                             type->is_signed ? init->data.i
+                                             : (int64_t)init->data.u);
+            return !out->failed;
+        case ANVIL_VAL_CONST_FLOAT:
+            if (type->kind == ANVIL_TYPE_F32) {
             anvil_strbuf_appendf(out, "DC    %s'%g'\n",
                                  fp_format == ANVIL_FP_IEEE754 ||
                                  fp_format == ANVIL_FP_HFP_IEEE ? "EB" : "E",
                                  init->data.f);
-            break;
-        case ANVIL_TYPE_F64:
+            } else if (type->kind == ANVIL_TYPE_F64) {
             anvil_strbuf_appendf(out, "DC    %s'%g'\n",
                                  fp_format == ANVIL_FP_IEEE754 ||
                                  fp_format == ANVIL_FP_HFP_IEEE ? "DB" : "D",
                                  init->data.f);
-            break;
-        case ANVIL_TYPE_DECIMAL:
+            } else return false;
+            return !out->failed;
+        case ANVIL_VAL_CONST_DECIMAL:
+            if (type->kind != ANVIL_TYPE_DECIMAL) return false;
             mf_emit_decimal_initializer(out, type, init);
-            break;
-        case ANVIL_TYPE_ARRAY:
-            if (init->kind == ANVIL_VAL_CONST_ARRAY) {
-                for (size_t i = 0; i < init->data.array.num_elements; i++) {
-                    mf_emit_global_initializer(out, type->data.array.elem,
-                                               init->data.array.elements[i],
-                                               fp_format);
-                }
-            } else {
-                mf_emit_data_zero(out, type->size);
+            return !out->failed;
+        case ANVIL_VAL_CONST_NULL:
+            if (type->kind != ANVIL_TYPE_PTR || type->size != pointer_size)
+                return false;
+            mf_emit_data_zero(out, pointer_size);
+            return !out->failed;
+        case ANVIL_VAL_CONST_STRING: {
+            if (type->kind != ANVIL_TYPE_PTR || type->size != pointer_size)
+                return false;
+            const char *label = mf_global_string_intern(strings, init);
+            if (!label) return false;
+            anvil_strbuf_appendf(out, "DC    %s(%s)\n",
+                                 pointer_size == 8 ? "AD" : "A", label);
+            return !out->failed;
+        }
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP: {
+            if (type->kind != ANVIL_TYPE_PTR || type->size != pointer_size ||
+                !init->data.reloc.symbol || !init->data.reloc.symbol->name)
+                return false;
+            char upper[96];
+            mf_uppercase(upper, init->data.reloc.symbol->name, sizeof(upper));
+            anvil_strbuf_appendf(out, "DC    %s(%s",
+                                 pointer_size == 8 ? "AD" : "A", upper);
+            if (init->data.reloc.addend > 0)
+                anvil_strbuf_appendf(out, "+%lld",
+                                     (long long)init->data.reloc.addend);
+            else if (init->data.reloc.addend < 0) {
+                uint64_t magnitude = UINT64_C(0) -
+                                     (uint64_t)init->data.reloc.addend;
+                anvil_strbuf_appendf(out, "-%llu",
+                                     (unsigned long long)magnitude);
             }
-            break;
-        default:
-            mf_emit_data_zero(out, type->size);
-            break;
+            anvil_strbuf_append(out, ")\n");
+            return !out->failed;
+        }
+        case ANVIL_VAL_CONST_ARRAY:
+            if (type->kind != ANVIL_TYPE_ARRAY ||
+                init->data.aggregate.num_elements != type->data.array.count)
+                return false;
+            for (size_t i = 0; i < type->data.array.count; i++) {
+                if (!mf_emit_global_initializer(
+                        out, type->data.array.elem,
+                        init->data.aggregate.elements[i], fp_format,
+                        pointer_size, strings)) return false;
+            }
+            return true;
+        case ANVIL_VAL_CONST_STRUCT: {
+            if (type->kind != ANVIL_TYPE_STRUCT ||
+                !type->data.struc.complete ||
+                init->data.aggregate.num_elements !=
+                    type->data.struc.num_fields) return false;
+            size_t cursor = 0;
+            for (size_t i = 0; i < type->data.struc.num_fields; i++) {
+                size_t offset = type->data.struc.offsets[i];
+                anvil_type_t *field = type->data.struc.fields[i];
+                if (!field || offset < cursor ||
+                    field->size > type->size - offset) return false;
+                mf_emit_data_zero(out, offset - cursor);
+                if (!mf_emit_global_initializer(
+                        out, field, init->data.aggregate.elements[i],
+                        fp_format, pointer_size, strings)) return false;
+                cursor = offset + field->size;
+            }
+            if (cursor > type->size) return false;
+            mf_emit_data_zero(out, type->size - cursor);
+            return !out->failed;
+        }
+        case ANVIL_VAL_GLOBAL:
+        case ANVIL_VAL_FUNC:
+        case ANVIL_VAL_PARAM:
+        case ANVIL_VAL_INSTR:
+        case ANVIL_VAL_BLOCK:
+            return false;
     }
+    return false;
 }
 
-static void mf_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod,
-                            anvil_fp_format_t fp_format)
+static bool mf_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod,
+                            anvil_fp_format_t fp_format, size_t pointer_size)
 {
-    if (!mod || !mod->globals) return;
+    if (!mod || !out || (pointer_size != 4 && pointer_size != 8)) return false;
+    if (!mod->globals) return true;
+    mf_global_string_pool_t strings = { 0 };
     anvil_strbuf_append(out, "         LTORG\n");
     anvil_strbuf_append(out, "         DS    0D\n");
     for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (!g->value || !g->value->name) continue;
+        if (!g->value || !g->value->name || !g->value->type) {
+            free(strings.entries);
+            return false;
+        }
         char upper[96];
         mf_uppercase(upper, g->value->name, sizeof(upper));
+        if (g->value->data.global.is_declaration) {
+            anvil_strbuf_appendf(out, "         EXTRN %s\n", upper);
+            continue;
+        }
+        if (g->value->data.global.linkage == ANVIL_LINK_WEAK) {
+            free(strings.entries);
+            return false;
+        }
+        if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL ||
+            g->value->data.global.linkage == ANVIL_LINK_COMMON)
+            anvil_strbuf_appendf(out, "         ENTRY %s\n", upper);
         anvil_strbuf_appendf(out, "%-8s ", upper);
-        mf_emit_global_initializer(out, g->value->type,
-                                   g->value->data.global.init,
-                                   fp_format);
+        if (!mf_emit_global_initializer(out, g->value->type,
+                                        g->value->data.global.init,
+                                        fp_format, pointer_size,
+                                        &strings)) {
+            free(strings.entries);
+            return false;
+        }
     }
+    bool ok = mf_emit_global_strings(out, &strings);
+    free(strings.entries);
+    return ok && !out->failed;
 }
 
 anvil_error_t anvil_mainframe_codegen_func(anvil_backend_t *be,
@@ -3499,8 +3840,11 @@ anvil_error_t anvil_mainframe_codegen_module(anvil_backend_t *be,
     *output = NULL;
     if (len) *len = 0;
 
+    const anvil_mainframe_target_desc_t *desc =
+        anvil_mainframe_get_target_desc(variant);
+    if (!desc) return ANVIL_ERR_INVALID_ARG;
     anvil_fp_format_t fp_format = be->ctx ? be->ctx->fp_format
-                                          : anvil_mainframe_get_target_desc(variant)->fp_format;
+                                          : desc->fp_format;
     anvil_strbuf_t out;
     anvil_strbuf_init(&out);
 
@@ -3518,7 +3862,8 @@ anvil_error_t anvil_mainframe_codegen_module(anvil_backend_t *be,
         anvil_strbuf_append(&out, func_text);
         free(func_text);
     }
-    if (ok) mf_emit_globals(&out, mod, fp_format);
+    if (ok) ok = mf_emit_globals(&out, mod, fp_format,
+                                  (size_t)desc->ptr_size);
     if (ok) anvil_strbuf_append(&out, "         END\n");
 
     if (!ok || out.failed) {

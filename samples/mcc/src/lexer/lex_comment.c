@@ -54,7 +54,7 @@ lex_comment_result_t lex_try_skip_comment(mcc_lexer_t *lex)
         }
     }
     
-    /* Check for /* block comment */
+    /* Check for a block comment opener. */
     if (next == '*') {
         lex_advance(lex);
         lex_skip_block_comment(lex);

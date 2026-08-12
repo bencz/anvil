@@ -118,6 +118,21 @@ static const char *op_name(anvil_op_t op)
     return "unknown";
 }
 
+static const char *cc_name(anvil_cc_t cc)
+{
+    static const char *names[] = {
+        [ANVIL_CC_DEFAULT] = "default",
+        [ANVIL_CC_CDECL] = "cdecl",
+        [ANVIL_CC_STDCALL] = "stdcall",
+        [ANVIL_CC_FASTCALL] = "fastcall",
+        [ANVIL_CC_SYSV] = "sysv",
+        [ANVIL_CC_WIN64] = "win64",
+        [ANVIL_CC_MVS] = "mvs"
+    };
+    return (unsigned)cc < sizeof(names) / sizeof(names[0]) && names[cc]
+               ? names[cc] : "invalid";
+}
+
 /* Get type name as string */
 static const char *type_kind_name(anvil_type_kind_t kind)
 {
@@ -244,6 +259,7 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
             break;
             
         case ANVIL_TYPE_FUNC:
+            fprintf(out, "cc(%s) ", cc_name(type->data.func.cc));
             anvil_dump_type(out, type->data.func.ret);
             fprintf(out, "(");
             for (size_t i = 0; i < type->data.func.num_params; i++) {
@@ -251,7 +267,8 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
                 anvil_dump_type(out, type->data.func.params[i]);
             }
             if (type->data.func.variadic) {
-                fprintf(out, ", ...");
+                if (type->data.func.num_params > 0) fprintf(out, ", ");
+                fprintf(out, "...");
             }
             fprintf(out, ")");
             break;
@@ -300,7 +317,30 @@ void anvil_dump_value(FILE *out, anvil_value_t *val)
             break;
             
         case ANVIL_VAL_CONST_ARRAY:
-            fprintf(out, "[array %zu elems]", val->data.array.num_elements);
+            fprintf(out, "[array %zu elems]",
+                    val->data.aggregate.num_elements);
+            break;
+
+        case ANVIL_VAL_CONST_STRUCT:
+            fprintf(out, "{struct ");
+            for (size_t i = 0; i < val->data.aggregate.num_elements; i++) {
+                if (i) fprintf(out, ", ");
+                anvil_dump_value(out, val->data.aggregate.elements[i]);
+            }
+            fprintf(out, "}");
+            break;
+
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+            fprintf(out, "addr(@%s)",
+                    val->data.reloc.symbol && val->data.reloc.symbol->name
+                        ? val->data.reloc.symbol->name : "?");
+            break;
+
+        case ANVIL_VAL_CONST_GEP:
+            fprintf(out, "reloc(@%s%+lld)",
+                    val->data.reloc.symbol && val->data.reloc.symbol->name
+                        ? val->data.reloc.symbol->name : "?",
+                    (long long)val->data.reloc.addend);
             break;
             
         case ANVIL_VAL_GLOBAL:
@@ -352,6 +392,8 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
     
     /* Print operation */
     fprintf(out, "%s", op_name(instr->op));
+    if (instr->op == ANVIL_OP_CALL)
+        fprintf(out, " cc(%s)", cc_name(instr->call_cc));
     if (instr->op == ANVIL_OP_FCMP) {
         static const char *predicates[] = {
             "false", "oeq", "ogt", "oge", "olt", "ole", "one", "ord",
@@ -488,6 +530,9 @@ void anvil_dump_func(FILE *out, anvil_func_t *func)
     
     /* Linkage */
     dump_linkage(out, func->linkage);
+
+    if (func->type && func->type->kind == ANVIL_TYPE_FUNC)
+        fprintf(out, "cc(%s) ", cc_name(func->type->data.func.cc));
 
     /* Return type */
     if (func->type && func->type->kind == ANVIL_TYPE_FUNC) {

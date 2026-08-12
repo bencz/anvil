@@ -281,6 +281,7 @@ bool mcc_token_is_unary_op(mcc_token_type_t type)
 mcc_token_t *lex_make_token(mcc_lexer_t *lex, mcc_token_type_t type)
 {
     mcc_token_t *tok = mcc_alloc(lex->ctx, sizeof(mcc_token_t));
+    if (!tok) return NULL;
     tok->type = type;
     tok->location.filename = lex->filename;
     tok->location.line = lex->line;
@@ -299,14 +300,18 @@ mcc_token_t *mcc_token_create(mcc_context_t *ctx)
 
 mcc_token_t *mcc_token_copy(mcc_context_t *ctx, mcc_token_t *tok)
 {
+    if (!ctx || !tok) return NULL;
     mcc_token_t *copy = mcc_token_create(ctx);
+    if (!copy) return NULL;
     *copy = *tok;
     copy->next = NULL;
     if (tok->text) {
         copy->text = mcc_strdup(ctx, tok->text);
+        if (!copy->text) return NULL;
     }
     if (tok->raw_text) {
         copy->raw_text = mcc_strdup(ctx, tok->raw_text);
+        if (!copy->raw_text) return NULL;
     }
     return copy;
 }

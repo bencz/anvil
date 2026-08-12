@@ -616,46 +616,65 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
     return true;
 }
 
-anvil_value_t *anvil_build_call(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *callee,
-                                 anvil_value_t **args, size_t num_args, const char *name)
+bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
+                               anvil_value_t **args, size_t num_args,
+                               const char *name, anvil_value_t **result)
 {
-    if (!ctx || !builder_value_is_usable(ctx, callee) || !type ||
-        type->owner_ctx != ctx) {
+    if (result) *result = NULL;
+    if (!ctx || !builder_value_is_usable(ctx, callee)) {
         builder_invalid(ctx, "Call builder requires a callee");
-        return NULL;
+        return false;
     }
     
     if ((num_args > 0 && !args) || num_args == SIZE_MAX) {
         builder_invalid(ctx, "Call builder received invalid arguments");
-        return NULL;
+        return false;
     }
     anvil_type_t *fn_type = anvil_sem_callee_func_type(callee);
-    if (!fn_type || (type->kind == ANVIL_TYPE_FUNC
-                         ? !anvil_types_equal(type, fn_type)
-                         : !anvil_types_equal(type, fn_type->data.func.ret)) ||
+    anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
+    if (!fn_type || fn_type->owner_ctx != ctx ||
+        !fn_type->data.func.ret ||
+        fn_type->data.func.ret->owner_ctx != ctx ||
+        fn_type->data.func.ret->kind == ANVIL_TYPE_FUNC ||
+        (fn_type->data.func.ret->kind != ANVIL_TYPE_VOID &&
+         !anvil_sem_type_is_sized(fn_type->data.func.ret)) ||
+        (fn_type->data.func.num_params > 0 &&
+         !fn_type->data.func.params) ||
+        !anvil_cc_resolve(ctx, fn_type->data.func.cc,
+                                     &effective_cc) ||
+        effective_cc != fn_type->data.func.cc ||
         (!fn_type->data.func.variadic &&
          num_args != fn_type->data.func.num_params) ||
         (fn_type->data.func.variadic &&
          num_args < fn_type->data.func.num_params)) {
         builder_invalid(ctx, "Call signature, result type, or argument count is incompatible");
-        return NULL;
+        return false;
     }
     for (size_t i = 0; i < num_args; i++) {
         if (!builder_value_is_usable(ctx, args[i]) ||
             (i < fn_type->data.func.num_params &&
-             !anvil_types_equal(args[i]->type,
-                                fn_type->data.func.params[i]))) {
+             (!fn_type->data.func.params[i] ||
+              fn_type->data.func.params[i]->owner_ctx != ctx ||
+              !anvil_sem_type_is_sized(fn_type->data.func.params[i]) ||
+              !anvil_types_equal(args[i]->type,
+                                 fn_type->data.func.params[i])))) {
             builder_invalid(ctx, "Call argument type/context does not match the signature");
-            return NULL;
+            return false;
         }
     }
     anvil_type_t *ret_type = fn_type->data.func.ret;
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_CALL, ret_type, name);
-    if (!instr) return NULL;
+    if (!instr) return false;
+    instr->call_cc = effective_cc;
     if (!anvil_instr_reserve_operands(instr, num_args + 1) ||
         !anvil_instr_add_operand(instr, callee) ||
-        !add_operands(instr, args, num_args)) return NULL;
-    return finish_value(ctx, instr);
+        !add_operands(instr, args, num_args) ||
+        !anvil_instr_insert(ctx, instr)) {
+        anvil_instr_discard_new(ctx, instr);
+        return false;
+    }
+    if (result) *result = instr->result;
+    return true;
 }
 
 bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val)

@@ -85,7 +85,6 @@ anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type);
 anvil_value_t *codegen_const_int_for_type(mcc_codegen_t *cg, anvil_type_t *anvil_type, int64_t val);
 
 /* Get sizeof for a type using ANVIL arch info for pointer size */
-size_t codegen_sizeof(mcc_codegen_t *cg, mcc_type_t *type);
 
 /* ============================================================
  * Expression Code Generation (codegen_expr.c)
