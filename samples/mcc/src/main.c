@@ -4,7 +4,7 @@
  */
 
 #include "mcc.h"
-#include <getopt.h>
+#include "platform/host.h"
 
 static void print_version(void)
 {
@@ -23,7 +23,9 @@ static void print_usage(const char *prog)
     printf("  -arch=<arch>      Target architecture:\n");
     printf("                      x86, x86_64, s370, s370_xa, s390, zarch\n");
     printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
+    printf("                      x86_64_windows (Windows x64, LLP64)\n");
     printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
+    printf("  -ffp-vectorize    Allow FP lane packing in O3 (changes exception observation order)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
     printf("  -dump-ast         Print AST\n");
@@ -45,6 +47,8 @@ static mcc_arch_t parse_arch(const char *name)
 {
     if (strcmp(name, "x86") == 0) return MCC_ARCH_X86;
     if (strcmp(name, "x86_64") == 0 || strcmp(name, "x64") == 0) return MCC_ARCH_X86_64;
+    if (strcmp(name, "x86_64_windows") == 0 || strcmp(name, "win64") == 0)
+        return MCC_ARCH_X86_64_WINDOWS;
     if (strcmp(name, "s370") == 0) return MCC_ARCH_S370;
     if (strcmp(name, "s370_xa") == 0 || strcmp(name, "s370xa") == 0) return MCC_ARCH_S370_XA;
     if (strcmp(name, "s390") == 0) return MCC_ARCH_S390;
@@ -605,7 +609,7 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
 int main(int argc, char **argv)
 {
     mcc_options_t opts = {0};
-    opts.arch = MCC_ARCH_X86_64;  /* Default */
+    opts.arch = mcc_host.default_target;
     opts.opt_level = MCC_OPT_NONE;
     opts.c_std = MCC_STD_DEFAULT; /* Default to C89 */
     
@@ -646,6 +650,12 @@ int main(int argc, char **argv)
             continue;
         }
         
+        if (strcmp(arg, "-ffp-vectorize") == 0 || strcmp(arg, "-fno-fp-vectorize") == 0)
+        {
+            opts.fp_vectorization = strcmp(arg, "-ffp-vectorize") == 0;
+            continue;
+        }
+
         if (strncmp(arg, "-std=", 5) == 0) {
             opts.c_std = mcc_c_std_from_name(arg + 5);
             if (opts.c_std == MCC_STD_DEFAULT && strcmp(arg + 5, "default") != 0) {

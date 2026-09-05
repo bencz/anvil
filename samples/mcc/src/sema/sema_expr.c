@@ -185,7 +185,7 @@ mcc_type_t *sema_analyze_binary_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
     /* Pointer subtraction */
     if (mcc_type_is_pointer(lhs_type) && mcc_type_is_pointer(rhs_type)) {
         if (op == BINOP_SUB) {
-            expr->type = mcc_type_long(sema->types); /* ptrdiff_t */
+            expr->type = mcc_type_ptrdiff_t(sema->types);
             return expr->type;
         }
     }
@@ -281,7 +281,20 @@ mcc_type_t *sema_analyze_ternary_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
         return NULL;
     }
     
-    expr->type = sema_apply_usual_conversions(sema, then_type, else_type);
+    if (mcc_type_is_record(then_type) || mcc_type_is_record(else_type))
+    {
+        if (!mcc_type_is_compatible(then_type, else_type))
+        {
+            mcc_error_at(sema->ctx, expr->location, "conditional aggregate operands must have compatible types");
+            return NULL;
+        }
+
+        expr->type = then_type;
+    }
+    else
+    {
+        expr->type = sema_apply_usual_conversions(sema, then_type, else_type);
+    }
     return expr->type;
 }
 
@@ -411,6 +424,9 @@ mcc_type_t *sema_analyze_member_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
     }
     
     expr->type = field->type;
+    if (obj_type->qualifiers & (QUAL_CONST | QUAL_VOLATILE))
+        expr->type = mcc_type_qualified(sema->types, field->type, field->type->qualifiers | (obj_type->qualifiers & (QUAL_CONST | QUAL_VOLATILE)));
+
     return expr->type;
 }
 
@@ -454,7 +470,7 @@ mcc_type_t *sema_analyze_sizeof_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
                      "sizeof on a variable-length array is not implemented");
         return NULL;
     }
-    expr->type = mcc_type_ulong(sema->types); /* size_t */
+    expr->type = mcc_type_size_t(sema->types);
     return expr->type;
 }
 
@@ -567,7 +583,7 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
                     return NULL;
                 }
             }
-            expr->type = mcc_type_ulong(sema->types);
+            expr->type = mcc_type_size_t(sema->types);
             return expr->type;
 
         case AST_NULL_PTR:

@@ -26,6 +26,7 @@ struct mcc_codegen {
     anvil_block_t *current_block;
     const char *current_func_name;  /* For __func__ (C99) */
     mcc_type_t *current_return_type;
+    anvil_value_t *current_result_pointer;
     
     /* For break/continue */
     anvil_block_t *break_target;
@@ -80,6 +81,7 @@ struct mcc_codegen {
     struct {
         const char *name;
         anvil_value_t *value;
+        bool is_defined;
     } *globals;
     size_t num_globals;
     size_t cap_globals;

@@ -101,6 +101,7 @@ The command above publishes this layout:
 build/smalltalk-apps/my_hello/
 ├── matrix.manifest
 ├── x86_64-sysv-gas-O2/
+├── x86_64-win64-gas-O2/
 ├── arm64-sysv-gas-O2/
 ├── ppc64-sysv-gas-O2/
 ├── ppc64le-sysv-gas-O2/
@@ -127,10 +128,12 @@ make smalltalk-aotc
 ```
 
 The checked-in `examples/hello` and `examples/closures` applications use this
-same product pipeline. The end-to-end regression compiles both five-profile
+same product pipeline. The end-to-end regression compiles both assembly
 matrices, cross-assembles the complete ARM64 Hello profile, links and executes
 the x86-64 programs, checks Hello's stdout byte-for-byte, and requires the
-closures application to return 42.
+closures application to return 42. The [HTTP sample](examples/web-http-server/README.md)
+documents cooperative fibers, dynamically allocated connections and the
+separate native Windows/Linux runtime and load tests.
 
 ## Current gates
 
@@ -258,7 +261,7 @@ use CAS and preserve concurrent GC bits. Allocation currently accepts only
 implemented immutable/pinned policies. Caller-requested weak, finalizable and
 remembered-set allocation flags are rejected; the write barrier and collector
 alone own the remembered bit. Primitive pragmas resolve only when executable
-semantics and the declared failure policy both exist. All 69 primitive pragma
+semantics and the declared failure policy both exist. Primitive pragma
 uses in the current image bind to executable contracts without diagnostics.
 The families cover identity and tagged integers,
 heap access/allocation and barriers, arbitrary-precision Integer operations,

@@ -1,1265 +1,145 @@
-# IBM Mainframe Backends
+# SystemZ family backends
 
-This document provides detailed information about the IBM mainframe backends (S/370, S/390, z/Architecture).
+`src/backend/systemz/` contains the compiler family for the S/370 lineage.
+The directory name groups related instruction encodings and lowering rules; it
+does not make S/370 a 64-bit target. S/370, S/370-XA, S/390 and z/Architecture
+remain separate targets with separate descriptors and capability limits.
 
-## Overview
+The historical public `anvil_mainframe_*` API and `anvil_mainframe_mir.h` header
+are retained for source compatibility. There is no target named `mainframe`.
 
-ANVIL supports four IBM mainframe targets, corresponding to the
-`ANVIL_ARCH_S370`, `ANVIL_ARCH_S370_XA`, `ANVIL_ARCH_S390`, and
-`ANVIL_ARCH_ZARCH` architectures:
+## Source ownership
 
-| Architecture | Bits | Introduced | Key Features |
-|--------------|------|------------|--------------|
-| S/370 | 24 | 1970 | Base architecture, HFP only |
-| S/370-XA | 31 | 1983 | 31-bit addressing, HFP only |
-| S/390 | 31 | 1990 | Extended addressing, relative branches, optional IEEE FP |
-| z/Architecture | 64 | 2000 | 64-bit, relative addressing, IEEE + decimal FP |
-
-## Backend Pipeline (MachineIR)
-
-All four variants share a single backend implemented in
-`src/backend/mainframe/mainframe_mir.c`. The per-architecture files
-`src/backend/{s370,s370_xa,s390,zarch}/*.c` are **thin wrappers**: each provides
-an `anvil_arch_info_t` and an `anvil_backend_ops_t` whose codegen entry points
-forward to `anvil_mainframe_codegen_module` / `anvil_mainframe_codegen_func`
-with the appropriate `anvil_mainframe_variant_t`.
-
-Code generation goes through a MachineIR (MIR) pipeline rather than emitting text
-directly from the source IR:
-
-1. **Lower to MIR** — `anvil_mainframe_lower_func_to_mir()` lowers each source-IR
-   function to target MachineIR.
-2. **Legality check** — `anvil_mainframe_verify_mir_legal()` validates the MIR
-   for the chosen variant.
-3. **Register allocation** — `anvil_mainframe_regalloc_mir()` assigns physical
-   GPRs/FPRs (shared linear-scan allocator with spill slots).
-4. **HLASM emission** — `anvil_mainframe_emit_mir()` prints HLASM from the
-   allocated MIR.
-
-Each variant is described by an `anvil_mainframe_target_desc_t` (see
-`include/anvil/anvil_mainframe_mir.h`) holding the facts that differ between
-targets: pointer/address/word sizes, save-area size, FP register set, FP format,
-AMODE/RMODE strings, and the allocatable/scratch register lists. The
-register conventions and physical register numbers below are read directly from
-those descriptors.
-
-## Common Characteristics
-
-All IBM mainframe architectures share:
-
-1. **Big-endian** byte order
-2. **Stack grows upward** (toward higher addresses)
-3. **Chained save areas** instead of push/pop
-4. **R1 parameter passing** convention
-5. **HLASM** assembly syntax
-
-## Register Conventions
-
-All four variants use the same register conventions (MVS Linkage). The register
-roles below match the target descriptors and the allocator's register lists in
-`mainframe_mir.c`:
-
-| Register | Usage |
-|----------|-------|
-| R0, R1 | Scratch registers (used by the emitter; R1 also holds the parameter list pointer at call/entry) |
-| R2-R10 | Allocatable general-purpose registers (`mf_alloc_gprs`) |
-| R11 | Saved parameter list pointer (ANVIL convention) |
-| R12 | Base register for addressability |
-| R13 | Save area pointer |
-| R14 | Return address |
-| R15 | Entry point address / return code |
-
-**Floating-point registers:** S/370 and S/370-XA expose 4 FPRs and allocate the
-even-numbered pair F2/F4/F6 (F0 scratch). S/390 and z/Architecture expose 16
-FPRs and allocate F1-F15 (F0 scratch).
-
-## Save Area Format
-
-### S/370, S/370-XA and S/390 (72 bytes)
-
-```
-Offset  Size  Content
-------  ----  -------
-+0      4     Reserved (used by PL/I)
-+4      4     Pointer to previous save area (caller's)
-+8      4     Pointer to next save area (callee's)
-+12     4     R14 (return address)
-+16     4     R15 (entry point)
-+20     4     R0
-+24     4     R1
-+28     4     R2
-+32     4     R3
-+36     4     R4
-+40     4     R5
-+44     4     R6
-+48     4     R7
-+52     4     R8
-+56     4     R9
-+60     4     R10
-+64     4     R11
-+68     4     R12
+```text
+src/backend/systemz/
+    systemz_internal.h       Internal component contracts and emission state
+    systemz_target.c         Descriptor lookup and common register pools
+    systemz_lower.c          Source IR to MIR, including 32-bit wide-value lowering
+    systemz_legal.c          MIR legality and register-allocation bridge
+    systemz_codegen.c        Configuration validation and pipeline orchestration
+    targets/
+        s370.c              S/370 identity, capabilities and policy binding
+        s370_xa.c           S/370-XA identity, capabilities and policy binding
+        s390.c              S/390 identity, capabilities and policy binding
+        zarch.c             z/Architecture identity, capabilities and policy binding
+    abi/
+        mvs_arena_31.c       ANVIL 32-bit save-area prologue and epilogue
+        mvs_arena_64.c       ANVIL 64-bit save-area prologue and epilogue
+    asm/
+        hlasm.c             Allocated MIR instructions and HLASM function emission
+        hlasm_data.c        Global storage and initializer encoding
+        hlasm_names.c       Symbol spelling
+        hlasm_dispatch.c    HLASM printer vtable and module terminator
 ```
 
-### z/Architecture F4SA (144 bytes)
-
-```
-Offset  Size  Content
-------  ----  -------
-+0      4     Reserved
-+4      4     Reserved
-+8      8     Pointer to previous save area (caller's)
-+16     8     Pointer to next save area (callee's)
-+24     8     R14 (return address)
-+32     8     R15 (entry point)
-+40     8     R0
-+48     8     R1
-+56     8     R2
-+64     8     R3
-+72     8     R4
-+80     8     R5
-+88     8     R6
-+96     8     R7
-+104    8     R8
-+112    8     R9
-+120    8     R10
-+128    8     R11
-+136    8     R12
-```
-
-## Parameter Passing
-
-### MVS Convention
-
-Parameters are passed via R1, which points to a list of addresses:
-
-```
-R1 --> +0: Address of parameter 1
-       +4: Address of parameter 2  (or +8 for 64-bit)
-       +8: Address of parameter 3  (or +16 for 64-bit)
-       ...
-       +n: Address of parameter N (with high bit set)
-```
-
-The high-order bit of the last parameter address is set to 1 (VL bit).
-
-### Accessing Parameters
-
-When loading an incoming parameter address, the emitter **masks off the
-high-order (VL) bit** before dereferencing, so the last parameter's flagged
-address still loads cleanly.
-
-```hlasm
-* R11 contains saved R1 (parameter list pointer)
-
-* Load first parameter (32-bit) — see mf_emit_incoming_arg()
-         L     R2,0(,R11)         Load address of param 0
-         N     R2,=X'7FFFFFFF'    Clear high-order (VL) bit
-         L     R2,0(,R2)          Load actual value
-```
-
-For 64-bit (z/Architecture) the top bit is cleared with `NIHH`:
-
-```hlasm
-* Load first parameter (64-bit)
-         LG    R2,0(,R11)         Load address of param 0
-         NIHH  R2,X'7FFF'         Clear high-order (VL) bit
-         LG    R2,0(,R2)          Load actual value
-```
-
-**Note:** When *building* an outgoing parameter list, ANVIL sets the high-order
-bit on the address of the **last** parameter to mark the end of the list
-(`O R0,=X'80000000'` on 32-bit, `OIHH R0,X'8000'` on 64-bit), and the callee
-clears it again on load as shown above.
-
-## GCCMVS Compatibility
-
-ANVIL generates code compatible with GCCMVS conventions for maximum portability and compatibility with existing mainframe toolchains.
-
-### Key Conventions
-
-| Convention | ANVIL Implementation |
-|------------|---------------------|
-| **CSECT** | Blank (no module name prefix) |
-| **AMODE/RMODE** | Per variant (see below), emitted from the target descriptor |
-| **Function Names** | UPPERCASE (e.g., `FACTORIAL`, `SUM_ARRAY`) |
-| **Block Labels** | `FUNCLABEL_BLOCKNAME` format (uppercased) |
-| **Stack Allocation** | Direct stack offset from R13 (no GETMAIN) |
-| **VL Bit** | Set on the last outgoing parameter; cleared by the callee on load |
-
-**AMODE/RMODE per variant** (from the target descriptors):
-
-| Variant | AMODE | RMODE |
-|---------|-------|-------|
-| S/370 | 24 | 24 |
-| S/370-XA | 31 | ANY |
-| S/390 | 31 | ANY |
-| z/Architecture | 64 | ANY |
-
-### Why These Conventions Matter
-
-1. **CSECT Blank**: Allows the linker to assign the control section name, improving compatibility with different link-edit configurations.
-
-2. **AMODE/RMODE per variant**: The emitter writes the AMODE/RMODE from the
-   target descriptor (e.g. `AMODE 24`/`RMODE 24` for S/370, `AMODE 31`/`RMODE
-   ANY` for S/370-XA and S/390, `AMODE 64`/`RMODE ANY` for z/Architecture), so
-   each program declares the addressing mode appropriate to its target.
-
-3. **Uppercase Names**: Standard mainframe convention for external symbols. Required for proper linkage resolution. Function names, block labels, call targets, globals, and string-literal labels are all uppercased.
-
-4. **VL Bit Handling**: The caller marks the end of the outgoing parameter list
-   by setting the high-order bit of the last parameter address; the callee clears
-   it (`N Rx,=X'7FFFFFFF'` on 32-bit, `NIHH Rx,X'7FFF'` on 64-bit) before
-   dereferencing the address.
-
-5. **Stack Allocation**: Using `LA R2,72(,R13)` instead of `GETMAIN` is faster and follows the GCCMVS pattern. Each function's stack frame is allocated relative to the caller's save area.
-
-### Generated Header
-
-The header is emitted by `mf_emit_header()`. The comment line is uppercase and
-names the variant; the AMODE/RMODE come from the target descriptor. For S/370:
-
-```hlasm
-***********************************************************************
-*        GENERATED BY ANVIL FOR IBM S/370
-***********************************************************************
-         CSECT
-         AMODE 24
-         RMODE 24
-```
-
-## Stack-Based Code Generation
-
-ANVIL generates stack-based (non-GETMAIN) code for better performance and GCCMVS compatibility.
-
-### Stack Frame Layout
-
-Each function allocates its stack frame relative to R13:
-
-```
-Caller's R13 --> +0:   Caller's Save Area (72 bytes for 32-bit)
-                 +72:  Our Save Area starts here
-                       +0:   Reserved
-                       +4:   Pointer to previous SA (caller's)
-                       +8:   Pointer to next SA (callee's)
-                       +12:  R14 (return address)
-                       ...
-                 +144: Local variables (for 32-bit)
-                 +N:   Parameter list for outgoing calls
-```
-
-### Prologue (Stack-Based)
-
-**S/370 / S/370-XA / S/390 Example:**
-```hlasm
-FACTORIAL DS    0H
-         STM   R14,R12,12(R13)    Save caller's registers
-         LR    R12,R15            Copy entry point to base reg
-         USING FACTORIAL,R12      Establish addressability
-         LR    R11,R13            Stable base of this function's frame
-*        Set up save area chain (stack allocation)
-         LA    R2,FRAME_SIZE(,R13) R2 -> next free/callee save area
-         ST    R11,4(,R2)         Chain: new->prev = this frame
-         ST    R2,8(,R11)         Chain: this frame->next = new
-         LR    R13,R2             R13 -> our save area
-*
-```
-
-**z/Architecture Example:**
-```hlasm
-FACTORIAL DS    0H
-         STMG  R14,R12,24(R13)    Save caller's registers (64-bit)
-         LGR   R12,R15            Copy entry point to base reg
-         USING FACTORIAL,R12      Establish addressability
-         LGR   R11,R13            Stable base of this function's frame
-*        Set up save area chain (stack allocation)
-         LA    R2,FRAME_SIZE(,R13) R2 -> next free/callee save area
-         STG   R11,8(,R2)         Chain: new->prev = this frame
-         STG   R2,16(,R11)        Chain: this frame->next = new
-         LGR   R13,R2             R13 -> our save area
-*
-```
-
-### Epilogue (Stack-Based)
-
-**S/370 / S/370-XA / S/390 Example:**
-```hlasm
-*        Function epilogue
-         L     R13,4(,R13)        Restore caller's SA pointer
-         L     R14,12(,R13)       Restore return address
-         LM    R0,R12,20(,R13)    Restore R0-R12
-         BR    R14                Return to caller
-```
-
-**z/Architecture Example:**
-```hlasm
-*        Function epilogue
-         LG    R13,8(,R13)        Restore caller's SA pointer
-         LG    R14,24(,R13)       Restore return address
-         LMG   R0,R12,40(,R13)    Restore R0-R12
-         BR    R14                Return to caller
-```
-
-**Key Difference from GETMAIN-based code:** No need to save/restore R15 around FREEMAIN, making the epilogue simpler and faster.
-
-## Legacy GETMAIN-Based Code (Historical Reference)
-
-For reference, the older GETMAIN-based approach is documented below. ANVIL no longer generates this style of code, but it may be useful for understanding existing mainframe programs.
-
-### Dynamic Area Layout
-
-```
-R13 --> +0:   Save Area (72 or 144 bytes)
-        +SA:  Local variables (stack slots)
-        +N:   Parameter list for outgoing calls
-```
-
-### Local Variable Allocation
-
-ANVIL allocates local variables in the dynamic area using fixed stack slots:
-
-**S/370 / S/370-XA / S/390 (32-bit):**
-```
-R13 --> +0:   Save Area (72 bytes)
-        +72:  Local var 0 (4 bytes)
-        +76:  Local var 1 (4 bytes)
-        +80:  Local var 2 (4 bytes)
-        ...
-        +N:   Parameter list for calls
-```
-
-**z/Architecture (64-bit):**
-```
-R13 --> +0:   Save Area (144 bytes)
-        +144: Local var 0 (8 bytes)
-        +152: Local var 1 (8 bytes)
-        +160: Local var 2 (8 bytes)
-        ...
-        +N:   Parameter list for calls
-```
-
-### Stack Slot Access
-
-ANVIL generates direct stack slot access for local variables:
-
-```hlasm
-* Initialize local variable to 0
-         XC    72(4,R13),72(R13)  Clear 4 bytes at offset 72
-
-* Store value to local variable
-         ST    R2,72(,R13)        Store to stack slot
-
-* Load value from local variable
-         L     R2,72(,R13)        Load from stack slot
-```
-
-This is more efficient than using intermediate registers for address calculation.
-
-### Prologue (Reentrant)
-
-**S/370 Example:**
-```hlasm
-FUNC     DS    0H
-         STM   R14,R12,12(R13)    Save caller's registers
-         LR    R12,R15            Establish base register
-         USING FUNC,R12           Tell assembler
-         LR    R11,R13            Stable frame base (R1 remains parameter list)
-*
-         GETMAIN R,LV=DYN@FUNC    Allocate dynamic storage
-         LR    R2,R1              R2 -> new area
-         ST    R13,4(,R2)         Chain: new->prev = caller
-         ST    R2,8(,R13)         Chain: caller->next = new
-         LR    R13,R2             R13 -> our area
-```
-
-### Epilogue (Reentrant)
-
-**S/370 Example:**
-```hlasm
-*        Function epilogue
-         LR    R2,R15             Save return value
-         LR    R1,R13             R1 -> area to free
-         L     R13,4(,R13)        Restore caller's SA pointer
-         FREEMAIN R,LV=DYN@FUNC,A=(1)  Free our storage
-         LR    R15,R2             Restore return value
-         L     R14,12(,R13)       Restore return address only
-         LM    R0,R12,20(,R13)    Restore R0-R12 (skip R14,R15)
-         BR    R14                Return
-```
-
-**Critical Note:** Do NOT use `LM R14,R12,12(R13)` in the epilogue as it overwrites R15 (the return value).
-
-## S/370 Specifics
-
-### Addressing Mode
-
-- 24-bit addresses (16MB address space)
-- High byte of address is ignored
-- AMODE 24, RMODE 24
-
-### Key Instructions
-
-| Instruction | Description |
-|-------------|-------------|
-| L | Load (32-bit) |
-| ST | Store (32-bit) |
-| LR | Load Register |
-| AR | Add Register |
-| SR | Subtract Register |
-| MR | Multiply Register (even-odd pair) |
-| DR | Divide Register (even-odd pair) |
-| NR | AND Register |
-| OR | OR Register |
-| XR | XOR Register |
-| CR | Compare Register |
-| LM | Load Multiple |
-| STM | Store Multiple |
-| LA | Load Address (0-4095) |
-| B | Branch |
-| BE | Branch if Equal |
-| BNE | Branch if Not Equal |
-| BL | Branch if Low |
-| BH | Branch if High |
-
-### Limitations
-
-- No immediate instructions (except LA for 0-4095)
-- 4KB addressability limit per base register
-- Division requires even-odd register pair
-
-## S/370-XA Specifics
-
-### Addressing Mode
-
-- 31-bit addresses (2GB address space)
-- Bit 0 is AMODE flag (must be preserved)
-- AMODE 31, RMODE ANY (from the target descriptor)
-
-### Differences from S/370
-
-- 31-bit rather than 24-bit addressing; the descriptor's `addr_bits` is 31 and
-  RMODE is `ANY` (S/370 is 24/24).
-- Same HFP-only floating point and same instruction repertoire as S/370 in the
-  current emitter — it does **not** use the S/390 halfword-immediate or
-  relative-branch forms.
-
-> **Note:** Calls are emitted with `BALR R14,R15` on every mainframe variant
-> (see `mf_emit_call()`); the backend does not currently emit `BASR`.
-
-## S/390 Specifics
-
-### Addressing Mode
-
-- 31-bit addresses (2GB address space)
-- Bit 0 is AMODE flag
-- AMODE 31, RMODE ANY
-
-### Additional Instructions
-
-| Instruction | Description |
-|-------------|-------------|
-| LHI | Load Halfword Immediate (-32768 to 32767) |
-| AHI | Add Halfword Immediate |
-| MHI | Multiply Halfword Immediate |
-| CHI | Compare Halfword Immediate |
-| MSR | Multiply Single Register |
-| J | Jump (relative) |
-| JE | Jump if Equal (relative) |
-| JNE | Jump if Not Equal (relative) |
-| JL | Jump if Low (relative) |
-| JH | Jump if High (relative) |
-| JNH | Jump if Not High (relative) |
-| JNL | Jump if Not Low (relative) |
-| BASR | Branch and Save Register |
-
-### Improvements over S/370
-
-- Halfword immediate instructions
-- Relative branch instructions (no base register needed)
-- More efficient multiplication
-
-### S/390 Instruction Use in ANVIL
-
-The S/390 descriptor marks relative branches and IEEE FP as available, and the
-emitter uses relative comparison branches. However, the current MachineIR
-emitter does **not** select halfword-immediate ALU forms (AHI/LHI/MHI/CHI):
-integer arithmetic is emitted with register-register instructions
-(`AR`/`SR`/`NR`/`OR`/`XR`, `MR`, `DR`) just like S/370. The immediate
-instructions in the table above are listed as architectural facts, not as code
-the backend currently generates.
-
-## z/Architecture Specifics
-
-### Addressing Mode
-
-- 64-bit addresses
-- AMODE 64, RMODE 64
-
-### 64-bit Instructions
-
-| Instruction | Description |
-|-------------|-------------|
-| LG | Load (64-bit) |
-| STG | Store (64-bit) |
-| LGR | Load Register (64-bit) |
-| AGR | Add Register (64-bit) |
-| SGR | Subtract Register (64-bit) |
-| MSGR | Multiply Single Register (64-bit) |
-| NGR | AND Register (64-bit) |
-| OGR | OR Register (64-bit) |
-| XGR | XOR Register (64-bit) |
-| CGR | Compare Register (64-bit) |
-| LMG | Load Multiple (64-bit) |
-| STMG | Store Multiple (64-bit) |
-| LGHI | Load Halfword Immediate (64-bit) |
-| LGFI | Load Fullword Immediate (64-bit) |
-| AGHI | Add Halfword Immediate (64-bit) |
-| LARL | Load Address Relative Long |
-| BRASL | Branch Relative and Save Long |
-| LGRL | Load Relative Long |
-| NIHH | AND Immediate High Halfword |
-
-### Key Differences from 32-bit
-
-1. **Save area is 144 bytes** (F4SA format)
-2. **STMG offset is 24**, not 8 (offsets 8 and 16 are for SA chaining)
-3. **Parameter list entries are 8 bytes** each
-4. **Use STORAGE macro** instead of GETMAIN for 64-bit
-
-### z/Architecture Instruction Use in ANVIL
-
-The z/Architecture emitter uses 64-bit register-register forms for wide
-operations: `AGR`/`SGR`, `MSGR` for multiply, `DSGR` (with `SRDAG`) for
-division/modulo, `NGR`/`OGR`/`XGR`, and `LGR`/`LMG`/`STMG` for moves and
-save-area handling. As on S/390, it does **not** currently select the
-halfword-immediate forms (AGHI/LGHI); those are listed above as architectural
-facts only. Symbol addresses use `LARL` and calls use `L R15,=V(...)`-style or
-`LARL` plus `BALR`.
-
-## HLASM Syntax
-
-### Column Layout
-
-```
-Column 1-8:   Label (optional)
-Column 10+:   Operation
-Column 16+:   Operands
-Column 72:    Continuation marker
-```
-
-### Common Directives
-
-```hlasm
-name     CSECT                    Control Section
-name     AMODE 24/31/64           Addressing Mode
-name     RMODE 24/ANY/64          Residency Mode
-         USING name,Rn            Establish addressability
-         DROP  Rn                 Drop addressability
-         LTORG                    Literal pool
-         DS    nC                 Define Storage (character)
-         DS    nF                 Define Storage (fullword)
-         DS    nFD                Define Storage (doubleword)
-         DC    F'value'           Define Constant (fullword)
-         EQU   value              Equate symbol
-         END   entry              End of assembly
-```
-
-### Literal Notation
-
-```hlasm
-         L     R2,=F'100'         Fullword literal
-         L     R2,=H'50'          Halfword literal
-         L     R2,=X'7FFFFFFF'    Hex literal
-         L     R2,=A(SYMBOL)      Address literal
-         L     R2,=V(EXTERNAL)    External address literal
-```
-
-## Generated Code Examples
-
-> **Illustrative only.** The HLASM listings in this and the following sections
-> were written by hand to convey structure and may not match the current
-> MachineIR backend byte-for-byte. In particular: the live backend emits the
-> uppercase header `*  GENERATED BY ANVIL FOR <variant>`, per-variant AMODE/RMODE
-> (not `ANY`), `FUNCNAME_BLOCKNAME` block labels (underscore, not `$`), and only
-> register-register ALU instructions (`AR`/`AGR`, never `AHI`/`AGHI`). The
-> normative behavior is described in the sections above; treat these samples as
-> approximate.
-
-### Simple Add Function (GCCMVS Style)
-
-**S/370:**
-```hlasm
-***********************************************************************
-*        Generated by ANVIL for IBM S/370
-***********************************************************************
-         CSECT
-         AMODE ANY
-         RMODE ANY
-*
-ADD      DS    0H
-         STM   R14,R12,12(R13)    Save caller's registers
-         LR    R12,R15            Copy entry point to base reg
-         USING ADD,R12            Establish addressability
-         LR    R11,R13            Stable frame base (R1 remains parameter list)
-*        Set up save area chain (stack allocation)
-         LA    R2,72(,R13)        R2 -> our save area
-         ST    R13,4(,R2)         Chain: new->prev = caller's
-         ST    R2,8(,R13)         Chain: caller->next = new
-         LR    R13,R2             R13 -> our save area
-*
-ADD$ENTRY DS    0H
-         L     R2,0(,R11)         Load addr of param 0
-         L     R2,0(,R2)          Load param value
-         L     R3,4(,R11)         Load addr of param 1
-         L     R3,0(,R3)          Load param value
-         AR    R2,R3              Add registers
-         LR    R15,R2             Result in R15
-*        Function epilogue
-         L     R13,4(,R13)        Restore caller's SA pointer
-         L     R14,12(,R13)       Restore return address
-         LM    R0,R12,20(,R13)    Restore R0-R12
-         BR    R14                Return to caller
-*
-         DROP  R12
-*
-*        Stack frame sizes
-DYN@ADD  EQU   88                 Stack frame size for ADD
-*
-         LTORG                    Literal pool
-*
-*        Register equates
-R0       EQU   0
-R1       EQU   1
-R2       EQU   2
-R3       EQU   3
-R4       EQU   4
-R5       EQU   5
-R6       EQU   6
-R7       EQU   7
-R8       EQU   8
-R9       EQU   9
-R10      EQU   10
-R11      EQU   11
-R12      EQU   12
-R13      EQU   13
-R14      EQU   14
-R15      EQU   15
-*
-         END   ADD
-```
-
-**z/Architecture:**
-```hlasm
-***********************************************************************
-*        Generated by ANVIL for IBM z/Architecture
-***********************************************************************
-         CSECT
-         AMODE ANY
-         RMODE ANY
-*
-ADD      DS    0H
-         STMG  R14,R12,24(R13)    Save caller's registers
-         LGR   R12,R15            Copy entry point to base reg
-         USING ADD,R12            Establish addressability
-         LGR   R11,R13            Stable frame base (R1 remains parameter list)
-*        Set up save area chain (stack allocation)
-         LA    R2,144(,R13)       R2 -> our save area (144 bytes for 64-bit)
-         STG   R13,8(,R2)         Chain: new->prev = caller's
-         STG   R2,16(,R13)        Chain: caller->next = new
-         LGR   R13,R2             R13 -> our save area
-*
-ADD$ENTRY DS    0H
-         LG    R2,0(,R11)         Load addr of param 0
-         LG    R2,0(,R2)          Load param value
-         LG    R3,8(,R11)         Load addr of param 1
-         LG    R3,0(,R3)          Load param value
-         AGR   R2,R3              Add 64-bit registers
-         LGR   R15,R2             Result in R15
-*        Function epilogue
-         LG    R13,8(,R13)        Restore caller's SA pointer
-         LG    R14,24(,R13)       Restore return address
-         LMG   R0,R12,40(,R13)    Restore R0-R12
-         BR    R14                Return to caller
-*
-         DROP  R12
-*
-*        Stack frame sizes
-DYN@ADD  EQU   176                Stack frame size for ADD
-*
-         LTORG                    Literal pool
-*
-         END   ADD
-```
-
-## Comparison Operations
-
-### Branch Offset Calculation
-
-**S/370 / S/370-XA / S/390 (32-bit):**
-```hlasm
-         CR    R2,R3              Compare registers (4 bytes)
-         LA    R15,1              Assume true (4 bytes)
-         BE    *+6                Skip if equal (4 bytes)
-         SR    R15,R15            Set false (2 bytes)
-```
-
-Branch offset is +6 because:
-- BE instruction: 4 bytes
-- SR instruction: 2 bytes
-- Total to skip: 6 bytes
-
-**z/Architecture (64-bit):**
-```hlasm
-         CGR   R2,R3              Compare registers (4 bytes)
-         LGHI  R15,1              Assume true (4 bytes)
-         JE    *+8                Skip if equal (4 bytes)
-         SGR   R15,R15            Set false (4 bytes)
-```
-
-Branch offset is +8 because:
-- JE instruction: 4 bytes
-- SGR instruction: 4 bytes
-- Total to skip: 8 bytes
-
-## Function Calls
-
-### Building Parameter List
-
-For each outgoing argument the emitter stores the value into the outgoing-values
-area, takes its address into R0, marks the **last** argument's address with the
-high-order (VL) bit, and stores the address into the parameter list. R1 then
-points at the list and the target is called with `BALR R14,R15` (the target
-address comes from `L R15,=V(NAME)` on 32-bit, `LARL R15,NAME` on 64-bit; an
-indirect callee is moved into R15 with `LR`/`LGR`). See `mf_emit_call_stack_arg()`
-and `mf_emit_call()`.
-
-```hlasm
-*        Store arg 0 value and record its address
-         ST    R3,VALOFF0(,R13)        Store arg 0 value
-         LA    R0,VALOFF0(,R13)        Address of arg 0
-         ST    R0,LISTOFF0(,R13)       Into param list
-
-*        Last arg: set VL (high-order) bit on its address
-         ST    R4,VALOFF1(,R13)
-         LA    R0,VALOFF1(,R13)
-         O     R0,=X'80000000'         Mark last param (VL bit; OIHH R0,X'8000' on 64-bit)
-         ST    R0,LISTOFF1(,R13)
-
-         LA    R1,LISTOFF0(,R13)       R1 -> param list
-         L     R15,=V(TARGET)          Target address (LARL on z/Architecture)
-         BALR  R14,R15                 Call
-```
-
-## Addressability
-
-### 4KB Limitation
-
-Each base register can address 4096 bytes (offsets 0-4095). For larger programs:
-
-1. **Multiple base registers**: Use R12, R11, R10, etc.
-2. **LTORG placement**: Place literal pools every 4KB
-3. **Relative addressing** (S/390+): Use relative branches
-
-### USING and DROP
-
-```hlasm
-FUNC     DS    0H
-         USING FUNC,R12           R12 is base for FUNC
-         ...
-         USING DATA,R11           R11 is base for DATA section
-         ...
-         DROP  R11                No longer using R11
-```
-
-## Memory Allocation Details
-
-### GETMAIN Parameters
-
-```hlasm
-* Register form (R)
-         GETMAIN R,LV=length      Basic allocation
-         GETMAIN R,LV=length,LOC=ANY    Above 16MB (31-bit)
-         GETMAIN R,LV=length,LOC=BELOW  Below 16MB (24-bit)
-
-* After GETMAIN: R1 = address of allocated storage
-*                R15 = return code (0 = success)
-```
-
-### FREEMAIN Parameters
-
-```hlasm
-* Register form (R)
-         FREEMAIN R,LV=length,A=(1)     Free storage at address in R1
-         FREEMAIN R,LV=length,A=addr    Free storage at specified address
-```
-
-### STORAGE Macro (z/OS)
-
-```hlasm
-* OBTAIN
-         STORAGE OBTAIN,LENGTH=length,LOC=ANY
-* R1 = address of allocated storage
-
-* RELEASE
-         STORAGE RELEASE,LENGTH=length,ADDR=(1)
-* Storage at address in R1 is freed
-```
-
-## Control Flow and Labels
-
-### Branch Label Naming
-
-ANVIL generates unique block labels by joining the (uppercased) function name and
-block name with an underscore: `FUNCNAME_BLOCKNAME` (see `mf_block_label()`).
-Comparison/select helpers append further suffixes such as `_CMP_T_n`, `_CMP_E_n`,
-`_SEL_T_n`, `_SEL_E_n` using an internal counter.
-
-> **Note:** Some HLASM samples elsewhere in this document use a legacy
-> `FUNC$BLOCK` (`$`) separator. The current backend uses an underscore (`_`), as
-> shown below.
-
-```hlasm
-SUM_TO_N_ENTRY     DS    0H
-         ...
-         B     SUM_TO_N_LOOP_COND      Branch to loop condition
-SUM_TO_N_LOOP_COND DS    0H
-         ...
-         BH    SUM_TO_N_LOOP_END       Branch if i > n
-SUM_TO_N_LOOP_BODY DS    0H
-         ...
-         B     SUM_TO_N_LOOP_COND      Loop back
-SUM_TO_N_LOOP_END  DS    0H
-         ...
-```
-
-### Loop Example (Sum 1 to N)
-
-**S/390 Generated Code (GCCMVS Style):**
-```hlasm
-SUM_TO_N$ENTRY DS    0H
-         XC    72(4,R13),72(R13)  Init sum = 0
-         LA    R2,1
-         ST    R2,76(,R13)        Init i = 1
-         J     SUM_TO_N$LOOP_COND
-*
-SUM_TO_N$LOOP_COND DS    0H
-         L     R2,76(,R13)        Load i
-         L     R3,0(,R11)         Load &n
-         L     R3,0(,R3)          Load n
-         CR    R2,R3              Compare i : n
-         JH    SUM_TO_N$LOOP_END  Exit if i > n
-*
-SUM_TO_N$LOOP_BODY DS    0H
-         L     R2,72(,R13)        Load sum
-         L     R3,76(,R13)        Load i
-         AR    R2,R3              sum = sum + i
-         ST    R2,72(,R13)        Store sum
-         L     R2,76(,R13)        Load i
-         AHI   R2,1               i = i + 1 (optimized!)
-         ST    R2,76(,R13)        Store i
-         J     SUM_TO_N$LOOP_COND Loop back
-*
-SUM_TO_N$LOOP_END DS    0H
-         L     R15,72(,R13)       Return sum
-```
-
-**Note:** Function and block names are uppercase (`SUM_TO_N$ENTRY`, `SUM_TO_N$LOOP_COND`, etc.) following GCCMVS conventions.
-
-## Array Access (GEP)
-
-ANVIL supports array indexing through the GEP (Get Element Pointer) operation, which computes element addresses using the mainframe's indexed addressing capabilities.
-
-### GEP Code Generation
-
-For `arr[i]` where `arr` is a pointer to `int` (4 bytes):
-
-**S/370, S/370-XA, S/390 (32-bit):**
-```hlasm
-         L     R2,arr_addr        Load base pointer
-         L     R3,i_val           Load index
-         SLL   R3,2               Index * 4 (sizeof int)
-         AR    R2,R3              Base + offset
-         LR    R15,R2             Result pointer
-*        Load the element
-         L     R15,0(,R2)         Load arr[i]
-```
-
-**z/Architecture (64-bit):**
-```hlasm
-         LG    R2,arr_addr        Load base pointer (64-bit)
-         LG    R3,i_val           Load index (64-bit)
-         SLLG  R3,R3,2            Index * 4 (64-bit shift)
-         AGR   R2,R3              Base + offset (64-bit add)
-         LGR   R15,R2             Result pointer
-*        Load the element
-         L     R15,0(,R2)         Load arr[i] (32-bit int)
-```
-
-### Element Size Optimization
-
-The index multiplication uses shifts for power-of-2 sizes:
-
-| Element Type | Size | Instruction |
-|--------------|------|-------------|
-| i8/u8 | 1 | (no shift) |
-| i16/u16 | 2 | `SLL R3,1` |
-| i32/u32/f32 | 4 | `SLL R3,2` |
-| i64/u64/f64 | 8 | `SLL R3,3` / `SLLG R3,R3,3` |
-
-For non-power-of-2 sizes, `MH` (Multiply Halfword) is used.
-
-### Example: Sum Array Elements
-
-```c
-int sum_array(int *arr, int n) {
-    int sum = 0;
-    for (int i = 0; i < n; i++) {
-        sum += arr[i];  // Uses GEP
-    }
-    return sum;
-}
-```
-
-See `examples/array_test.c` for a complete example.
-
-## Struct Field Access (STRUCT_GEP)
-
-ANVIL supports struct field access through the STRUCT_GEP operation, which computes field addresses using fixed offsets calculated at compile time.
-
-### STRUCT_GEP Code Generation
-
-For `p->field` where `p` is a pointer to a struct:
-
-**S/370, S/370-XA, S/390 (32-bit):**
-```hlasm
-*        Field at offset 0 (e.g., p->x)
-         LR    R15,R2             Struct field at offset 0
-
-*        Field at offset 4 (e.g., p->y)
-         LA    R15,4(,R2)        Struct field at offset 4
-
-*        Field at large offset (>4095)
-         LR    R15,R2             Load base
-         AHI   R15,offset         Add field offset
-```
-
-**z/Architecture (64-bit):**
-```hlasm
-*        Field at offset 0
-         LGR   R15,R2             Struct field at offset 0
-
-*        Field at offset 4
-         LA    R15,4(,R2)        Struct field at offset 4
-
-*        Field at large offset
-         LGR   R15,R2             Load base
-         AGHI  R15,offset         Add field offset
-```
-
-### Struct Layout
-
-ANVIL calculates struct field offsets automatically with proper alignment:
-
-```c
-/* struct Point { int x; int y; } */
-/* Field 0 (x): offset 0, size 4 */
-/* Field 1 (y): offset 4, size 4 */
-/* Total size: 8 bytes */
-
-/* struct Mixed { char a; int b; short c; } */
-/* Field 0 (a): offset 0, size 1 */
-/* Field 1 (b): offset 4, size 4 (aligned to 4) */
-/* Field 2 (c): offset 8, size 2 */
-/* Total size: 12 bytes (padded to alignment) */
-```
-
-### Example: Distance Squared
-
-```c
-int dist_sq(struct Point *p) {
-    return p->x * p->x + p->y * p->y;
-}
-```
-
-**Generated Assembly (S/390):**
-```hlasm
-*        Load p->x
-         LR    R15,R2             Struct field at offset 0
-         L     R15,0(,R15)        Load x value
-*        Load p->y  
-         LA    R15,4(,R2)        Struct field at offset 4
-         L     R15,0(,R15)        Load y value
-*        Compute x*x + y*y
-         MSR   R2,R2              x * x
-         MSR   R3,R3              y * y
-         AR    R2,R3              x*x + y*y
-```
-
-See `examples/struct_test.c` for a complete example.
-
-## Floating-Point Support
-
-### FP Formats
-
-IBM mainframes support two floating-point formats:
-
-| Format | Name | Description |
-|--------|------|-------------|
-| HFP | Hexadecimal FP | Base-16 exponent, IBM proprietary (S/370, S/390) |
-| BFP | Binary FP | IEEE 754 standard (z/Architecture, S/390 optional) |
-
-### FP Registers
-
-S/370 and S/370-XA expose 4 FPRs; ANVIL allocates F2/F4/F6 (F0 is scratch).
-S/390 and z/Architecture expose 16 FPRs; ANVIL allocates F1-F15 (F0 is scratch).
-
-### HFP Instructions (S/370, S/370-XA, S/390)
-
-```hlasm
-*        Load/Store
-         LE    0,addr            Load Short (32-bit)
-         LD    0,addr            Load Long (64-bit)
-         STE   0,addr            Store Short
-         STD   0,addr            Store Long
-         LER   0,2               Load Register Short
-         LDR   0,2               Load Register Long
-
-*        Arithmetic (Short)
-         AER   0,2               Add Short
-         SER   0,2               Subtract Short
-         MER   0,2               Multiply Short
-         DER   0,2               Divide Short
-
-*        Arithmetic (Long)
-         ADR   0,2               Add Long
-         SDR   0,2               Subtract Long
-         MDR   0,2               Multiply Long
-         DDR   0,2               Divide Long
-
-*        Sign Operations
-         LCER  0,0               Load Complement (Negate) Short
-         LCDR  0,0               Load Complement (Negate) Long
-         LPER  0,0               Load Positive (Abs) Short
-         LPDR  0,0               Load Positive (Abs) Long
-
-*        Compare
-         CER   0,2               Compare Short
-         CDR   0,2               Compare Long
-```
-
-### IEEE 754 (BFP) Instructions (z/Architecture, S/390)
-
-```hlasm
-*        Arithmetic (Short BFP)
-         AEBR  0,2               Add Short BFP
-         SEBR  0,2               Subtract Short BFP
-         MEEBR 0,2               Multiply Short BFP
-         DEBR  0,2               Divide Short BFP
-
-*        Arithmetic (Long BFP)
-         ADBR  0,2               Add Long BFP
-         SDBR  0,2               Subtract Long BFP
-         MDBR  0,2               Multiply Long BFP
-         DDBR  0,2               Divide Long BFP
-
-*        Sign Operations (BFP)
-         LCEBR 0,0               Load Complement Short BFP
-         LCDBR 0,0               Load Complement Long BFP
-         LPEBR 0,0               Load Positive Short BFP
-         LPDBR 0,0               Load Positive Long BFP
-
-*        Compare (BFP)
-         CEBR  0,2               Compare Short BFP
-         CDBR  0,2               Compare Long BFP
-
-```
-
-### Integer ↔ Floating-Point Conversion
-
-The six numeric conversion opcodes are emitted as real HFP or BFP operations;
-there are no unresolved runtime-helper placeholders. ESA/390 and z/Architecture
-use `CEFR/CDFR/CEGR/CDGR` for HFP and `CEFBR/CDFBR/CEGBR/CDGBR` for BFP. The
-reverse direction uses `CFER/CFDR/CGER/CGDR` or
-`CFEBR/CFDBR/CGEBR/CGDBR`, with rounding-mode field 5 (toward zero).
-
-S/370 and S/370-XA predate those ESA conversion instructions. Their HFP path is
-fully inline: integer-to-HFP constructs an exact long-HFP value in the reserved
-FP temporary and applies `LEDR` only when a short result is requested; HFP-to-
-integer decodes sign, hexadecimal exponent and the 56-bit fraction with GPR
-shifts, discarding fractional bits. It therefore remains linkable without a
-fictional helper library and does not emit instructions unavailable to the
-selected architecture.
-
-Unsigned full-register conversions use an exact decomposition on machines where
-logical-conversion instructions are not part of the selected baseline:
-`u -> float((u >> 1) | (u & 1)) * 2` for a high-bit-set integer, and a split at
-2^(N-1) for FP-to-unsigned. Powers of two are exact in both HFP and BFP. Values
-outside the destination integer range, NaNs and infinities are IR poison; the
-backend deliberately does not promise a result for that domain. `fpext` uses
-`LDER`/`LDEBR`; `fptrunc` uses the rounded `LEDR`/`LEDBR` operation.
-
-Loads of signed/unsigned i8 and i16 are normalized immediately after `IC`/`LH`:
-sign extension uses shifts, unsigned halfwords are masked, and z/Architecture
-finishes with `LGFR`/`LLGFR` so the upper 32 bits are never stale.
-
-### FP Format Selection in ANVIL
-
-```c
-/* Select IEEE 754 for z/Architecture */
-anvil_ctx_set_target(ctx, ANVIL_ARCH_ZARCH);
-anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754);
-
-/* Select HFP for S/390 (default) */
-anvil_ctx_set_target(ctx, ANVIL_ARCH_S390);
-/* HFP is default, or explicitly: */
-anvil_ctx_set_fp_format(ctx, ANVIL_FP_HFP);
-```
-
-## Decimal Types
-
-ANVIL's `decimal` type (packed or zoned, see `doc/IR.md`) is recognized by the
-mainframe backend for **static initializers**. A global of decimal type is
-emitted as an HLASM packed (`PLn`) or zoned (`ZLn`) constant using its digit
-string (see `mf_emit_decimal_initializer()`):
-
-```hlasm
-*        packed decimal global, e.g. decimal(packed, 5, 2) with digits "123.45"
-BALANCE  DC    PL3'123.45'
-
-*        zoned decimal global
-COUNTER  DC    ZL5'12345'
-```
-
-The length `n` is the type's storage size (`(precision+2)/2` bytes for packed,
-`precision` bytes for zoned). General-purpose packed/zoned decimal *arithmetic*
-(AP/SP/ZAP/PACK/UNPK lowering) is not generated by the current backend.
-
-## Dynamic Area Layout with FP
-
-The dynamic storage area includes space for FP temporaries:
-
-**S/370, S/370-XA, S/390 (88 bytes minimum):**
-```
-+0    Save Area (72 bytes)
-+72   FP Temp 1 (8 bytes)
-+80   FP Temp 2 (8 bytes) - for conversions
-+88   Local variables start
-```
-
-**z/Architecture (160 bytes minimum):**
-```
-+0    Save Area (144 bytes)
-+144  FP Temp 1 (8 bytes)
-+152  FP Temp 2 (8 bytes) - for conversions
-+160  Local variables start
-```
-
-`ANVIL_MIR_OP_DYN_ALLOCA` reserves real storage. The emitter computes
-`count * element_size`, aligns both the returned address and the new stack top
-to 16 bytes, installs the appropriate 32- or 64-bit backchain, and advances R13.
-R11 remains the fixed-frame base, so fixed locals and outgoing parameter bundles
-cannot overlap a dynamic object. Each new dynamic top chains directly to R11;
-therefore nested callees use the current R13 while this function's epilogue can
-restore its caller in one step. Integer overflow or exhaustion of the available
-stack is outside the defined program domain.
-
-## Global Variables
-
-Global variables are emitted by `mf_emit_globals()` after the function bodies,
-following a `LTORG` and a `DS 0D` alignment directive. Every global is emitted as
-a **`DC` constant** — initialized globals use their initializer value; uninitialized
-globals are zero-filled. (The backend does not emit bare `DS` reservations for
-globals.)
-
-### Storage Encoding
-
-| ANVIL Type | HLASM | Size | Notes |
-|------------|-------|------|-------|
-| i8/i16/i32/i64 | `DC` byte data | type size | Signed integer initializer |
-| u8/u16/u32/u64/ptr | `DC` byte data | type size | Unsigned integer initializer |
-| f32 | `DC E'...'` / `DC EB'...'` | 4 bytes | `EB` when IEEE/HFP-IEEE FP format is selected, else `E` (HFP) |
-| f64 | `DC D'...'` / `DC DB'...'` | 8 bytes | `DB` when IEEE/HFP-IEEE FP format is selected, else `D` (HFP) |
-| decimal (packed) | `DC PLn'digits'` | `(precision+2)/2` | Packed decimal |
-| decimal (zoned) | `DC ZLn'digits'` | `precision` | Zoned decimal |
-| array | per-element `DC` | sum of elements | Recurses into element initializers |
-
-### Naming Convention
-
-Global variable names (and string-literal labels) are converted to UPPERCASE:
-- `counter` → `COUNTER`
-- `my_global` → `MY_GLOBAL`
-
-### Generated Code
-
-```hlasm
-         LTORG
-         DS    0D
-COUNTER  DC    F'42'              Initialized i32 global
-G_DOUBLE DC    D'3.14'           Initialized f64 global (HFP format)
-ZEROED   DC    XL4'00000000'      Uninitialized i32 global (zero-filled)
-```
-
-### Load/Store Instructions
-
-Global access is two steps: materialize the symbol address into a register, then
-load/store indirectly through it. The address is taken with `LA` on the 32-bit
-variants and `LARL` (relative long) on z/Architecture (see `mf_emit_symbol_addr()`).
-
-**S/370, S/370-XA, S/390:**
-```hlasm
-*        Load from global
-         LA    R2,COUNTER             Address of global
-         L     R3,0(,R2)              Load global value
-
-*        Store to global
-         LA    R2,COUNTER             Address of global
-         ST    R3,0(,R2)              Store to global
-```
-
-**z/Architecture (symbol address via LARL):**
-```hlasm
-*        Load from global
-         LARL  R2,COUNTER             Address of global (relative long)
-         LG    R3,0(,R2)              Load global value
-```
-
-### Example Usage
-
-```c
-// Create global variable
-anvil_value_t *counter = anvil_module_add_global(mod, "counter", 
-    anvil_type_i32(ctx), ANVIL_LINK_INTERNAL);
-
-// In function: load, increment, store
-anvil_value_t *val = anvil_build_load(ctx, anvil_type_i32(ctx), counter, "val");
-anvil_value_t *one = anvil_const_i32(ctx, 1);
-anvil_value_t *new_val = anvil_build_add(ctx, val, one, "new_val");
-anvil_build_store(ctx, new_val, counter);
-```
-
-## Debugging Tips
-
-1. **Check save area chaining**: Verify +4 and +8 offsets are correct
-2. **Verify register preservation**: R2-R12 must be restored
-3. **Check VL bit handling**: Clear before using parameter address
-4. **Verify STMG/LMG offsets**: 24 for z/Architecture, 12 for 32-bit
-5. **Use SNAP macro**: Dump registers and storage for debugging
-6. **Check label names**: Ensure branch targets use `func$block` format
-7. **Verify stack slot offsets**: 88+ for S/370/S/370-XA/S/390, 160+ for z/Architecture
-8. **FP format consistency**: Ensure HFP/BFP instructions match the data format
-
-## Current Limitations
-
-These reflect the present state of the MachineIR mainframe backend:
-
-- **No immediate-form ALU selection.** Integer arithmetic uses register-register
-  instructions only (`AR`/`AGR`, `SR`/`SGR`, `MR`/`MSGR`, `DR`/`DSGR`, etc.);
-  the AHI/AGHI/LHI/LGHI family is not generated.
-- **Calls always use `BALR R14,R15`** on all variants (no `BASR`/`BRASL`).
-- **Decimal support is limited to static initializers** (`DC PLn`/`ZLn`); no
-  packed/zoned decimal arithmetic is generated.
-
-## References
-
-- IBM z/Architecture Principles of Operation (SA22-7832)
-- IBM z/OS MVS Programming: Assembler Services Guide (SA23-1368)
-- IBM High Level Assembler Language Reference (SC26-4940)
+`systemz_abi_ops_t` selects linkage entry/exit behavior.
+`systemz_asm_ops_t` selects function/data printing and module termination.
+Descriptors bind these policies explicitly. The current linkage routines print
+HLASM and are only paired with that printer. Adding GAS requires implementing
+that printer and the corresponding linkage emission; adding an OS ABI also
+requires argument classification, register preservation and frame management.
+Changing a descriptor string does not implement either capability.
+
+Instruction-width decisions use descriptor capabilities. Architecture and host
+selection do not use conditional compilation in these components. No component
+includes another component's `.c` file.
+
+## Implemented target profiles
+
+These are ANVIL's current profiles, not a claim that every historical processor
+in each family implements all of the profile's facilities.
+
+| Target | Pointer storage | Address bits | GPR width | FPR profile | Default FP | AMODE / RMODE |
+|---|---:|---:|---:|---|---|---|
+| S/370 | 4 bytes | 24 | 32 | F0, F2, F4, F6 | HFP | 24 / 24 |
+| S/370-XA | 4 bytes | 31 | 32 | F0, F2, F4, F6 | HFP | 31 / ANY |
+| S/390 | 4 bytes | 31 | 32 | 16 registers | HFP | 31 / ANY |
+| z/Architecture | 8 bytes | 64 | 64 | 16 registers | HFP / IEEE | 64 / ANY |
+
+All four have real lowering, legality checking, allocation, spilling and text
+emission. Their validation is materially weaker than the execution coverage for
+x86-64 and AArch64. Atomics, SIMD and native variadic ABI support are not supplied
+by this family. CPU model/facility gating still needs a systematic audit.
+
+## Architecture, linkage and assembler are separate contracts
+
+The ISA does not prescribe an upward-growing C stack, R1 parameter lists or
+HLASM syntax. Those choices belong to an execution environment and its tools.
+The `ANVIL_STACK_UP` metadata describes ANVIL's current arena convention.
+
+IBM defines AMODE as addressing mode and RMODE as residence mode. In particular,
+`RMODE ANY` means 31-bit residence, even alongside `AMODE 64`; it does not mean
+unrestricted 64-bit residence. See the [HLASM AMODE/RMODE reference](https://www.ibm.com/docs/en/hla-and-tf/1.6.0?topic=support-addressing-mode-amode-residence-mode-rmode).
+
+HLASM itself can produce ELF32 and ELF64 through ASMAXT2E. Therefore HLASM does
+not imply the MVS ABI, and GAS does not by itself implement the Linux s390x ABI.
+ANVIL currently supplies only HLASM with its MVS-oriented arena convention.
+Linux s390x SysV, z/OS Language Environment and other linkage environments need
+separate implementations. See [IBM APAR PH15557](https://www.ibm.com/support/pages/apar/PH15557).
+
+Function and module codegen reject unsupported ABI/syntax combinations before
+producing output, including empty modules and declarations. Public low-level
+`anvil_mainframe_emit_mir` uses the selected descriptor's default printer.
+
+## Current linkage and known incompatibilities
+
+The 32-bit entry sequence saves GPRs in a 72-byte caller-provided area. R11 holds
+the stable frame base; R13 advances through storage assumed to be owned by the
+caller. R1 points to an address list. The emitter marks and strips a terminal bit
+on parameter addresses, including its private 64-bit list representation.
+
+There is no storage acquisition, arena capacity check or stack-growth runtime.
+The generated prologue assumes more storage than the minimum caller-provided
+save area. It must not be advertised as general MVS, Metal C, LE or GCCMVS
+interoperability without a matching runtime and executable ABI tests.
+
+The previous documentation incorrectly called the current 144-byte layout
+F4SA. The layouts differ:
+
+| Field | ANVIL arena-64 offset | IBM F4SA offset |
+|---|---:|---:|
+| Signature | Not emitted | 4 (`F4SA`) |
+| Saved R14 | 24 | 8 |
+| Saved R15 | 32 | 16 |
+| Saved R0 through R12 | 40 through 136 | 24 through 120 |
+| Back chain | 8 | 128 |
+| Forward chain | 16 | 136 |
+
+IBM specifies saving the registers into the caller-provided area and creating
+and chaining any additional area required by the callee. A correct F4SA change
+must update prologue, epilogue, dynamic allocation and the runtime contract
+together; renaming the existing layout would be incorrect. See [IBM: If starting in AMODE 64](https://www.ibm.com/docs/en/zos/2.5.0?topic=area-if-starting-in-amode-64).
+
+Further open items found during source review:
+
+- FPR allocation currently permits registers without a complete call-clobber
+  and preservation policy. z/OS normally treats FPR8-FPR15 as nonvolatile;
+  language options can affect the contract. See [IBM AFP conventions](https://www.ibm.com/docs/en/cobol-zos/6.5.0?topic=ecco-afp).
+- R0 occurs as a base register in emitted memory operands. Base-field zero has
+  special ISA semantics; these sequences require instruction-level correction
+  and execution tests, not only assembly substring checks. See [IBM's register-zero addressing rules](https://www.ibm.com/docs/en/hla-and-tf/1.6.0?topic=instruction-using-general-register-zero).
+- Long functions, literal reach, HLASM continuation fields, symbol visibility,
+  external relocations and the selected character encoding need assembler and
+  binder validation. Uppercasing a name is not a universal ABI requirement.
+- The 64-bit terminal-bit parameter-list convention, aggregate arguments,
+  register returns and cross-language calls have not been certified against a
+  chosen native compiler/runtime contract.
+
+These limitations remain visible rather than being hidden by the directory
+reorganization. ISA validation should use the applicable edition of the
+[z/Architecture Principles of Operation, SA22-7832-14](https://www.ibm.com/docs/en/module_1678991624569/pdf/SA22-7832-14.pdf?cp=HW11W)
+and the original [System/370 Principles of Operation, GA22-7000-0](https://www.bitsavers.org/pdf/ibm/370/princOps/GA22-7000-0_370_Principles_Of_Operation_Jun70.pdf).
+The latter is an IBM manual hosted in the Bitsavers archive.
+
+## Validation boundary
+
+`tests/mainframe_mir_lowering_regression.c` exercises source lowering, variant
+legality, spilling and HLASM output. `tests/backend_dispatch_regression.c`
+exercises all seven PPC/SystemZ targets through registered backend callbacks,
+including unsupported configurations, declarations and empty modules.
+
+These tests run on Windows and Linux hosts. They do not assemble with IBM HLASM
+or execute under MVS/z/OS. QEMU's Linux s390x user mode cannot validate MVS
+linkage or a GOFF load module. Native readiness requires a selected OS/runtime,
+the matching assembler and binder, and bidirectional call tests covering
+register preservation, argument lists, frame storage and floating point.

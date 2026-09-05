@@ -229,6 +229,22 @@ bool anvil_instr_add_operand(anvil_instr_t *instr, anvil_value_t *val)
     return anvil_instr_add_operands(instr, &val, 1);
 }
 
+void anvil_block_append_prepared(anvil_block_t *block, anvil_instr_t *instr)
+{
+    instr->parent = block;
+    instr->owner_module = block->owner_module;
+    instr->prev = block->last;
+    instr->next = NULL;
+    if (block->last)
+        block->last->next = instr;
+    else
+        block->first = instr;
+
+    block->last = instr;
+    if (instr->result)
+        instr->result->owner_module = block->owner_module;
+}
+
 bool anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr)
 {
     if (!ctx || !instr || instr->owner_ctx != ctx || !ctx->insert_block) {

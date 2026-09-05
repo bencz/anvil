@@ -90,7 +90,7 @@ test-unit:
 	@$(CC) $(CFLAGS) $(TESTDIR)/unit/context_target.c src/context.c src/c_std.c \
 		-o $(OBJDIR)/context_target_test
 	@$(OBJDIR)/context_target_test
-	@$(CC) $(CFLAGS) $(TESTDIR)/unit/layout.c src/context.c src/c_std.c \
+	@$(CC) $(CFLAGS) $(TESTDIR)/unit/layout.c src/context.c src/c_std.c src/target.c \
 		src/types.c src/codegen/codegen_type.c $(ANVIL_LIB) \
 		-o $(OBJDIR)/layout_test
 	@$(OBJDIR)/layout_test

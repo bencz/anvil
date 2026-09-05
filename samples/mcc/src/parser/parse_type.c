@@ -1145,13 +1145,10 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
 end_params:
     parse_expect(p, TOK_RPAREN, ")");
     
-    mcc_type_t *func = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-    if (!func) return NULL;
-    func->kind = TYPE_FUNCTION;
-    func->data.function.return_type = return_type;
-    func->data.function.params = params;
-    func->data.function.num_params = num_params;
-    func->data.function.is_variadic = is_variadic;
+    mcc_type_t *func = mcc_type_function(p->types, return_type, params, num_params, is_variadic);
+    if (!func)
+        return NULL;
+
     func->data.function.is_oldstyle = false;
     return func;
 }

@@ -6,6 +6,32 @@ Integer := Number [
         <primitive: IntegerHashPrimitive>
     ]
 
+    asString [
+        | digits magnitude count value result position |
+        digits := '0123456789'.
+        magnitude := self abs.
+        count := 1.
+        value := magnitude.
+
+        [value >= 10] whileTrue: [
+            count := count + 1.
+            value := value // 10
+        ].
+
+        self < 0 ifTrue: [count := count + 1].
+        result := String new: count.
+        position := count.
+
+        [position > 0] whileTrue: [
+            result at: position put: (digits at: (magnitude \\ 10) + 1).
+            magnitude := magnitude // 10.
+            position := position - 1
+        ].
+
+        self < 0 ifTrue: [result at: 1 put: $-].
+        ^result
+    ]
+
     / aNumber [
         (aNumber isKindOf: Integer) ifTrue: [
             ^Fraction numerator: self denominator: aNumber

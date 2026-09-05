@@ -196,23 +196,21 @@ static void test_message_precedence_chains_and_cascades(void)
 
     CHECK(fixture_init(&fixture, "foo [ x foo bar; baz ]"));
     expression = only_expression(st_parse_method(&fixture.parser));
-    CHECK(expression->as.expression.receiver->kind == ST_AST_VARIABLE);
-    CHECK(text_is(expression->as.expression.receiver->as.variable.name, "x"));
-    CHECK(expression->as.expression.messages.count == 3u);
-    CHECK(text_is(expression->as.expression.messages.items[0]
+    CHECK(expression->as.expression.receiver->kind == ST_AST_EXPRESSION);
+    CHECK(text_is(expression->as.expression.receiver->as.expression.receiver->as.variable.name, "x"));
+    CHECK(text_is(expression->as.expression.receiver->as.expression.messages.items[0]
                       ->as.message.selector,
                   "foo"));
-    CHECK(text_is(expression->as.expression.messages.items[1]
+    CHECK(expression->as.expression.messages.count == 2u);
+    CHECK(text_is(expression->as.expression.messages.items[0]
                       ->as.message.selector,
                   "bar"));
-    CHECK(text_is(expression->as.expression.messages.items[2]
+    CHECK(text_is(expression->as.expression.messages.items[1]
                       ->as.message.selector,
                   "baz"));
     CHECK(!expression->as.expression.messages.items[0]
                ->as.message.starts_cascade);
-    CHECK(!expression->as.expression.messages.items[1]
-               ->as.message.starts_cascade);
-    CHECK(expression->as.expression.messages.items[2]
+    CHECK(expression->as.expression.messages.items[1]
               ->as.message.starts_cascade);
     fixture_destroy(&fixture);
 
@@ -221,6 +219,23 @@ static void test_message_precedence_chains_and_cascades(void)
     CHECK(expression->as.expression.messages.count == 2u);
     CHECK(expression->as.expression.messages.items[0]->as.message.super_send);
     CHECK(expression->as.expression.messages.items[1]->as.message.super_send);
+    fixture_destroy(&fixture);
+
+    CHECK(fixture_init(&fixture, "foo [ OrderedCollection new add: 1; yourself ]"));
+    expression = only_expression(st_parse_method(&fixture.parser));
+    CHECK(expression->as.expression.messages.count == 2u);
+    CHECK(text_is(expression->as.expression.messages.items[0]->as.message.selector, "add:"));
+    CHECK(expression->as.expression.messages.items[1]->as.message.starts_cascade);
+    CHECK(expression->as.expression.receiver->kind == ST_AST_EXPRESSION);
+    CHECK(text_is(expression->as.expression.receiver->as.expression.messages.items[0]->as.message.selector, "new"));
+    CHECK(text_is(expression->as.expression.receiver->as.expression.receiver->as.variable.name, "OrderedCollection"));
+    fixture_destroy(&fixture);
+
+    CHECK(fixture_init(&fixture, "foo [ super factory initialize; yourself ]"));
+    expression = only_expression(st_parse_method(&fixture.parser));
+    CHECK(expression->as.expression.receiver->as.expression.messages.items[0]->as.message.super_send);
+    CHECK(!expression->as.expression.messages.items[0]->as.message.super_send);
+    CHECK(!expression->as.expression.messages.items[1]->as.message.super_send);
     fixture_destroy(&fixture);
 }
 
@@ -547,10 +562,20 @@ static void test_long_cascade_chain_is_iterative(void)
     CHECK(fixture_init(&fixture, source));
     expression = only_expression(st_parse_method(&fixture.parser));
     CHECK(expression != NULL);
-    CHECK(expression->as.expression.receiver->kind == ST_AST_VARIABLE);
-    CHECK(expression->as.expression.messages.count == sends + 1u);
-    CHECK(expression->as.expression.messages.items[sends]
+    CHECK(expression->as.expression.messages.count == 2u);
+    CHECK(expression->as.expression.messages.items[1]
               ->as.message.starts_cascade);
+
+    st_ast_node_t *receiver = expression->as.expression.receiver;
+
+    for (index = 1u; index < sends; index++) {
+        CHECK(receiver->kind == ST_AST_EXPRESSION);
+        CHECK(receiver->as.expression.messages.count == 1u);
+        receiver = receiver->as.expression.receiver;
+    }
+
+    CHECK(receiver->kind == ST_AST_VARIABLE);
+    CHECK(text_is(receiver->as.variable.name, "x"));
     fixture_destroy(&fixture);
     free(source);
 }

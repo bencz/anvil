@@ -25,6 +25,11 @@ CODEGEN_SRCDIR = src/codegen
 AST_SRCDIR = src/ast
 TESTDIR = tests
 
+HOST_PLATFORM ?= posix
+ifeq ($(OS),Windows_NT)
+HOST_PLATFORM = windows
+endif
+
 # Source files (excluding old monolithic versions - using new modular versions)
 SRCS = $(filter-out $(SRCDIR)/preprocessor.c $(SRCDIR)/lexer.c $(SRCDIR)/parser.c $(SRCDIR)/sema.c $(SRCDIR)/codegen.c $(SRCDIR)/ast.c, $(wildcard $(SRCDIR)/*.c))
 PP_SRCS = $(wildcard $(PP_SRCDIR)/*.c)
@@ -42,7 +47,8 @@ PARSE_OBJS = $(PARSE_SRCS:$(PARSE_SRCDIR)/%.c=$(OBJDIR)/parse_%.o)
 SEMA_OBJS = $(SEMA_SRCS:$(SEMA_SRCDIR)/%.c=$(OBJDIR)/sema_%.o)
 CODEGEN_OBJS = $(CODEGEN_SRCS:$(CODEGEN_SRCDIR)/%.c=$(OBJDIR)/cg_%.o)
 AST_OBJS = $(AST_SRCS:$(AST_SRCDIR)/%.c=$(OBJDIR)/ast_%.o)
-ALL_OBJS = $(OBJS) $(PP_OBJS) $(LEX_OBJS) $(PARSE_OBJS) $(SEMA_OBJS) $(CODEGEN_OBJS) $(AST_OBJS)
+HOST_OBJECT = $(OBJDIR)/host_$(HOST_PLATFORM).o
+ALL_OBJS = $(HOST_OBJECT) $(OBJS) $(PP_OBJS) $(LEX_OBJS) $(PARSE_OBJS) $(SEMA_OBJS) $(CODEGEN_OBJS) $(AST_OBJS)
 DEPS = $(ALL_OBJS:.o=.d)
 
 # Target

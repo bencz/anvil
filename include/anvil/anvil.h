@@ -132,7 +132,8 @@ typedef enum {
     ANVIL_TYPE_PTR,
     ANVIL_TYPE_STRUCT,
     ANVIL_TYPE_ARRAY,
-    ANVIL_TYPE_FUNC
+    ANVIL_TYPE_FUNC,
+    ANVIL_TYPE_VECTOR
 } anvil_type_kind_t;
 
 /* IEEE-754 comparison predicates. Ordered predicates are false on NaN;
@@ -230,9 +231,51 @@ typedef enum {
     ANVIL_OP_PHI,
     ANVIL_OP_SELECT,
     ANVIL_OP_NOP,
+    ANVIL_OP_VA_START,       /* Address of the first unnamed argument */
+    ANVIL_OP_ATOMIC_LOAD,
+    ANVIL_OP_ATOMIC_STORE,
+    ANVIL_OP_ATOMIC_RMW,
+    ANVIL_OP_ATOMIC_CMPXCHG,
+    ANVIL_OP_ATOMIC_FENCE,
     
     ANVIL_OP_COUNT
 } anvil_op_t;
+
+typedef enum {
+    ANVIL_ORDER_RELAXED,
+    ANVIL_ORDER_ACQUIRE,
+    ANVIL_ORDER_RELEASE,
+    ANVIL_ORDER_ACQ_REL,
+    ANVIL_ORDER_SEQ_CST
+} anvil_memory_order_t;
+
+typedef enum {
+    ANVIL_ATOMIC_EXCHANGE,
+    ANVIL_ATOMIC_ADD,
+    ANVIL_ATOMIC_SUB,
+    ANVIL_ATOMIC_AND,
+    ANVIL_ATOMIC_OR,
+    ANVIL_ATOMIC_XOR
+} anvil_atomic_rmw_t;
+
+typedef struct {
+    anvil_memory_order_t order;
+    anvil_memory_order_t failure_order;
+    anvil_atomic_rmw_t rmw;
+} anvil_atomic_info_t;
+
+/* Atomic storage must be aligned to its size. Scalar integer and pointer
+ * objects are supported; I1 and aggregate atomics require frontend expansion.
+ * RMW and strong compare-exchange return the previous value. A failed compare
+ * does not write the object; callers may compare the result with expected.
+ * Consume may be represented conservatively as acquire. */
+bool anvil_atomic_is_lock_free(anvil_ctx_t *ctx, anvil_type_t *type);
+anvil_value_t *anvil_build_atomic_load(anvil_ctx_t *ctx, anvil_value_t *pointer, anvil_memory_order_t order, const char *name);
+bool anvil_build_atomic_store(anvil_ctx_t *ctx, anvil_value_t *value, anvil_value_t *pointer, anvil_memory_order_t order);
+anvil_value_t *anvil_build_atomic_rmw(anvil_ctx_t *ctx, anvil_atomic_rmw_t operation, anvil_value_t *pointer, anvil_value_t *value, anvil_memory_order_t order, const char *name);
+anvil_value_t *anvil_build_atomic_cmpxchg(anvil_ctx_t *ctx, anvil_value_t *pointer, anvil_value_t *expected, anvil_value_t *desired,
+                                       anvil_memory_order_t success, anvil_memory_order_t failure, const char *name);
+bool anvil_build_atomic_fence(anvil_ctx_t *ctx, anvil_memory_order_t order);
 
 /* Calling conventions */
 typedef enum {
@@ -451,6 +494,14 @@ size_t anvil_type_struct_field_offset(const anvil_type_t *type,
 
 /* Create array type */
 anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count);
+/* Fixed-width FP vectors use lane-wise arithmetic without reassociation or
+ * contraction. Storage needs element alignment; preferred alignment is the
+ * vector width. Vector calling conventions are not implicit. */
+anvil_type_t *anvil_type_vector(anvil_ctx_t *ctx, anvil_type_t *element, size_t lanes);
+anvil_type_t *anvil_type_vector_element(anvil_type_t *type);
+size_t anvil_type_vector_lanes(anvil_type_t *type);
+/* Zero means unsupported; positive values are relative instruction costs. */
+unsigned anvil_vector_operation_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type);
 
 /* Create function type */
 anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
@@ -517,12 +568,34 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
 
 /* Get function as a value (for use in calls) */
 anvil_value_t *anvil_func_get_value(anvil_func_t *func);
+/* Permit packing independent FP operations. Results keep their lane-wise
+ * arithmetic, but the order of FP exception observations may change.
+ * Disabled by default; this does not permit reassociation or contraction. */
+void anvil_func_set_fp_vectorization(anvil_func_t *func, bool enabled);
 
 /* Get function parameter */
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index);
 
 /* Get entry block */
 anvil_block_t *anvil_func_get_entry(anvil_func_t *func);
+
+/* Conservative call effects. Clearing a bit is a frontend assertion about
+ * every execution of the function, including its callees. Declarations and
+ * indirect calls default to ALL. Volatile/atomic accesses require OBSERVABLE.
+ * MAY_NOT_RETURN includes nonlocal transfers and nontermination. */
+typedef enum {
+    ANVIL_EFFECT_READ_MEMORY = 1u << 0,
+    ANVIL_EFFECT_WRITE_MEMORY = 1u << 1,
+    ANVIL_EFFECT_CAPTURE_POINTERS = 1u << 2,
+    ANVIL_EFFECT_MAY_TRAP = 1u << 3,
+    ANVIL_EFFECT_MAY_UNWIND = 1u << 4,
+    ANVIL_EFFECT_MAY_NOT_RETURN = 1u << 5,
+    ANVIL_EFFECT_OBSERVABLE = 1u << 6,
+    ANVIL_EFFECT_ALL = (1u << 7) - 1,
+} anvil_effect_t;
+
+anvil_error_t anvil_func_set_effects(anvil_func_t *func, unsigned effects);
+unsigned anvil_func_get_effects(const anvil_func_t *func);
 
 /* ============================================================================
  * Basic Block API
@@ -613,7 +686,34 @@ anvil_value_t *anvil_build_cmp_ugt(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_v
 anvil_value_t *anvil_build_cmp_uge(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 
 /* Memory operations */
+/* Zero alignment means the natural alignment of the accessed type. An explicit
+ * alignment is a caller guarantee and must be a power of two at least as large
+ * as the natural alignment. Volatile accesses remain observable and ordered
+ * relative to other volatile accesses; volatile does not imply atomicity. */
+typedef struct
+{
+    size_t alignment;
+    bool is_volatile;
+} anvil_memory_access_t;
+
+anvil_value_t *anvil_build_load_ex(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr,
+                                  const anvil_memory_access_t *access, const char *name);
+bool anvil_build_store_ex(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr,
+                          const anvil_memory_access_t *access);
+
 anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type, const char *name);
+/* Cursor-based varargs. VA_START requires a variadic function. VA_ARG advances
+ * a cursor stored in an i8** and returns a pointer to the requested object.
+ * Targets with a different va_list representation must provide their own ABI
+ * implementation; unsupported layouts fail instead of assuming stack-only C. */
+anvil_value_t *anvil_build_va_start(anvil_ctx_t *ctx, const char *name);
+anvil_value_t *anvil_build_va_copy(anvil_ctx_t *ctx, anvil_value_t *cursor, const char *name);
+/* Copy the target's native cursor state into caller-owned storage. Destination
+ * must have the native va_list size/alignment; cursor is returned by va_start.
+ * Unlike the convenience va_copy temporary, distinct destinations stay
+ * independent when this operation executes repeatedly in a loop. */
+bool anvil_build_va_copy_into(anvil_ctx_t *ctx, anvil_value_t *destination, anvil_value_t *cursor);
+anvil_value_t *anvil_build_va_arg(anvil_ctx_t *ctx, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name);
 /* Dynamic-size alloca: stack area sized to `count` * sizeof(type). */
 anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
                                        anvil_value_t *count, const char *name);
@@ -678,6 +778,24 @@ anvil_value_t *anvil_build_select(anvil_ctx_t *ctx, anvil_value_t *cond,
  * Backend Registration API
  * ============================================================================ */
 
+/* C-compatible value classification. Indirect parameters require a caller-owned
+ * copy; an indirect result adds the first pointer parameter and returns that
+ * pointer. This describes the scalar signature, not aggregate IR legalization.
+ * Unsupported target/value combinations return ANVIL_ERR_INVALID_TYPE. */
+typedef enum {
+    ANVIL_ABI_VALUE_DIRECT,
+    ANVIL_ABI_VALUE_INTEGER,
+    ANVIL_ABI_VALUE_INDIRECT
+} anvil_abi_value_kind_t;
+
+typedef struct {
+    anvil_abi_value_kind_t kind;
+    anvil_type_t *transport_type;
+    size_t temporary_alignment;
+} anvil_abi_value_plan_t;
+
+anvil_error_t anvil_abi_classify_value(anvil_ctx_t *ctx, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
+
 /* Backend interface - for implementing new backends */
 typedef struct anvil_backend_ops {
     const char *name;
@@ -715,6 +833,12 @@ typedef struct anvil_backend_ops {
     
     /* Private data */
     void *priv;
+    anvil_error_t (*classify_abi_value)(anvil_backend_t *be, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
+    anvil_value_t *(*build_va_arg)(anvil_backend_t *be, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name);
+    bool (*atomic_is_lock_free)(anvil_backend_t *be, anvil_type_t *type);
+    unsigned (*vector_operation_cost)(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type);
+    anvil_value_t *(*build_va_copy)(anvil_backend_t *be, anvil_value_t *cursor, const char *name);
+    bool (*build_va_copy_into)(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor);
 } anvil_backend_ops_t;
 
 /* Register a custom backend */

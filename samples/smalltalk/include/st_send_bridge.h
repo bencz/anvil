@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define ST_AOT_THREAD_ABI_VERSION UINT32_C(9)
+#define ST_AOT_THREAD_ABI_VERSION UINT32_C(10)
 #define ST_AOT_MAX_DYNAMIC_ROOTS UINT32_C(4096)
 
 typedef struct st_aot_closure_context st_aot_closure_context_t;
@@ -72,6 +72,8 @@ typedef struct {
     void *object_class_user;
     st_aot_send_failure_fn failure;
     void *failure_user;
+    struct st_fiber_context *fibers;
+    struct st_socket_context *sockets;
     bool initialized;
 } st_aot_thread_t;
 

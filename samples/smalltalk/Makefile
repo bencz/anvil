@@ -9,6 +9,12 @@ INCLUDES = -Iinclude
 BUILD_DIR ?= build
 TOOLS_DIR = tools
 
+HOST_PLATFORM ?= posix
+ifeq ($(OS),Windows_NT)
+HOST_PLATFORM = windows
+endif
+PLATFORM_OBJECT = $(BUILD_DIR)/platform_$(HOST_PLATFORM).o
+
 LEXER_OBJECT = $(BUILD_DIR)/lexer.o
 LEXER_TEST_OBJECT = $(BUILD_DIR)/lexer_test.o
 LEXER_TEST = $(BUILD_DIR)/lexer_test
@@ -43,7 +49,7 @@ EXAMPLES_TEST = $(BUILD_DIR)/examples_test
 PRIMITIVE_OBJECT = $(BUILD_DIR)/primitive.o
 PRIMITIVE_TEST_OBJECT = $(BUILD_DIR)/primitive_test.o
 PRIMITIVE_TEST = $(BUILD_DIR)/primitive_test
-RUNTIME_OBJECT = $(BUILD_DIR)/runtime.o
+RUNTIME_OBJECT = $(BUILD_DIR)/runtime.o $(PLATFORM_OBJECT)
 RUNTIME_TEST_OBJECT = $(BUILD_DIR)/runtime_test.o
 RUNTIME_TEST = $(BUILD_DIR)/runtime_test
 CORE_PRIMITIVES_OBJECT = $(BUILD_DIR)/core_primitives.o
@@ -946,3 +952,7 @@ $(BUILD_DIR)/st_parse.o: $(TOOLS_DIR)/st_parse.c include/st_parser.h include/st_
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+$(PLATFORM_OBJECT): src/platform/$(HOST_PLATFORM)/runtime.c src/platform/runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(THREAD_FLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@

@@ -508,6 +508,9 @@ anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi)
                         "Select a target before setting the ABI");
         return ANVIL_ERR_NO_TARGET;
     }
+    if (abi == ANVIL_ABI_DEFAULT)
+        abi = arch_info_table[ctx->arch].abi;
+
     if (ctx->target_frozen && ctx->abi != abi) {
         anvil_set_error(ctx, ANVIL_ERR_INVALID_OP,
                         "Target ABI is frozen by existing IR/types");

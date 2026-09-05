@@ -95,25 +95,29 @@ anvil/
 │   │   └── regalloc.c       # Linear-scan register allocation + spilling
 │   ├── opt/                 # IR optimization passes
 │   └── backend/             # Target backends
-│       ├── x86/             # x86 (32-bit) MachineIR backend
-│       │   ├── x86.c        #   thin backend_ops driver
-│       │   ├── x86_mir.c    #   source IR -> MachineIR -> asm
-│       │   ├── x86_helpers.c
-│       │   └── x86_internal.h
-│       ├── x86_64/          # x86-64 MachineIR backend (same layout)
-│       │   ├── x86_64.c
-│       │   ├── x86_64_mir.c
-│       │   ├── x86_64_helpers.c
-│       │   └── x86_64_internal.h
-│       ├── mainframe/mainframe_mir.c  # Shared S/370..z/Arch MachineIR backend
-│       ├── s370/s370.c                # mainframe descriptor entries
-│       ├── s370_xa/s370_xa.c
-│       ├── s390/s390.c
-│       ├── zarch/zarch.c
-│       ├── ppc/ppc_mir.c              # Shared PPC MachineIR backend
-│       ├── ppc32/ppc32.c             # PPC descriptor entries
-│       ├── ppc64/ppc64.c
-│       ├── ppc64le/ppc64le.c
+│       ├── common/                   # Shared target-independent backend utilities
+│       │   ├── anvil_slot_map.h
+│       │   └── gnu_data.c, gnu_data.h # GAS data emission with symbol callback
+│       ├── x86/                      # x86 family (32-bit and 64-bit)
+│       │   ├── x86_32_lower.c, x86_64_lower.c
+│       │   ├── x86_32_legal.c, x86_64_legal.c
+│       │   ├── x86_32_codegen.c, x86_64_codegen.c
+│       │   ├── x86_32_helpers.c, x86_64_helpers.c
+│       │   ├── x86_32_internal.h, x86_64_internal.h
+│       │   ├── targets/              # Target identity and vtables
+│       │   ├── abi/                  # Calling conventions and varargs
+│       │   └── asm/                  # GAS emission per execution mode
+│       ├── systemz/                  # S/370 lineage, distinct ISA descriptors
+│       │   ├── systemz_lower.c, systemz_legal.c, systemz_codegen.c
+│       │   ├── systemz_target.c, systemz_internal.h
+│       │   ├── targets/              # S/370, XA, S/390, z/Architecture
+│       │   ├── abi/                  # MVS-oriented arena linkage policies
+│       │   └── asm/                  # HLASM instructions/data/symbols
+│       ├── ppc/                      # PowerPC family
+│       │   ├── ppc_lower.c, ppc_legal.c, ppc_emit.c, ppc_codegen.c
+│       │   ├── ppc_target.c, ppc_internal.h
+│       │   ├── targets/              # PPC32, PPC64 BE, PPC64 LE
+│       │   └── abi/                  # ELF32, ELFv1, ELFv2
 │       └── arm64/                     # Reference MachineIR backend
 │           ├── arm64.c               #   thin backend_ops driver
 │           ├── arm64_mir.c           #   source IR -> MachineIR -> asm
@@ -296,7 +300,7 @@ if (bad_condition) {
 ### Adding a New Backend (recommended approach)
 
 New backends should lower through **MachineIR**, following the **ARM64 reference
-backend** (`src/backend/arm64/`). The x86_64 (`src/backend/x86_64/`) and x86
+backend** (`src/backend/arm64/`). The x86-64 and x86 modes
 (`src/backend/x86/`) backends are concrete, non-RISC examples of the same pattern.
 Do not write a monolithic `emit_instr` switch directly over source IR; instead split
 the backend into:

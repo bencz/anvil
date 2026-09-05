@@ -14,20 +14,22 @@
 
 typedef struct {
     anvil_arch_t target;
+    anvil_abi_t abi;
     bool supported;
 } profile_definition_t;
 
 static const profile_definition_t profile_definitions[] = {
-    {ANVIL_ARCH_X86_64, true},
-    {ANVIL_ARCH_ARM64, true},
-    {ANVIL_ARCH_PPC64, true},
-    {ANVIL_ARCH_PPC64LE, true},
-    {ANVIL_ARCH_ZARCH, true},
-    {ANVIL_ARCH_X86, false},
-    {ANVIL_ARCH_S370, false},
-    {ANVIL_ARCH_S370_XA, false},
-    {ANVIL_ARCH_S390, false},
-    {ANVIL_ARCH_PPC32, false}
+    {ANVIL_ARCH_X86_64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_ARM64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_PPC64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_PPC64LE, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_ZARCH, ANVIL_ABI_MVS, true},
+    {ANVIL_ARCH_X86, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S370, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S370_XA, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S390, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_PPC32, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_X86_64, ANVIL_ABI_WIN64, true}
 };
 
 _Static_assert(
@@ -270,6 +272,7 @@ static const char *abi_name(anvil_abi_t abi)
 {
     switch (abi) {
     case ANVIL_ABI_SYSV: return "sysv";
+    case ANVIL_ABI_WIN64: return "win64";
     case ANVIL_ABI_MVS: return "mvs";
     case ANVIL_ABI_DEFAULT: return "default";
     default: return "invalid";
@@ -510,7 +513,7 @@ st_application_aot_status_t st_application_aot_compile(
             .external_globals = &transcript,
             .external_global_count = 1u,
             .target = profile->target,
-            .abi = ANVIL_ABI_DEFAULT,
+            .abi = profile_definitions[index].abi,
             .syntax = ANVIL_SYNTAX_DEFAULT,
             .optimization = options->optimization,
             .symbol_prefix = symbol_prefix,

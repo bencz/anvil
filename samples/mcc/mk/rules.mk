@@ -24,6 +24,9 @@ $(TARGET): $(ALL_OBJS) $(ANVIL_LIB)
 $(ALL_OBJS): $(ANVIL_HEADERS)
 
 # Compile main source files
+$(HOST_OBJECT): $(SRCDIR)/platform/$(HOST_PLATFORM)/host.c include/platform/host.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 

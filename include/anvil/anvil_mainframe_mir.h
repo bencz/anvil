@@ -1,9 +1,12 @@
 /*
- * ANVIL - Shared IBM mainframe MachineIR backend interface.
+ * ANVIL - SystemZ family MachineIR backend interface (historical API names).
  *
  * S/370, S/370-XA, S/390, and z/Architecture use one lowering,
  * allocation, and HLASM emission pipeline. Target descriptors hold the
- * architectural and ABI facts that differ between variants.
+ * architectural and ABI facts that differ between variants. Implementation
+ * components live under src/backend/systemz; these public names are retained
+ * for source compatibility. HLASM and the current arena linkage are separate
+ * policies, not universal properties of the instruction set.
  */
 
 #ifndef ANVIL_MAINFRAME_MIR_H
@@ -56,6 +59,8 @@ typedef struct {
     size_t num_scratch_gpr_regs;
     const int *scratch_fpr_regs;
     size_t num_scratch_fpr_regs;
+    const struct anvil_systemz_abi_ops *abi_ops;
+    const struct anvil_systemz_asm_ops *asm_ops;
 } anvil_mainframe_target_desc_t;
 
 const anvil_mainframe_target_desc_t *

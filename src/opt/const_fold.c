@@ -39,6 +39,8 @@ static unsigned type_int_bits(const anvil_type_t *type)
     if (!type) return 64;
 
     switch (type->kind) {
+        case ANVIL_TYPE_I1:
+            return 1;
         case ANVIL_TYPE_I8:
         case ANVIL_TYPE_U8:
             return 8;
@@ -293,6 +295,13 @@ static anvil_value_t *try_fold_binop_float(anvil_ctx_t *ctx, anvil_op_t op,
 static anvil_value_t *try_fold_cmp(anvil_ctx_t *ctx, anvil_op_t op,
                                     anvil_value_t *lhs, anvil_value_t *rhs)
 {
+    if ((op == ANVIL_OP_CMP_NE && is_zero(rhs)) || (op == ANVIL_OP_CMP_EQ && is_one(rhs)))
+    {
+        if (lhs->kind == ANVIL_VAL_INSTR && lhs->data.instr->op == ANVIL_OP_ZEXT &&
+            lhs->data.instr->operands[0]->type->kind == ANVIL_TYPE_I1)
+            return lhs->data.instr->operands[0];
+    }
+
     /* x cmp x */
     if (lhs == rhs) {
         switch (op) {
@@ -412,6 +421,65 @@ static anvil_value_t *try_fold_unop(anvil_ctx_t *ctx, anvil_op_t op,
     }
     
     return NULL;
+}
+
+anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *instr, anvil_value_t *left, anvil_value_t *right)
+{
+    if (!instr || !instr->result || !is_const_int(left))
+        return NULL;
+
+    switch (instr->op)
+    {
+        case ANVIL_OP_ADD:
+        case ANVIL_OP_SUB:
+        case ANVIL_OP_MUL:
+        case ANVIL_OP_SDIV:
+        case ANVIL_OP_UDIV:
+        case ANVIL_OP_SMOD:
+        case ANVIL_OP_UMOD:
+        case ANVIL_OP_AND:
+        case ANVIL_OP_OR:
+        case ANVIL_OP_XOR:
+        case ANVIL_OP_SHL:
+        case ANVIL_OP_SHR:
+        case ANVIL_OP_SAR:
+            return try_fold_binop_int(ctx, instr->op, left, right, instr->result->type);
+        case ANVIL_OP_CMP_EQ:
+        case ANVIL_OP_CMP_NE:
+        case ANVIL_OP_CMP_LT:
+        case ANVIL_OP_CMP_LE:
+        case ANVIL_OP_CMP_GT:
+        case ANVIL_OP_CMP_GE:
+        case ANVIL_OP_CMP_ULT:
+        case ANVIL_OP_CMP_ULE:
+        case ANVIL_OP_CMP_UGT:
+        case ANVIL_OP_CMP_UGE:
+            return try_fold_cmp(ctx, instr->op, left, right);
+        case ANVIL_OP_NEG:
+        case ANVIL_OP_NOT:
+            return try_fold_unop(ctx, instr->op, left, instr->result->type);
+        case ANVIL_OP_TRUNC:
+        case ANVIL_OP_ZEXT:
+        case ANVIL_OP_SEXT:
+        {
+            unsigned source_bits = type_int_bits(left->type);
+            unsigned target_bits = type_int_bits(instr->result->type);
+            if (!source_bits || !target_bits)
+                return NULL;
+
+            uint64_t bits = left->data.u & mask_for_bits(source_bits);
+            if (instr->op == ANVIL_OP_SEXT)
+                bits = (uint64_t)sign_extend_to_bits(bits, source_bits);
+
+            bits &= mask_for_bits(target_bits);
+            if (target_bits == 1)
+                return anvil_const_i1(ctx, bits != 0);
+
+            return make_const_int(ctx, instr->result->type, (int64_t)bits);
+        }
+        default:
+            return NULL;
+    }
 }
 
 /* Main constant folding pass */

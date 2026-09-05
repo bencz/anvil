@@ -1,6 +1,6 @@
 #include "st_reflection_primitives.h"
 
-#include <pthread.h>
+#include "../../platform/runtime.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,7 +27,7 @@ typedef struct {
 
 struct st_reflection_state {
     uint64_t magic;
-    pthread_mutex_t cache_mutex;
+    st_platform_mutex_t cache_mutex;
     bool cache_mutex_initialized;
     st_image_runtime_t *image;
     st_lookup_context_t *lookup;
@@ -518,7 +518,8 @@ static void destroy_state(st_reflection_state_t *state)
     }
     allocator = state->allocator;
     if (state->cache_mutex_initialized) {
-        if (pthread_mutex_destroy(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_destroy(&state->cache_mutex) != 0)
+        {
             abort();
         }
         state->cache_mutex_initialized = false;
@@ -720,7 +721,8 @@ st_reflection_primitive_status_t st_reflection_context_init(
     }
     memset(state, 0, sizeof(*state));
     state->allocator = allocator;
-    if (pthread_mutex_init(&state->cache_mutex, NULL) != 0) {
+    if (st_runtime_platform.mutex_init(&state->cache_mutex) != 0)
+    {
         destroy_state(state);
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_STATE;
     }
@@ -911,7 +913,8 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         return ST_REFLECTION_PRIMITIVE_OK;
     }
 
-    if (pthread_mutex_lock(&state->cache_mutex) != 0) {
+    if (st_runtime_platform.mutex_lock(&state->cache_mutex) != 0)
+    {
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_STATE;
     }
 
@@ -919,13 +922,15 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         state->lookup, class_id, selector_id, &lookup_result);
     if (lookup_status == ST_LOOKUP_NOT_FOUND) {
         *result_out = st_value_nil();
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_OK;
     }
     if (lookup_status != ST_LOOKUP_FOUND) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_ERR_LOOKUP;
@@ -937,7 +942,8 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
                 != lookup_result.defining_class_id
             || lookup_result.defining_class_id == 0u
             || lookup_result.defining_class_id > state->class_count) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
@@ -946,7 +952,8 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         state->method_cache, state->method_cache_capacity,
         lookup_result.entry);
     if (cache == NULL || cache->root_index >= state->method_count) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
@@ -956,13 +963,15 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         if (!compiled_method_matches(
                 state, method, selector, lookup_result.defining_class_id,
                 lookup_result.binding->descriptor->arity)) {
-            if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+            if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+            {
                 abort();
             }
             return ST_REFLECTION_PRIMITIVE_ERR_BAD_OBJECT;
         }
         *result_out = method;
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_OK;
@@ -971,7 +980,8 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         state, selector, lookup_result.defining_class_id,
         lookup_result.binding->descriptor->arity, &method);
     if (status != ST_REFLECTION_PRIMITIVE_OK) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return status;
@@ -979,7 +989,8 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
     state->method_roots[cache->root_index] = method;
     cache->binding = lookup_result.binding;
     *result_out = method;
-    if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+    if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+    {
         abort();
     }
     return ST_REFLECTION_PRIMITIVE_OK;
@@ -999,14 +1010,16 @@ st_reflection_primitive_status_t st_reflection_compiled_method_for_entry(
     if (state == NULL) {
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_STATE;
     }
-    if (pthread_mutex_lock(&state->cache_mutex) != 0) {
+    if (st_runtime_platform.mutex_lock(&state->cache_mutex) != 0)
+    {
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_STATE;
     }
     cache = method_cache_lookup(
         state->method_cache, state->method_cache_capacity, entry);
     if (cache == NULL || cache->root_index >= state->method_count
             || cache->binding != st_method_entry_load(entry)) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
@@ -1017,13 +1030,15 @@ st_reflection_primitive_status_t st_reflection_compiled_method_for_entry(
             state, method,
             state->selector_symbols[descriptor->selector_id - 1u],
             descriptor->owner_class_id, descriptor->arity)) {
-        if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+        {
             abort();
         }
         return ST_REFLECTION_PRIMITIVE_ERR_BAD_OBJECT;
     }
     *result_out = method;
-    if (pthread_mutex_unlock(&state->cache_mutex) != 0) {
+    if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
+    {
         abort();
     }
     return ST_REFLECTION_PRIMITIVE_OK;

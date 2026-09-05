@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 
+uint32_t st_aot_string_from_characters(StFrame *frame, st_value_t receiver, const st_value_t *arguments, size_t argument_count,
+    st_value_t *result_out, uint32_t *detail_out);
+
 /* Uniform runtime-symbol ABI consumed by the AOT primitive prologue. */
 uint32_t st_aot_string_compare_primitive_execute(
     StFrame *frame, st_value_t receiver, const st_value_t *arguments,

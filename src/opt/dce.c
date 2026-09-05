@@ -70,11 +70,16 @@ static bool dce_map_insert(anvil_ctx_t *ctx, dce_map_t *map,
     return false;
 }
 
-/* Instructions whose execution is observable cannot be removed solely from
- * SSA liveness.  The current IR has no volatile/atomic load opcode; those must
- * become explicit traits before such loads can participate in DCE. */
+/* Ordinary loads can fault; volatile loads are additionally observable.
+ * Neither may be discarded solely because its SSA result is unused. */
 static bool has_side_effects(const anvil_instr_t *instr)
 {
+    if (anvil_op_is_atomic(instr->op))
+        return true;
+
+    if (instr->op == ANVIL_OP_CALL)
+        return anvil_opt_call_effects(instr) != 0;
+
     switch (instr->op) {
         case ANVIL_OP_SDIV:
         case ANVIL_OP_UDIV:
@@ -83,7 +88,6 @@ static bool has_side_effects(const anvil_instr_t *instr)
         case ANVIL_OP_LOAD:
         case ANVIL_OP_STORE:
         case ANVIL_OP_ALLOCA:
-        case ANVIL_OP_CALL:
         case ANVIL_OP_BR:
         case ANVIL_OP_BR_COND:
         case ANVIL_OP_RET:
@@ -108,7 +112,7 @@ static bool has_side_effects(const anvil_instr_t *instr)
 static bool is_dead_candidate(const dce_node_t *node)
 {
     if (node->instr->op == ANVIL_OP_NOP) return true;
-    return node->result && node->uses == 0 && !has_side_effects(node->instr);
+    return node->uses == 0 && (node->result || node->instr->op == ANVIL_OP_CALL) && !has_side_effects(node->instr);
 }
 
 anvil_pass_result_t anvil_pass_dce(anvil_func_t *func)

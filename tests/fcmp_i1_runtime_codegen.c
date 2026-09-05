@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int fail(const char *message)
 {
@@ -11,10 +12,14 @@ static int fail(const char *message)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) return fail("expected an output assembly path");
+    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "win64") != 0))
+        return fail("expected an output assembly path and optional 'win64' target");
     anvil_ctx_t *ctx = anvil_ctx_create();
     if (!ctx || anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64) != ANVIL_OK)
         return fail("could not create native x86-64 context");
+    if (argc == 3 && anvil_ctx_set_abi(ctx, ANVIL_ABI_WIN64) != ANVIL_OK)
+        return fail("could not select Win64 ABI");
+
     anvil_module_t *mod = anvil_module_create(ctx, "fcmp_i1_runtime");
     if (!mod) return fail("could not create module");
 

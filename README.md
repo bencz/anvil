@@ -8,17 +8,17 @@ A C library for compiler code generation with support for multiple architectures
 * Source IR verifier: `anvil_module_codegen()` rejects invalid IR before optimization or backend lowering.
 * Configurable optimizer: Copy propagation, constant folding, CSE, strength reduction, memory optimizations, CFG simplification, and DCE with deterministic pass ordering.
 * MachineIR and register allocation: A generic backend layer with target-independent virtual registers, fixed ABI registers, stack/frame slots, spill materialization, copy coalescing, and linear-scan allocation.
-* Backend architecture: Backends can either emit directly from source IR or lower through MachineIR; the ARM64 backend is the current reference implementation for the MachineIR path.
+* Backend architecture: The current x86, x86-64, ARM64, PowerPC and mainframe backends lower through MachineIR, with target descriptors and backend vtables.
 * Multiple backend targets: x86, x86-64, S/370, S/370-XA, S/390, z/Architecture, PowerPC 32/64-bit, PPC64LE, and ARM64.
 * CPU model system: Target-specific CPU model selection and feature flags.
-* Assembly output: Generates assembly text (HLASM for mainframes, GAS/Mach-O-compatible ARM64 output, and GAS/NASM-style x86/PPC output).
+* Assembly output: Generates assembly text (HLASM for mainframes and GAS for x86, x86-64, ARM64 and PowerPC, with target-specific object directives).
 
 ## Supported Architectures
 
 | Architecture | Bits | Endianness | Stack | FP Format | ABI | Syntax |
 |--------------|------|------------|-------|-----------|-----|--------|
-| x86 | 32 | Little | Down | IEEE 754 | System V | GAS/NASM |
-| x86-64 | 64 | Little | Down | IEEE 754 | System V | GAS/NASM |
+| x86 | 32 | Little | Down | IEEE 754 | System V | GAS |
+| x86-64 | 64 | Little | Down | IEEE 754 | System V / Windows x64 | GAS |
 | S/370 | 24 | Big | Up | HFP | MVS | HLASM |
 | S/370-XA | 31 | Big | Up | HFP | MVS | HLASM |
 | S/390 | 31 | Big | Up | HFP | MVS | HLASM |
@@ -37,7 +37,7 @@ A C library for compiler code generation with support for multiple architectures
 **OS ABI Variants:**
 - **System V**: Standard Unix/Linux ABI
 - **Darwin**: macOS/Apple ABI (underscore prefix, Mach-O format)
-- **MVS**: IBM z/OS ABI
+- **MVS**: ANVIL's MVS-oriented arena linkage (native interoperability incomplete)
 
 ## Building
 
@@ -77,6 +77,42 @@ sudo make install
 ```
 
 ## Basic Usage
+
+### Native Windows validation
+
+Use Python 3, Clang/LLVM, and the MSVC libraries plus Windows SDK. The validated
+toolchain uses Clang's integrated assembler to produce COFF objects and native
+PE executables; MASM, NASM, FASM, MinGW and Wine are not needed for this path.
+
+```powershell
+py -3 tests/run_windows.py --cc C:/llvm/bin/clang.exe --scope compiler
+py -3 tests/run_windows_mcc.py --cc C:/llvm/bin/clang.exe
+py -3 tests/run_windows_sanitize.py --cc C:/llvm/bin/clang.exe
+py -3 tests/run_windows_abi.py --cc C:/llvm/bin/clang.exe --family aggregate
+py -3 tests/run_windows_abi.py --cc C:/llvm/bin/clang.exe --family variadic
+py -3 tests/fuzz_windows_optimizer.py --cc C:/llvm/bin/clang.exe --cases 128
+
+# Full audit, including Smalltalk's currently unsupported POSIX services.
+# This command returns nonzero while those failures remain.
+py -3 tests/run_windows.py --cc C:/llvm/bin/clang.exe --scope all
+```
+
+The compiler and logs are retained in `build/windows`. MCC accepts
+`-arch=x86_64_windows` (alias `win64`); it uses LLP64 and Windows calling conventions.
+For a generated program using the sample stdio headers:
+
+```powershell
+./build/windows/mcc.exe -arch=win64 -std=c99 -Isamples/mcc/includes -o build/windows/hello.s input.c
+C:/llvm/bin/clang.exe build/windows/hello.s -Xlinker legacy_stdio_definitions.lib -o build/windows/hello.exe
+./build/windows/hello.exe
+```
+
+Host services use platform vtables selected by the build (`HOST_PLATFORM=posix`
+or `windows` in Makefiles). Target ABI selection remains independent of the host.
+See [the Windows source review](doc/WINDOWS_REVIEW.md) for tested coverage,
+reproductions of outstanding defects, and IR/MIR optimization priorities.
+
+### Library example
 
 ```c
 #include <anvil/anvil.h>
@@ -231,55 +267,42 @@ Function definitions/declarations are exposed as callable address values. In pra
 |--------------|------------|-------------|
 | x86 | CDECL | Parameters on stack, caller cleanup |
 | x86-64 | System V | RDI, RSI, RDX, RCX, R8, R9, then stack |
-| S/370 | MVS | R1 points to parameter list |
-| S/390 | MVS | R1 points to parameter list |
-| z/Arch | z/OS 64-bit | R1 points to parameter list (64-bit) |
+| S/370 | ANVIL MVS-oriented arena | R1 points to parameter list |
+| S/390 | ANVIL MVS-oriented arena | R1 points to parameter list |
+| z/Arch | ANVIL arena-64 | R1 points to parameter list (64-bit) |
 | PPC32 | System V | r3-r10 for args, r3 for return |
 | PPC64 BE | ELFv1 | r3-r10 for args, function descriptors |
 | PPC64 LE | ELFv2 | r3-r10 for args, local entry points |
 | ARM64 (Linux) | AAPCS64 | x0-x7 for args, x0 for return |
 | ARM64 (macOS) | Apple ARM64 | x0-x7 for args, underscore prefix on symbols |
 
-## Mainframe Notes
+## SystemZ Family Notes
 
-### GCCMVS Compatibility
+The S/370, S/370-XA, S/390 and z/Architecture implementations live in
+`src/backend/systemz/`, with distinct ISA descriptors in `targets/`, linkage
+policies in `abi/`, and HLASM printing in `asm/`. The PowerPC family follows the
+same domain organization under `src/backend/ppc/`.
 
-ANVIL generates code compatible with GCCMVS conventions:
+These backends have real MIR lowering, allocation and text emission. The current
+SystemZ linkage assumes caller-owned arena storage; it is not certified against
+native z/OS, Language Environment or GCCMVS. In particular, its 144-byte layout
+is not the IBM F4SA layout. Upward arena growth and R1 parameter lists describe
+ANVIL's present convention, not universal properties of IBM instruction sets.
 
-* **CSECT**: Blank (no module name prefix)
-* **AMODE/RMODE**: `AMODE ANY`, `RMODE ANY` for maximum flexibility
-* **Function Names**: UPPERCASE (e.g., `FACTORIAL`, `SUM_ARRAY`)
-* **Stack Allocation**: Direct stack offset from R13 (no GETMAIN/FREEMAIN)
-* **VL Bit**: NOT cleared, allowing full 31/64-bit addressing
+[Implementation notes and IBM manual references](doc/MAINFRAME.md) document
+the supported profiles, ABI discrepancies and required execution validation.
 
-### Stack Direction
+## Backend Source Organization
 
-Unlike x86 where the stack grows downward (toward lower addresses), IBM mainframes grow the stack upward (toward higher addresses). ANVIL handles this automatically.
+Backends are grouped by instruction-set family. `src/backend/x86/` contains
+both 32-bit x86 and x86-64, with `targets/` for registration/capabilities,
+`abi/` for calling conventions and varargs, and `asm/` for GAS emission.
+Mode-specific lowering and legality remain separate. PPC and SystemZ follow
+the same ownership boundaries; see [the backend guide](doc/BACKENDS.md).
 
-### Save Areas
-
-Mainframes use chained save areas instead of push/pop on the stack:
-
-* S/370/S/390: 72 bytes (18 fullwords of 4 bytes)
-* z/Architecture: 144 bytes (18 doublewords of 8 bytes)
-
-### Stack-Based Code Generation
-
-The mainframe backends generate efficient stack-based code:
-
-* Stack frame allocation via `LA R2,72(,R13)` (no GETMAIN overhead)
-* Proper save area chaining
-* Thread-safe execution
-* Simplified epilogue (no FREEMAIN cleanup)
-
-### HLASM Output
-
-Generated mainframe code is in HLASM (High Level Assembler) format:
-
-* Labels in columns 1-8
-* Opcodes starting at column 10
-* Operands starting at column 16
-* Comments with asterisk in column 1
+`src/backend/common/gnu_data.{h,c}` centralizes GAS data constants, relocations
+and aggregate layout used by x86, PowerPC and AArch64. Backends retain control
+of their sections and symbol spelling.
 
 ## Adding New Backends
 
@@ -351,9 +374,10 @@ Backend lowering
 MachineIR is the production backend implementation path. ARM64 is the stable
 reference backend for validating the design and should be treated as the
 canonical implementation model. PowerPC and IBM mainframe targets also use
-shared MachineIR lowerers with target descriptors. The x86 and x86-64 backends
-are older direct source-IR emitters and are useful only as legacy/bootstrap
-code, not as references for new backend work.
+shared MachineIR lowerers with target descriptors. x86 and x86-64 also use
+MachineIR in production. The five shared lowerers consume the same CFG analysis
+and parallel-copy implementation while retaining their target-specific ABI,
+legality and assembly-emission rules.
 
 ### Source IR Verifier
 
@@ -371,21 +395,51 @@ code, not as references for new backend work.
 
 Optimization is target-independent and runs before backend `prepare_ir`/codegen. Passes are managed by `anvil_pass_manager_t` and executed in a fixed order designed to expose new opportunities while keeping DCE last in each iteration:
 
-1. copy propagation
-2. constant folding
-3. common subexpression elimination
-4. strength reduction
-5. store-load propagation
-6. dead store elimination
-7. load elimination
+1. scalar replacement of aggregates (SROA)
+2. promotion of local scalar storage to SSA (mem2reg)
+3. sparse conditional constant propagation (SCCP) and known integer bits/bounds
+4. copy propagation and constant folding
+5. local common subexpression elimination and dominance-based integer GVN
+6. strength reduction
+7. store-load propagation, dead store elimination and load elimination
 8. CFG simplification
-9. dead code elimination
+9. loop-invariant integer code motion (LICM, O3)
+10. complete unrolling of small constant-trip loops (O3)
+11. budgeted inlining of internal leaf functions (O3)
+12. target-costed floating-point SLP packing, explicitly enabled per function (O3)
+13. dead code elimination
 
 The pass manager verifies the current function after every pass and iterates to
 a bounded fixpoint. The bound defaults to 10 and is configurable through
 `anvil_pass_manager_set_iteration_limit()`; pass failure, invalid IR, or failure
 to converge is reported as an error. Only implemented passes are exposed by the
 public pass enum.
+
+Mem2reg starts at O1; SROA, SCCP and GVN start at O2. O3 additionally moves
+nontrapping integer invariants into loop preheaders, creating them and joining
+incoming PHI values when needed. Volatile memory
+accesses survive optimization and MIR lowering. Explicit function-effect
+contracts allow selected memory transformations around known calls; unknown
+and indirect calls remain conservative.
+
+Inlining clones control flow and repairs PHIs, using callee-first module order.
+Unrolling proves termination within eight iterations and limits code growth.
+The x86-64 SIMD path supports 128-bit FP32/FP64 loads, stores and arithmetic.
+Enable SLP packing with `anvil_func_set_fp_vectorization(func, true)` or MCC's
+`-O3 -ffp-vectorize`; this permits changing FP exception observation order,
+without reassociation or contraction. Unknown aliases and volatile accesses
+prevent packing. The default preserves scalar FP evaluation order.
+
+Integer/pointer atomics of 8, 16, 32 and 64 bits have verified IR/MIR contracts
+and native x86-64/AArch64 emission, including strong compare/exchange, RMW and
+fences. They require naturally aligned storage. MCC's C `_Atomic` frontend is
+not yet connected to these APIs.
+
+Optional statistics and a pass observer report instruction counts, changes,
+failures and host process CPU time per pass/function. CFG snapshots cache
+reachability and immediate dominators, detect exact topology changes and retain
+acquired snapshots safely across invalidation. Implementation limits and the
+remaining roadmap are tracked in [OPTIMIZER_IMPLEMENTATION.md](doc/OPTIMIZER_IMPLEMENTATION.md).
 
 ### MachineIR and Regalloc
 
@@ -396,14 +450,20 @@ public pass enum.
 - basic blocks, branches, direct calls, indirect calls, frame slots, string literals, and spill slots
 - copy coalescing before allocation
 - linear-scan allocation by register class
+- bitset/worklist liveness, heap-sorted intervals and compatible spill-slot reuse
+- local interval splitting around clobbers, with one saved value and lazy reloads
+- shared parallel-copy scheduling with typed cycle temporaries
 - spill materialization using backend-provided scratch register classes
+- rematerialization of integer constants and reuse of repeated spilled operands
 - verifier for MachineIR structural invariants
 
 Backends can lower source IR to MachineIR, allocate registers, materialize spills, then emit target assembly from allocated machine instructions. This keeps optimization, value lifetime handling, spill insertion, and ABI fixed-register constraints in shared infrastructure while leaving instruction selection and final assembly emission target-specific.
 
 ### Reference MachineIR Backend: ARM64
 
-ARM64 is documented here as the current reference implementation for the generic MachineIR design, not as the final focus of the project. It is the backend that currently exercises the full path from source IR to MachineIR, register allocation, spill materialization, and ABI-aware assembly emission. The same structure is the intended implementation model for the remaining targets.
+ARM64 is a reference implementation for the generic MachineIR design. All ten
+targets exercise source IR lowering, register allocation, spill materialization
+and ABI-aware assembly emission through their five shared lowerers.
 
 - `src/backend/arm64/arm64.c`: backend lifecycle and module/function codegen entry points
 - `src/backend/arm64/arm64_helpers.c`: target sizes, alignment, ABI helpers, and constants
@@ -448,7 +508,12 @@ Backend emitters choose the concrete call instruction. In the current ARM64 refe
 
 ### MCC Integration
 
-`samples/mcc` is the integration stress test for the generic IR, verifier, optimizer, and backend contract. It is a small C compiler frontend that drives ANVIL codegen. On the current development host, `make -C samples/mcc test-exec` validates generated ARM64/macOS executables because that is the most complete executable backend path today. The execution suite covers arithmetic, arrays, pointer arithmetic, structs, switch, recursion, long long arithmetic, preprocessing, strings, matrix operations, and function pointers, and should be reused as additional MachineIR-backed targets come online.
+`samples/mcc` is the integration stress test for the generic IR, verifier,
+optimizer and backend contract. Its execution corpus is checked against Clang
+on native Windows x64, Linux x64 and AArch64 Linux under QEMU. The suite covers
+arithmetic, arrays, pointers, structs, switches, recursion, preprocessing,
+function pointers and scalar varargs. `tests/run_arm64.py` also checks atomics
+and C ABI interoperability; see the review documents for commands and limits.
 
 ### IR Debug/Dump API
 New debugging functionality for inspecting IR structures:
@@ -544,9 +609,9 @@ ANVIL includes a configurable optimization pass infrastructure that can be enabl
 |-------|------|-------------|
 | O0 | `ANVIL_OPT_NONE` | No optimization (default) |
 | Og | `ANVIL_OPT_DEBUG` | Debug-friendly: copy propagation, store-load propagation |
-| O1 | `ANVIL_OPT_BASIC` | Og + constant folding, DCE |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + CFG simplification, strength reduction, memory opts, CSE |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | Currently the same verified pass set as O2 |
+| O1 | `ANVIL_OPT_BASIC` | Og + mem2reg, constant folding and DCE |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + SROA, SCCP, GVN, known bits, CFG, arithmetic and memory optimizations |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + LICM, bounded unrolling, internal leaf inlining and explicitly enabled SLP |
 
 ### Available Passes
 
@@ -611,7 +676,7 @@ anvil_pass_manager_disable(pm, ANVIL_PASS_DCE);
 
 * Binary opcode generation
 * Migrate existing direct text emitters to the MachineIR/regalloc path
-* Complete and enable loop unrolling
+* Extend bounded unrolling to partial/runtime unrolling and broaden vectorization
 * Broaden MachineIR coverage for additional ABIs and future targets
 * RISC-V support
 * Debug info (DWARF)

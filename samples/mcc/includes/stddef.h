@@ -12,13 +12,13 @@
 #endif
 
 /* Size type */
-typedef unsigned long size_t;
+typedef __SIZE_TYPE__ size_t;
 
 /* Pointer difference type */
-typedef long ptrdiff_t;
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
 
 /* Wide character type */
-typedef int wchar_t;
+typedef __WCHAR_TYPE__ wchar_t;
 
 /* Offset of member in structure */
 #define offsetof(type, member) ((size_t)&((type *)0)->member)

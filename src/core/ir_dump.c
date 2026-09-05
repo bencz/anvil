@@ -6,47 +6,19 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include "../platform/stream.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* open_memstream is a POSIX.1-2008 extension. It's present on Linux and macOS
- * but not on Windows/MSVC. Fall back to tmpfile() where it's missing. */
-#if defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
-#  define ANVIL_HAVE_OPEN_MEMSTREAM 1
-#endif
-
 /* Capture whatever `dump_fn(stream, obj)` writes and return it as a malloc'd
  * NUL-terminated string. Caller frees. */
-typedef void (*anvil_dump_stream_fn)(FILE *stream, void *obj);
-
 static char *dump_to_string(anvil_dump_stream_fn dump_fn, void *obj)
 {
-    if (!dump_fn || !obj) return NULL;
+    if (!dump_fn || !obj)
+        return NULL;
 
-#ifdef ANVIL_HAVE_OPEN_MEMSTREAM
-    char *result = NULL;
-    size_t size = 0;
-    FILE *stream = open_memstream(&result, &size);
-    if (!stream) return NULL;
-    dump_fn(stream, obj);
-    fclose(stream);
-    return result;
-#else
-    FILE *tmp = tmpfile();
-    if (!tmp) return NULL;
-    dump_fn(tmp, obj);
-    long size = ftell(tmp);
-    if (size < 0) { fclose(tmp); return NULL; }
-    rewind(tmp);
-
-    char *result = malloc((size_t)size + 1);
-    if (!result) { fclose(tmp); return NULL; }
-    size_t read = fread(result, 1, (size_t)size, tmp);
-    result[read] = '\0';
-    fclose(tmp);
-    return result;
-#endif
+    return anvil_stream_platform.capture(dump_fn, obj);
 }
 
 /* Get operation name as string */
@@ -110,6 +82,12 @@ static const char *op_name(anvil_op_t op)
         [ANVIL_OP_PHI] = "phi",
         [ANVIL_OP_SELECT] = "select",
         [ANVIL_OP_NOP] = "nop",
+        [ANVIL_OP_VA_START] = "va_start",
+        [ANVIL_OP_ATOMIC_LOAD] = "atomic_load",
+        [ANVIL_OP_ATOMIC_STORE] = "atomic_store",
+        [ANVIL_OP_ATOMIC_RMW] = "atomic_rmw",
+        [ANVIL_OP_ATOMIC_CMPXCHG] = "atomic_cmpxchg",
+        [ANVIL_OP_ATOMIC_FENCE] = "atomic_fence",
     };
     
     if (op >= 0 && op < ANVIL_OP_COUNT && names[op]) {
@@ -154,6 +132,7 @@ static const char *type_kind_name(anvil_type_kind_t kind)
         case ANVIL_TYPE_STRUCT: return "struct";
         case ANVIL_TYPE_ARRAY: return "array";
         case ANVIL_TYPE_FUNC: return "func";
+        case ANVIL_TYPE_VECTOR: return "vector";
         default: return "?";
     }
 }
@@ -243,6 +222,12 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
             fprintf(out, "[%zu x ", type->data.array.count);
             anvil_dump_type(out, type->data.array.elem);
             fprintf(out, "]");
+            break;
+
+        case ANVIL_TYPE_VECTOR:
+            fprintf(out, "<%zu x ", type->data.vector.lanes);
+            anvil_dump_type(out, type->data.vector.element);
+            fprintf(out, ">");
             break;
             
         case ANVIL_TYPE_STRUCT:
@@ -392,6 +377,14 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
     
     /* Print operation */
     fprintf(out, "%s", op_name(instr->op));
+    if (anvil_op_is_atomic(instr->op))
+        fprintf(out, " order(%u) failure(%u) rmw(%u)", instr->atomic.order, instr->atomic.failure_order, instr->atomic.rmw);
+    if (instr->memory_access.is_volatile)
+        fprintf(out, " volatile");
+
+    if (instr->memory_access.alignment)
+        fprintf(out, " align(%zu)", instr->memory_access.alignment);
+
     if (instr->op == ANVIL_OP_CALL)
         fprintf(out, " cc(%s)", cc_name(instr->call_cc));
     if (instr->op == ANVIL_OP_FCMP) {

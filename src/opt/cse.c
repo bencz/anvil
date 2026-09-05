@@ -17,6 +17,7 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
+#include "anvil/anvil_analysis.h"
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -184,11 +185,12 @@ static void expr_table_add(expr_table_t *table, anvil_op_t op,
     size_t i = (size_t)expr_hash(op, fcmp_pred, op1, op2) & mask;
 
     while (table->entries[i].result) {
-        /* On duplicate, leave existing entry (prefer the earliest). */
+        /* A global lookup may replace an expression from a sibling block. */
         if (table->entries[i].op == op &&
             table->entries[i].fcmp_pred == fcmp_pred &&
             table->entries[i].op1 == op1 &&
             table->entries[i].op2 == op2) {
+            table->entries[i].result = result;
             return;
         }
         i = (i + 1) & mask;
@@ -307,5 +309,63 @@ anvil_pass_result_t anvil_pass_cse(anvil_func_t *func)
     
     if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
         return ANVIL_PASS_RUN_ERROR;
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
+}
+
+/* Dominance-based value numbering for integer expressions. Memory and FP
+ * environment effects are deliberately outside this expression domain. */
+anvil_pass_result_t anvil_pass_gvn(anvil_func_t *func)
+{
+    if (!func || !func->parent)
+        return ANVIL_PASS_RUN_ERROR;
+
+    anvil_ctx_t *ctx = func->parent->ctx;
+    anvil_ctx_clear_error(ctx);
+    if (func->is_declaration || !func->blocks)
+        return ANVIL_PASS_RUN_UNCHANGED;
+
+    anvil_opt_cfg_t cfg;
+    if (!anvil_opt_cfg_build(func, &cfg))
+        return ANVIL_PASS_RUN_ERROR;
+
+    expr_table_t table;
+    expr_table_init(&table, ctx);
+    bool changed = false;
+    for (size_t rank = 0; table.entries && rank < cfg.reachable_count; rank++)
+    {
+        size_t block_index = cfg.rpo[rank];
+        anvil_block_t *block = cfg.blocks[block_index];
+        for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
+        {
+            if (!is_cse_candidate(instr->op) || instr->op == ANVIL_OP_FCMP || instr->num_operands != 2 || !instr->result)
+                continue;
+
+            anvil_value_t *left = instr->operands[0];
+            anvil_value_t *right = instr->operands[1];
+            anvil_value_t *existing = expr_table_lookup(&table, instr->op, instr->fcmp_pred, left, right);
+            size_t defining_block = existing ? anvil_opt_cfg_index(&cfg, existing->data.instr->parent) : SIZE_MAX;
+            if (existing && anvil_types_equal(existing->type, instr->result->type) && anvil_opt_cfg_dominates(&cfg, defining_block, block_index))
+            {
+                anvil_opt_replace_uses_in_func(func, instr->result, existing);
+                anvil_opt_erase_instr(instr);
+                changed = true;
+            }
+            else
+            {
+                expr_table_add(&table, instr->op, instr->fcmp_pred, left, right, instr->result);
+                if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+                    break;
+            }
+        }
+
+        if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+            break;
+    }
+
+    expr_table_free(&table);
+    anvil_opt_cfg_destroy(&cfg);
+    if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+        return ANVIL_PASS_RUN_ERROR;
+
     return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }

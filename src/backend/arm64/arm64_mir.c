@@ -9,6 +9,7 @@
 
 #include "anvil/anvil_arm64_mir.h"
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_analysis.h"
 #include "arm64_internal.h"
 
 #include <stdarg.h>
@@ -32,10 +33,7 @@ typedef struct {
     anvil_mir_block_t mir_block;
 } block_map_t;
 
-typedef struct {
-    anvil_mir_vreg_t dst;
-    anvil_mir_vreg_t src;
-} phi_edge_copy_t;
+typedef anvil_mir_parallel_copy_t phi_edge_copy_t;
 
 typedef struct {
     anvil_block_t *dest_block;
@@ -767,92 +765,6 @@ static bool append_phi_edge_copy(phi_edge_copy_t **copies,
     return true;
 }
 
-static bool emit_vreg_copy(anvil_mir_func_t *mir,
-                           anvil_mir_vreg_t dst,
-                           anvil_mir_vreg_t src)
-{
-    anvil_mir_vreg_t uses[] = { src };
-    return anvil_mir_add_instr(mir, ANVIL_MIR_OP_COPY, dst, uses, 1);
-}
-
-static bool copy_dst_is_still_source(phi_edge_copy_t *copies,
-                                     size_t num_copies,
-                                     anvil_mir_vreg_t dst)
-{
-    for (size_t i = 0; i < num_copies; i++) {
-        if (copies[i].src == dst) return true;
-    }
-    return false;
-}
-
-static void remove_phi_edge_copy(phi_edge_copy_t *copies,
-                                 size_t *num_copies,
-                                 size_t index)
-{
-    if (index >= *num_copies) return;
-
-    for (size_t i = index + 1; i < *num_copies; i++) {
-        copies[i - 1] = copies[i];
-    }
-    (*num_copies)--;
-}
-
-static bool break_parallel_copy_cycle(arm64_mir_lower_t *lower,
-                                      phi_edge_copy_t *copies,
-                                      size_t num_copies)
-{
-    if (num_copies == 0) return true;
-
-    anvil_mir_vreg_t saved = copies[0].dst;
-    const anvil_mir_vreg_info_t *info =
-        anvil_mir_get_vreg_info(lower->mir, saved);
-    if (!info) return false;
-
-    anvil_mir_vreg_t temp =
-        anvil_mir_add_vreg_typed(lower->mir, info->reg_class,
-                                 info->size_bits, info->is_signed);
-    if (temp == ANVIL_MIR_NO_VREG) return false;
-
-    if (!emit_vreg_copy(lower->mir, temp, saved)) return false;
-
-    for (size_t i = 0; i < num_copies; i++) {
-        if (copies[i].src == saved) {
-            copies[i].src = temp;
-        }
-    }
-
-    return true;
-}
-
-static bool emit_parallel_phi_edge_copies(arm64_mir_lower_t *lower,
-                                          phi_edge_copy_t *copies,
-                                          size_t num_copies)
-{
-    while (num_copies > 0) {
-        bool emitted = false;
-
-        for (size_t i = 0; i < num_copies; i++) {
-            if (copy_dst_is_still_source(copies, num_copies, copies[i].dst)) {
-                continue;
-            }
-
-            if (!emit_vreg_copy(lower->mir, copies[i].dst, copies[i].src)) {
-                return false;
-            }
-            remove_phi_edge_copy(copies, &num_copies, i);
-            emitted = true;
-            break;
-        }
-
-        if (emitted) continue;
-
-        if (!break_parallel_copy_cycle(lower, copies, num_copies)) {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 static bool lower_phi_copies_for_edge(arm64_mir_lower_t *lower,
                                       anvil_block_t *src_block,
@@ -892,7 +804,7 @@ static bool lower_phi_copies_for_edge(arm64_mir_lower_t *lower,
         }
     }
 
-    bool ok = emit_parallel_phi_edge_copies(lower, copies, num_copies);
+    bool ok = anvil_mir_emit_parallel_copies(lower->mir, copies, num_copies);
     free(copies);
     return ok;
 
@@ -911,7 +823,12 @@ static anvil_mir_block_t create_phi_edge_block(arm64_mir_lower_t *lower,
     char name[256];
     snprintf(name, sizeof(name), "%s_to_%s_phi_%zu",
              src_name, dest_name, lower->num_edge_blocks++);
-    return anvil_mir_add_block(lower->mir, name);
+    anvil_mir_block_t source = anvil_mir_current_block(lower->mir);
+    anvil_mir_block_t edge = anvil_mir_add_block(lower->mir, name);
+    if (!anvil_mir_set_current_block(lower->mir, source))
+        return ANVIL_MIR_NO_BLOCK;
+
+    return edge;
 }
 
 static bool emit_phi_edge_block(arm64_mir_lower_t *lower,
@@ -1590,6 +1507,24 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
     if (instr->op == ANVIL_OP_NOP) return true;
     if (instr->op == ANVIL_OP_PHI) return true;
 
+    if (anvil_op_is_atomic(instr->op))
+    {
+        anvil_mir_vreg_t uses[3];
+        for (size_t operand = 0; operand < instr->num_operands; operand++)
+        {
+            uses[operand] = lower_value(lower, instr->operands[operand]);
+            if (uses[operand] == ANVIL_MIR_NO_VREG)
+                return false;
+        }
+
+        anvil_mir_vreg_t def = instr->result ? arm64_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
+        if ((instr->result && def == ANVIL_MIR_NO_VREG) ||
+            !anvil_mir_add_atomic(lower->mir, instr->op, def, uses, instr->num_operands, &instr->atomic))
+            return false;
+
+        return !instr->result || map_put(lower, instr->result, def);
+    }
+
     anvil_mir_opcode_t mir_op;
     if (instr->num_operands == 2 && map_binop(instr->op, &mir_op)) {
         anvil_mir_vreg_t lhs = lower_value(lower, instr->operands[0]);
@@ -1634,6 +1569,30 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
     }
 
     switch (instr->op) {
+        case ANVIL_OP_VA_START: {
+            if (!instr->result || !lower->func->type->data.func.variadic || lower_abi(lower) != ANVIL_ABI_SYSV ||
+                lower->func->num_params > INT32_MAX / 8)
+                return false;
+
+            size_t gpr = 0;
+            size_t fpr = 0;
+            size_t stack = 0;
+            for (size_t parameter = 0; parameter < lower->func->num_params; parameter++)
+            {
+                anvil_type_t *type = lower->func->params[parameter]->type;
+                if (!arg_still_uses_register(type, gpr, fpr))
+                    stack += (size_t)arm64_stack_arg_slot_size(type);
+
+                advance_arg_count(type, &gpr, &fpr);
+            }
+
+            anvil_mir_vreg_t def = arm64_add_vreg_for_type(lower, instr->result->type);
+            int slot = anvil_mir_add_frame_slot(lower->mir, 224 * 8, 16);
+            return def != ANVIL_MIR_NO_VREG && slot >= 0 &&
+                   anvil_mir_add_va_start(lower->mir, def, slot, (unsigned)(gpr < 8 ? gpr : 8), (unsigned)(fpr < 8 ? fpr : 8), stack) &&
+                   map_put(lower, instr->result, def);
+        }
+
         case ANVIL_OP_ALLOCA:
             return lower_alloca(lower, instr);
         case ANVIL_OP_GEP:
@@ -1797,11 +1756,20 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     memset(&lower, 0, sizeof(lower));
     lower.func = func;
     lower.mir = anvil_mir_func_create(func->name);
-    if (!lower.mir) return NULL;
+    if (!lower.mir)
+        return NULL;
+
+    anvil_opt_cfg_t cfg;
+    if (!anvil_opt_cfg_build(func, &cfg))
+    {
+        anvil_mir_func_destroy(lower.mir);
+        return NULL;
+    }
 
     if (!create_mir_blocks(&lower) ||
         !lower_params(&lower) ||
         !prepare_phi_results(&lower)) {
+        anvil_opt_cfg_destroy(&cfg);
         anvil_mir_func_destroy(lower.mir);
         free(lower.blocks);
         free(lower.values);
@@ -1809,10 +1777,13 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
         return NULL;
     }
 
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+    for (size_t rank = 0; rank < cfg.count; rank++)
+    {
+        anvil_block_t *block = cfg.blocks[cfg.rpo[rank]];
         anvil_mir_block_t mir_block = block_get(&lower, block);
         if (mir_block == ANVIL_MIR_NO_BLOCK ||
             !anvil_mir_set_current_block(lower.mir, mir_block)) {
+            anvil_opt_cfg_destroy(&cfg);
             anvil_mir_func_destroy(lower.mir);
             free(lower.blocks);
             free(lower.values);
@@ -1821,7 +1792,10 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
         }
 
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            if (!lower_instr(&lower, instr)) {
+            size_t first = anvil_mir_num_instrs(lower.mir);
+            if (!lower_instr(&lower, instr) || !anvil_mir_annotate_memory(lower.mir, first, &instr->memory_access) ||
+                (instr->op == ANVIL_OP_CALL && !anvil_mir_annotate_call_effects(lower.mir, first, anvil_instr_call_effects(instr)))) {
+                anvil_opt_cfg_destroy(&cfg);
                 anvil_mir_func_destroy(lower.mir);
                 free(lower.blocks);
                 free(lower.values);
@@ -1834,6 +1808,7 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     free(lower.blocks);
     free(lower.values);
     free(lower.addr_offsets);
+    anvil_opt_cfg_destroy(&cfg);
     return lower.mir;
 }
 
@@ -2069,6 +2044,24 @@ static bool arm64_legal_instr(const anvil_mir_func_t *mir,
     }
 
     switch (instr->op) {
+        case ANVIL_MIR_OP_VA_START: {
+            anvil_mir_frame_slot_info_t slot;
+            return arm64_legal_pointer_operand(mir, instr->def, instr_index, error, error_len) &&
+                   anvil_mir_get_frame_slot_info(mir, instr->frame_slot, &slot) && slot.size_bits >= 224 * 8 && slot.align_bytes >= 16 &&
+                   instr->named_gpr <= 8 && instr->named_fpr <= 8 && instr->named_stack_bytes <= INT32_MAX - 16 && instr->named_stack_bytes % 8 == 0;
+        }
+
+        case ANVIL_MIR_OP_ATOMIC:
+            for (size_t operand = 0; operand < instr->num_uses; operand++)
+            {
+                const anvil_mir_vreg_info_t *use = anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, instr_index, operand));
+                if (use->has_fixed_reg && use->fixed_phys_reg >= 9 && use->fixed_phys_reg <= 11)
+                    return arm64_legal_fail(error, error_len, "ARM64 atomic instruction %zu uses a reserved temporary", instr_index);
+            }
+
+            return instr->atomic_op == ANVIL_OP_ATOMIC_FENCE ||
+                   arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, 0), instr_index, error, error_len);
+
         case ANVIL_MIR_OP_ADD:
         case ANVIL_MIR_OP_SUB:
         case ANVIL_MIR_OP_MUL:
@@ -2218,6 +2211,24 @@ bool anvil_arm64_verify_mir_legal(const anvil_mir_func_t *mir,
 bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
 {
     if (!mir) return false;
+
+    for (size_t index = 0; index < anvil_mir_num_instrs(mir); index++)
+    {
+        anvil_mir_instr_info_t instruction;
+        if (!anvil_mir_get_instr_info(mir, index, &instruction))
+            return false;
+
+        if (instruction.op == ANVIL_MIR_OP_ATOMIC)
+        {
+            uint64_t scratch = (UINT64_C(1) << 9) | (UINT64_C(1) << 10) | (UINT64_C(1) << 11);
+            if (!anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_GPR, instruction.clobbers[ANVIL_MIR_REG_GPR] | scratch))
+                return false;
+        }
+
+        if (instruction.op == ANVIL_MIR_OP_VA_START &&
+            !anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_GPR, instruction.clobbers[ANVIL_MIR_REG_GPR] | (UINT64_C(1) << 16) | (UINT64_C(1) << 17)))
+            return false;
+    }
 
     static const int gpr_regs[] = {
         19, 20, 21, 22, 23, 24, 25, 26, 27, 28
@@ -2667,6 +2678,30 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
     return true;
 }
 
+static void mir_emit_variadic_register_save(arm64_mir_emit_t *emit)
+{
+    for (size_t index = 0; index < anvil_mir_num_instrs(emit->mir); index++)
+    {
+        anvil_mir_instr_info_t instruction;
+        if (!anvil_mir_get_instr_info(emit->mir, index, &instruction))
+        {
+            emit->failed = true;
+            return;
+        }
+        if (instruction.op != ANVIL_MIR_OP_VA_START)
+            continue;
+
+        int offset = emit->frame_slot_offsets[instruction.frame_slot];
+        for (unsigned reg = 0; reg < 8; reg++)
+        {
+            mir_emit_stack_access(&emit->code, "str", arm64_xreg_names[reg], offset - 32 - (int)reg * 8);
+            char vector[8];
+            snprintf(vector, sizeof(vector), "q%u", reg);
+            mir_emit_stack_access(&emit->code, "str", vector, offset - 96 - (int)reg * 16);
+        }
+    }
+}
+
 static void mir_emit_prologue(arm64_mir_emit_t *emit)
 {
     const char *name = anvil_mir_func_name(emit->mir);
@@ -2698,6 +2733,8 @@ static void mir_emit_prologue(arm64_mir_emit_t *emit)
             anvil_strbuf_append(&emit->code, "\tsub sp, sp, x16\n");
         }
     }
+
+    mir_emit_variadic_register_save(emit);
 
     for (int reg = 19; reg <= 28; reg++) {
         if (emit->gpr_save_offsets[reg] >= 0) {
@@ -2760,7 +2797,8 @@ static void mir_emit_copy(arm64_mir_emit_t *emit,
         anvil_strbuf_appendf(&emit->code, "\tfmov %s, %s\n", dst_reg, src_reg);
     } else if (dst_info->reg_class == ANVIL_MIR_REG_GPR &&
                src_info->reg_class == ANVIL_MIR_REG_GPR) {
-        anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_reg, src_reg);
+        const char *source = mir_gpr_name_for_size(src_assignment->phys_reg, size);
+        anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_reg, source);
     } else if (dst_info->reg_class == ANVIL_MIR_REG_FPR &&
                src_info->reg_class == ANVIL_MIR_REG_GPR) {
         anvil_strbuf_appendf(&emit->code, "\tfmov %s, %s\n", dst_reg, src_reg);
@@ -3427,11 +3465,123 @@ static void mir_emit_ret(arm64_mir_emit_t *emit,
     if (!emit->failed) mir_emit_epilogue(emit);
 }
 
+static void mir_emit_va_start(arm64_mir_emit_t *emit, const anvil_mir_instr_info_t *instruction)
+{
+    if (emit->is_darwin)
+    {
+        emit->failed = true;
+        return;
+    }
+
+    int offset = emit->frame_slot_offsets[instruction->frame_slot];
+    mir_emit_mov_gpr_imm(&emit->code, "x16", offset);
+    anvil_strbuf_append(&emit->code, "\tsub x17, x29, x16\n");
+    mir_emit_mov_gpr_imm(&emit->code, "x16", (int64_t)instruction->named_stack_bytes + 16);
+    anvil_strbuf_append(&emit->code, "\tadd x16, x29, x16\n\tstr x16, [x17]\n");
+    anvil_strbuf_append(&emit->code, "\tadd x16, x17, #96\n\tstr x16, [x17, #8]\n");
+    anvil_strbuf_append(&emit->code, "\tadd x16, x17, #224\n\tstr x16, [x17, #16]\n");
+    mir_emit_mov_gpr_imm(&emit->code, "w16", -(int64_t)(8 - instruction->named_gpr) * 8);
+    anvil_strbuf_append(&emit->code, "\tstr w16, [x17, #24]\n");
+    mir_emit_mov_gpr_imm(&emit->code, "w16", -(int64_t)(8 - instruction->named_fpr) * 16);
+    anvil_strbuf_append(&emit->code, "\tstr w16, [x17, #28]\n");
+    const char *destination = mir_reg_name(emit, instruction->def);
+    if (!emit->failed)
+        anvil_strbuf_appendf(&emit->code, "\tmov %s, x17\n", destination);
+}
+
+static void mir_emit_atomic(arm64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *instruction)
+{
+    if (instruction->atomic_op == ANVIL_OP_ATOMIC_FENCE)
+    {
+        if (instruction->atomic.order != ANVIL_ORDER_RELAXED)
+            anvil_strbuf_append(&emit->code, "\tdmb ish\n");
+
+        return;
+    }
+
+    anvil_mir_vreg_t pointer = anvil_mir_get_instr_use(emit->mir, index, 0);
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, index, 1);
+    anvil_mir_vreg_t typed = instruction->def != ANVIL_MIR_NO_VREG ? instruction->def : value;
+    const anvil_mir_vreg_info_t *type = mir_vreg_info_checked(emit, typed);
+    const char *address = mir_reg_name(emit, pointer);
+    const char *operand = instruction->num_uses > 1 ? mir_reg_name(emit, value) : NULL;
+    if (!type || emit->failed)
+        return;
+
+    unsigned bits = type->size_bits;
+    const char *suffix = bits == 8 ? "b" : (bits == 16 ? "h" : "");
+    const char *old = bits == 64 ? "x9" : "w9";
+    const char *temporary = bits == 64 ? "x10" : "w10";
+    bool acquire = instruction->atomic.order == ANVIL_ORDER_ACQUIRE || instruction->atomic.order == ANVIL_ORDER_ACQ_REL ||
+                   instruction->atomic.order == ANVIL_ORDER_SEQ_CST;
+    bool release = instruction->atomic.order == ANVIL_ORDER_RELEASE || instruction->atomic.order == ANVIL_ORDER_ACQ_REL ||
+                   instruction->atomic.order == ANVIL_ORDER_SEQ_CST;
+
+    if (instruction->atomic_op == ANVIL_OP_ATOMIC_LOAD)
+    {
+        anvil_strbuf_appendf(&emit->code, "\t%s%s %s, [%s]\n", acquire ? "ldar" : "ldr", suffix, old, address);
+    }
+    else if (instruction->atomic_op == ANVIL_OP_ATOMIC_STORE)
+    {
+        anvil_strbuf_appendf(&emit->code, "\t%s%s %s, [%s]\n", release ? "stlr" : "str", suffix, operand, address);
+        return;
+    }
+    else
+    {
+        const char *name = anvil_mir_func_name(emit->mir);
+        bool compare = instruction->atomic_op == ANVIL_OP_ATOMIC_CMPXCHG;
+        if (compare)
+        {
+            if (bits < 32)
+                anvil_strbuf_appendf(&emit->code, "\t%s w10, %s\n", bits == 8 ? "uxtb" : "uxth", operand);
+            else
+                anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", temporary, operand);
+
+            operand = mir_reg_name(emit, anvil_mir_get_instr_use(emit->mir, index, 2));
+        }
+
+        anvil_strbuf_appendf(&emit->code, ".L%s_atomic_%zu_retry:\n\t%s%s %s, [%s]\n", name, index, acquire ? "ldaxr" : "ldxr", suffix, old, address);
+        const char *replacement = operand;
+        if (compare)
+        {
+            anvil_strbuf_appendf(&emit->code, "\tcmp %s, %s\n\tb.ne .L%s_atomic_%zu_mismatch\n", old, temporary, name, index);
+        }
+        else if (instruction->atomic.rmw != ANVIL_ATOMIC_EXCHANGE)
+        {
+            static const char *operations[] = { NULL, "add", "sub", "and", "orr", "eor" };
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s\n", operations[instruction->atomic.rmw], temporary, old, operand);
+            replacement = temporary;
+        }
+
+        /* The status register is distinct from the address and stored value;
+         * retrying the exclusive pair implements strong compare/exchange. */
+        anvil_strbuf_appendf(&emit->code, "\t%s%s w11, %s, [%s]\n\tcbnz w11, .L%s_atomic_%zu_retry\n",
+                             release ? "stlxr" : "stxr", suffix, replacement, address, name, index);
+        if (compare)
+        {
+            anvil_strbuf_appendf(&emit->code, "\tb .L%s_atomic_%zu_done\n.L%s_atomic_%zu_mismatch:\n\tclrex\n.L%s_atomic_%zu_done:\n",
+                                 name, index, name, index, name, index);
+        }
+    }
+
+    const char *destination = mir_reg_name(emit, instruction->def);
+    if (!emit->failed)
+        anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", destination, old);
+}
+
 static void mir_emit_instr(arm64_mir_emit_t *emit,
                            size_t instr_index,
                            const anvil_mir_instr_info_t *info)
 {
     switch (info->op) {
+        case ANVIL_MIR_OP_VA_START:
+            mir_emit_va_start(emit, info);
+            break;
+
+        case ANVIL_MIR_OP_ATOMIC:
+            mir_emit_atomic(emit, instr_index, info);
+            break;
+
         case ANVIL_MIR_OP_MOV:
             mir_emit_mov(emit, info);
             break;

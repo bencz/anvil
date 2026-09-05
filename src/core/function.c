@@ -3,6 +3,7 @@
  */
 
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_analysis.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,6 +22,38 @@ static void register_owned_func(anvil_ctx_t *ctx, anvil_func_t *func)
     ctx->owned_funcs = func;
 }
 
+anvil_error_t anvil_func_set_effects(anvil_func_t *func, unsigned effects)
+{
+    if (!func || !func->parent || (effects & ~ANVIL_EFFECT_ALL))
+    {
+        if (func && func->owner_ctx)
+            anvil_set_error(func->owner_ctx, ANVIL_ERR_INVALID_ARG, "Invalid function effect mask");
+
+        return ANVIL_ERR_INVALID_ARG;
+    }
+
+    func->effects = effects;
+    func->effects_explicit = true;
+    return ANVIL_OK;
+}
+
+unsigned anvil_instr_call_effects(const anvil_instr_t *instr)
+{
+    if (!instr || instr->op != ANVIL_OP_CALL || !instr->num_operands)
+        return ANVIL_EFFECT_ALL;
+
+    const anvil_value_t *callee = instr->operands[0];
+    if (!callee || callee->kind != ANVIL_VAL_FUNC)
+        return ANVIL_EFFECT_ALL;
+
+    return anvil_func_get_effects(callee->data.func);
+}
+
+unsigned anvil_func_get_effects(const anvil_func_t *func)
+{
+    return func && func->effects_explicit ? func->effects : ANVIL_EFFECT_ALL;
+}
+
 void anvil_func_free_all(anvil_ctx_t *ctx)
 {
     if (!ctx) return;
@@ -28,6 +61,7 @@ void anvil_func_free_all(anvil_ctx_t *ctx)
     ctx->owned_funcs = NULL;
     while (func) {
         anvil_func_t *next = func->ctx_next_owned;
+        anvil_func_invalidate_cfg(func);
         free(func->params);
         free(func->name);
         free(func);
@@ -315,6 +349,12 @@ anvil_value_t *anvil_func_get_value(anvil_func_t *func)
     return func ? func->value : NULL;
 }
 
+void anvil_func_set_fp_vectorization(anvil_func_t *func, bool enabled)
+{
+    if (func)
+        func->fp_vectorization = enabled;
+}
+
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index)
 {
     if (!func || !func->params || index >= func->num_params) return NULL;
@@ -326,7 +366,7 @@ anvil_block_t *anvil_func_get_entry(anvil_func_t *func)
     return func ? func->entry : NULL;
 }
 
-anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
+anvil_block_t *anvil_block_prepare(anvil_func_t *func, const char *name)
 {
     if (!func) return NULL;
     anvil_ctx_t *ctx = func->parent ? func->parent->ctx : NULL;
@@ -350,7 +390,11 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
     block->id = func->parent->ctx->next_block_id++;
     block->ctx_next_owned = func->parent->ctx->owned_blocks;
     func->parent->ctx->owned_blocks = block;
-    
+    return block;
+}
+
+void anvil_func_append_block(anvil_func_t *func, anvil_block_t *block)
+{
     /* Append to function's block list in O(1) using the cached tail. */
     if (!func->blocks) {
         func->blocks = block;
@@ -359,6 +403,13 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
     }
     func->last_block = block;
     func->num_blocks++;
+}
+
+anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
+{
+    anvil_block_t *block = anvil_block_prepare(func, name);
+    if (block)
+        anvil_func_append_block(func, block);
 
     return block;
 }

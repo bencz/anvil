@@ -7,6 +7,7 @@
  */
 
 #include "codegen_internal.h"
+#include "target.h"
 
 /* ============================================================
  * Architecture Mapping
@@ -89,16 +90,16 @@ bool mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
             return false;
         }
     }
-    
-    /* Set Darwin ABI for macOS ARM64 */
-    if (codegen_arch_is_darwin(arch)) {
-        anvil_error_t err = anvil_ctx_set_abi(cg->anvil_ctx, ANVIL_ABI_DARWIN);
-        if (err != ANVIL_OK) {
-            mcc_error(cg->mcc_ctx, "failed to select ANVIL ABI: %s",
-                      anvil_ctx_get_error(cg->anvil_ctx));
-            return false;
-        }
+
+    /* Select the object ABI before creating any target-dependent IR. */
+    anvil_abi_t abi = mcc_target_model(arch)->abi;
+    anvil_error_t err = anvil_ctx_set_abi(cg->anvil_ctx, abi);
+    if (err != ANVIL_OK)
+    {
+        mcc_error(cg->mcc_ctx, "failed to select ANVIL ABI: %s", anvil_ctx_get_error(cg->anvil_ctx));
+        return false;
     }
+
     return true;
 }
 
@@ -174,8 +175,9 @@ anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, an
     anvil_value_t *existing = codegen_find_global(cg, name);
     if (existing) return existing;
     
-    /* Create new global */
-    anvil_value_t *global = anvil_module_add_global(cg->anvil_mod, name, type, ANVIL_LINK_EXTERNAL);
+    /* Referencing a symbol does not define storage for it. A later source
+     * definition upgrades this declaration through the module API. */
+    anvil_value_t *global = anvil_module_declare_global(cg->anvil_mod, name, type, ANVIL_LINK_EXTERNAL);
     if (!global) return NULL;
     
     /* Add to cache */
@@ -190,6 +192,7 @@ anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, an
     }
     cg->globals[cg->num_globals].name = name;
     cg->globals[cg->num_globals].value = global;
+    cg->globals[cg->num_globals].is_defined = false;
     cg->num_globals++;
     
     return global;

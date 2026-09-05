@@ -13,6 +13,22 @@ static void clear_outputs(st_value_t *result_out, uint32_t *detail_out)
     }
 }
 
+uint32_t st_aot_string_from_characters(StFrame *frame, st_value_t receiver, const st_value_t *arguments, size_t argument_count,
+    st_value_t *result_out, uint32_t *detail_out)
+{
+    clear_outputs(result_out, detail_out);
+
+    if (result_out == NULL || detail_out == NULL || argument_count != 1u || arguments == NULL
+            || st_aot_frame_validate(frame, 0u) != ST_AOT_SEND_OK || frame->receiver != receiver)
+        return ST_STRING_PRIMITIVE_ERR_INVALID_ARGUMENT;
+
+    st_aot_thread_t *thread = frame->thread;
+    st_string_primitive_status_t status = st_string_primitive_from_characters(thread->strings, arguments[0], result_out);
+
+    *detail_out = (uint32_t)status;
+    return (uint32_t)status;
+}
+
 static uint32_t execute_bridge(
     StFrame *frame, st_string_operation_t operation,
     st_value_t receiver, const st_value_t *arguments,

@@ -18,6 +18,14 @@ typedef struct anvil_mir_instr {
     bool has_imm;
     int64_t imm;
     anvil_cc_t call_cc;
+    anvil_memory_access_t memory_access;
+    anvil_op_t atomic_op;
+    anvil_atomic_info_t atomic;
+    unsigned named_gpr;
+    unsigned named_fpr;
+    size_t named_stack_bytes;
+    unsigned call_effects;
+    uint64_t clobbers[ANVIL_MIR_REG_CLASS_COUNT];
     char *symbol;
     int spill_slot;
     int frame_slot;
@@ -54,6 +62,7 @@ struct anvil_mir_func {
     anvil_mir_spill_slot_info_t *spill_slots;
     size_t num_spills;
     size_t cap_spills;
+    size_t num_pinned_spills; /* Explicit interval-split storage survives reallocation. */
 
     anvil_mir_frame_slot_info_t *frame_slots;
     size_t num_frame_slots;
@@ -69,5 +78,19 @@ bool anvil_mir_prepare_assignments(anvil_mir_func_t *func);
 int anvil_mir_allocate_spill_slot(anvil_mir_func_t *func,
                                   anvil_mir_reg_class_t reg_class,
                                   uint16_t size_bits);
+
+typedef struct
+{
+    size_t words_per_block;
+    uint64_t *live_in;
+    uint64_t *live_out;
+    size_t *first_instr;
+    size_t *last_instr;
+} anvil_mir_liveness_t;
+
+bool anvil_mir_compute_liveness(const anvil_mir_func_t *func, anvil_mir_liveness_t *result);
+void anvil_mir_liveness_destroy(anvil_mir_liveness_t *result);
+bool anvil_mir_verify_clobbers(const anvil_mir_func_t *func, char *error, size_t error_len);
+bool anvil_mir_split_spilled_intervals(anvil_mir_func_t *func, bool *changed);
 
 #endif /* ANVIL_MACHINE_INTERNAL_H */

@@ -30,19 +30,61 @@
 static bool may_read_memory(anvil_instr_t *instr)
 {
     if (!instr) return false;
-    return instr->op == ANVIL_OP_LOAD || instr->op == ANVIL_OP_CALL;
+    if (anvil_op_is_atomic(instr->op))
+        return true;
+
+    if (instr->op == ANVIL_OP_CALL)
+    {
+        unsigned barriers = ANVIL_EFFECT_READ_MEMORY | ANVIL_EFFECT_MAY_TRAP | ANVIL_EFFECT_MAY_UNWIND |
+                            ANVIL_EFFECT_MAY_NOT_RETURN | ANVIL_EFFECT_OBSERVABLE;
+        return (anvil_opt_call_effects(instr) & barriers) != 0;
+    }
+
+    return instr->op == ANVIL_OP_LOAD;
+}
+
+static bool may_exit_before_overwrite(const anvil_instr_t *instr)
+{
+    switch (instr->op)
+    {
+        case ANVIL_OP_SDIV:
+        case ANVIL_OP_UDIV:
+        case ANVIL_OP_SMOD:
+        case ANVIL_OP_UMOD:
+        case ANVIL_OP_STORE:
+        case ANVIL_OP_ALLOCA:
+        case ANVIL_OP_FADD:
+        case ANVIL_OP_FSUB:
+        case ANVIL_OP_FMUL:
+        case ANVIL_OP_FDIV:
+        case ANVIL_OP_FCMP:
+        case ANVIL_OP_FPTRUNC:
+        case ANVIL_OP_FPEXT:
+        case ANVIL_OP_FPTOSI:
+        case ANVIL_OP_FPTOUI:
+        case ANVIL_OP_SITOFP:
+        case ANVIL_OP_UITOFP:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /* Check if a store is dead (overwritten before read) within the same block */
 static bool is_dead_store(anvil_instr_t *store)
 {
     if (!store || store->op != ANVIL_OP_STORE) return false;
+    if (store->memory_access.is_volatile)
+        return false;
     if (store->num_operands < 2) return false;
     
     anvil_value_t *ptr = store->operands[1];
     
     /* Look at subsequent instructions in the same block */
     for (anvil_instr_t *instr = store->next; instr; instr = instr->next) {
+        if (instr->memory_access.is_volatile)
+            return false;
+
         /* Any potentially aliasing read observes the first store. */
         if (may_read_memory(instr)) {
             return false;
@@ -54,6 +96,10 @@ static bool is_dead_store(anvil_instr_t *store)
             same_pointer(instr->operands[1], ptr)) {
             return true;
         }
+
+        /* A handler reached before the overwrite may observe the first store. */
+        if (may_exit_before_overwrite(instr))
+            return false;
         
         /* If we hit a branch, stop (cross-block analysis not done here) */
         if (instr->op == ANVIL_OP_BR || instr->op == ANVIL_OP_BR_COND ||

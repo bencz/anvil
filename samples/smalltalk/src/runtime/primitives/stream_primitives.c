@@ -1,4 +1,5 @@
 #include "st_stream_primitives.h"
+#include "../../platform/runtime.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -6,12 +7,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-
-#if defined(_WIN32)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
 
 #define ST_STREAM_PRIMITIVE_COOKIE UINT64_C(0x535453545245414d)
 
@@ -24,25 +19,6 @@ static const st_primitive_spec_t stream_specs[] = {
         sizeof("st_aot_stream_write_primitive_execute") - 1u
     }
 };
-
-static int64_t platform_write(void *user, int descriptor, const void *bytes,
-                              size_t byte_count, int *os_error_out)
-{
-    (void)user;
-#if defined(_WIN32)
-    unsigned int request = byte_count > UINT_MAX ? UINT_MAX
-                                                  : (unsigned int)byte_count;
-    int result = _write(descriptor, bytes, request);
-#else
-    ssize_t result = write(descriptor, bytes, byte_count);
-#endif
-    if (result < 0) {
-        *os_error_out = errno != 0 ? errno : EIO;
-        return -1;
-    }
-    *os_error_out = 0;
-    return (int64_t)result;
-}
 
 static bool context_is_live(const st_stream_primitive_context_t *context)
 {
@@ -118,7 +94,7 @@ st_stream_primitive_status_t st_stream_primitive_context_init(
         .string_class_id = options->string_class_id,
         .string_shape_id = options->string_shape_id,
         .write_bytes = options->write_bytes != NULL
-            ? options->write_bytes : platform_write,
+            ? options->write_bytes : st_runtime_platform.write_bytes,
         .write_user = options->write_user
     };
     return ST_STREAM_PRIMITIVE_OK;

@@ -6,6 +6,7 @@
  */
 
 #include "pp_internal.h"
+#include "target.h"
 #include <limits.h>
 
 /* ============================================================
@@ -841,7 +842,15 @@ void pp_define_standard_macros(mcc_preprocessor_t *pp)
     
     /* Compiler identification */
     mcc_preprocessor_define(pp, "__MCC__", "1");
-    
+    const mcc_target_model_t *model = mcc_target_model(pp->ctx->options.arch);
+    mcc_preprocessor_define(pp, "__SIZE_TYPE__", model->size_type);
+    mcc_preprocessor_define(pp, "__PTRDIFF_TYPE__", model->ptrdiff_type);
+    mcc_preprocessor_define(pp, "__WCHAR_TYPE__", model->wchar_type);
+    for (size_t i = 0; i < model->macro_count; i++)
+    {
+        mcc_preprocessor_define(pp, model->macros[i].name, model->macros[i].value);
+    }
+
     char buf[64];
     snprintf(buf, sizeof(buf), "%d", MCC_VERSION_MAJOR);
     mcc_preprocessor_define(pp, "__MCC_VERSION_MAJOR__", buf);

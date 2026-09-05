@@ -9,42 +9,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include "platform/host.h"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { fprintf(stderr, "[FAIL] %s\n", (m)); failures++; } } while (0)
 
-static void cross_assemble(const char *assembly, const char *target,
-                           const char *message)
+static void cross_assemble(const char *assembly, const char *target, const char *message)
 {
-    if (!assembly || access("/usr/bin/clang", X_OK) != 0) return;
-    char source[] = "/tmp/anvil-fcmp-XXXXXX.s";
-    int fd = mkstemps(source, 2);
-    if (fd < 0) { CHECK(false, message); return; }
-    FILE *out = fdopen(fd, "wb");
-    bool ppc_numeric_regs = strncmp(target, "powerpc", 7) == 0;
-    bool write_ok = out != NULL;
-    for (size_t i = 0; write_ok && assembly[i]; i++) {
-        if (ppc_numeric_regs && (assembly[i] == 'r' || assembly[i] == 'f') &&
-            assembly[i + 1] >= '0' && assembly[i + 1] <= '9') continue;
-        write_ok = fputc((unsigned char)assembly[i], out) != EOF;
-    }
-    bool close_ok = out ? fclose(out) == 0 : false;
-    if (!out || !write_ok || !close_ok) {
-        if (!out) close(fd);
-        unlink(source);
-        CHECK(false, message);
-        return;
-    }
-    char object[128], command[512];
-    snprintf(object, sizeof(object), "%s.o", source);
-    snprintf(command, sizeof(command),
-             "/usr/bin/clang --target=%s -c %s -o %s >/dev/null 2>&1",
-             target, source, object);
-    int status = system(command);
-    unlink(source);
-    unlink(object);
-    CHECK(status == 0, message);
+    CHECK(anvil_test_host.cross_assemble(assembly, target) <= 0, message);
 }
 
 static bool run_target_pipeline(anvil_arch_t arch, anvil_func_t *fn,

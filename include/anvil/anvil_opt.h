@@ -35,6 +35,15 @@ typedef enum {
     ANVIL_PASS_LOAD_ELIM,        /* Redundant load elimination (O2+) */
     ANVIL_PASS_STORE_LOAD_PROP,  /* Store-load propagation (Og+) */
     ANVIL_PASS_COMMON_SUBEXPR,   /* Common subexpression elimination (O2+) */
+    ANVIL_PASS_MEM2REG,         /* Promote local scalar storage to SSA (O1+) */
+    ANVIL_PASS_GVN,             /* Dominance-based integer value numbering (O2+) */
+    ANVIL_PASS_SROA,            /* Split disjoint constant aggregate accesses (O2+) */
+    ANVIL_PASS_LICM,            /* Hoist nontrapping integer loop invariants (O3) */
+    ANVIL_PASS_SCCP,            /* Sparse conditional integer constants (O2+) */
+    ANVIL_PASS_KNOWN_BITS,      /* Bit facts and unsigned range folding (O2+) */
+    ANVIL_PASS_INLINE,         /* Bounded leaf-function inlining (O3) */
+    ANVIL_PASS_UNROLL,         /* Completely unroll small proven-trip loops (O3) */
+    ANVIL_PASS_VECTORIZE,      /* Pack independent memory streams with target costs (O3) */
     ANVIL_PASS_COUNT
 } anvil_pass_id_t;
 
@@ -60,6 +69,20 @@ typedef struct {
     anvil_pass_func_t run;
     anvil_opt_level_t min_level;  /* Minimum opt level to enable this pass */
 } anvil_pass_info_t;
+
+typedef struct {
+    size_t runs;
+    size_t changes;
+    size_t failures;
+    size_t instructions_before;
+    size_t instructions_after;
+    double cpu_seconds; /* Host process CPU time, including verification. */
+} anvil_pass_statistics_t;
+
+/* One event per pass/function invocation. Names and pointers are borrowed for
+ * the callback duration. Observers must not mutate the IR or pass manager. */
+typedef void (*anvil_pass_observer_t)(const anvil_func_t *func, const anvil_pass_info_t *pass,
+                                     const anvil_pass_statistics_t *event, void *user_data);
 
 /* ============================================================================
  * Pass Manager API
@@ -95,6 +118,13 @@ anvil_error_t anvil_pass_manager_disable(anvil_pass_manager_t *pm,
 
 /* Check if a pass is enabled */
 bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pass);
+
+/* Collection is disabled by default. Installing an observer enables it.
+ * Statistics accumulate across runs until explicitly reset. */
+void anvil_pass_manager_collect_statistics(anvil_pass_manager_t *pm, bool enabled);
+void anvil_pass_manager_set_observer(anvil_pass_manager_t *pm, anvil_pass_observer_t observer, void *user_data);
+void anvil_pass_manager_reset_statistics(anvil_pass_manager_t *pm);
+bool anvil_pass_manager_get_statistics(const anvil_pass_manager_t *pm, anvil_pass_id_t pass, anvil_pass_statistics_t *statistics);
 
 /* Run all enabled passes. ERROR is also reflected in the context error state. */
 anvil_pass_result_t anvil_pass_manager_run_func(anvil_pass_manager_t *pm,
@@ -157,6 +187,27 @@ anvil_pass_result_t anvil_pass_cse(anvil_func_t *func);
 
 /* Store-load propagation: replace load after store with stored value */
 anvil_pass_result_t anvil_pass_store_load_prop(anvil_func_t *func);
+
+/* Promote initialized, nonescaping, nonvolatile entry-block scalar allocas. */
+anvil_pass_result_t anvil_pass_mem2reg(anvil_func_t *func);
+
+/* Eliminate repeated integer expressions dominated by an available value. */
+anvil_pass_result_t anvil_pass_gvn(anvil_func_t *func);
+
+/* Scalarize nonescaping aggregate storage accessed at disjoint constant offsets. */
+anvil_pass_result_t anvil_pass_sroa(anvil_func_t *func);
+
+/* Hoist safe integer invariants in natural loops with existing preheaders. */
+anvil_pass_result_t anvil_pass_licm(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_inline(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_unroll(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_vectorize(anvil_func_t *func);
+
+/* Propagate integer constants using executable edges and sparse SSA uses. */
+anvil_pass_result_t anvil_pass_sccp(anvil_func_t *func);
+
+/* Fold integer results proven constant by bit facts and unsigned bounds. */
+anvil_pass_result_t anvil_pass_known_bits(anvil_func_t *func);
 
 #ifdef __cplusplus
 }

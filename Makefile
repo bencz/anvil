@@ -20,8 +20,15 @@ EXAMPLES_DIR = examples
 LIB_NAME = libanvil.a
 LIB_PATH = $(LIB_DIR)/$(LIB_NAME)
 
+# Host platform implementation (independent of the generated target).
+HOST_PLATFORM ?= posix
+ifeq ($(OS),Windows_NT)
+HOST_PLATFORM = windows
+endif
+
 # Source files
 CORE_SRCS = \
+	$(SRC_DIR)/core/atomic.c \
 	$(SRC_DIR)/core/context.c \
 	$(SRC_DIR)/core/cpu_table.c \
 	$(SRC_DIR)/core/types.c \
@@ -35,26 +42,70 @@ CORE_SRCS = \
 	$(SRC_DIR)/core/verify.c
 
 BACKEND_SRCS = \
-	$(SRC_DIR)/backend/x86/x86.c \
-	$(SRC_DIR)/backend/x86/x86_helpers.c \
-	$(SRC_DIR)/backend/x86/x86_mir.c \
-	$(SRC_DIR)/backend/x86_64/x86_64.c \
-	$(SRC_DIR)/backend/x86_64/x86_64_helpers.c \
-	$(SRC_DIR)/backend/x86_64/x86_64_mir.c \
-	$(SRC_DIR)/backend/mainframe/mainframe_mir.c \
-	$(SRC_DIR)/backend/s370/s370.c \
-	$(SRC_DIR)/backend/s370_xa/s370_xa.c \
-	$(SRC_DIR)/backend/s390/s390.c \
-	$(SRC_DIR)/backend/zarch/zarch.c \
-	$(SRC_DIR)/backend/ppc/ppc_mir.c \
-	$(SRC_DIR)/backend/ppc32/ppc32.c \
-	$(SRC_DIR)/backend/ppc64/ppc64.c \
-	$(SRC_DIR)/backend/ppc64le/ppc64le.c \
+	$(SRC_DIR)/backend/common/gnu_data.c \
+	$(SRC_DIR)/backend/x86/targets/x86_32.c \
+	$(SRC_DIR)/backend/x86/targets/x86_64.c \
+	$(SRC_DIR)/backend/x86/x86_32_helpers.c \
+	$(SRC_DIR)/backend/x86/x86_64_helpers.c \
+	$(SRC_DIR)/backend/x86/x86_32_lower.c \
+	$(SRC_DIR)/backend/x86/x86_64_lower.c \
+	$(SRC_DIR)/backend/x86/x86_32_legal.c \
+	$(SRC_DIR)/backend/x86/x86_64_legal.c \
+	$(SRC_DIR)/backend/x86/x86_32_codegen.c \
+	$(SRC_DIR)/backend/x86/x86_64_codegen.c \
+	$(SRC_DIR)/backend/x86/abi/x86_32_abi.c \
+	$(SRC_DIR)/backend/x86/abi/x86_64_abi.c \
+	$(SRC_DIR)/backend/x86/abi/x86_64_varargs.c \
+	$(SRC_DIR)/backend/x86/asm/gas32.c \
+	$(SRC_DIR)/backend/x86/asm/gas64.c \
+	$(SRC_DIR)/backend/systemz/systemz_target.c \
+	$(SRC_DIR)/backend/systemz/systemz_lower.c \
+	$(SRC_DIR)/backend/systemz/systemz_legal.c \
+	$(SRC_DIR)/backend/systemz/systemz_codegen.c \
+	$(SRC_DIR)/backend/systemz/abi/mvs_arena_31.c \
+	$(SRC_DIR)/backend/systemz/abi/mvs_arena_64.c \
+	$(SRC_DIR)/backend/systemz/asm/hlasm.c \
+	$(SRC_DIR)/backend/systemz/asm/hlasm_data.c \
+	$(SRC_DIR)/backend/systemz/asm/hlasm_names.c \
+	$(SRC_DIR)/backend/systemz/asm/hlasm_dispatch.c \
+	$(SRC_DIR)/backend/systemz/targets/s370.c \
+	$(SRC_DIR)/backend/systemz/targets/s370_xa.c \
+	$(SRC_DIR)/backend/systemz/targets/s390.c \
+	$(SRC_DIR)/backend/systemz/targets/zarch.c \
+	$(SRC_DIR)/backend/ppc/ppc_target.c \
+	$(SRC_DIR)/backend/ppc/ppc_lower.c \
+	$(SRC_DIR)/backend/ppc/ppc_legal.c \
+	$(SRC_DIR)/backend/ppc/ppc_emit.c \
+	$(SRC_DIR)/backend/ppc/ppc_codegen.c \
+	$(SRC_DIR)/backend/ppc/abi/elf32.c \
+	$(SRC_DIR)/backend/ppc/abi/elfv1.c \
+	$(SRC_DIR)/backend/ppc/abi/elfv2.c \
+	$(SRC_DIR)/backend/ppc/targets/ppc32.c \
+	$(SRC_DIR)/backend/ppc/targets/ppc64.c \
+	$(SRC_DIR)/backend/ppc/targets/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
+	$(SRC_DIR)/backend/arm64/arm64_varargs.c \
 	$(SRC_DIR)/backend/arm64/arm64_mir.c
 
+ANALYSIS_SRCS = \
+	$(SRC_DIR)/analysis/loops.c \
+	$(SRC_DIR)/analysis/dominance_frontier.c \
+	$(SRC_DIR)/analysis/alias.c \
+	$(SRC_DIR)/analysis/cfg.c \
+	$(SRC_DIR)/analysis/def_use.c
+
 OPT_SRCS = \
+	$(SRC_DIR)/opt/call_order.c \
+	$(SRC_DIR)/opt/inline.c \
+	$(SRC_DIR)/opt/unroll.c \
+	$(SRC_DIR)/opt/vectorize.c \
+	$(SRC_DIR)/opt/mem2reg.c \
+	$(SRC_DIR)/opt/sroa.c \
+	$(SRC_DIR)/opt/licm.c \
+	$(SRC_DIR)/opt/loop_utils.c \
+	$(SRC_DIR)/opt/sccp.c \
+	$(SRC_DIR)/opt/known_bits.c \
 	$(SRC_DIR)/opt/opt.c \
 	$(SRC_DIR)/opt/const_fold.c \
 	$(SRC_DIR)/opt/dce.c \
@@ -68,10 +119,17 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/store_load_prop.c
 
 MACHINE_SRCS = \
+	$(SRC_DIR)/machine/parallel_copy.c \
+	$(SRC_DIR)/machine/liveness.c \
+	$(SRC_DIR)/machine/verify_alloc.c \
 	$(SRC_DIR)/machine/machine_ir.c \
 	$(SRC_DIR)/machine/regalloc.c
 
-ALL_SRCS = $(CORE_SRCS) $(BACKEND_SRCS) $(OPT_SRCS) $(MACHINE_SRCS)
+PLATFORM_SRCS = \
+	$(SRC_DIR)/platform/$(HOST_PLATFORM)/registry.c \
+	$(SRC_DIR)/platform/$(HOST_PLATFORM)/stream.c
+
+ALL_SRCS = $(PLATFORM_SRCS) $(CORE_SRCS) $(BACKEND_SRCS) $(ANALYSIS_SRCS) $(OPT_SRCS) $(MACHINE_SRCS)
 
 # Object files
 OBJS = $(ALL_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -95,6 +153,17 @@ EXAMPLES = \
 	$(BUILD_DIR)/examples/ir_dump_test
 
 TESTS = \
+	$(BUILD_DIR)/tests/global_memory_regression \
+	$(BUILD_DIR)/tests/arithmetic_optimization_regression \
+	$(BUILD_DIR)/tests/analysis_regression \
+	$(BUILD_DIR)/tests/atomic_regression \
+	$(BUILD_DIR)/tests/inline_regression \
+	$(BUILD_DIR)/tests/unroll_regression \
+	$(BUILD_DIR)/tests/interval_split_regression \
+	$(BUILD_DIR)/tests/vector_regression \
+	$(BUILD_DIR)/tests/loop_preheader_regression \
+	$(BUILD_DIR)/tests/abi_plan_regression \
+	$(BUILD_DIR)/tests/optimization_pipeline_regression \
 	$(BUILD_DIR)/tests/core_arm64_regression \
 	$(BUILD_DIR)/tests/ir_verifier_regression \
 	$(BUILD_DIR)/tests/optimizer_regression \
@@ -103,6 +172,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/x86_64_mir_lowering_regression \
 	$(BUILD_DIR)/tests/x86_mir_lowering_regression \
 	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
+	$(BUILD_DIR)/tests/backend_dispatch_regression \
 	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression \
 	$(BUILD_DIR)/tests/fcmp_backend_regression \
 	$(BUILD_DIR)/tests/typed_gep_backend_regression \
@@ -166,9 +236,11 @@ all: lib examples
 
 lib: $(LIB_PATH)
 
-$(LIB_PATH): $(OBJS)
+$(LIB_PATH): $(OBJS) Makefile
 	@mkdir -p $(LIB_DIR)
-	$(AR) $(ARFLAGS) $@ $^
+	$(RM) $@.tmp
+	$(AR) $(ARFLAGS) $@.tmp $(OBJS)
+	mv -f $@.tmp $@
 	@echo "Built $(LIB_PATH)"
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
@@ -217,9 +289,9 @@ test-win64-abi: $(BUILD_DIR)/tests/win64_abi_codegen
 test-fcmp-i1-runtime: $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
 	BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
 
-$(BUILD_DIR)/tests/%: tests/%.c $(LIB_PATH)
+$(BUILD_DIR)/tests/%: tests/%.c tests/platform/$(HOST_PLATFORM)/host.c tests/platform/host.h $(LIB_PATH)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
+	$(CC) $(CFLAGS) $< tests/platform/$(HOST_PLATFORM)/host.c -o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_lexer_regression: \
@@ -402,14 +474,14 @@ $(BUILD_DIR)/tests/smalltalk_primitive_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_runtime_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/tests/runtime_test.c \
 		samples/smalltalk/include/st_value.h \
 		samples/smalltalk/include/st_dispatch.h \
 		samples/smalltalk/include/st_runtime.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/tests/runtime_test.c \
 		-o $@ $(LDFLAGS) -pthread
 	@echo "Built $@"
@@ -435,7 +507,7 @@ $(BUILD_DIR)/tests/smalltalk_core_primitives_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_lookup_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/tests/lookup_test.c \
 		samples/smalltalk/include/st_value.h \
@@ -443,14 +515,14 @@ $(BUILD_DIR)/tests/smalltalk_lookup_regression: \
 		samples/smalltalk/include/st_lookup.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/tests/lookup_test.c \
 		-o $@ $(LDFLAGS) -pthread
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_send_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/tests/send_bridge_test.c \
 		samples/smalltalk/include/st_value.h \
@@ -460,14 +532,14 @@ $(BUILD_DIR)/tests/smalltalk_send_bridge_regression: \
 		samples/smalltalk/include/st_control.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/tests/send_bridge_test.c \
 		-o $@ $(LDFLAGS) -pthread
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_image_runtime_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/image_runtime.c \
@@ -477,7 +549,7 @@ $(BUILD_DIR)/tests/smalltalk_image_runtime_regression: \
 		samples/smalltalk/include/st_heap.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/image_runtime.c \
@@ -499,7 +571,7 @@ $(BUILD_DIR)/tests/smalltalk_primitive_bridge_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_heap_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/tests/heap_test.c \
@@ -510,7 +582,7 @@ $(BUILD_DIR)/tests/smalltalk_heap_regression: \
 		samples/smalltalk/include/st_control_roots.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/tests/heap_test.c \
@@ -521,7 +593,7 @@ $(BUILD_DIR)/tests/smalltalk_heap_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -534,7 +606,7 @@ $(BUILD_DIR)/tests/smalltalk_heap_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -546,7 +618,7 @@ $(BUILD_DIR)/tests/smalltalk_float_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -560,7 +632,7 @@ $(BUILD_DIR)/tests/smalltalk_float_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -573,7 +645,7 @@ $(BUILD_DIR)/tests/smalltalk_integer_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/float_primitives.c \
@@ -589,7 +661,7 @@ $(BUILD_DIR)/tests/smalltalk_integer_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/float_primitives.c \
@@ -599,7 +671,7 @@ $(BUILD_DIR)/tests/smalltalk_integer_primitives_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_integer_primitive_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -613,7 +685,7 @@ $(BUILD_DIR)/tests/smalltalk_integer_primitive_bridge_regression: \
 		samples/smalltalk/include/st_send_bridge.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -629,7 +701,7 @@ $(BUILD_DIR)/tests/smalltalk_stream_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -646,7 +718,7 @@ $(BUILD_DIR)/tests/smalltalk_stream_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -657,7 +729,7 @@ $(BUILD_DIR)/tests/smalltalk_stream_primitives_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_stream_primitive_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/compiler/primitive.c \
@@ -669,7 +741,7 @@ $(BUILD_DIR)/tests/smalltalk_stream_primitive_bridge_regression: \
 		samples/smalltalk/include/st_send_bridge.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/compiler/primitive.c \
@@ -683,18 +755,15 @@ $(BUILD_DIR)/tests/smalltalk_string_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
 		samples/smalltalk/src/runtime/primitives/float_primitives.c \
 		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
 		samples/smalltalk/src/runtime/primitives/string_primitives.c \
-		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/tests/string_primitives_test.c \
 		samples/smalltalk/include/st_string_primitives.h \
-		samples/smalltalk/include/st_block_primitives.h \
-		samples/smalltalk/tests/block_primitives_aot_harness.c \
 		samples/smalltalk/include/st_stream_primitives.h \
 		samples/smalltalk/include/st_float_primitives.h \
 		samples/smalltalk/include/st_heap_primitives.h \
@@ -705,20 +774,19 @@ $(BUILD_DIR)/tests/smalltalk_string_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
 		samples/smalltalk/src/runtime/primitives/float_primitives.c \
 		samples/smalltalk/src/runtime/primitives/stream_primitives.c \
 		samples/smalltalk/src/runtime/primitives/string_primitives.c \
-		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/tests/string_primitives_test.c \
 		-o $@ $(LDFLAGS) -pthread -lm
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_string_primitive_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -731,7 +799,7 @@ $(BUILD_DIR)/tests/smalltalk_string_primitive_bridge_regression: \
 		samples/smalltalk/include/st_send_bridge.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -749,7 +817,7 @@ $(BUILD_DIR)/tests/smalltalk_symbol_intern_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -772,7 +840,7 @@ $(BUILD_DIR)/tests/smalltalk_symbol_intern_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -786,7 +854,7 @@ $(BUILD_DIR)/tests/smalltalk_symbol_intern_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_control_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/tests/control_test.c \
 		samples/smalltalk/include/st_control.h \
@@ -795,14 +863,14 @@ $(BUILD_DIR)/tests/smalltalk_control_regression: \
 		samples/smalltalk/include/st_value.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/tests/control_test.c \
 		-o $@ $(LDFLAGS) -pthread
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_control_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_bridge.c \
 		samples/smalltalk/tests/control_bridge_test.c \
@@ -814,7 +882,7 @@ $(BUILD_DIR)/tests/smalltalk_control_bridge_regression: \
 		samples/smalltalk/include/st_control_bridge.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_bridge.c \
 		samples/smalltalk/tests/control_bridge_test.c \
@@ -822,7 +890,7 @@ $(BUILD_DIR)/tests/smalltalk_control_bridge_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_control_gc_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c \
@@ -836,7 +904,7 @@ $(BUILD_DIR)/tests/smalltalk_control_gc_regression: \
 		samples/smalltalk/include/st_heap.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/heap.c \
@@ -845,7 +913,7 @@ $(BUILD_DIR)/tests/smalltalk_control_gc_regression: \
 	@echo "Built $@"
 
 $(BUILD_DIR)/tests/smalltalk_closure_bridge_regression: \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
@@ -859,7 +927,7 @@ $(BUILD_DIR)/tests/smalltalk_closure_bridge_regression: \
 		samples/smalltalk/include/st_control_roots.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
@@ -872,7 +940,7 @@ $(BUILD_DIR)/tests/smalltalk_block_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
@@ -889,7 +957,7 @@ $(BUILD_DIR)/tests/smalltalk_block_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/control/control_bridge.c samples/smalltalk/src/runtime/heap.c \
@@ -904,7 +972,7 @@ $(BUILD_DIR)/tests/smalltalk_exception_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -922,7 +990,7 @@ $(BUILD_DIR)/tests/smalltalk_exception_primitives_regression: \
 		samples/smalltalk/src/frontend/lexer.c samples/smalltalk/src/frontend/ast.c \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/compiler/primitive.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -936,7 +1004,7 @@ $(BUILD_DIR)/tests/smalltalk_exception_primitives_regression: \
 
 $(BUILD_DIR)/tests/smalltalk_reflection_primitives_regression: \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -953,7 +1021,7 @@ $(BUILD_DIR)/tests/smalltalk_reflection_primitives_regression: \
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Isamples/smalltalk/include \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -977,7 +1045,7 @@ $(BUILD_DIR)/tests/smalltalk_reflection_lower_regression: \
 		samples/smalltalk/src/compiler/primitive.c \
 		samples/smalltalk/src/compiler/lower.c \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -1002,7 +1070,7 @@ $(BUILD_DIR)/tests/smalltalk_reflection_lower_regression: \
 		samples/smalltalk/src/compiler/primitive.c \
 		samples/smalltalk/src/compiler/lower.c \
 		samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
@@ -1021,7 +1089,7 @@ $(BUILD_DIR)/tests/smalltalk_exception_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/compiler/lower.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -1040,7 +1108,7 @@ $(BUILD_DIR)/tests/smalltalk_exception_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/compiler/lower.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -1058,7 +1126,7 @@ $(BUILD_DIR)/tests/smalltalk_dnu_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/lower.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -1076,7 +1144,7 @@ $(BUILD_DIR)/tests/smalltalk_dnu_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/lower.c \
-		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c \
+		samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
@@ -1093,7 +1161,7 @@ $(BUILD_DIR)/tests/smalltalk_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1141,7 +1209,7 @@ $(BUILD_DIR)/tests/smalltalk_lower_regression: \
 		samples/smalltalk/src/frontend/parser.c samples/smalltalk/src/frontend/sema.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1191,7 +1259,7 @@ $(BUILD_DIR)/tests/smalltalk_aot_compile_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1223,7 +1291,7 @@ $(BUILD_DIR)/tests/smalltalk_aot_compile_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1251,7 +1319,7 @@ $(BUILD_DIR)/tests/smalltalk_artifact_bundle_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1273,7 +1341,7 @@ $(BUILD_DIR)/tests/smalltalk_artifact_bundle_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
 		samples/smalltalk/src/runtime/primitives/heap_primitives.c \
@@ -1326,7 +1394,7 @@ $(BUILD_DIR)/tests/smalltalk_application_aot_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
@@ -1338,7 +1406,7 @@ $(BUILD_DIR)/tests/smalltalk_application_aot_regression: \
 		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
 		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
-		samples/smalltalk/src/runtime/primitives/product_primitives.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c samples/smalltalk/src/runtime/primitives/fiber_catalog.c samples/smalltalk/src/runtime/primitives/socket_catalog.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/image_runtime.c \
 		samples/smalltalk/src/runtime/closure_bridge.c \
@@ -1360,7 +1428,7 @@ $(BUILD_DIR)/tests/smalltalk_application_aot_regression: \
 		samples/smalltalk/src/frontend/source_bundle.c \
 		samples/smalltalk/src/frontend/class_graph.c samples/smalltalk/src/frontend/selector.c \
 		samples/smalltalk/src/compiler/primitive.c samples/smalltalk/src/runtime/value.c \
-		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/heap.c \
+		samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c samples/smalltalk/src/runtime/heap.c \
 		samples/smalltalk/src/runtime/control/control.c \
 		samples/smalltalk/src/runtime/control/control_roots.c \
 		samples/smalltalk/src/runtime/primitives/core_primitives.c \
@@ -1372,7 +1440,7 @@ $(BUILD_DIR)/tests/smalltalk_application_aot_regression: \
 		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
 		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
-		samples/smalltalk/src/runtime/primitives/product_primitives.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c samples/smalltalk/src/runtime/primitives/fiber_catalog.c samples/smalltalk/src/runtime/primitives/socket_catalog.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/image_runtime.c \
 		samples/smalltalk/src/runtime/closure_bridge.c \
@@ -1436,7 +1504,7 @@ SMALLTALK_APPLICATION_COMPILER_SRCS = \
 	samples/smalltalk/src/frontend/selector.c \
 	samples/smalltalk/src/compiler/primitive.c \
 	samples/smalltalk/src/runtime/value.c \
-	samples/smalltalk/src/runtime/runtime.c \
+	samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/$(HOST_PLATFORM)/runtime.c \
 	samples/smalltalk/src/runtime/heap.c \
 	samples/smalltalk/src/runtime/control/control.c \
 	samples/smalltalk/src/runtime/control/control_roots.c \
@@ -1449,7 +1517,7 @@ SMALLTALK_APPLICATION_COMPILER_SRCS = \
 	samples/smalltalk/src/runtime/primitives/block_primitives.c \
 	samples/smalltalk/src/runtime/primitives/exception_primitives.c \
 	samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
-	samples/smalltalk/src/runtime/primitives/product_primitives.c \
+	samples/smalltalk/src/runtime/primitives/product_primitives.c samples/smalltalk/src/runtime/primitives/fiber_catalog.c samples/smalltalk/src/runtime/primitives/socket_catalog.c \
 	samples/smalltalk/src/runtime/lookup.c \
 	samples/smalltalk/src/runtime/send_bridge.c \
 	samples/smalltalk/src/runtime/image_runtime.c \
@@ -1480,6 +1548,7 @@ $(BUILD_DIR)/samples/smalltalk/st-aotc: \
 	@echo "Built $@"
 
 SMALLTALK_PRODUCT_RUNTIME_SRCS = \
+	$(wildcard samples/smalltalk/src/platform/$(HOST_PLATFORM)/*.c) \
 	samples/smalltalk/src/compiler/primitive.c \
 	$(wildcard samples/smalltalk/src/runtime/*.c) \
 	$(wildcard samples/smalltalk/src/runtime/control/*.c) \
@@ -1615,12 +1684,4 @@ $(BUILD_DIR)/core/backend.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/a
 $(BUILD_DIR)/core/verify.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h
 $(BUILD_DIR)/machine/machine_ir.o: $(INCLUDE_DIR)/anvil/anvil_machine.h src/machine/machine_internal.h
 $(BUILD_DIR)/machine/regalloc.o: $(INCLUDE_DIR)/anvil/anvil_machine.h src/machine/machine_internal.h
-$(BUILD_DIR)/backend/mainframe/mainframe_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_mainframe_mir.h
-$(BUILD_DIR)/backend/ppc/ppc_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_ppc_mir.h
 $(BUILD_DIR)/backend/arm64/arm64_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_arm64_mir.h
-$(BUILD_DIR)/backend/x86/x86.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_mir.h src/backend/x86/x86_internal.h
-$(BUILD_DIR)/backend/x86/x86_helpers.o: src/backend/x86/x86_internal.h $(INCLUDE_DIR)/anvil/anvil_internal.h
-$(BUILD_DIR)/backend/x86/x86_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_mir.h src/backend/x86/x86_internal.h
-$(BUILD_DIR)/backend/x86_64/x86_64.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_64_mir.h src/backend/x86_64/x86_64_internal.h
-$(BUILD_DIR)/backend/x86_64/x86_64_helpers.o: src/backend/x86_64/x86_64_internal.h $(INCLUDE_DIR)/anvil/anvil_internal.h
-$(BUILD_DIR)/backend/x86_64/x86_64_mir.o: $(INCLUDE_DIR)/anvil/anvil.h $(INCLUDE_DIR)/anvil/anvil_internal.h $(INCLUDE_DIR)/anvil/anvil_machine.h $(INCLUDE_DIR)/anvil/anvil_x86_64_mir.h src/backend/x86_64/x86_64_internal.h

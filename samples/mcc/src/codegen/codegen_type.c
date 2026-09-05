@@ -30,7 +30,7 @@ static anvil_type_t *codegen_check_object_layout(mcc_codegen_t *cg,
     return NULL;
 }
 
-bool codegen_type_pass_by_reference(mcc_type_t *type)
+bool codegen_type_is_record(mcc_type_t *type)
 {
     type = codegen_type_unwrap(type);
     return type && (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION);
@@ -38,12 +38,8 @@ bool codegen_type_pass_by_reference(mcc_type_t *type)
 
 anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type)
 {
-    anvil_type_t *value_type = codegen_type(cg, type);
-    if (!value_type) return NULL;
-    if (codegen_type_pass_by_reference(type)) {
-        return anvil_type_ptr(cg->anvil_ctx, value_type);
-    }
-    return value_type;
+    anvil_abi_value_plan_t plan;
+    return codegen_abi_plan(cg, type, false, &plan) ? plan.transport_type : NULL;
 }
 
 static anvil_type_t *codegen_record_fail(mcc_codegen_t *cg,
@@ -245,8 +241,12 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
         case TYPE_UNION:
             return codegen_record_type(cg, type);
         case TYPE_FUNCTION: {
-            anvil_type_t *ret_type = codegen_type(cg, type->data.function.return_type);
-            if (!ret_type) return NULL;
+            anvil_abi_value_plan_t result_plan;
+            if (!codegen_abi_plan(cg, type->data.function.return_type, true, &result_plan))
+                return NULL;
+
+            anvil_type_t *ret_type = result_plan.transport_type;
+            size_t hidden = result_plan.kind == ANVIL_ABI_VALUE_INDIRECT ? 1 : 0;
             int num_params = type->data.function.num_params;
             if (num_params < 0 ||
                 (size_t)num_params > SIZE_MAX / sizeof(anvil_type_t *)) {
@@ -254,8 +254,10 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                 return NULL;
             }
             anvil_type_t **param_types = mcc_alloc_array(cg->mcc_ctx,
-                num_params > 0 ? (size_t)num_params : 1, sizeof(*param_types));
+                (size_t)num_params + 1, sizeof(*param_types));
             if (!param_types) return NULL;
+            if (hidden)
+                param_types[0] = ret_type;
             
             int i = 0;
             for (mcc_func_param_t *p = type->data.function.params; p; p = p->next, i++) {
@@ -264,8 +266,9 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                               "function parameter count does not match list");
                     return NULL;
                 }
-                param_types[i] = codegen_param_type(cg, p->type);
-                if (!param_types[i]) return NULL;
+                param_types[i + hidden] = codegen_param_type(cg, p->type);
+                if (!param_types[i + hidden])
+                    return NULL;
             }
             if (i != num_params) {
                 mcc_error(cg->mcc_ctx,
@@ -273,7 +276,7 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                 return NULL;
             }
             
-            return anvil_type_func(cg->anvil_ctx, ret_type, param_types, num_params,
+            return anvil_type_func(cg->anvil_ctx, ret_type, param_types, (size_t)num_params + hidden,
                                    type->data.function.is_variadic);
         }
         default:

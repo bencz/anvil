@@ -287,6 +287,7 @@ static bool build_runtime_object(
         "samples/smalltalk/src/compiler/primitive.c",
         "samples/smalltalk/src/runtime/value.c",
         "samples/smalltalk/src/runtime/runtime.c",
+        "samples/smalltalk/src/platform/posix/runtime.c",
         "samples/smalltalk/src/runtime/heap.c",
         "samples/smalltalk/src/runtime/lookup.c",
         "samples/smalltalk/src/runtime/send_bridge.c",

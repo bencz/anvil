@@ -76,7 +76,12 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym);
 
 /* Convert MCC type to ANVIL type */
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type);
-bool codegen_type_pass_by_reference(mcc_type_t *type);
+bool codegen_type_is_record(mcc_type_t *type);
+bool codegen_abi_plan(mcc_codegen_t *cg, mcc_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
+anvil_value_t *codegen_abi_temporary(mcc_codegen_t *cg, mcc_type_t *type, size_t alignment);
+anvil_value_t *codegen_abi_pack(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const anvil_abi_value_plan_t *plan);
+bool codegen_abi_unpack(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *value, anvil_value_t *pointer, const anvil_abi_value_plan_t *plan);
+bool codegen_copy_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *source, anvil_value_t *destination, const anvil_memory_access_t *access);
 anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type);
 
 /* Build an integer constant whose Anvil type matches `anvil_type`.
@@ -146,5 +151,8 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func);
 
 /* Generate code for global variable */
 void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var);
+
+anvil_value_t *codegen_load_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const char *name);
+bool codegen_store_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *value, anvil_value_t *pointer);
 
 #endif /* MCC_CODEGEN_INTERNAL_H */

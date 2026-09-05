@@ -436,6 +436,20 @@ const mcc_c_std_info_t *mcc_c_std_get_info(mcc_c_std_t std)
     return NULL;
 }
 
+static bool standard_name_matches(const char *expected, const char *name)
+{
+    while (*expected && *name)
+    {
+        if (tolower((unsigned char)*expected) != tolower((unsigned char)*name))
+            return false;
+
+        expected++;
+        name++;
+    }
+
+    return *expected == *name;
+}
+
 mcc_c_std_t mcc_c_std_from_name(const char *name)
 {
     if (!name) {
@@ -449,7 +463,8 @@ mcc_c_std_t mcc_c_std_from_name(const char *name)
     
     /* Search in name table */
     for (size_t i = 0; c_std_name_table[i].name != NULL; i++) {
-        if (strcasecmp(c_std_name_table[i].name, name) == 0) {
+        if (standard_name_matches(c_std_name_table[i].name, name))
+        {
             return c_std_name_table[i].std;
         }
     }

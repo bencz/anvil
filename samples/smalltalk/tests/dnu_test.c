@@ -349,7 +349,7 @@ static void build_descriptors(fixture_t *fixture)
             : normal_super;
         fixture->class_storage[class_id - 1u] = (StClassDescriptor) {
             .class_id = class_id,
-            .superclass_id = superclass,
+            .superclass_id = meta && normal_super == 0u ? C_CLASS : superclass,
             .metaclass_id = meta ? class_id : class_id + 1u,
             .default_shape_id = class_id,
             .flags = meta ? ST_CLASS_METACLASS : 0u,

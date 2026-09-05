@@ -29,48 +29,96 @@ ARM64 established as the reference path: **lower source IR to MachineIR ->
 verify target legality -> coalesce copies -> linear-scan register allocation ->
 materialize spills -> emit assembly**. ARM64, x86, x86-64, and the PowerPC family
 share this contract; the mainframe (S/370 family) backends use the same pipeline
-through their own `*_mir.c` lowering. The linear-scan allocator and the
+through the `systemz/` family components. The linear-scan allocator and the
 copy-coalescing / spill-materialization passes are target-independent and live in
 `src/machine/` (`regalloc.c`, `machine_ir.c`).
 
-**Example: Shared PowerPC Backend Organization**
+**PowerPC and SystemZ domain organization**
 
-PowerPC targets share one MachineIR-backed implementation with
-target-specific descriptors for PPC32, PPC64 ELFv1, and PPC64LE ELFv2:
+Each family owns lowering, MIR legality, allocation and emission. Target
+identity, linkage policy and assembler syntax have explicit owners:
 
-```
+```text
 src/backend/ppc/
-└── ppc_mir.c         # Source IR -> MachineIR -> PPC assembly
+    ppc_lower.c, ppc_legal.c, ppc_emit.c, ppc_codegen.c
+    ppc_target.c, ppc_internal.h
+    targets/ppc32.c, targets/ppc64.c, targets/ppc64le.c
+    abi/elf32.c, abi/elfv1.c, abi/elfv2.c
 
-src/backend/ppc32/ppc32.c    # thin backend_ops driver (PPC32)
-src/backend/ppc64/ppc64.c    # thin backend_ops driver (PPC64 ELFv1)
-src/backend/ppc64le/ppc64le.c # thin backend_ops driver (PPC64LE ELFv2)
+src/backend/systemz/
+    systemz_lower.c, systemz_legal.c, systemz_codegen.c
+    systemz_target.c, systemz_internal.h
+    targets/s370.c, targets/s370_xa.c, targets/s390.c, targets/zarch.c
+    abi/mvs_arena_31.c, abi/mvs_arena_64.c
+    asm/hlasm.c, asm/hlasm_data.c, asm/hlasm_names.c, asm/hlasm_dispatch.c
 ```
 
-**Example: Shared x86 / x86-64 Backend Organization**
+PPC ABI vtables select ELF32, ELFv1 descriptor entries/calls, or ELFv2 global and
+local entry conventions. PPC currently emits GAS. The descriptor still supplies
+word width, endianness, frame offsets and register pools to common lowering.
 
-Both x86 backends were rewritten onto the generic MachineIR pipeline, mirroring
-ARM64. Each is split into a thin `backend_ops` driver plus a large `*_mir.c`
-that holds lowering, legality, the regalloc bridge, and emission:
+SystemZ descriptors select a linkage vtable and a printer vtable. The family
+name groups the S/370 lineage; it does not collapse four ISAs into one target.
+The current MVS-oriented arena implementation is not a certified native z/OS
+ABI. [SystemZ implementation notes](MAINFRAME.md) distinguish implemented
+behavior, IBM manual requirements and outstanding incompatibilities.
 
-```
-src/backend/x86_64/
-├── x86_64.c           # thin backend_ops driver (init/cleanup/codegen entry)
-├── x86_64_internal.h  # backend state, register constants, ABI descriptor struct
-├── x86_64_helpers.c   # type size/alignment helpers
-└── x86_64_mir.c       # Source IR -> MachineIR -> x86-64 assembly (SysV/Darwin/Win64)
+To extend these families, put architecture capabilities in `targets/`, linkage
+entry/call behavior in `abi/`, and syntax-specific printing in the assembler
+component. Wire descriptors and vtables rather than adding architecture tests
+to unrelated components or using preprocessor branches. An ABI and printer may
+only be paired when their emission contracts are implemented.
 
+The reorganization preserves public backend registration and MIR entry points.
+Empty modules and declarations also validate their requested configuration.
+
+**x86 family organization**
+
+`src/backend/x86/` owns both 32-bit x86 and x86-64. The family name does not
+imply a pointer width. Each target keeps its own lowering, legality checks and
+instruction emission because their register sets and ABI requirements differ.
+
+```text
 src/backend/x86/
-├── x86.c              # thin backend_ops driver
-├── x86_internal.h     # backend state, register constants, CC/platform descriptors
-├── x86_helpers.c      # type sizing + byte-register name tables
-└── x86_mir.c          # Source IR -> MachineIR -> x86 assembly (cdecl/stdcall/fastcall)
+    x86_32_internal.h, x86_64_internal.h   Internal mode-specific contracts
+    x86_32_helpers.c, x86_64_helpers.c     Register names and type helpers
+    x86_32_lower.c, x86_64_lower.c         Source IR to MIR
+    x86_32_legal.c, x86_64_legal.c         Legality and allocation bridge
+    x86_32_codegen.c, x86_64_codegen.c     Function/module coordination and globals
+    targets/
+        x86_32.c                         Identity, lifecycle and backend vtable
+        x86_64.c                         Identity, lifecycle and capability callbacks
+    abi/
+        x86_32_abi.c                     cdecl/stdcall/fastcall and symbol decoration
+        x86_64_abi.c                     SysV/Darwin/Win64 descriptors and aggregate classification
+        x86_64_varargs.c                 Native va_list operations
+    asm/
+        gas32.c                         Allocated MIR to 32-bit GAS/AT&T
+        gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```
 
-The public per-target MIR entry points are declared in
-`include/anvil/anvil_x86_64_mir.h` and `include/anvil/anvil_x86_mir.h`
-(e.g. `anvil_x86_64_lower_func_to_mir`, `anvil_x86_64_verify_mir_legal`,
-`anvil_x86_64_regalloc_mir`, `anvil_x86_64_emit_mir_abi`, and the x86 analogs).
+The existing `anvil_backend_ops_t` vtables retain registration, codegen,
+aggregate classification, varargs and capability dispatch. ABI descriptors
+supply register pools, call clobbers, argument placement and frame properties.
+Changing the family layout adds no architecture/platform preprocessor branches.
+
+32-bit lowering still legalizes wide integers into pairs and implements
+cdecl/stdcall/fastcall cleanup. The 64-bit path retains SysV/Darwin/Win64,
+atomics, 128-bit floating-point vectors and native variadic cursors. This
+organization does not make those 64-bit features available on the 32-bit path.
+
+The public headers `include/anvil/anvil_x86_mir.h` and
+`include/anvil/anvil_x86_64_mir.h`, architecture enums and function names are
+unchanged. Internal component headers are not public API. The common allocator
+remains in `src/machine/` rather than being duplicated into the family.
+
+**Shared GAS data emission**
+
+The GAS backends share data emission through `src/backend/common/gnu_data.h`
+and `gnu_data.c`. The header declares the string pool and initializer interface;
+the implementation handles integer/FP bit patterns, relocations, nested aggregate
+layout, padding and string literals. Each backend chooses its sections and symbol
+spelling through the existing callback. HLASM data emission remains in SystemZ.
 
 **Example: ARM64 Backend Organization**
 
@@ -111,13 +159,13 @@ should follow ARM64's MachineIR structure.
 | x86-64 | `ANVIL_ARCH_X86_64` | MachineIR | SysV (Linux/BSD), Darwin, Win64 | GAS/AT&T | Linux/SysV and Win64 execution-tested; Darwin emit-validated |
 | x86 (32-bit) | `ANVIL_ARCH_X86` | MachineIR | cdecl, stdcall, fastcall; ELF/Mach-O/COFF decoration | GAS/AT&T | ELF execution-tested (`as --32` / `gcc -m32`); Mach-O/COFF emit-validated only |
 | ARM64 | `ANVIL_ARCH_ARM64` | MachineIR (reference) | AAPCS64 (Linux SysV), Darwin | GAS | Reference path; execution-tested |
-| PPC32 | `ANVIL_ARCH_PPC32` | MachineIR | System V (ELF) | GAS | Shared `ppc_mir.c` |
-| PPC64 (ELFv1) | `ANVIL_ARCH_PPC64` | MachineIR | ELFv1 (BE) | GAS | Shared `ppc_mir.c` |
-| PPC64LE (ELFv2) | `ANVIL_ARCH_PPC64LE` | MachineIR | ELFv2 (LE) | GAS | Shared `ppc_mir.c` |
-| S/370 | `ANVIL_ARCH_S370` | MachineIR | GCCMVS/MVS linkage | HLASM | Mainframe (`mainframe_mir`) |
-| S/370-XA | `ANVIL_ARCH_S370_XA` | MachineIR | MVS linkage | HLASM | Mainframe |
-| S/390 | `ANVIL_ARCH_S390` | MachineIR | MVS linkage | HLASM | Mainframe |
-| z/Architecture | `ANVIL_ARCH_ZARCH` | MachineIR | MVS linkage | HLASM | Mainframe |
+| PPC32 | `ANVIL_ARCH_PPC32` | MachineIR | System V (ELF) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
+| PPC64 (ELFv1) | `ANVIL_ARCH_PPC64` | MachineIR | ELFv1 (BE) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
+| PPC64LE (ELFv2) | `ANVIL_ARCH_PPC64LE` | MachineIR | ELFv2 (LE) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
+| S/370 | `ANVIL_ARCH_S370` | MachineIR | ANVIL MVS-oriented arena | HLASM | Lowering/text regressions; native linkage incomplete |
+| S/370-XA | `ANVIL_ARCH_S370_XA` | MachineIR | ANVIL MVS-oriented arena | HLASM | Lowering/text regressions; native linkage incomplete |
+| S/390 | `ANVIL_ARCH_S390` | MachineIR | ANVIL MVS-oriented arena | HLASM | Lowering/text regressions; native linkage incomplete |
+| z/Architecture | `ANVIL_ARCH_ZARCH` | MachineIR | ANVIL MVS-oriented arena | HLASM | Lowering/text regressions; native linkage incomplete |
 
 > **Output syntax:** All non-mainframe backends currently emit **GAS / AT&T
 > syntax only**. Intel/NASM/MASM output is not exposed until an emitter
@@ -702,16 +750,11 @@ anvil_register_backend(&anvil_backend_arm64);
 anvil_register_backend(&anvil_backend_myarch);  // Add your backend
 ```
 
-Add your source files to the `Makefile` (a MachineIR backend is typically a thin
-driver plus an `*_mir.c`):
-
-```makefile
-BACKEND_SRCS = \
-    src/backend/x86/x86.c src/backend/x86/x86_mir.c \
-    src/backend/x86_64/x86_64.c src/backend/x86_64/x86_64_mir.c \
-    src/backend/arm64/arm64.c src/backend/arm64/arm64_mir.c \
-    src/backend/myarch/myarch.c src/backend/myarch/myarch_mir.c  # Add yours
-```
+Add every component source to `BACKEND_SRCS` in the `Makefile`. Use the
+explicit family source lists as examples, and give source files unique basenames
+where they become archive members. Compiler-generated dependency files track
+internal headers. Library creation replaces the archive so removed source files
+cannot survive as stale object members.
 
 ## Calling Conventions
 
@@ -723,8 +766,8 @@ The x86 and x86-64 backends select a definition's convention from the canonical
 `func->type->data.func.cc`; CALL lowering consumes the callee-derived
 `instr->call_cc`. No backend may silently map an incompatible convention.
 Platform decoration is selected from `ctx->abi`. See the ABI/CC descriptor tables in
-`src/backend/x86_64/x86_64_mir.c` (`anvil_x64_abi_desc_t x64_abi_descs[]`) and
-`src/backend/x86/x86_mir.c` (`anvil_x86_cc_desc_t x86_cc_descs[]` /
+`src/backend/x86/abi/x86_64_abi.c` (`anvil_x64_abi_desc_t x64_abi_descs[]`) and
+`src/backend/x86/abi/x86_32_abi.c` (`anvil_x86_cc_desc_t x86_cc_descs[]` /
 `anvil_x86_plat_desc_t x86_plat_descs[]`).
 
 **x86 (32-bit) — cdecl / stdcall / fastcall:**
@@ -807,52 +850,18 @@ The ARM64 backend includes several important features for robust code generation
 - Minimum frame: 32 bytes
 - No function descriptors (uses `.localentry`)
 
-**IBM Mainframe (MVS/GCCMVS):**
-- R1 points to parameter list
-- Each entry is address of parameter
-- High bit of last entry is set (VL bit)
-- VL bit is NOT cleared when loading parameters (allows full 31/64-bit addressing)
+**SystemZ family linkage:**
 
-### GCCMVS Conventions for Mainframes
+The existing HLASM implementation uses R1 address lists and a caller-owned
+arena with chained save areas. It sets and clears the terminal parameter bit;
+AMODE and RMODE come from the selected target descriptor. R11 is the stable
+frame base, while R13 points to the outgoing save area.
 
-ANVIL generates code compatible with GCCMVS conventions:
-
-| Convention | Implementation |
-|------------|----------------|
-| **CSECT** | Blank (no module name prefix) |
-| **AMODE/RMODE** | `AMODE ANY`, `RMODE ANY` |
-| **Function Names** | UPPERCASE (e.g., `FACTORIAL`, `SUM_ARRAY`) |
-| **Block Labels** | `FUNCNAME$BLOCKNAME` format |
-| **Stack Allocation** | Direct stack offset from R13 (no GETMAIN/FREEMAIN) |
-| **VL Bit** | NOT cleared (allows full addressing) |
-
-**Why Stack Allocation Instead of GETMAIN:**
-- **Performance**: `LA R2,72(,R13)` is faster than `GETMAIN R,LV=size`
-- **Simplicity**: No need to save/restore R15 around FREEMAIN in epilogue
-- **Compatibility**: Matches GCCMVS output for easier interoperability
-
-**Prologue (Stack-Based):**
-```hlasm
-FACTORIAL DS    0H
-         STM   R14,R12,12(R13)    Save caller's registers
-         LR    R12,R15            Copy entry point to base reg
-         USING FACTORIAL,R12      Establish addressability
-         LR    R11,R1             Save parameter list pointer
-*        Set up save area chain (stack allocation)
-         LA    R2,72(,R13)        R2 -> our save area
-         ST    R13,4(,R2)         Chain: new->prev = caller's
-         ST    R2,8(,R13)         Chain: caller->next = new
-         LR    R13,R2             R13 -> our save area
-```
-
-**Epilogue (Stack-Based):**
-```hlasm
-*        Function epilogue
-         L     R13,4(,R13)        Restore caller's SA pointer
-         L     R14,12(,R13)       Restore return address
-         LM    R0,R12,20(,R13)    Restore R0-R12
-         BR    R14                Return to caller
-```
+This is an ANVIL convention with known native ABI gaps. It does not establish
+GCCMVS interoperability or implement the IBM F4SA layout. Linkage entry/exit
+code belongs to `systemz/abi/`; instruction, data and symbol printing belongs
+to `systemz/asm/`. See [the implementation and manual comparison](MAINFRAME.md)
+before extending or integrating this target family.
 
 ### Handling Return Values
 
@@ -864,8 +873,9 @@ FACTORIAL DS    0H
 - Integer: X0
 - Float: D0 (double) or S0 (float)
 
-**IBM Mainframe:**
-- R15 contains return value
+**SystemZ arena convention:**
+- Integer: R15
+- Float: F0
 
 ## Register Allocation
 
@@ -1176,7 +1186,7 @@ Both x86 backends follow the ARM64 MachineIR contract
 ### Multi-ABI selection (x86-64)
 
 The descriptor struct `anvil_x64_abi_desc_t` and table `x64_abi_descs[]` in
-`x86_64_mir.c` hold one entry per ABI (SysV, Darwin, Win64) with argument
+`abi/x86_64_abi.c` hold one entry per ABI (SysV, Darwin, Win64) with argument
 register sequences, return registers, shadow-space size, symbol prefix, and
 register pools. Function-type construction resolves the active ABI to
 `ANVIL_CC_WIN64` or `ANVIL_CC_SYSV`; lowering consumes that canonical value.

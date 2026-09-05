@@ -1,0 +1,2 @@
+SocketError := Error [
+]

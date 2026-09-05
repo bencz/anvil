@@ -1,0 +1,189 @@
+#include "ppc_internal.h"
+
+#include "../common/gnu_data.h"
+
+static bool ppc_validate_config(anvil_backend_t *be, const anvil_ppc_target_desc_t *desc)
+{
+    if (!be->ctx)
+        return true;
+
+    const ppc_abi_ops_t *abi = desc->abi_ops;
+
+    if (be->ctx->arch != desc->arch || (be->ctx->abi != ANVIL_ABI_DEFAULT && be->ctx->abi != abi->abi) || (be->ctx->syntax != ANVIL_SYNTAX_DEFAULT && be->ctx->syntax != abi->syntax)) {
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "%s requires its %s ABI policy and GAS syntax", desc->name, abi->name);
+        return false;
+    }
+
+    return true;
+}
+
+static bool ppc_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, const anvil_ppc_target_desc_t *desc)
+{
+    if (!mod || !desc || mod->num_globals == 0)
+        return mod && desc;
+
+    anvil_gnu_string_pool_t strings;
+    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
+
+    bool emitted_header = false;
+    for (anvil_global_t *g = mod->globals; g; g = g->next) {
+        if (!g->value)
+            continue;
+        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) {
+            continue;
+        }
+
+        if (!emitted_header) {
+            anvil_strbuf_append(out, "\t.data\n");
+            emitted_header = true;
+        }
+
+        if (!g->value->name || !g->value->type) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
+        }
+        if (g->value->data.global.is_declaration) {
+            anvil_strbuf_appendf(out, "\t.extern %s\n", g->value->name);
+            continue;
+        }
+
+        size_t align = g->value->type ? anvil_type_align(g->value->type) : 1;
+        if (align == 0)
+            align = 1;
+        if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL || g->value->data.global.linkage == ANVIL_LINK_COMMON)
+            anvil_strbuf_appendf(out, "\t.globl %s\n", g->value->name);
+        else if (g->value->data.global.linkage == ANVIL_LINK_WEAK)
+            anvil_strbuf_appendf(out, "\t.weak %s\n", g->value->name);
+        anvil_strbuf_appendf(out, "\t.align %zu\n", align);
+        anvil_strbuf_appendf(out, "%s:\n", g->value->name);
+        if (!anvil_gnu_emit_constant(out, g->value->type, g->value->data.global.init, (size_t)desc->word_size, "", &strings, NULL, NULL)) {
+            anvil_gnu_string_pool_destroy(&strings);
+            return false;
+        }
+    }
+
+    if (emitted_header)
+        anvil_strbuf_append(out, "\n");
+    bool ok = anvil_gnu_string_pool_emit(out, &strings, "\t.section .rodata");
+    anvil_gnu_string_pool_destroy(&strings);
+    return ok && !out->failed;
+}
+
+static const char *ppc_variant_display_name(anvil_ppc_variant_t variant)
+{
+    switch (variant) {
+    case ANVIL_PPC_VARIANT_PPC32:
+        return "PowerPC 32-bit";
+    case ANVIL_PPC_VARIANT_PPC64:
+        return "PowerPC 64-bit big-endian ELFv1";
+    case ANVIL_PPC_VARIANT_PPC64LE:
+        return "PowerPC 64-bit little-endian ELFv2";
+    default:
+        return "PowerPC";
+    }
+}
+
+anvil_error_t anvil_ppc_codegen_func(anvil_backend_t *be, anvil_func_t *func, anvil_ppc_variant_t variant, char **output, size_t *len)
+{
+    if (!be || !func || !output)
+        return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len)
+        *len = 0;
+
+    const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
+
+    if (!desc)
+        return ANVIL_ERR_INVALID_ARG;
+
+    if (!ppc_validate_config(be, desc))
+        return ANVIL_ERR_CODEGEN;
+
+    if (func->is_declaration) {
+        *output = calloc(1, 1);
+        return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+    }
+
+    anvil_mir_func_t *mir = anvil_ppc_lower_func_to_mir(func, variant);
+    if (!mir) {
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "PowerPC MachineIR lowering failed for function %s", func->name ? func->name : "<anonymous>");
+        return ANVIL_ERR_CODEGEN;
+    }
+
+    bool ok = anvil_ppc_regalloc_mir(mir, variant);
+    char *mir_text = NULL;
+    size_t mir_len = 0;
+    if (ok)
+        ok = anvil_ppc_emit_mir(mir, variant, &mir_text, &mir_len);
+    anvil_mir_func_destroy(mir);
+
+    if (!ok || !mir_text) {
+        free(mir_text);
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "PowerPC MachineIR emission failed for function %s", func->name ? func->name : "<anonymous>");
+        return ANVIL_ERR_CODEGEN;
+    }
+
+    *output = mir_text;
+    if (len)
+        *len = mir_len;
+    return ANVIL_OK;
+}
+
+anvil_error_t anvil_ppc_codegen_module(anvil_backend_t *be, anvil_module_t *mod, anvil_ppc_variant_t variant, char **output, size_t *len)
+{
+    if (!be || !mod || !output)
+        return ANVIL_ERR_INVALID_ARG;
+    *output = NULL;
+    if (len)
+        *len = 0;
+
+    const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
+    if (!desc)
+        return ANVIL_ERR_INVALID_ARG;
+
+    if (!ppc_validate_config(be, desc))
+        return ANVIL_ERR_CODEGEN;
+
+    anvil_strbuf_t result;
+    anvil_strbuf_init(&result);
+    anvil_strbuf_appendf(&result, "# Generated by ANVIL for %s\n", ppc_variant_display_name(variant));
+
+    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
+        if (func->is_declaration) {
+            anvil_strbuf_appendf(&result, "\t.extern %s\n", func->name);
+        }
+    }
+
+    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
+        if (func->is_declaration)
+            continue;
+
+        char *func_text = NULL;
+        size_t func_len = 0;
+        anvil_error_t err = anvil_ppc_codegen_func(be, func, variant, &func_text, &func_len);
+        if (err != ANVIL_OK) {
+            anvil_strbuf_destroy(&result);
+            free(func_text);
+            return err;
+        }
+        if (func_text) {
+            (void)func_len;
+            anvil_strbuf_append(&result, func_text);
+            anvil_strbuf_append(&result, "\n");
+            free(func_text);
+        }
+    }
+
+    if (!ppc_emit_globals(&result, mod, desc)) {
+        anvil_strbuf_destroy(&result);
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "PowerPC global initializer is not representable");
+        return ANVIL_ERR_CODEGEN;
+    }
+
+    if (result.failed) {
+        anvil_strbuf_destroy(&result);
+        return ANVIL_ERR_NOMEM;
+    }
+    *output = anvil_strbuf_detach(&result, len);
+    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+}

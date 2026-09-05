@@ -81,6 +81,9 @@ st_dnu_status_t st_dnu_context_init(
     const st_dnu_context_options_t *options);
 st_dnu_status_t st_dnu_context_attach(
     st_dnu_context_t *context, st_aot_thread_t *thread);
+/* Shares the immutable image configuration while giving a logical thread
+ * its own miss cache and recursion guard. Destination must be zeroed. */
+st_dnu_status_t st_dnu_context_fork(st_dnu_context_t *destination, const st_dnu_context_t *source);
 st_dnu_status_t st_dnu_context_detach(
     st_dnu_context_t *context, st_aot_thread_t *thread);
 st_dnu_status_t st_dnu_context_destroy(st_dnu_context_t *context);

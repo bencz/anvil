@@ -43,6 +43,8 @@ static bool opt_store_load_propagate(anvil_instr_t *store, anvil_instr_t *load)
     if (!store || !load) return false;
     
     if (store->op != ANVIL_OP_STORE || load->op != ANVIL_OP_LOAD) return false;
+    if (store->memory_access.is_volatile || load->memory_access.is_volatile)
+        return false;
     if (store->num_operands < 2 || load->num_operands < 1) return false;
     if (!load->result) return false;
     

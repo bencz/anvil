@@ -98,10 +98,28 @@ typedef enum {
     ANVIL_MIR_OP_CALL_RESULT,
     /* Supplies a value to an additional ABI return register before RET.  The
        source need not be fixed: the target emitter performs the ABI move. */
-    ANVIL_MIR_OP_RET_VALUE_PART
+    ANVIL_MIR_OP_RET_VALUE_PART,
+    /* Target varargs cursor; immediate is the number of named ABI arguments. */
+    ANVIL_MIR_OP_VA_START,
+    ANVIL_MIR_OP_ATOMIC,
+    /* FP vectors: immediate is the element width, 32 or 64 bits. */
+    ANVIL_MIR_OP_VECTOR_FADD,
+    ANVIL_MIR_OP_VECTOR_FSUB,
+    ANVIL_MIR_OP_VECTOR_FMUL,
+    ANVIL_MIR_OP_VECTOR_FDIV
 } anvil_mir_opcode_t;
 
 typedef struct anvil_mir_func anvil_mir_func_t;
+
+typedef struct {
+    anvil_mir_vreg_t dst;
+    anvil_mir_vreg_t src;
+} anvil_mir_parallel_copy_t;
+
+/* Emit simultaneous virtual-register assignments before register allocation.
+ * Destinations must be unique and copies must preserve class/width. Cycles
+ * use fresh typed temporaries. Failure leaves instructions/vregs unchanged. */
+bool anvil_mir_emit_parallel_copies(anvil_mir_func_t *func, const anvil_mir_parallel_copy_t *copies, size_t count);
 
 typedef struct {
     anvil_mir_reg_class_t reg_class;
@@ -163,6 +181,16 @@ typedef struct {
        immediate remains available for ABI-specific payloads such as the
        SysV variadic vector-register count. */
     anvil_cc_t call_cc;
+    anvil_memory_access_t memory_access;
+    anvil_op_t atomic_op;
+    anvil_atomic_info_t atomic;
+    unsigned named_gpr;
+    unsigned named_fpr;
+    size_t named_stack_bytes;
+    unsigned call_effects;
+    /* Implicit physical-register writes before this instruction's results.
+     * Unlisted emitter scratch registers must remain excluded from allocation. */
+    uint64_t clobbers[ANVIL_MIR_REG_CLASS_COUNT];
     const char *symbol;
     int spill_slot;
     int frame_slot;
@@ -205,6 +233,8 @@ bool anvil_mir_add_instr(anvil_mir_func_t *func, anvil_mir_opcode_t op,
                          anvil_mir_vreg_t def,
                          const anvil_mir_vreg_t *uses,
                          size_t num_uses);
+bool anvil_mir_add_atomic(anvil_mir_func_t *func, anvil_op_t operation, anvil_mir_vreg_t def,
+                          const anvil_mir_vreg_t *uses, size_t count, const anvil_atomic_info_t *info);
 bool anvil_mir_add_instr_imm(anvil_mir_func_t *func, anvil_mir_opcode_t op,
                              anvil_mir_vreg_t def, int64_t imm);
 bool anvil_mir_add_instr_imm_uses(anvil_mir_func_t *func,
@@ -254,11 +284,21 @@ size_t anvil_mir_num_vregs(const anvil_mir_func_t *func);
 size_t anvil_mir_num_instrs(const anvil_mir_func_t *func);
 bool anvil_mir_get_instr_info(const anvil_mir_func_t *func, size_t index,
                               anvil_mir_instr_info_t *out_info);
+
+/* Attach source memory semantics to memory operations emitted since first.
+ * Split accesses conservatively cap the guaranteed alignment to their width. */
+bool anvil_mir_annotate_memory(anvil_mir_func_t *func, size_t first, const anvil_memory_access_t *access);
+/* Calls start with ANVIL_EFFECT_ALL. A lowering may propagate an IR contract
+ * to calls appended since first; helper calls from other IR operations retain
+ * the conservative default. Non-call instructions carry zero call_effects. */
+bool anvil_mir_annotate_call_effects(anvil_mir_func_t *func, size_t first, unsigned effects);
+bool anvil_mir_set_instr_clobbers(anvil_mir_func_t *func, size_t index, anvil_mir_reg_class_t reg_class, uint64_t mask);
 anvil_mir_vreg_t anvil_mir_get_instr_use(const anvil_mir_func_t *func,
                                          size_t instr_index,
                                          size_t use_index);
 
 void anvil_mir_clear_allocations(anvil_mir_func_t *func);
+bool anvil_mir_add_va_start(anvil_mir_func_t *func, anvil_mir_vreg_t def, int frame_slot, unsigned named_gpr, unsigned named_fpr, size_t named_stack_bytes);
 bool anvil_mir_coalesce_copies(anvil_mir_func_t *func);
 bool anvil_regalloc_linear_scan(anvil_mir_func_t *func, int num_phys_regs);
 bool anvil_regalloc_linear_scan_classes(

@@ -25,6 +25,12 @@ static const st_primitive_spec_t string_specs[] = {
         ST_PRIMITIVE_RUNTIME_SYMBOL, ST_PRIMITIVE_INVALID_INTRINSIC_ID,
         "st_aot_string_as_symbol_primitive_execute",
         sizeof("st_aot_string_as_symbol_primitive_execute") - 1u
+    },
+    {
+        "StringFromCharactersPrimitive", sizeof("StringFromCharactersPrimitive") - 1u,
+        1u, ST_PRIMITIVE_CLASS_ONLY, ST_PRIMITIVE_FALL_THROUGH,
+        ST_PRIMITIVE_RUNTIME_SYMBOL, ST_PRIMITIVE_INVALID_INTRINSIC_ID,
+        "st_aot_string_from_characters", sizeof("st_aot_string_from_characters") - 1u
     }
 };
 
@@ -60,6 +66,66 @@ static bool context_is_live(const st_string_primitive_context_t *context)
                          context->uint16_shape_id, ST_INDEXED_UINT16)
         && shape_matches(descriptors, context->string_class_id,
                          context->uint32_shape_id, ST_INDEXED_UINT32);
+}
+
+static st_string_primitive_status_t map_heap_status(st_heap_status_t status);
+
+st_string_primitive_status_t st_string_primitive_from_characters(st_string_primitive_context_t *context, st_value_t array, st_value_t *result_out)
+{
+    if (result_out == NULL)
+        return ST_STRING_PRIMITIVE_ERR_INVALID_ARGUMENT;
+
+    *result_out = ST_VALUE_INVALID;
+
+    if (!context_is_live(context))
+        return ST_STRING_PRIMITIVE_ERR_INVALID_ARGUMENT;
+
+    st_object_view_t source;
+
+    if (st_heap_object_view(context->heap, array, &source) != ST_HEAP_OK
+            || source.shape_descriptor->fixed_word_count != 0u || source.shape_descriptor->indexed_format != ST_INDEXED_VALUES)
+        return ST_STRING_PRIMITIVE_ERR_TYPE_MISMATCH;
+
+    const st_value_t *characters = source.indexed_elements;
+    uint32_t maximum = 0u;
+
+    for (size_t index = 0u; index < source.indexed_length; index++) {
+        uint32_t code_point;
+
+        if (!st_value_to_character(characters[index], &code_point))
+            return ST_STRING_PRIMITIVE_ERR_TYPE_MISMATCH;
+
+        if (code_point > maximum)
+            maximum = code_point;
+    }
+
+    uint32_t shape = maximum <= UINT8_MAX ? context->uint8_shape_id : maximum <= UINT16_MAX ? context->uint16_shape_id : context->uint32_shape_id;
+    st_value_t value;
+    st_heap_status_t status = st_heap_allocate(context->heap, context->string_class_id, shape, source.indexed_length, source.indexed_length, ST_HEADER_IMMUTABLE, &value);
+
+    if (status != ST_HEAP_OK)
+        return map_heap_status(status);
+
+    st_object_view_t destination;
+
+    if (st_heap_object_view(context->heap, value, &destination) != ST_HEAP_OK)
+        return ST_STRING_PRIMITIVE_ERR_BAD_OBJECT;
+
+    for (size_t index = 0u; index < source.indexed_length; index++) {
+        uint32_t code_point;
+
+        st_value_to_character(characters[index], &code_point);
+
+        if (maximum <= UINT8_MAX)
+            ((uint8_t *)destination.indexed_elements)[index] = (uint8_t)code_point;
+        else if (maximum <= UINT16_MAX)
+            ((uint16_t *)destination.indexed_elements)[index] = (uint16_t)code_point;
+        else
+            ((uint32_t *)destination.indexed_elements)[index] = code_point;
+    }
+
+    *result_out = value;
+    return ST_STRING_PRIMITIVE_OK;
 }
 
 static st_string_primitive_status_t map_heap_status(st_heap_status_t status)

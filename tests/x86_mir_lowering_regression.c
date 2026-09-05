@@ -9,8 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/wait.h>
+#include "platform/host.h"
 
 static int failures = 0;
 
@@ -37,65 +36,9 @@ static void check_contains(const char *text, const char *needle, const char *msg
     CHECK(text && needle && strstr(text, needle) != NULL, msg);
 }
 
-static int g_have_as = -1;
-
-static int have_as(void)
+static void assemble_check(const char *assembly, const char *message)
 {
-    if (g_have_as < 0) {
-        g_have_as = (system("as --version >/dev/null 2>&1") == 0) ? 1 : 0;
-    }
-    return g_have_as;
-}
-
-static void assemble_check(const char *asm_text, const char *msg)
-{
-    if (!asm_text) {
-        CHECK(false, msg);
-        return;
-    }
-    if (!have_as()) {
-        fprintf(stderr, "[skip] %s (no host assembler)\n", msg);
-        return;
-    }
-
-    char src[] = "/tmp/anvil_x86_asm_XXXXXX";
-    int fd = mkstemp(src);
-    if (fd < 0) {
-        CHECK(false, msg);
-        return;
-    }
-    FILE *f = fdopen(fd, "w");
-    if (!f) {
-        close(fd);
-        CHECK(false, msg);
-        return;
-    }
-    fputs(asm_text, f);
-    fclose(f);
-
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "as --32 %s -o %s.o 2>%s.err", src, src, src);
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "==== as --32 failed for: %s ====\n%s\n", msg, asm_text);
-        char errcat[600];
-        snprintf(errcat, sizeof(errcat), "cat %s.err 1>&2", src);
-        (void)system(errcat);
-        char errf[600];
-        snprintf(errf, sizeof(errf), "%s.err", src);
-        remove(errf);
-    } else {
-        char errf[600];
-        snprintf(errf, sizeof(errf), "%s.err", src);
-        remove(errf);
-    }
-    CHECK(rc == 0, msg);
-
-    char obj[600];
-    snprintf(obj, sizeof(obj), "%s.o", src);
-    remove(src);
-    remove(obj);
+    CHECK(anvil_test_host.assemble_i386(assembly, message) <= 0, message);
 }
 
 static char *emit_func(anvil_func_t *fn)
@@ -447,62 +390,9 @@ static void test_regalloc_spill_forcing(void)
     anvil_ctx_destroy(ctx);
 }
 
-static int g_have_m32 = -1;
-
-static int have_m32(void)
+static int assemble_link_run(const char *assembly, const char *driver, const char *message)
 {
-    if (g_have_m32 < 0) {
-        g_have_m32 = (system(
-            "printf 'int main(void){return 0;}' "
-            "| gcc -m32 -x c - -o /tmp/anvil_m32_probe >/dev/null 2>&1")
-            == 0) ? 1 : 0;
-        remove("/tmp/anvil_m32_probe");
-    }
-    return g_have_m32;
-}
-
-static int assemble_link_run(const char *asm_text, const char *driver,
-                             const char *msg)
-{
-    if (!asm_text || !have_as() || !have_m32()) {
-        if (!have_as() || !have_m32()) {
-            fprintf(stderr, "[skip] %s (no 32-bit toolchain)\n", msg);
-        }
-        return -1;
-    }
-
-    char as_src[] = "/tmp/anvil_x86_run_XXXXXX";
-    int fd = mkstemp(as_src);
-    if (fd < 0) { CHECK(false, msg); return -1; }
-    FILE *f = fdopen(fd, "w");
-    if (!f) { close(fd); CHECK(false, msg); return -1; }
-    fputs(asm_text, f);
-    fclose(f);
-
-    char drv_src[] = "/tmp/anvil_x86_drv_XXXXXX";
-    int dfd = mkstemp(drv_src);
-    if (dfd < 0) { remove(as_src); CHECK(false, msg); return -1; }
-    FILE *df = fdopen(dfd, "w");
-    if (!df) { close(dfd); remove(as_src); CHECK(false, msg); return -1; }
-    fputs(driver, df);
-    fclose(df);
-
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd),
-             "as --32 %s -o %s.o 2>/dev/null && "
-             "gcc -m32 -x c %s -x none %s.o -o %s.bin -lm 2>/dev/null && "
-             "%s.bin",
-             as_src, as_src, drv_src, as_src, as_src, as_src);
-    int rc = system(cmd);
-
-    char tmp[600];
-    snprintf(tmp, sizeof(tmp), "%s.o", as_src); remove(tmp);
-    snprintf(tmp, sizeof(tmp), "%s.bin", as_src); remove(tmp);
-    remove(as_src);
-    remove(drv_src);
-
-    if (rc == -1) return -1;
-    return WEXITSTATUS(rc);
+    return anvil_test_host.run_i386(assembly, driver, message);
 }
 
 static void test_sub_spilled_operands_stay_distinct(void)

@@ -230,6 +230,8 @@ mcc_type_t *mcc_type_long(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_ulong(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_llong(mcc_type_context_t *tctx);   /* C99 long long */
 mcc_type_t *mcc_type_ullong(mcc_type_context_t *tctx);  /* C99 unsigned long long */
+mcc_type_t *mcc_type_size_t(mcc_type_context_t *tctx);
+mcc_type_t *mcc_type_ptrdiff_t(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_float(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_double(mcc_type_context_t *tctx);
 mcc_type_t *mcc_type_long_double(mcc_type_context_t *tctx);

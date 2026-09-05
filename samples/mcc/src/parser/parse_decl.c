@@ -347,8 +347,8 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
         parse_expect(p, TOK_SEMICOLON, ";");
         
         mcc_ast_node_t *node = mcc_ast_create(p->ctx, AST_STATIC_ASSERT, loc);
-        node->data.static_assert.expr = expr;
-        node->data.static_assert.message = mcc_strdup(p->ctx, msg->literal.string_val.value);
+        node->data.static_assert_decl.expr = expr;
+        node->data.static_assert_decl.message = mcc_strdup(p->ctx, msg->literal.string_val.value);
         return node;
     }
     
@@ -454,7 +454,13 @@ mcc_ast_node_t *parse_declaration(mcc_parser_t *p)
     
     /* Parse type specifier */
     mcc_type_t *base_type = parse_type_specifier(p);
-    
+
+    if (!base_type)
+    {
+        p->panic_mode = true;
+        return NULL;
+    }
+
     /* Parse declarator(s) */
     if (parse_check(p, TOK_SEMICOLON)) {
         /* Type declaration only (e.g., struct definition) */

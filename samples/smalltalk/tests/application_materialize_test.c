@@ -73,6 +73,9 @@ static const char *target_name(anvil_arch_t target)
 
 static const char *abi_name(anvil_abi_t abi)
 {
+    if (abi == ANVIL_ABI_WIN64)
+        return "win64";
+
     return abi == ANVIL_ABI_MVS ? "mvs" : "sysv";
 }
 
@@ -96,7 +99,7 @@ static void hash_hex(
 
 static void initialize_ready_profile(
     st_application_aot_profile_t *profile, bundle_storage_t *storage,
-    anvil_arch_t target)
+    anvil_arch_t target, anvil_abi_t abi)
 {
     st_artifact_bundle_t *bundle = &profile->bundle;
     const bool hlasm = target == ANVIL_ARCH_ZARCH;
@@ -108,7 +111,7 @@ static void initialize_ready_profile(
     memset(storage, 0, sizeof(*storage));
     memset(bundle, 0, sizeof(*bundle));
     profile->target = target;
-    profile->abi = hlasm ? ANVIL_ABI_MVS : ANVIL_ABI_SYSV;
+    profile->abi = abi;
     profile->syntax = hlasm ? ANVIL_SYNTAX_HLASM : ANVIL_SYNTAX_GAS;
     profile->optimization = ANVIL_OPT_STANDARD;
     profile->state = ST_APPLICATION_PROFILE_READY;
@@ -180,15 +183,15 @@ static void initialize_application(
     used += (size_t)snprintf(
         matrix + used, 4096u - used,
         "anvil-smalltalk-application-matrix-v1\n"
-        "application=hello\nprofile-count=10\n");
+        "application=hello\nprofile-count=%u\n", ST_APPLICATION_AOT_PROFILE_COUNT);
 
     for (size_t index = 0u;
-         index < ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT; index++) {
+         index < sizeof(supported_targets) / sizeof(supported_targets[0]); index++) {
         st_application_aot_profile_t *profile = &application->profiles[index];
         char hash[ST_ARTIFACT_SHA256_SIZE * 2u + 1u];
 
         initialize_ready_profile(
-            profile, &storage[index], supported_targets[index]);
+            profile, &storage[index], supported_targets[index], supported_targets[index] == ANVIL_ARCH_ZARCH ? ANVIL_ABI_MVS : ANVIL_ABI_SYSV);
         hash_hex(profile->bundle.bundle_sha256, hash);
         used += (size_t)snprintf(
             matrix + used, 4096u - used,
@@ -201,7 +204,7 @@ static void initialize_application(
          index++) {
         st_application_aot_profile_t *profile =
             &application->profiles[
-                ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT + index];
+                sizeof(supported_targets) / sizeof(supported_targets[0]) + index];
 
         profile->target = unsupported_targets[index];
         profile->abi = ANVIL_ABI_DEFAULT;
@@ -215,6 +218,12 @@ static void initialize_application(
             "tagged32-abi-unimplemented\n",
             target_name(profile->target));
     }
+    st_application_aot_profile_t *windows = &application->profiles[ST_APPLICATION_AOT_PROFILE_COUNT - 1u];
+    char hash[ST_ARTIFACT_SHA256_SIZE * 2u + 1u];
+
+    initialize_ready_profile(windows, &storage[ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT - 1u], ANVIL_ARCH_X86_64, ANVIL_ABI_WIN64);
+    hash_hex(windows->bundle.bundle_sha256, hash);
+    used += (size_t)snprintf(matrix + used, 4096u - used, "profile=x86_64|win64|gas|O2|ready|%s\n", hash);
     CHECK(used < 4096u);
     application->matrix_manifest = matrix;
     application->matrix_manifest_length = used;
@@ -284,7 +293,10 @@ static void remove_application(
     char path[512];
 
     for (size_t profile = 0u;
-         profile < ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT; profile++) {
+         profile < ST_APPLICATION_AOT_PROFILE_COUNT; profile++) {
+        if (application->profiles[profile].state != ST_APPLICATION_PROFILE_READY)
+            continue;
+
         const st_artifact_bundle_t *bundle =
             &application->profiles[profile].bundle;
         char profile_name[ST_ARTIFACT_PROFILE_NAME_MAX];
@@ -330,6 +342,7 @@ static void test_complete_publication_and_collision(
     CHECK(result.committed);
     CHECK(path_exists(root, "hello/matrix.manifest"));
     CHECK(path_exists(root, "hello/x86_64-sysv-gas-O2/launch.s"));
+    CHECK(path_exists(root, "hello/x86_64-win64-gas-O2/launch.s"));
     CHECK(path_exists(root, "hello/arm64-sysv-gas-O2/metadata.s"));
     CHECK(path_exists(root, "hello/zarch-mvs-hlasm-O2/launch.asm"));
     CHECK(!path_exists(root, "hello/x86-default-default-O2"));
@@ -386,6 +399,35 @@ static void test_manifest_tamper_is_rejected(
     CHECK(rmdir(root) == 0);
 }
 
+static void test_matrix_write_failure_removes_all_profiles(st_application_aot_result_t *application)
+{
+    char root[160];
+    write_failure_t failure = {0};
+    st_application_materialize_result_t result;
+    st_application_materialize_options_t options = {
+        .artifact_options = {.write = failing_write, .write_user = &failure}
+    };
+
+    for (size_t index = 0u; index < application->profile_count; index++) {
+        const st_application_aot_profile_t *profile = &application->profiles[index];
+
+        if (profile->state != ST_APPLICATION_PROFILE_READY)
+            continue;
+
+        failure.bytes_before_failure += profile->bundle.manifest_length;
+
+        for (size_t artifact = 0u; artifact < profile->bundle.artifact_count; artifact++)
+            failure.bytes_before_failure += profile->bundle.artifacts[artifact].size;
+    }
+
+    failure.bytes_before_failure += application->matrix_manifest_length / 2u;
+    CHECK(make_directory(root));
+    st_application_materialize_result_init(&result);
+    CHECK(st_application_aot_materialize(&result, application, "hello", root, &options) == ST_APPLICATION_MATERIALIZE_ERR_IO);
+    CHECK(!result.committed && !path_exists(root, "hello") && staging_count(root) == 0u);
+    CHECK(rmdir(root) == 0);
+}
+
 int main(void)
 {
     st_application_aot_result_t application;
@@ -396,6 +438,7 @@ int main(void)
     test_complete_publication_and_collision(&application);
     test_failure_rolls_back_whole_matrix(&application);
     test_manifest_tamper_is_rejected(&application);
+    test_matrix_write_failure_removes_all_profiles(&application);
 
     if (failures != 0u) {
         fprintf(
@@ -404,6 +447,6 @@ int main(void)
         return 1;
     }
     puts("Smalltalk application materializer: PASS "
-         "(atomic five-profile matrix, honest narrow records, rollback)");
+         "(atomic six-profile matrix, Win64 publication, narrow records, rollback)");
     return 0;
 }

@@ -1,3 +1,4 @@
+#include "../../platform/runtime.h"
 #include "st_symbol_intern.h"
 #include "st_send_bridge.h"
 
@@ -85,7 +86,7 @@ static bool round_up(size_t value, size_t alignment, size_t *result_out)
 static void *default_allocate(void *user, size_t alignment, size_t size)
 {
     (void)user;
-    return aligned_alloc(alignment, size);
+    return st_runtime_platform.aligned_alloc(alignment, size);
 }
 
 static void default_deallocate(void *user, void *pointer, size_t alignment,
@@ -94,7 +95,7 @@ static void default_deallocate(void *user, void *pointer, size_t alignment,
     (void)user;
     (void)alignment;
     (void)size;
-    free(pointer);
+    st_runtime_platform.aligned_free(pointer);
 }
 
 static bool normalize_allocator(st_runtime_allocator_t input,

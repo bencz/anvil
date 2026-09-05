@@ -7,7 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "platform/host.h"
+#if defined(__x86_64__) && !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 static int failures;
 
@@ -55,25 +58,9 @@ static void check_x64_vtable_runtime(const char *assembly)
 #endif
 }
 
-static void cross_assemble_data(const char *assembly, const char *target,
-                                const char *message)
+static void cross_assemble_data(const char *assembly, const char *target, const char *message)
 {
-    if (!assembly || !target || access("/usr/bin/clang", X_OK) != 0) return;
-    char source[] = "/tmp/anvil-vtable-data-XXXXXX.s";
-    int fd = mkstemps(source, 2);
-    if (fd < 0) { CHECK(false, message); return; }
-    FILE *file = fdopen(fd, "wb");
-    bool ok = file && fputs(assembly, file) >= 0;
-    if (file) ok = fclose(file) == 0 && ok;
-    else close(fd);
-    char object[160], command[512];
-    snprintf(object, sizeof(object), "%s.o", source);
-    snprintf(command, sizeof(command),
-             "/usr/bin/clang --target=%s -c %s -o %s >/dev/null 2>&1",
-             target, source, object);
-    if (ok) ok = system(command) == 0;
-    CHECK(ok, message);
-    unlink(source); unlink(object);
+    CHECK(anvil_test_host.cross_assemble(assembly, target) <= 0, message);
 }
 
 static anvil_ctx_t *new_ctx(anvil_arch_t arch)

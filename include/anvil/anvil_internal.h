@@ -13,6 +13,14 @@
 extern "C" {
 #endif
 
+unsigned anvil_instr_call_effects(const anvil_instr_t *instr);
+bool anvil_op_is_atomic(anvil_op_t op);
+bool anvil_atomic_info_valid(anvil_op_t op, const anvil_atomic_info_t *info);
+bool anvil_atomic_type_valid(const anvil_type_t *type);
+anvil_block_t *anvil_block_prepare(anvil_func_t *func, const char *name);
+void anvil_func_append_block(anvil_func_t *func, anvil_block_t *block);
+void anvil_block_append_prepared(anvil_block_t *block, anvil_instr_t *instr);
+
 /* String buffer for code generation */
 typedef struct anvil_strbuf {
     char *data;
@@ -44,6 +52,8 @@ typedef struct anvil_instr {
     anvil_op_t op;
     anvil_fcmp_pred_t fcmp_pred;
     anvil_cc_t call_cc;
+    anvil_memory_access_t memory_access;
+    anvil_atomic_info_t atomic;
     anvil_value_t *result;
     anvil_value_t **operands;
     size_t num_operands;
@@ -144,6 +154,11 @@ struct anvil_type {
             size_t count;
         } array;
 
+        struct {
+            anvil_type_t *element;
+            size_t lanes;
+        } vector;
+
         /* Struct type */
         struct {
             char *name;
@@ -221,6 +236,10 @@ struct anvil_func {
     
     /* Associated value for use in calls */
     anvil_value_t *value;
+    unsigned effects;
+    bool effects_explicit;
+    bool fp_vectorization;
+    struct anvil_cfg *cfg_cache;
 };
 
 /* Global variable */

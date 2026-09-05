@@ -40,8 +40,8 @@ typedef uint32_t           uint_fast32_t;
 typedef uint64_t           uint_fast64_t;
 
 /* Integer types capable of holding object pointers */
-typedef long               intptr_t;
-typedef unsigned long      uintptr_t;
+typedef __PTRDIFF_TYPE__ intptr_t;
+typedef __SIZE_TYPE__ uintptr_t;
 
 /* Greatest-width integer types */
 typedef int64_t            intmax_t;

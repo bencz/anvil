@@ -192,7 +192,7 @@ static bool execute_x86_64(const char *assembly, uint32_t root_capacity,
         "-Iinclude -Isamples/smalltalk/include %s "
         "samples/smalltalk/tests/reflection_primitives_aot_harness.c "
         "samples/smalltalk/src/runtime/value.c "
-        "samples/smalltalk/src/runtime/runtime.c "
+        "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/lookup.c "
         "samples/smalltalk/src/runtime/send_bridge.c "
         "samples/smalltalk/src/runtime/control/control.c "

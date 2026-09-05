@@ -34,7 +34,7 @@ HashedCollection := Collection [
     addAtEmptyIndex: index value: anObject [
         contents at: index put: anObject.
         tally := tally + 1.
-        tally * 4 >= contents size * 3 ifTrue: [
+        (tally * 4) >= (contents size * 3) ifTrue: [
             self grow
         ].
         ^anObject

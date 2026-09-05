@@ -468,8 +468,8 @@ struct mcc_ast_node {
         struct {
             mcc_ast_node_t *expr;
             const char *message;
-        } static_assert;
-        
+        } static_assert_decl;
+
         /* C11: _Generic selection */
         struct {
             mcc_ast_node_t *controlling_expr;

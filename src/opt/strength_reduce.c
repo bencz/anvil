@@ -64,6 +64,91 @@ static anvil_value_t *make_mask_const(anvil_ctx_t *ctx, anvil_type_t *type, int 
     return anvil_opt_make_const_int(ctx, type, (int64_t)mask);
 }
 
+static anvil_instr_t *prepare_binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *left, anvil_value_t *right)
+{
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, "division.reduce");
+    if (!instr || !anvil_instr_add_operand(instr, left) || !anvil_instr_add_operand(instr, right))
+        return NULL;
+
+    return instr;
+}
+
+static void insert_before(anvil_instr_t *position, anvil_instr_t *instr)
+{
+    instr->parent = position->parent;
+    instr->owner_module = position->owner_module;
+    instr->result->owner_module = position->owner_module;
+    instr->prev = position->prev;
+    instr->next = position;
+    if (position->prev)
+        position->prev->next = instr;
+    else
+        position->parent->first = instr;
+
+    position->prev = instr;
+}
+
+static bool reduce_signed_power(anvil_ctx_t *ctx, anvil_instr_t *instr, unsigned shift)
+{
+    anvil_value_t *value = instr->operands[0];
+    anvil_type_t *type = value->type;
+    unsigned width = anvil_type_bit_width(type);
+    if (!shift || shift >= width - 1)
+        return false;
+
+    anvil_value_t *sign_shift = make_shift_const(ctx, type, (int)(width - 1));
+    anvil_value_t *amount = make_shift_const(ctx, type, (int)shift);
+    anvil_value_t *mask = make_mask_const(ctx, type, (int)shift);
+    if (!sign_shift || !amount || !mask)
+        return false;
+
+    /* Bias only negative dividends, preserving C-style truncation toward zero.
+     * All nodes are prepared before touching the existing instruction chain. */
+    anvil_instr_t *sign = prepare_binary(ctx, ANVIL_OP_SAR, type, value, sign_shift);
+    if (!sign)
+        return false;
+
+    anvil_instr_t *bias = prepare_binary(ctx, ANVIL_OP_AND, type, sign->result, mask);
+    if (!bias)
+        return false;
+
+    anvil_instr_t *biased = prepare_binary(ctx, ANVIL_OP_ADD, type, value, bias->result);
+    if (!biased)
+        return false;
+
+    anvil_instr_t *quotient = NULL;
+    anvil_instr_t *product = NULL;
+    if (instr->op == ANVIL_OP_SMOD)
+    {
+        quotient = prepare_binary(ctx, ANVIL_OP_SAR, type, biased->result, amount);
+        if (!quotient)
+            return false;
+
+        product = prepare_binary(ctx, ANVIL_OP_SHL, type, quotient->result, amount);
+        if (!product)
+            return false;
+    }
+
+    insert_before(instr, sign);
+    insert_before(instr, bias);
+    insert_before(instr, biased);
+    if (product)
+    {
+        insert_before(instr, quotient);
+        insert_before(instr, product);
+        instr->op = ANVIL_OP_SUB;
+        instr->operands[1] = product->result;
+    }
+    else
+    {
+        instr->op = ANVIL_OP_SAR;
+        instr->operands[0] = biased->result;
+        instr->operands[1] = amount;
+    }
+
+    return true;
+}
+
 /* Strength reduction pass */
 anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
 {
@@ -118,9 +203,10 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                     break;
                     
                 case ANVIL_OP_SDIV:
-                    /* For signed division by power of 2, we can only optimize
-                     * if we know the dividend is non-negative, which we can't
-                     * easily determine. Skip for now. */
+                case ANVIL_OP_SMOD:
+                    if (is_power_of_2(rhs, &shift) && reduce_signed_power(ctx, instr, (unsigned)shift))
+                        changed = true;
+
                     break;
                     
                 case ANVIL_OP_UMOD:
@@ -133,10 +219,6 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                         instr->operands[1] = mask;
                         changed = true;
                     }
-                    break;
-                    
-                case ANVIL_OP_SMOD:
-                    /* Signed modulo is more complex, skip for now */
                     break;
                     
                 default:

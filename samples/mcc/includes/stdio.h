@@ -35,10 +35,8 @@ typedef long fpos_t;
 /* FILE structure (opaque) */
 typedef struct _FILE FILE;
 
-/* Standard streams (to be provided by runtime) */
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *stderr;
+/* Runtime-specific stream declarations are selected by the target model. */
+#include <anvil_target_stdio.h>
 
 /* File operations */
 extern FILE *fopen(const char *filename, const char *mode);

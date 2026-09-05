@@ -739,9 +739,16 @@ static void test_zarch_spilled_call_arguments_preserve_bundle(void)
     bool built = true;
     for (size_t i = 0; i < ARG_COUNT; i++) {
         args[i] = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 64);
-        built = built && args[i] != ANVIL_MIR_NO_VREG &&
-                anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, args[i],
-                                        (int64_t)(i + 1));
+        built = built && args[i] != ANVIL_MIR_NO_VREG;
+        if (i % 2 == 0)
+        {
+            built = built && anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, args[i], (int64_t)(i + 1));
+        }
+        else
+        {
+            anvil_mir_vreg_t uses[] = { args[i - 1], args[i - 1] };
+            built = built && anvil_mir_add_instr(mir, ANVIL_MIR_OP_ADD, args[i], uses, 2);
+        }
     }
     for (size_t i = 0; i < ARG_COUNT; i++) {
         built = built && anvil_mir_add_instr_imm_uses(
@@ -762,6 +769,7 @@ static void test_zarch_spilled_call_arguments_preserve_bundle(void)
 
     bool in_bundle = false;
     bool saw_interleaved_reload = false;
+    bool saw_interleaved_constant = false;
     for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
         anvil_mir_instr_info_t info;
         CHECK(anvil_mir_get_instr_info(mir, i, &info),
@@ -770,11 +778,15 @@ static void test_zarch_spilled_call_arguments_preserve_bundle(void)
         if (info.op == ANVIL_MIR_OP_CALL_STACK_ARG) in_bundle = true;
         else if (in_bundle && info.op == ANVIL_MIR_OP_SPILL_LOAD)
             saw_interleaved_reload = true;
+        else if (in_bundle && info.op == ANVIL_MIR_OP_MOV && info.has_imm)
+            saw_interleaved_constant = true;
         else if (in_bundle && info.op == ANVIL_MIR_OP_CALL)
             in_bundle = false;
     }
     CHECK(saw_interleaved_reload,
           "regression must contain a spill reload inside the logical call bundle");
+    CHECK(saw_interleaved_constant,
+          "regression must contain a rematerialized constant inside the logical call bundle");
 
     char legal_error[192] = { 0 };
     CHECK(anvil_mainframe_verify_mir_legal(
@@ -1253,7 +1265,7 @@ static void test_mainframe_phi_swap_uses_parallel_copy(void)
             for (size_t bidx = 0; bidx < anvil_mir_num_blocks(mir); bidx++) {
                 anvil_mir_block_info_t info;
                 anvil_mir_get_block_info(mir, (anvil_mir_block_t)bidx, &info);
-                if (info.name && strcmp(info.name, "body_to_header_phi") == 0) {
+                if (info.name && strncmp(info.name, "body_to_header_phi_", strlen("body_to_header_phi_")) == 0) {
                     mir_body = (anvil_mir_block_t)bidx;
                 }
             }

@@ -553,8 +553,19 @@ static void test_win64_variadic_fp_shadow_and_nonvolatile_xmm(void)
             if (asm_text) {
                 check_contains(asm_text, "32(%rsp)",
                                "Win64 first stack arg must follow 32-byte shadow space");
-                check_contains(asm_text, "subq $80, %rsp",
-                               "Win64 frame must reserve shadow, stack arg, and saves without overlap");
+                const char *allocation = strstr(asm_text, "subq $");
+                int frame = 0;
+                CHECK(allocation && sscanf(allocation, "subq $%d, %%rsp", &frame) == 1 && frame >= 48 && frame % 16 == 0,
+                      "Win64 frame must reserve aligned shadow space and the stack argument");
+                const char *save = asm_text;
+                while ((save = strstr(save, ".seh_save")) != NULL)
+                {
+                    int offset = -1;
+                    int width = strncmp(save, ".seh_savexmm", 12) == 0 ? 16 : 8;
+                    CHECK(sscanf(save, "%*[^,], %d", &offset) == 1 && offset >= 40 && offset <= frame - width,
+                          "Win64 register saves must fit above outgoing arguments inside the frame");
+                    save++;
+                }
                 CHECK(strstr(asm_text, "movb $") == NULL,
                       "Win64 calls must not use the SysV AL vector-count convention");
                 free(asm_text);
@@ -586,8 +597,8 @@ static void test_win64_variadic_fp_shadow_and_nonvolatile_xmm(void)
                                         &asm_text, &asm_len),
               "Win64 fixed XMM6 MIR should emit");
         if (asm_text) {
-            check_contains(asm_text, "movdqu %xmm6, -",
-                           "used Win64 XMM6 must be saved in the prologue");
+            check_contains(asm_text, "movdqu %xmm6, ", "used Win64 XMM6 must be saved in the prologue");
+            check_contains(asm_text, ".seh_setframe %rbp, 0", "Win64 frame pointer must be described for dynamic unwind");
             check_contains(asm_text, ", %xmm6\n",
                            "used Win64 XMM6 must be restored in the epilogue");
             free(asm_text);

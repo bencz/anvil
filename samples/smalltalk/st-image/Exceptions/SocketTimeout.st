@@ -1,0 +1,2 @@
+SocketTimeout := SocketError [
+]

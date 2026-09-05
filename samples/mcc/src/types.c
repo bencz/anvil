@@ -5,6 +5,7 @@
 
 #include "anvil/anvil.h"
 #include "mcc.h"
+#include "target.h"
 #include <limits.h>
 
 static const char *type_kind_names[] = {
@@ -75,8 +76,8 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
         mcc_fatal(ctx, "Target has no DataLayout");
         return NULL;
     }
-    anvil_abi_t abi = ctx->options.arch == MCC_ARCH_ARM64_MACOS
-        ? ANVIL_ABI_DARWIN : ANVIL_ABI_DEFAULT;
+    const mcc_target_model_t *model = mcc_target_model(ctx->options.arch);
+    anvil_abi_t abi = model->abi;
     if (abi != ANVIL_ABI_DEFAULT &&
         anvil_ctx_set_abi(layout_ctx, abi) != ANVIL_OK) {
         mcc_fatal(ctx, "Failed to select target ABI for DataLayout");
@@ -93,17 +94,17 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
     tctx->abi = abi;
     tctx->layout = *layout;
     int ptr_size = (int)tctx->layout.pointer.size;
-    
+
     /* Determine long size based on data model:
      * - ILP32 (32-bit): long = 4 bytes (x86, S/370, S/370-XA, S/390, PPC32)
      * - LP64 (64-bit Unix): long = 8 bytes (x86_64, z/Architecture, PPC64, ARM64)
-     * - LLP64 (64-bit Windows): long = 4 bytes (would need ANVIL_ABI_WIN64 check)
-     * 
+     * - LLP64 (64-bit Windows): long = 4 bytes
+     *
      * Note: IBM mainframes (S/370, S/390) use ILP32 even with 24/31-bit addressing.
      * z/Architecture uses LP64 with 64-bit addressing.
      */
-    int long_size = (ptr_size == 8) ? 8 : 4;
-    
+    int long_size = (ptr_size == 8 && model->long_matches_pointer) ? 8 : 4;
+
     /* Create primitive types */
     anvil_layout_entry_t void_layout = { 0, 1, 1 };
     const anvil_layout_entry_t *long_layout = long_size == 8
@@ -150,6 +151,16 @@ mcc_type_context_t *mcc_type_context_create(mcc_context_t *ctx)
 void mcc_type_context_destroy(mcc_type_context_t *tctx)
 {
     (void)tctx; /* Arena allocated */
+}
+
+mcc_type_t *mcc_type_size_t(mcc_type_context_t *tctx)
+{
+    return tctx->type_ulong->size == (size_t)tctx->ptr_size ? tctx->type_ulong : tctx->type_ullong;
+}
+
+mcc_type_t *mcc_type_ptrdiff_t(mcc_type_context_t *tctx)
+{
+    return tctx->type_long->size == (size_t)tctx->ptr_size ? tctx->type_long : tctx->type_llong;
 }
 
 /* Primitive type getters */
@@ -232,6 +243,19 @@ mcc_type_t *mcc_type_function(mcc_type_context_t *tctx, mcc_type_t *return_type,
     if (!tctx || !return_type || num_params < 0) return NULL;
     int actual_params = 0;
     for (mcc_func_param_t *param = params; param; param = param->next) {
+        mcc_type_t *adjusted = param->type;
+        while (adjusted && adjusted->kind == TYPE_TYPEDEF)
+            adjusted = adjusted->data.typedef_ref.underlying;
+
+        /* Parameter adjustment applies through typedefs too, including the
+         * one-element array used by the SysV x64 va_list definition. */
+        if (adjusted && (adjusted->kind == TYPE_ARRAY || adjusted->kind == TYPE_FUNCTION))
+        {
+            param->type = mcc_type_decay(tctx, adjusted);
+            if (!param->type)
+                return NULL;
+        }
+
         if (actual_params == INT_MAX) {
             mcc_error(tctx->ctx, "too many function parameters");
             return NULL;

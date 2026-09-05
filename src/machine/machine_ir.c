@@ -3,6 +3,7 @@
  */
 
 #include "machine_internal.h"
+#include "anvil/anvil_internal.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -326,6 +327,7 @@ static bool add_instr_full(anvil_mir_func_t *func, anvil_mir_opcode_t op,
 
     size_t instr_index = func->num_instrs++;
     anvil_mir_instr_t *instr = &func->instrs[instr_index];
+    memset(instr, 0, sizeof(*instr));
     instr->op = op;
     instr->def = def;
     instr->uses = uses_copy;
@@ -336,6 +338,9 @@ static bool add_instr_full(anvil_mir_func_t *func, anvil_mir_opcode_t op,
     instr->has_imm = has_imm;
     instr->imm = imm;
     instr->call_cc = ANVIL_CC_DEFAULT;
+    instr->memory_access = (anvil_memory_access_t){ 0 };
+    instr->call_effects = op == ANVIL_MIR_OP_CALL ? ANVIL_EFFECT_ALL : 0;
+    memset(instr->clobbers, 0, sizeof(instr->clobbers));
     instr->symbol = symbol_copy;
     instr->spill_slot = -1;
     instr->frame_slot = -1;
@@ -605,9 +610,100 @@ bool anvil_mir_get_instr_info(const anvil_mir_func_t *func, size_t index,
     out_info->has_imm = instr->has_imm;
     out_info->imm = instr->imm;
     out_info->call_cc = instr->call_cc;
+    out_info->memory_access = instr->memory_access;
+    out_info->atomic_op = instr->atomic_op;
+    out_info->atomic = instr->atomic;
+    out_info->named_gpr = instr->named_gpr;
+    out_info->named_fpr = instr->named_fpr;
+    out_info->named_stack_bytes = instr->named_stack_bytes;
+    out_info->call_effects = instr->call_effects;
+    memcpy(out_info->clobbers, instr->clobbers, sizeof(out_info->clobbers));
     out_info->symbol = instr->symbol;
     out_info->spill_slot = instr->spill_slot;
     out_info->frame_slot = instr->frame_slot;
+    return true;
+}
+
+bool anvil_mir_add_va_start(anvil_mir_func_t *func, anvil_mir_vreg_t def, int frame_slot, unsigned named_gpr, unsigned named_fpr, size_t named_stack_bytes)
+{
+    if (!func || frame_slot < 0 || (size_t)frame_slot >= func->num_frame_slots ||
+        !anvil_mir_add_instr_imm(func, ANVIL_MIR_OP_VA_START, def, 0))
+        return false;
+
+    anvil_mir_instr_t *instruction = &func->instrs[func->num_instrs - 1];
+    instruction->frame_slot = frame_slot;
+    instruction->named_gpr = named_gpr;
+    instruction->named_fpr = named_fpr;
+    instruction->named_stack_bytes = named_stack_bytes;
+    return true;
+}
+
+bool anvil_mir_add_atomic(anvil_mir_func_t *func, anvil_op_t operation, anvil_mir_vreg_t def,
+                          const anvil_mir_vreg_t *uses, size_t count, const anvil_atomic_info_t *info)
+{
+    if (!anvil_atomic_info_valid(operation, info) || !anvil_mir_add_instr(func, ANVIL_MIR_OP_ATOMIC, def, uses, count))
+        return false;
+
+    anvil_mir_instr_t *instr = &func->instrs[func->num_instrs - 1];
+    instr->atomic_op = operation;
+    instr->atomic = *info;
+    return true;
+}
+
+bool anvil_mir_annotate_call_effects(anvil_mir_func_t *func, size_t first, unsigned effects)
+{
+    if (!func || first > func->num_instrs || (effects & ~ANVIL_EFFECT_ALL))
+        return false;
+
+    for (size_t index = first; index < func->num_instrs; index++)
+    {
+        if (func->instrs[index].op == ANVIL_MIR_OP_CALL)
+            func->instrs[index].call_effects = effects;
+    }
+
+    return true;
+}
+
+bool anvil_mir_set_instr_clobbers(anvil_mir_func_t *func, size_t index, anvil_mir_reg_class_t reg_class, uint64_t mask)
+{
+    if (!func || index >= func->num_instrs || (unsigned)reg_class >= ANVIL_MIR_REG_CLASS_COUNT || func->assignments)
+        return false;
+
+    func->instrs[index].clobbers[reg_class] = mask;
+    return true;
+}
+
+bool anvil_mir_annotate_memory(anvil_mir_func_t *func, size_t first, const anvil_memory_access_t *access)
+{
+    if (!func || !access || first > func->num_instrs)
+        return false;
+
+    size_t alignment = access->alignment;
+    if (alignment && (alignment & (alignment - 1)) != 0)
+        return false;
+
+    if (!alignment && !access->is_volatile)
+        return true;
+
+    for (size_t index = first; index < func->num_instrs; index++)
+    {
+        anvil_mir_instr_t *instr = &func->instrs[index];
+        if (instr->op != ANVIL_MIR_OP_LOAD && instr->op != ANVIL_MIR_OP_STORE)
+            continue;
+
+        instr->memory_access = *access;
+        if (instr->op == ANVIL_MIR_OP_STORE && instr->num_uses == 0)
+            return false;
+
+        anvil_mir_vreg_t value = instr->op == ANVIL_MIR_OP_LOAD ? instr->def : instr->uses[0];
+        if (!anvil_mir_valid_vreg(func, value))
+            return false;
+
+        size_t width = (func->vregs[value].size_bits + 7u) / 8u;
+        while (instr->memory_access.alignment > width)
+            instr->memory_access.alignment /= 2;
+    }
+
     return true;
 }
 
@@ -641,6 +737,17 @@ static bool mir_vregs_coalescible(const anvil_mir_func_t *func,
 
 static void recompute_block_instr_ranges(anvil_mir_func_t *func);
 
+static bool instr_has_clobbers(const anvil_mir_instr_t *instr)
+{
+    for (size_t reg_class = 0; reg_class < ANVIL_MIR_REG_CLASS_COUNT; reg_class++)
+    {
+        if (instr->clobbers[reg_class])
+            return true;
+    }
+
+    return false;
+}
+
 static void remove_instr_at(anvil_mir_func_t *func, size_t index)
 {
     if (!func || index >= func->num_instrs) return;
@@ -673,6 +780,8 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
     for (size_t i = 0; i < func->num_instrs; i++) {
         anvil_mir_instr_t *instr = &func->instrs[i];
         if (instr->op != ANVIL_MIR_OP_COPY || instr->num_uses != 1) continue;
+        if (instr_has_clobbers(instr))
+            continue;
 
         anvil_mir_vreg_t dst = instr->def;
         anvil_mir_vreg_t src = instr->uses[0];
@@ -952,12 +1061,73 @@ static bool mir_verify_blocks(const anvil_mir_func_t *func,
     return true;
 }
 
+static bool mir_verify_atomic(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr, size_t index, char *error, size_t error_len)
+{
+    if (!anvil_atomic_info_valid(instr->atomic_op, &instr->atomic) || instr->has_imm || instr->symbol)
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid atomic metadata", index);
+
+    size_t count = 0;
+    switch (instr->atomic_op)
+    {
+        case ANVIL_OP_ATOMIC_LOAD:
+            count = 1;
+            break;
+        case ANVIL_OP_ATOMIC_STORE:
+        case ANVIL_OP_ATOMIC_RMW:
+            count = 2;
+            break;
+        case ANVIL_OP_ATOMIC_CMPXCHG:
+            count = 3;
+            break;
+        default:
+            break;
+    }
+
+    bool has_result = instr->atomic_op != ANVIL_OP_ATOMIC_STORE && instr->atomic_op != ANVIL_OP_ATOMIC_FENCE;
+    if (instr->num_uses != count || (instr->def != ANVIL_MIR_NO_VREG) != has_result)
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid atomic operands", index);
+
+    if (!count)
+        return true;
+
+    const anvil_mir_vreg_info_t *pointer = &func->vregs[instr->uses[0]];
+    if (pointer->reg_class != ANVIL_MIR_REG_GPR || (pointer->size_bits != 32 && pointer->size_bits != 64))
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid atomic address", index);
+
+    const anvil_mir_vreg_info_t *value = &func->vregs[has_result ? instr->def : instr->uses[1]];
+    if (value->reg_class != ANVIL_MIR_REG_GPR ||
+        (value->size_bits != 8 && value->size_bits != 16 && value->size_bits != 32 && value->size_bits != 64))
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid atomic value width", index);
+
+    for (size_t operand = 1; operand < count; operand++)
+    {
+        const anvil_mir_vreg_info_t *input = &func->vregs[instr->uses[operand]];
+        if (input->reg_class != value->reg_class || input->size_bits != value->size_bits)
+            return mir_verify_fail(error, error_len, "instruction %zu has mismatched atomic value widths", index);
+    }
+
+    return true;
+}
+
 static bool mir_verify_instr(const anvil_mir_func_t *func,
                              const anvil_mir_instr_t *instr,
                              size_t index,
                              char *error,
                              size_t error_len)
 {
+    size_t alignment = instr->memory_access.alignment;
+    if ((instr->call_effects & ~ANVIL_EFFECT_ALL) || (instr->call_effects && instr->op != ANVIL_MIR_OP_CALL))
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid call effects", index);
+
+    if ((alignment || instr->memory_access.is_volatile) &&
+        instr->op != ANVIL_MIR_OP_LOAD && instr->op != ANVIL_MIR_OP_STORE)
+    {
+        return mir_verify_fail(error, error_len, "instruction %zu has memory attributes on a non-memory operation", index);
+    }
+
+    if (alignment && (alignment & (alignment - 1)) != 0)
+        return mir_verify_fail(error, error_len, "instruction %zu has invalid memory alignment", index);
+
     if (!mir_valid_block(func, instr->block)) {
         return mir_verify_fail(error, error_len,
                                "instruction %zu references invalid block",
@@ -979,6 +1149,16 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
         case ANVIL_MIR_OP_MOV:
             return mir_verify_has_def(instr, index, error, error_len) &&
                    mir_verify_num_uses(instr, 0, index, error, error_len);
+
+        case ANVIL_MIR_OP_VECTOR_FADD:
+        case ANVIL_MIR_OP_VECTOR_FSUB:
+        case ANVIL_MIR_OP_VECTOR_FMUL:
+        case ANVIL_MIR_OP_VECTOR_FDIV:
+            return mir_verify_has_def(instr, index, error, error_len) &&
+                   mir_verify_num_uses(instr, 2, index, error, error_len) &&
+                   mir_verify_def_class(func, instr, index, ANVIL_MIR_REG_FPR, error, error_len) &&
+                   mir_verify_same_class_uses(func, instr, index, true, error, error_len) &&
+                   func->vregs[instr->def].size_bits == 128 && instr->has_imm && (instr->imm == 32 || instr->imm == 64);
 
         case ANVIL_MIR_OP_COPY:
             return mir_verify_has_def(instr, index, error, error_len) &&
@@ -1147,7 +1327,11 @@ static bool mir_verify_instr(const anvil_mir_func_t *func,
                                         ANVIL_MIR_REG_GPR, error, error_len) &&
                    instr->has_imm && instr->imm > 0;
 
+        case ANVIL_MIR_OP_ATOMIC:
+            return mir_verify_atomic(func, instr, index, error, error_len);
+
         case ANVIL_MIR_OP_INCOMING_STACK_ARG:
+        case ANVIL_MIR_OP_VA_START:
             return mir_verify_has_def(instr, index, error, error_len) &&
                    mir_verify_num_uses(instr, 0, index, error, error_len) &&
                    instr->has_imm && instr->imm >= 0;
@@ -1519,7 +1703,7 @@ bool anvil_mir_verify(const anvil_mir_func_t *func,
     }
 
     if (!mir_verify_blocks(func, error, error_len)) return false;
-    return mir_verify_cfg_and_assignment(func, error, error_len);
+    return mir_verify_cfg_and_assignment(func, error, error_len) && anvil_mir_verify_clobbers(func, error, error_len);
 }
 
 static void free_instr_contents(anvil_mir_instr_t *instr)
@@ -1677,6 +1861,17 @@ static bool scratch_phys_live_at_instr(const anvil_mir_func_t *func,
     return false;
 }
 
+static size_t first_matching_use(const anvil_mir_instr_t *instr, size_t index)
+{
+    for (size_t previous = 0; previous < index; previous++)
+    {
+        if (instr->uses[previous] == instr->uses[index])
+            return previous;
+    }
+
+    return index;
+}
+
 static bool instruction_scratch_needs(const anvil_mir_func_t *func,
                                       const anvil_mir_instr_t *instr,
                                       size_t needs[ANVIL_MIR_REG_CLASS_COUNT])
@@ -1688,6 +1883,8 @@ static bool instruction_scratch_needs(const anvil_mir_func_t *func,
     for (size_t u = 0; u < instr->num_uses; u++) {
         anvil_mir_vreg_t use = instr->uses[u];
         if (!assignment_is_spilled(func, use)) continue;
+        if (first_matching_use(instr, u) != u)
+            continue;
 
         anvil_mir_reg_class_t reg_class = func->vregs[use].reg_class;
         if (!valid_reg_class(reg_class)) return false;
@@ -1834,7 +2031,8 @@ static bool append_spill_load(anvil_mir_instr_t **instrs,
                               size_t *cap_instrs,
                               anvil_mir_block_t block,
                               anvil_mir_vreg_t temp,
-                              int spill_slot)
+                              int spill_slot,
+                              const anvil_mir_instr_t *rematerialize)
 {
     anvil_mir_instr_t instr;
     memset(&instr, 0, sizeof(instr));
@@ -1845,6 +2043,14 @@ static bool append_spill_load(anvil_mir_instr_t **instrs,
     instr.false_block = ANVIL_MIR_NO_BLOCK;
     instr.spill_slot = spill_slot;
     instr.frame_slot = -1;
+    if (rematerialize)
+    {
+        instr.op = ANVIL_MIR_OP_MOV;
+        instr.has_imm = true;
+        instr.imm = rematerialize->imm;
+        instr.spill_slot = -1;
+    }
+
     return append_owned_materialized_instr(instrs, num_instrs, cap_instrs,
                                            &instr);
 }
@@ -1924,6 +2130,261 @@ static void recompute_block_instr_ranges(anvil_mir_func_t *func)
     }
 }
 
+typedef struct {
+    const anvil_mir_instr_t *instruction;
+    unsigned definitions;
+} rematerialization_t;
+
+static rematerialization_t *find_rematerializable_constants(const anvil_mir_func_t *func)
+{
+    rematerialization_t *values = calloc(func->num_vregs, sizeof(*values));
+    if (!values)
+        return NULL;
+
+    for (size_t index = 0; index < func->num_instrs; index++)
+    {
+        const anvil_mir_instr_t *instr = &func->instrs[index];
+        if (instr->def == ANVIL_MIR_NO_VREG)
+            continue;
+
+        rematerialization_t *value = &values[instr->def];
+        if (value->definitions < 2)
+            value->definitions++;
+
+        const anvil_mir_vreg_info_t *info = &func->vregs[instr->def];
+        if (value->definitions == 1 && !info->is_live_in && info->reg_class == ANVIL_MIR_REG_GPR &&
+            instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && !instr->num_uses && !instr->symbol && !instr_has_clobbers(instr))
+            value->instruction = instr;
+        else
+            value->instruction = NULL;
+    }
+
+    return values;
+}
+
+typedef struct {
+    anvil_mir_block_t block;
+    size_t definitions;
+    size_t definition;
+    size_t first_use;
+    size_t definition_epoch;
+    size_t last_use_epoch;
+    size_t current_epoch;
+    anvil_mir_vreg_t current;
+    int slot;
+    bool crosses_blocks;
+} split_value_t;
+
+static void split_note_block(split_value_t *value, anvil_mir_block_t block)
+{
+    if (value->block == ANVIL_MIR_NO_BLOCK)
+        value->block = block;
+    else if (value->block != block)
+        value->crosses_blocks = true;
+}
+
+static void split_advance_epochs(const anvil_mir_instr_t *instruction, size_t *epochs)
+{
+    for (size_t reg_class = 0; reg_class < ANVIL_MIR_REG_CLASS_COUNT; reg_class++)
+    {
+        if (instruction->clobbers[reg_class])
+            epochs[(size_t)instruction->block * ANVIL_MIR_REG_CLASS_COUNT + reg_class]++;
+    }
+}
+
+/* Split local, single-definition spilled values at clobbers. Each immutable
+ * value is saved once, then reloaded only at the first use in a new segment.
+ * Cross-block ranges and PHI copies retain the global allocator's policy.
+ * Pinned slots keep these explicit transfers stable when allocation reruns. */
+bool anvil_mir_split_spilled_intervals(anvil_mir_func_t *func, bool *changed)
+{
+    *changed = false;
+    if (!func->num_spills || !func->num_vregs)
+        return true;
+
+    if (func->num_blocks > SIZE_MAX / (ANVIL_MIR_REG_CLASS_COUNT * sizeof(size_t)))
+        return false;
+
+    size_t original_vregs = func->num_vregs;
+    split_value_t *values = calloc(original_vregs, sizeof(*values));
+    size_t epoch_count = func->num_blocks * ANVIL_MIR_REG_CLASS_COUNT;
+    size_t *epochs = calloc(epoch_count, sizeof(*epochs));
+    if (!values || !epochs)
+    {
+        free(values);
+        free(epochs);
+        return false;
+    }
+
+    for (size_t index = 0; index < original_vregs; index++)
+    {
+        values[index].block = ANVIL_MIR_NO_BLOCK;
+        values[index].first_use = SIZE_MAX;
+        values[index].slot = -1;
+        values[index].current = (anvil_mir_vreg_t)index;
+    }
+
+    for (size_t index = 0; index < func->num_instrs; index++)
+    {
+        const anvil_mir_instr_t *instruction = &func->instrs[index];
+        for (size_t operand = 0; operand < instruction->num_uses; operand++)
+        {
+            anvil_mir_vreg_t use = instruction->uses[operand];
+            split_value_t *value = &values[use];
+            split_note_block(value, instruction->block);
+            if (value->first_use == SIZE_MAX)
+                value->first_use = index;
+
+            value->last_use_epoch = epochs[(size_t)instruction->block * ANVIL_MIR_REG_CLASS_COUNT + func->vregs[use].reg_class];
+        }
+
+        split_advance_epochs(instruction, epochs);
+        if (instruction->def != ANVIL_MIR_NO_VREG)
+        {
+            split_value_t *value = &values[instruction->def];
+            split_note_block(value, instruction->block);
+            value->definitions++;
+            value->definition = index;
+            value->definition_epoch = epochs[(size_t)instruction->block * ANVIL_MIR_REG_CLASS_COUNT + func->vregs[instruction->def].reg_class];
+        }
+    }
+
+    size_t pinned = func->num_pinned_spills;
+    for (size_t index = 0; index < original_vregs; index++)
+    {
+        split_value_t *value = &values[index];
+        if (!assignment_is_spilled(func, (anvil_mir_vreg_t)index) || value->definitions != 1 || value->crosses_blocks ||
+            value->first_use == SIZE_MAX || value->first_use <= value->definition || value->last_use_epoch <= value->definition_epoch ||
+            func->vregs[index].has_fixed_reg || func->vregs[index].is_live_in)
+            continue;
+
+        const anvil_mir_instr_t *definition = &func->instrs[value->definition];
+        if ((definition->op == ANVIL_MIR_OP_MOV && definition->has_imm) || definition->op == ANVIL_MIR_OP_CALL ||
+            definition->op == ANVIL_MIR_OP_CALL_RESULT || definition->op == ANVIL_MIR_OP_SPILL_LOAD)
+            continue;
+
+        if (pinned == INT_MAX)
+        {
+            free(values);
+            free(epochs);
+            return false;
+        }
+
+        value->slot = (int)pinned++;
+    }
+
+    if (pinned == func->num_pinned_spills)
+    {
+        free(values);
+        free(epochs);
+        return true;
+    }
+
+    anvil_mir_spill_slot_info_t *slots = calloc(pinned, sizeof(*slots));
+    anvil_mir_instr_t *instructions = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    bool success = false;
+    if (!slots)
+        goto done;
+
+    if (func->num_pinned_spills)
+        memcpy(slots, func->spill_slots, func->num_pinned_spills * sizeof(*slots));
+
+    for (size_t index = 0; index < original_vregs; index++)
+    {
+        if (values[index].slot >= 0)
+        {
+            slots[values[index].slot].reg_class = func->vregs[index].reg_class;
+            slots[values[index].slot].size_bits = func->vregs[index].size_bits;
+        }
+    }
+
+    memset(epochs, 0, epoch_count * sizeof(*epochs));
+    for (size_t index = 0; index < func->num_instrs; index++)
+    {
+        const anvil_mir_instr_t *original = &func->instrs[index];
+        anvil_mir_instr_t copy;
+        if (!clone_instr_for_materialization(original, &copy))
+            goto done;
+
+        bool copied = true;
+        for (size_t operand = 0; operand < copy.num_uses; operand++)
+        {
+            anvil_mir_vreg_t use = original->uses[operand];
+            split_value_t *value = &values[use];
+            if (value->slot < 0)
+                continue;
+
+            anvil_mir_vreg_info_t info = func->vregs[use];
+            size_t epoch = epochs[(size_t)original->block * ANVIL_MIR_REG_CLASS_COUNT + info.reg_class];
+            if (value->current_epoch != epoch)
+            {
+                if (func->num_vregs >= UINT32_MAX || !reserve_vregs(func, func->num_vregs + 1))
+                {
+                    copied = false;
+                    break;
+                }
+
+                anvil_mir_vreg_t segment = (anvil_mir_vreg_t)func->num_vregs++;
+                func->vregs[segment] = info;
+                if (!append_spill_load(&instructions, &count, &capacity, original->block, segment, value->slot, NULL))
+                {
+                    copied = false;
+                    break;
+                }
+
+                value->current = segment;
+                value->current_epoch = epoch;
+            }
+
+            copy.uses[operand] = value->current;
+        }
+
+        if (!copied || !append_owned_materialized_instr(&instructions, &count, &capacity, &copy))
+        {
+            free_instr_contents(&copy);
+            goto done;
+        }
+
+        split_advance_epochs(original, epochs);
+        if (original->def != ANVIL_MIR_NO_VREG && values[original->def].slot >= 0)
+        {
+            split_value_t *value = &values[original->def];
+            value->current_epoch = epochs[(size_t)original->block * ANVIL_MIR_REG_CLASS_COUNT + func->vregs[original->def].reg_class];
+            if (!append_spill_store(&instructions, &count, &capacity, original->block, original->def, value->slot))
+                goto done;
+        }
+    }
+
+    free_instr_array(func->instrs, func->num_instrs);
+    func->instrs = instructions;
+    func->num_instrs = count;
+    func->cap_instrs = capacity;
+    instructions = NULL;
+    free(func->assignments);
+    func->assignments = NULL;
+    free(func->spill_slots);
+    func->spill_slots = slots;
+    slots = NULL;
+    func->num_spills = pinned;
+    func->num_pinned_spills = pinned;
+    func->cap_spills = pinned;
+    recompute_block_instr_ranges(func);
+    success = true;
+    *changed = true;
+
+done:
+    if (!success)
+        func->num_vregs = original_vregs;
+
+    free(slots);
+    free_instr_array(instructions, instructions ? count : 0);
+    free(values);
+    free(epochs);
+    return success;
+}
+
 bool anvil_mir_materialize_spills(
     anvil_mir_func_t *func,
     const anvil_regalloc_class_config_t *scratch_configs,
@@ -1942,13 +2403,20 @@ bool anvil_mir_materialize_spills(
     anvil_mir_instr_t *new_instrs = NULL;
     size_t new_num_instrs = 0;
     size_t new_cap_instrs = 0;
+    rematerialization_t *rematerialize = find_rematerializable_constants(func);
+    if (!rematerialize)
+        return false;
 
     for (size_t i = 0; i < func->num_instrs; i++) {
         const anvil_mir_instr_t *old = &func->instrs[i];
+        if (old->def != ANVIL_MIR_NO_VREG && assignment_is_spilled(func, old->def) && rematerialize[old->def].instruction)
+            continue;
+
         size_t scratch_used[ANVIL_MIR_REG_CLASS_COUNT] = { 0 };
 
         anvil_mir_instr_t patched;
         if (!clone_instr_for_materialization(old, &patched)) {
+            free(rematerialize);
             free_instr_array(new_instrs, new_num_instrs);
             return false;
         }
@@ -1957,12 +2425,20 @@ bool anvil_mir_materialize_spills(
             anvil_mir_vreg_t use = patched.uses[u];
             if (!assignment_is_spilled(func, use)) continue;
 
+            size_t previous = first_matching_use(old, u);
+            if (previous != u)
+            {
+                patched.uses[u] = patched.uses[previous];
+                continue;
+            }
+
             const anvil_mir_vreg_info_t *info = &func->vregs[use];
             int phys_reg = -1;
             if (!next_scratch_phys(scratch_configs, num_scratch_configs,
                                    info->reg_class, scratch_used, func,
                                    original_vregs, i, &phys_reg)) {
                 free_instr_contents(&patched);
+                free(rematerialize);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;
             }
@@ -1974,8 +2450,10 @@ bool anvil_mir_materialize_spills(
             if (temp == ANVIL_MIR_NO_VREG ||
                 !append_spill_load(&new_instrs, &new_num_instrs,
                                    &new_cap_instrs, old->block, temp,
-                                   func->assignments[use].spill_slot)) {
+                                   func->assignments[use].spill_slot,
+                                   rematerialize[use].instruction)) {
                 free_instr_contents(&patched);
+                free(rematerialize);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;
             }
@@ -1993,6 +2471,7 @@ bool anvil_mir_materialize_spills(
                                    info->reg_class, scratch_used, func,
                                    original_vregs, i, &phys_reg)) {
                 free_instr_contents(&patched);
+                free(rematerialize);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;
             }
@@ -2002,6 +2481,7 @@ bool anvil_mir_materialize_spills(
                                            phys_reg);
             if (def_temp == ANVIL_MIR_NO_VREG) {
                 free_instr_contents(&patched);
+                free(rematerialize);
                 free_instr_array(new_instrs, new_num_instrs);
                 return false;
             }
@@ -2012,6 +2492,7 @@ bool anvil_mir_materialize_spills(
         if (!append_owned_materialized_instr(&new_instrs, &new_num_instrs,
                                              &new_cap_instrs, &patched)) {
             free_instr_contents(&patched);
+            free(rematerialize);
             free_instr_array(new_instrs, new_num_instrs);
             return false;
         }
@@ -2019,11 +2500,13 @@ bool anvil_mir_materialize_spills(
         if (spilled_def &&
             !append_spill_store(&new_instrs, &new_num_instrs, &new_cap_instrs,
                                 old->block, def_temp, def_spill_slot)) {
+            free(rematerialize);
             free_instr_array(new_instrs, new_num_instrs);
             return false;
         }
     }
 
+    free(rematerialize);
     free_instr_array(func->instrs, func->num_instrs);
     func->instrs = new_instrs;
     func->num_instrs = new_num_instrs;
@@ -2037,6 +2520,12 @@ void anvil_mir_clear_allocations(anvil_mir_func_t *func)
     if (!func) return;
     free(func->assignments);
     func->assignments = NULL;
+    if (func->num_pinned_spills)
+    {
+        func->num_spills = func->num_pinned_spills;
+        return;
+    }
+
     free(func->spill_slots);
     func->spill_slots = NULL;
     func->num_spills = 0;

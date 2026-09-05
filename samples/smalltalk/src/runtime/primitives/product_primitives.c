@@ -4,6 +4,8 @@
 #include "st_core_primitives.h"
 #include "st_exception_primitives.h"
 #include "st_float_primitives.h"
+#include "st_fiber_primitives.h"
+#include "st_socket_primitives.h"
 #include "st_heap_primitives.h"
 #include "st_integer_primitives.h"
 #include "st_reflection_primitives.h"
@@ -25,7 +27,9 @@ st_primitive_status_t st_product_primitive_catalog_build(
         st_string_primitive_specs,
         st_block_primitive_specs,
         st_exception_primitive_specs,
-        st_reflection_primitive_specs
+        st_reflection_primitive_specs,
+        st_fiber_primitive_specs,
+        st_socket_primitive_specs
     };
     st_primitive_catalog_t built = {0};
     size_t provider_index;

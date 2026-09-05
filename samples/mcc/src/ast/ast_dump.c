@@ -358,8 +358,9 @@ static void ast_dump_node(mcc_ast_node_t *node, FILE *out, int indent)
             break;
             
         case AST_STATIC_ASSERT:
-            if (node->data.static_assert.message) {
-                fprintf(out, " \"%s\"", node->data.static_assert.message);
+            if (node->data.static_assert_decl.message)
+            {
+                fprintf(out, " \"%s\"", node->data.static_assert_decl.message);
             }
             break;
             
@@ -677,10 +678,11 @@ static void ast_dump_node(mcc_ast_node_t *node, FILE *out, int indent)
             break;
             
         case AST_STATIC_ASSERT:
-            if (node->data.static_assert.expr) {
+            if (node->data.static_assert_decl.expr)
+            {
                 print_indent(out, indent + 1);
                 fprintf(out, "Expr:\n");
-                ast_dump_node(node->data.static_assert.expr, out, indent + 2);
+                ast_dump_node(node->data.static_assert_decl.expr, out, indent + 2);
             }
             break;
             

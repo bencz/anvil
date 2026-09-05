@@ -30,17 +30,18 @@ static struct mcc_arena_block *arena_block_new(size_t payload)
 
 /* Architecture names */
 static const char *arch_names[] = {
-    [MCC_ARCH_X86]         = "x86",
-    [MCC_ARCH_X86_64]      = "x86_64",
-    [MCC_ARCH_S370]        = "s370",
-    [MCC_ARCH_S370_XA]     = "s370_xa",
-    [MCC_ARCH_S390]        = "s390",
-    [MCC_ARCH_ZARCH]       = "zarch",
-    [MCC_ARCH_PPC32]       = "ppc32",
-    [MCC_ARCH_PPC64]       = "ppc64",
-    [MCC_ARCH_PPC64LE]     = "ppc64le",
-    [MCC_ARCH_ARM64]       = "arm64",
+    [MCC_ARCH_X86] = "x86",
+    [MCC_ARCH_X86_64] = "x86_64",
+    [MCC_ARCH_S370] = "s370",
+    [MCC_ARCH_S370_XA] = "s370_xa",
+    [MCC_ARCH_S390] = "s390",
+    [MCC_ARCH_ZARCH] = "zarch",
+    [MCC_ARCH_PPC32] = "ppc32",
+    [MCC_ARCH_PPC64] = "ppc64",
+    [MCC_ARCH_PPC64LE] = "ppc64le",
+    [MCC_ARCH_ARM64] = "arm64",
     [MCC_ARCH_ARM64_MACOS] = "arm64-macos",
+    [MCC_ARCH_X86_64_WINDOWS] = "x86_64_windows",
 };
 
 /*
@@ -381,7 +382,8 @@ bool mcc_has_errors(mcc_context_t *ctx)
 /* Utilities */
 const char *mcc_arch_name(mcc_arch_t arch)
 {
-    if (arch < MCC_ARCH_COUNT) {
+    if ((unsigned)arch < MCC_ARCH_COUNT)
+    {
         return arch_names[arch];
     }
     return "unknown";
@@ -403,6 +405,8 @@ anvil_arch_t mcc_arch_to_anvil(mcc_arch_t arch)
     switch (arch) {
         case MCC_ARCH_X86:         return ANVIL_ARCH_X86;
         case MCC_ARCH_X86_64:      return ANVIL_ARCH_X86_64;
+        case MCC_ARCH_X86_64_WINDOWS:
+            return ANVIL_ARCH_X86_64;
         case MCC_ARCH_S370:        return ANVIL_ARCH_S370;
         case MCC_ARCH_S370_XA:     return ANVIL_ARCH_S370_XA;
         case MCC_ARCH_S390:        return ANVIL_ARCH_S390;

@@ -21,15 +21,18 @@ must follow the class it extends. Application sources may add subclasses and
 explicit extensions, but cannot silently replace an image class or duplicate
 a method.
 
-The current bootstrap tranche contains 50 classes covering the object/class
+The source image contains classes covering the object/class
 kernel, booleans, exceptions, the immediate/arbitrary-precision numeric roots,
 indexed collections, associations, ordered collections, sets, dictionaries,
-strings/symbols, closures and the minimal canonical `Stream`/`ExternalStream`
-output protocol. Primitive pragmas are
+strings/symbols, closures, Unicode read/write streams, cooperative fibers,
+sockets and the HTTP sample protocol. Primitive pragmas are
 required AOT link contracts, not optional no-ops. The compiler currently
-resolves all 69 uses to typed intrinsics or real RT entries and rejects a build
+resolves primitive uses to typed intrinsics or real RT entries and rejects a build
 if any implementation or required fallback is absent. Whole-image lowering
-still has separate capability gates for general blocks and bootstrap.
+still has explicit capability gates for unsupported source constructs.
+
+See the [HTTP sample](../examples/web-http-server/README.md) for connection
+lifetime, platform adapters and compiled Windows/Linux validation commands.
 
 Source loading is transactional and bounded. Defaults cap the manifest at
 4 MiB, each source at 64 MiB, the combined source text at 512 MiB and the file

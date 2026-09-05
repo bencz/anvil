@@ -4,6 +4,7 @@ lib/
 
 # Object files
 *.o
+__pycache__/
 
 # Assembly files
 *.s
@@ -54,4 +55,3 @@ examples/base64_lib/base64_lib.s
 examples/base64_lib/base64_lib.o
 examples/base64_lib/test_base64.o
 examples/base64_lib/test_base64
-

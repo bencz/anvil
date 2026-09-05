@@ -517,6 +517,49 @@ anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t coun
     return type;
 }
 
+anvil_type_t *anvil_type_vector(anvil_ctx_t *ctx, anvil_type_t *element, size_t lanes)
+{
+    if (!ctx || !ctx->target_configured || !element || element->owner_ctx != ctx || !anvil_type_is_floating(element) ||
+        lanes < 2 || lanes > 16 || (lanes & (lanes - 1)))
+    {
+        if (ctx)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE, "Vector requires 2, 4, 8 or 16 floating-point lanes in the current context");
+
+        return NULL;
+    }
+
+    anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_VECTOR);
+    if (!type)
+        return NULL;
+
+    type->data.vector.element = element;
+    type->data.vector.lanes = lanes;
+    type->size = element->size * lanes;
+    type->align = element->align;
+    type->preferred_align = type->size;
+    type_register(ctx, type);
+    anvil_ctx_freeze_target(ctx);
+    return type;
+}
+
+anvil_type_t *anvil_type_vector_element(anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_VECTOR ? type->data.vector.element : NULL;
+}
+
+size_t anvil_type_vector_lanes(anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_VECTOR ? type->data.vector.lanes : 0;
+}
+
+unsigned anvil_vector_operation_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type)
+{
+    if (!ctx || !type || type->owner_ctx != ctx || type->kind != ANVIL_TYPE_VECTOR || !ctx->backend || !ctx->backend->ops->vector_operation_cost)
+        return 0;
+
+    return ctx->backend->ops->vector_operation_cost(ctx->backend, operation, type);
+}
+
 bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
                       anvil_cc_t *effective)
 {
@@ -727,6 +770,9 @@ static bool types_equal_graph(const anvil_type_t *lhs,
             return lhs->data.array.count == rhs->data.array.count &&
                    types_equal_graph(lhs->data.array.elem, rhs->data.array.elem,
                                      &pair);
+        case ANVIL_TYPE_VECTOR:
+            return lhs->data.vector.lanes == rhs->data.vector.lanes &&
+                   types_equal_graph(lhs->data.vector.element, rhs->data.vector.element, &pair);
         case ANVIL_TYPE_STRUCT:
             if (lhs->data.struc.identified || rhs->data.struc.identified)
                 return false; /* distinct identified types are nominal */
@@ -1023,7 +1069,8 @@ bool anvil_sem_binary_types(anvil_op_t op, const anvil_type_t *lhs,
             return false;
         case ANVIL_OP_FADD: case ANVIL_OP_FSUB:
         case ANVIL_OP_FMUL: case ANVIL_OP_FDIV:
-            return anvil_type_is_floating((anvil_type_t *)lhs);
+            return anvil_type_is_floating((anvil_type_t *)lhs) ||
+                   (lhs->kind == ANVIL_TYPE_VECTOR && anvil_type_is_floating(lhs->data.vector.element));
         default:
             return false;
     }

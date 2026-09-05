@@ -3,6 +3,8 @@
 #include "st_aot_bootstrap.h"
 #include "st_closure_bridge.h"
 #include "st_dnu.h"
+#include "st_fiber.h"
+#include "st_socket.h"
 #include "st_float_primitives.h"
 #include "st_heap_primitives.h"
 #include "st_integer_primitives.h"
@@ -30,6 +32,8 @@ struct st_application_startup_state {
     st_aot_closure_context_t closures;
     st_aot_thread_t thread;
     st_dnu_context_t dnu;
+    st_fiber_context_t *fibers;
+    st_socket_context_t *sockets;
 
     st_heap_indexed_access_t *indexed_access;
     bool image_ready;
@@ -753,6 +757,13 @@ static st_application_startup_status_t initialize_thread(
         return ST_APPLICATION_STARTUP_ERR_DNU;
     }
     state->dnu_attached = true;
+
+    if (st_fiber_context_create(&state->thread, 1024u * 1024u, &state->fibers) != ST_FIBER_OK)
+        return ST_APPLICATION_STARTUP_ERR_THREAD;
+
+    if (st_socket_context_create(&state->thread, &state->sockets) != ST_SOCKET_OK)
+        return ST_APPLICATION_STARTUP_ERR_THREAD;
+
     return ST_APPLICATION_STARTUP_OK;
 }
 
@@ -765,6 +776,20 @@ static st_application_startup_status_t destroy_state(
 
     if (state == NULL) {
         return ST_APPLICATION_STARTUP_OK;
+    }
+
+    if (state->sockets != NULL) {
+        if (st_socket_context_destroy(state->sockets) != ST_SOCKET_OK)
+            return ST_APPLICATION_STARTUP_ERR_CLEANUP;
+
+        state->sockets = NULL;
+    }
+
+    if (state->fibers != NULL) {
+        if (st_fiber_context_destroy(state->fibers) != ST_FIBER_OK)
+            return ST_APPLICATION_STARTUP_ERR_CLEANUP;
+
+        state->fibers = NULL;
     }
     if (state->control_ready
             && state->control._st_pending_kind != ST_CONTROL_PENDING_NONE

@@ -11,7 +11,7 @@
 
 #include "arm64_internal.h"
 #include "anvil/anvil_arm64_mir.h"
-#include "../gnu_data.h"
+#include "../common/gnu_data.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -334,6 +334,12 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
  * Backend Registration
  * ============================================================================ */
 
+static bool arm64_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
+{
+    (void)be;
+    return anvil_atomic_type_valid(type);
+}
+
 const anvil_backend_ops_t anvil_backend_arm64 = {
     .name = "ARM64",
     .arch = ANVIL_ARCH_ARM64,
@@ -342,5 +348,9 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .reset = arm64_reset,
     .codegen_module = arm64_codegen_module,
     .codegen_func = arm64_codegen_func,
-    .get_arch_info = arm64_get_arch_info
+    .get_arch_info = arm64_get_arch_info,
+    .atomic_is_lock_free = arm64_atomic_is_lock_free,
+    .build_va_arg = anvil_arm64_build_va_arg,
+    .build_va_copy = anvil_arm64_build_va_copy,
+    .build_va_copy_into = anvil_arm64_build_va_copy_into
 };

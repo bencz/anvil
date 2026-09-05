@@ -303,6 +303,55 @@ anvil_value_t *anvil_build_cmp_uge(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_v
 }
 
 /* Memory operations */
+anvil_value_t *anvil_build_va_start(anvil_ctx_t *ctx, const char *name)
+{
+    anvil_block_t *block = ctx ? ctx->insert_block : NULL;
+    if (!block || !block->parent || !block->parent->type->data.func.variadic)
+    {
+        builder_invalid(ctx, "va_start requires a variadic function");
+        return NULL;
+    }
+
+    anvil_type_t *pointer = anvil_type_ptr(ctx, anvil_type_i8(ctx));
+    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_VA_START, pointer, name);
+    return instr ? finish_value(ctx, instr) : NULL;
+}
+
+anvil_value_t *anvil_build_va_copy(anvil_ctx_t *ctx, anvil_value_t *cursor, const char *name)
+{
+    if (!ctx || !builder_value_is_usable(ctx, cursor) || !ctx->backend || !ctx->backend->ops->build_va_copy)
+    {
+        builder_invalid(ctx, "va_copy requires a supported cursor ABI");
+        return NULL;
+    }
+
+    return ctx->backend->ops->build_va_copy(ctx->backend, cursor, name);
+}
+
+bool anvil_build_va_copy_into(anvil_ctx_t *ctx, anvil_value_t *destination, anvil_value_t *cursor)
+{
+    if (!ctx || !builder_value_is_usable(ctx, destination) || !builder_value_is_usable(ctx, cursor) ||
+        !anvil_type_is_pointer(destination->type) || !ctx->backend || !ctx->backend->ops->build_va_copy_into)
+    {
+        builder_invalid(ctx, "va_copy_into requires native cursor storage and a supported cursor ABI");
+        return false;
+    }
+
+    return ctx->backend->ops->build_va_copy_into(ctx->backend, destination, cursor);
+}
+
+anvil_value_t *anvil_build_va_arg(anvil_ctx_t *ctx, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name)
+{
+    if (!ctx || !type || type->owner_ctx != ctx || !anvil_sem_type_is_sized(type) ||
+        !builder_value_is_usable(ctx, cursor_storage) || !ctx->backend || !ctx->backend->ops->build_va_arg)
+    {
+        builder_invalid(ctx, "va_arg requires a supported cursor ABI and a sized type");
+        return NULL;
+    }
+
+    return ctx->backend->ops->build_va_arg(ctx->backend, cursor_storage, type, name);
+}
+
 anvil_value_t *anvil_build_alloca(anvil_ctx_t *ctx, anvil_type_t *type, const char *name)
 {
     if (!ctx || !type || type->owner_ctx != ctx ||
@@ -343,7 +392,118 @@ anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
     return finish_value(ctx, instr);
 }
 
+static anvil_instr_t *build_atomic(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t **operands, size_t count,
+                                   anvil_atomic_info_t info, const char *name)
+{
+    if (!ctx || !builder_current_func(ctx) || !anvil_atomic_info_valid(op, &info))
+    {
+        builder_invalid(ctx, "Invalid atomic operation or memory ordering");
+        return NULL;
+    }
+
+    for (size_t index = 0; index < count; index++)
+    {
+        if (!builder_value_is_usable(ctx, operands[index]))
+        {
+            builder_invalid(ctx, "Atomic operand belongs to another function or context");
+            return NULL;
+        }
+    }
+
+    anvil_type_t *object = count ? anvil_sem_memory_object_type(operands[0]) : ctx->type_void;
+    if (count && !anvil_atomic_type_valid(object))
+    {
+        builder_invalid(ctx, "Atomic storage requires a scalar integer or pointer type");
+        return NULL;
+    }
+
+    for (size_t index = 1; index < count; index++)
+    {
+        if (!anvil_types_equal(object, operands[index]->type))
+        {
+            builder_invalid(ctx, "Atomic value and storage types must match");
+            return NULL;
+        }
+    }
+
+    if (op == ANVIL_OP_ATOMIC_RMW && info.rmw != ANVIL_ATOMIC_EXCHANGE && !anvil_type_is_integer(object))
+    {
+        builder_invalid(ctx, "Arithmetic atomic RMW requires an integer object");
+        return NULL;
+    }
+
+    bool has_result = op != ANVIL_OP_ATOMIC_STORE && op != ANVIL_OP_ATOMIC_FENCE;
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, has_result ? object : ctx->type_void, name);
+    if (!instr || !anvil_instr_add_operands(instr, operands, count))
+        return NULL;
+
+    instr->atomic = info;
+    if (!anvil_instr_insert(ctx, instr))
+        return NULL;
+
+    return instr;
+}
+
+anvil_value_t *anvil_build_atomic_load(anvil_ctx_t *ctx, anvil_value_t *pointer, anvil_memory_order_t order, const char *name)
+{
+    anvil_atomic_info_t info = { .order = order };
+    anvil_instr_t *instr = build_atomic(ctx, ANVIL_OP_ATOMIC_LOAD, &pointer, 1, info, name);
+    return instr ? instr->result : NULL;
+}
+
+bool anvil_build_atomic_store(anvil_ctx_t *ctx, anvil_value_t *value, anvil_value_t *pointer, anvil_memory_order_t order)
+{
+    anvil_value_t *operands[] = { pointer, value };
+    anvil_atomic_info_t info = { .order = order };
+    return build_atomic(ctx, ANVIL_OP_ATOMIC_STORE, operands, 2, info, NULL) != NULL;
+}
+
+anvil_value_t *anvil_build_atomic_rmw(anvil_ctx_t *ctx, anvil_atomic_rmw_t operation, anvil_value_t *pointer, anvil_value_t *value,
+                                    anvil_memory_order_t order, const char *name)
+{
+    anvil_value_t *operands[] = { pointer, value };
+    anvil_atomic_info_t info = { .order = order, .rmw = operation };
+    anvil_instr_t *instr = build_atomic(ctx, ANVIL_OP_ATOMIC_RMW, operands, 2, info, name);
+    return instr ? instr->result : NULL;
+}
+
+anvil_value_t *anvil_build_atomic_cmpxchg(anvil_ctx_t *ctx, anvil_value_t *pointer, anvil_value_t *expected, anvil_value_t *desired,
+                                        anvil_memory_order_t success, anvil_memory_order_t failure, const char *name)
+{
+    anvil_value_t *operands[] = { pointer, expected, desired };
+    anvil_atomic_info_t info = { .order = success, .failure_order = failure };
+    anvil_instr_t *instr = build_atomic(ctx, ANVIL_OP_ATOMIC_CMPXCHG, operands, 3, info, name);
+    return instr ? instr->result : NULL;
+}
+
+bool anvil_build_atomic_fence(anvil_ctx_t *ctx, anvil_memory_order_t order)
+{
+    anvil_atomic_info_t info = { .order = order };
+    return build_atomic(ctx, ANVIL_OP_ATOMIC_FENCE, NULL, 0, info, NULL) != NULL;
+}
+
+static bool valid_memory_access(anvil_ctx_t *ctx, const anvil_type_t *type, const anvil_memory_access_t *access)
+{
+    if (!access || access->alignment == 0)
+        return true;
+
+    size_t alignment = access->alignment;
+    if ((alignment & (alignment - 1)) != 0 || alignment < type->align)
+    {
+        builder_invalid(ctx, "Memory alignment must be a power of two at least as large as the type alignment");
+        return false;
+    }
+
+    return true;
+}
+
 anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr, const char *name)
+{
+    return anvil_build_load_ex(ctx, type, ptr, NULL, name);
+}
+
+anvil_value_t *anvil_build_load_ex(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr,
+                                  const anvil_memory_access_t *access, const char *name)
 {
     if (!ctx || !type || type->owner_ctx != ctx ||
         !builder_value_is_usable(ctx, ptr) ||
@@ -352,14 +512,25 @@ anvil_value_t *anvil_build_load(anvil_ctx_t *ctx, anvil_type_t *type, anvil_valu
         return NULL;
     }
     
+    if (!valid_memory_access(ctx, type, access))
+        return NULL;
+
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_LOAD, type, name);
     if (!instr) return NULL;
+
+    if (access)
+        instr->memory_access = *access;
     
     if (!anvil_instr_add_operand(instr, ptr)) return NULL;
     return finish_value(ctx, instr);
 }
 
 bool anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr)
+{
+    return anvil_build_store_ex(ctx, val, ptr, NULL);
+}
+
+bool anvil_build_store_ex(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr, const anvil_memory_access_t *access)
 {
     if (!ctx || !builder_value_is_usable(ctx, val) ||
         !builder_value_is_usable(ctx, ptr) ||
@@ -368,8 +539,14 @@ bool anvil_build_store(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *ptr)
         return false;
     }
     
+    if (!valid_memory_access(ctx, val->type, access))
+        return false;
+
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_STORE, ctx->type_void, NULL);
     if (!instr) return false;
+
+    if (access)
+        instr->memory_access = *access;
     
     anvil_value_t *operands[] = { val, ptr };
     if (!add_operands(instr, operands, 2)) return false;

@@ -27,21 +27,26 @@
 
 typedef struct {
     anvil_arch_t target;
+    anvil_abi_t abi;
     bool supported;
 } expected_profile_t;
 
 static const expected_profile_t expected_profiles[] = {
-    {ANVIL_ARCH_X86_64, true},
-    {ANVIL_ARCH_ARM64, true},
-    {ANVIL_ARCH_PPC64, true},
-    {ANVIL_ARCH_PPC64LE, true},
-    {ANVIL_ARCH_ZARCH, true},
-    {ANVIL_ARCH_X86, false},
-    {ANVIL_ARCH_S370, false},
-    {ANVIL_ARCH_S370_XA, false},
-    {ANVIL_ARCH_S390, false},
-    {ANVIL_ARCH_PPC32, false}
+    {ANVIL_ARCH_X86_64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_ARM64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_PPC64, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_PPC64LE, ANVIL_ABI_SYSV, true},
+    {ANVIL_ARCH_ZARCH, ANVIL_ABI_MVS, true},
+    {ANVIL_ARCH_X86, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S370, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S370_XA, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_S390, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_PPC32, ANVIL_ABI_DEFAULT, false},
+    {ANVIL_ARCH_X86_64, ANVIL_ABI_WIN64, true}
 };
+
+_Static_assert(sizeof(expected_profiles) / sizeof(expected_profiles[0]) == ST_APPLICATION_AOT_PROFILE_COUNT,
+               "application publication matrix changed");
 
 static atomic_uint_fast64_t application_staging_sequence =
     ATOMIC_VAR_INIT(0);
@@ -100,6 +105,7 @@ static const char *abi_name(anvil_abi_t abi)
     switch (abi) {
     case ANVIL_ABI_DEFAULT: return "default";
     case ANVIL_ABI_SYSV: return "sysv";
+    case ANVIL_ABI_WIN64: return "win64";
     case ANVIL_ABI_MVS: return "mvs";
     default: return NULL;
     }
@@ -189,7 +195,7 @@ static bool application_result_valid(
         const char *syntax = syntax_name(profile->syntax);
         const char *optimization = optimization_name(profile->optimization);
 
-        if (profile->target != definition->target || target == NULL
+        if (profile->target != definition->target || profile->abi != definition->abi || target == NULL
                 || abi == NULL || syntax == NULL || optimization == NULL) {
             return false;
         }
@@ -265,7 +271,7 @@ static void remove_profile(
 static void clean_staging(
     int root, int application_directory, const char *staging_name,
     const st_application_aot_result_t *application,
-    char profile_names[ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT]
+    char profile_names[ST_APPLICATION_AOT_PROFILE_COUNT]
                       [ST_ARTIFACT_PROFILE_NAME_MAX],
     size_t profile_count, bool matrix_created)
 {
@@ -276,6 +282,10 @@ static void clean_staging(
     }
     if (application_directory >= 0) {
         for (size_t index = 0u; index < profile_count; index++) {
+            if (profile_names[index][0] == '\0') {
+                continue;
+            }
+
             remove_profile(
                 application_directory, profile_names[index],
                 &application->profiles[index].bundle);
@@ -309,7 +319,7 @@ st_application_materialize_status_t st_application_aot_materialize(
     st_artifact_materialize_write_fn writer = default_write;
     void *write_user = NULL;
     char staging[STAGING_NAME_CAPACITY] = {0};
-    char profile_names[ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT]
+    char profile_names[ST_APPLICATION_AOT_PROFILE_COUNT]
                       [ST_ARTIFACT_PROFILE_NAME_MAX] = {{0}};
     int root = -1;
     int application_directory = -1;
@@ -382,8 +392,12 @@ st_application_materialize_status_t st_application_aot_materialize(
     }
 
     for (size_t index = 0u;
-         index < ST_APPLICATION_AOT_SUPPORTED_PROFILE_COUNT; index++) {
+         index < ST_APPLICATION_AOT_PROFILE_COUNT; index++) {
         st_artifact_materialize_result_t profile_result;
+
+        if (application->profiles[index].state != ST_APPLICATION_PROFILE_READY) {
+            continue;
+        }
 
         st_artifact_materialize_result_init(&profile_result);
         result->profile_status = st_artifact_bundle_materialize_at(
@@ -391,9 +405,9 @@ st_application_materialize_status_t st_application_aot_materialize(
             application_directory, &options->artifact_options);
         if (profile_result.committed) {
             memcpy(
-                profile_names[materialized_count], profile_result.profile,
+                profile_names[index], profile_result.profile,
                 strlen(profile_result.profile) + 1u);
-            materialized_count++;
+            materialized_count = index + 1u;
         }
         if (result->profile_status != ST_ARTIFACT_MATERIALIZE_OK) {
             result->failed_profile_index = index;

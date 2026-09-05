@@ -4,8 +4,10 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Pass manager structure */
 struct anvil_pass_manager {
@@ -13,6 +15,10 @@ struct anvil_pass_manager {
     anvil_opt_level_t level;
     unsigned iteration_limit;
     bool enabled[ANVIL_PASS_COUNT];
+    bool collect_statistics;
+    anvil_pass_statistics_t statistics[ANVIL_PASS_COUNT];
+    anvil_pass_observer_t observer;
+    void *observer_data;
 
     /* Custom passes */
     anvil_pass_info_t *custom_passes;
@@ -29,14 +35,23 @@ struct anvil_pass_manager {
  * reduction ran before copy propagation and missed pow-of-2 simplifications,
  * and the dead-code sweep ran before the passes that create NOPs. */
 static const int pass_exec_order[ANVIL_PASS_COUNT] = {
+    ANVIL_PASS_SROA,
+    ANVIL_PASS_MEM2REG,
+    ANVIL_PASS_SCCP,
+    ANVIL_PASS_KNOWN_BITS,
     ANVIL_PASS_COPY_PROP,          /* 1. Propagate copies — exposes constants */
     ANVIL_PASS_CONST_FOLD,         /* 2. Fold with freshly propagated constants */
     ANVIL_PASS_COMMON_SUBEXPR,     /* 3. CSE exposes further dead/copy patterns */
+    ANVIL_PASS_GVN,
     ANVIL_PASS_STRENGTH_REDUCE,    /* 4. Strength reduction sees post-fold consts */
     ANVIL_PASS_STORE_LOAD_PROP,    /* 5. Memory passes — do them together */
     ANVIL_PASS_DEAD_STORE,
     ANVIL_PASS_LOAD_ELIM,
     ANVIL_PASS_SIMPLIFY_CFG,       /* 6. Clean up CFG after the rewrites */
+    ANVIL_PASS_LICM,
+    ANVIL_PASS_UNROLL,
+    ANVIL_PASS_INLINE,
+    ANVIL_PASS_VECTORIZE,
     ANVIL_PASS_DCE,                /* 7. DCE mops up everything NOP'd above */
 };
 
@@ -45,9 +60,9 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
  * Optimization levels:
  *   O0 (NONE)       - No optimizations
  *   Og (DEBUG)      - Debug-friendly: copy_prop, store_load_prop (minimal IR cleanup)
- *   O1 (BASIC)      - Basic: const_fold, dce, copy_prop, store_load_prop
- *   O2 (STANDARD)   - Standard: O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse
- *   O3 (AGGRESSIVE) - Currently the same verified pass set as O2
+ *   O1 (BASIC)      - Scalar SSA promotion, constant folding, DCE and Og passes
+ *   O2 (STANDARD)   - O1 + SROA, SCCP, GVN, known bits, CFG, arithmetic and memory passes
+ *   O3 (AGGRESSIVE) - O2 + LICM, bounded unrolling, leaf inlining and explicitly enabled SLP
  */
 static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
@@ -112,6 +127,69 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .description = "Common subexpression elimination",
         .run = anvil_pass_cse,
         .min_level = ANVIL_OPT_STANDARD
+    },
+    {
+        .id = ANVIL_PASS_MEM2REG,
+        .name = "mem2reg",
+        .description = "Promote local scalar storage to SSA",
+        .run = anvil_pass_mem2reg,
+        .min_level = ANVIL_OPT_BASIC,
+    },
+    {
+        .id = ANVIL_PASS_GVN,
+        .name = "gvn",
+        .description = "Dominance-based integer value numbering",
+        .run = anvil_pass_gvn,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_SROA,
+        .name = "sroa",
+        .description = "Scalarize disjoint aggregate accesses",
+        .run = anvil_pass_sroa,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_LICM,
+        .name = "licm",
+        .description = "Hoist nontrapping integer loop invariants",
+        .run = anvil_pass_licm,
+        .min_level = ANVIL_OPT_AGGRESSIVE,
+    },
+    {
+        .id = ANVIL_PASS_SCCP,
+        .name = "sccp",
+        .description = "Sparse conditional integer constant propagation",
+        .run = anvil_pass_sccp,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_KNOWN_BITS,
+        .name = "known-bits",
+        .description = "Integer bit facts and unsigned bounds",
+        .run = anvil_pass_known_bits,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_INLINE,
+        .name = "inline",
+        .description = "Inline small leaf CFGs with bounded code growth",
+        .run = anvil_pass_inline,
+        .min_level = ANVIL_OPT_AGGRESSIVE,
+    },
+    {
+        .id = ANVIL_PASS_UNROLL,
+        .name = "unroll",
+        .description = "Completely unroll small loops with proven trip counts",
+        .run = anvil_pass_unroll,
+        .min_level = ANVIL_OPT_AGGRESSIVE,
+    },
+    {
+        .id = ANVIL_PASS_VECTORIZE,
+        .name = "vectorize",
+        .description = "Pack independent memory streams using target vector costs",
+        .run = anvil_pass_vectorize,
+        .min_level = ANVIL_OPT_AGGRESSIVE,
     }
 };
 
@@ -227,7 +305,39 @@ bool anvil_pass_manager_is_enabled(anvil_pass_manager_t *pm, anvil_pass_id_t pas
     return pm->enabled[pass];
 }
 
-static anvil_pass_result_t run_one_pass(anvil_pass_manager_t *pm,
+void anvil_pass_manager_collect_statistics(anvil_pass_manager_t *pm, bool enabled)
+{
+    if (pm)
+        pm->collect_statistics = enabled;
+}
+
+void anvil_pass_manager_set_observer(anvil_pass_manager_t *pm, anvil_pass_observer_t observer, void *user_data)
+{
+    if (!pm)
+        return;
+
+    pm->observer = observer;
+    pm->observer_data = user_data;
+    if (observer)
+        pm->collect_statistics = true;
+}
+
+void anvil_pass_manager_reset_statistics(anvil_pass_manager_t *pm)
+{
+    if (pm)
+        memset(pm->statistics, 0, sizeof(pm->statistics));
+}
+
+bool anvil_pass_manager_get_statistics(const anvil_pass_manager_t *pm, anvil_pass_id_t pass, anvil_pass_statistics_t *statistics)
+{
+    if (!pm || !statistics || (unsigned)pass >= ANVIL_PASS_COUNT)
+        return false;
+
+    *statistics = pm->statistics[pass];
+    return true;
+}
+
+static anvil_pass_result_t run_one_pass_checked(anvil_pass_manager_t *pm,
                                         anvil_func_t *func,
                                         const anvil_pass_info_t *pass)
 {
@@ -259,6 +369,57 @@ static anvil_pass_result_t run_one_pass(anvil_pass_manager_t *pm,
                         pass->name, verify_error[0] ? verify_error : "invalid IR");
         return ANVIL_PASS_RUN_ERROR;
     }
+    return result;
+}
+
+static size_t saturated_add(size_t left, size_t right)
+{
+    return right > SIZE_MAX - left ? SIZE_MAX : left + right;
+}
+
+static size_t count_instructions(const anvil_func_t *func)
+{
+    size_t count = 0;
+    for (const anvil_block_t *block = func->blocks; block; block = block->next)
+    {
+        for (const anvil_instr_t *instr = block->first; instr; instr = instr->next)
+            count = saturated_add(count, 1);
+    }
+
+    return count;
+}
+
+static anvil_pass_result_t run_one_pass(anvil_pass_manager_t *pm, anvil_func_t *func, const anvil_pass_info_t *pass)
+{
+    if (!pm->collect_statistics)
+        return run_one_pass_checked(pm, func, pass);
+
+    anvil_pass_statistics_t event = { .runs = 1, .instructions_before = count_instructions(func) };
+    clock_t start = clock();
+    anvil_pass_result_t result = run_one_pass_checked(pm, func, pass);
+    clock_t end = clock();
+    event.changes = result == ANVIL_PASS_RUN_CHANGED;
+    event.failures = result == ANVIL_PASS_RUN_ERROR;
+    if (result != ANVIL_PASS_RUN_ERROR)
+        event.instructions_after = count_instructions(func);
+
+    if (start != (clock_t)-1 && end != (clock_t)-1 && end >= start)
+        event.cpu_seconds = (double)(end - start) / CLOCKS_PER_SEC;
+
+    if ((unsigned)pass->id < ANVIL_PASS_COUNT)
+    {
+        anvil_pass_statistics_t *total = &pm->statistics[pass->id];
+        total->runs = saturated_add(total->runs, event.runs);
+        total->changes = saturated_add(total->changes, event.changes);
+        total->failures = saturated_add(total->failures, event.failures);
+        total->instructions_before = saturated_add(total->instructions_before, event.instructions_before);
+        total->instructions_after = saturated_add(total->instructions_after, event.instructions_after);
+        total->cpu_seconds += event.cpu_seconds;
+    }
+
+    if (pm->observer)
+        pm->observer(func, pass, &event, pm->observer_data);
+
     return result;
 }
 
@@ -337,16 +498,31 @@ anvil_pass_result_t anvil_pass_manager_run_module(anvil_pass_manager_t *pm,
     
     bool changed = false;
     
-    /* Run passes on each function */
-    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
-        anvil_pass_result_t result = anvil_pass_manager_run_func(pm, func);
-        if (result == ANVIL_PASS_RUN_ERROR)
+    anvil_func_t **order = NULL;
+    if (pm->enabled[ANVIL_PASS_INLINE] && mod->num_funcs)
+    {
+        order = anvil_opt_call_order(mod);
+        if (!order)
             return ANVIL_PASS_RUN_ERROR;
-        if (result == ANVIL_PASS_RUN_CHANGED) {
-            changed = true;
-        }
     }
 
+    size_t index = 0;
+    for (anvil_func_t *func = order ? order[0] : mod->funcs; func;)
+    {
+        anvil_pass_result_t result = anvil_pass_manager_run_func(pm, func);
+        if (result == ANVIL_PASS_RUN_ERROR)
+        {
+            free(order);
+            return ANVIL_PASS_RUN_ERROR;
+        }
+        if (result == ANVIL_PASS_RUN_CHANGED)
+            changed = true;
+
+        index++;
+        func = order ? (index < mod->num_funcs ? order[index] : NULL) : func->next;
+    }
+
+    free(order);
     return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 

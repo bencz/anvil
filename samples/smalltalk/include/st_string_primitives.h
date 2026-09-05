@@ -75,6 +75,10 @@ st_string_primitive_status_t st_string_primitive_execute(
     st_value_t *result_out);
 
 const st_primitive_spec_t *st_string_primitive_specs(size_t *count_out);
+/* Authenticate an indexed value array of Unicode Characters and create an
+ * immutable String using the narrowest configured character representation. */
+st_string_primitive_status_t st_string_primitive_from_characters(st_string_primitive_context_t *context, st_value_t array, st_value_t *result_out);
+
 const char *st_string_primitive_status_string(
     st_string_primitive_status_t status);
 

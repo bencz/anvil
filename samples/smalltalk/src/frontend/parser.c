@@ -617,50 +617,6 @@ static st_ast_node_t *parse_binary_object(st_parser_t *parser)
     return value;
 }
 
-static bool flatten_message_chain(st_parser_t *parser, st_ast_node_t *value,
-                                  st_ast_node_t *expression)
-{
-    st_ast_node_t **levels;
-    st_ast_node_t *cursor = value;
-    size_t level_count = 0u;
-    size_t index;
-    size_t level;
-
-    while (cursor->kind == ST_AST_EXPRESSION
-            && !cursor->as.expression.parenthesized) {
-        if (level_count == SIZE_MAX / sizeof(*levels)) {
-            set_error(parser, ST_PARSE_ERR_OUT_OF_MEMORY, ST_TOKEN_NONE);
-            return false;
-        }
-        level_count++;
-        cursor = cursor->as.expression.receiver;
-    }
-    expression->as.expression.receiver = cursor;
-    if (level_count == 0u) {
-        return true;
-    }
-    levels = st_ast_alloc(parser->unit, level_count * sizeof(*levels),
-                          _Alignof(st_ast_node_t *));
-    if (levels == NULL) {
-        (void)sync_subsystem_error(parser);
-        return false;
-    }
-    cursor = value;
-    for (level = 0u; level < level_count; level++) {
-        levels[level] = cursor;
-        cursor = cursor->as.expression.receiver;
-    }
-    while (level != 0u) {
-        st_ast_node_t *chain = levels[--level];
-        for (index = 0u; index < chain->as.expression.messages.count; index++) {
-            if (!append_node(parser, &expression->as.expression.messages,
-                             chain->as.expression.messages.items[index])) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
 
 static bool expression_first(const st_token_t *token)
 {
@@ -731,19 +687,10 @@ st_ast_node_t *st_parse_expression(st_parser_t *parser)
         if (keyword_message == NULL) return NULL;
     }
 
-    if (current(parser)->kind == ST_TOKEN_SEMICOLON) {
-        if (!flatten_message_chain(parser, receiver, expression)
-                || (keyword_message != NULL
-                    && !append_node(parser, &expression->as.expression.messages,
-                                    keyword_message))) {
-            return NULL;
-        }
-        if (keyword_message != NULL
-                && node_is_variable(expression->as.expression.receiver,
-                                    "super")) {
-            keyword_message->as.message.super_send = true;
-        }
-    } else if (keyword_message != NULL) {
+    /* Cascades retain the receiver of the message immediately before the
+     * first semicolon. In `self new initialize; yourself`, that receiver is
+     * the result of `self new`, evaluated once, rather than the class. */
+    if (keyword_message != NULL) {
         expression->as.expression.receiver = receiver;
         if (!append_node(parser, &expression->as.expression.messages,
                          keyword_message)) {
@@ -761,6 +708,14 @@ st_ast_node_t *st_parse_expression(st_parser_t *parser)
 
     while (current(parser)->kind == ST_TOKEN_SEMICOLON) {
         st_ast_node_t *message;
+
+        if (expression->as.expression.messages.count == 0u
+                || (keyword_message == NULL && receiver->kind == ST_AST_EXPRESSION
+                    && receiver->as.expression.parenthesized)) {
+            set_error(parser, ST_PARSE_ERR_UNEXPECTED_TOKEN, ST_TOKEN_PERIOD);
+            return NULL;
+        }
+
         if (!advance(parser)) {
             return NULL;
         }

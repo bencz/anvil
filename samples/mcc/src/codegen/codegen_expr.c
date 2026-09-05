@@ -7,6 +7,55 @@
 
 #include "codegen_internal.h"
 
+static anvil_memory_access_t codegen_memory_access(mcc_type_t *type)
+{
+    anvil_memory_access_t access = { 0 };
+    while (type)
+    {
+        access.is_volatile |= (type->qualifiers & QUAL_VOLATILE) != 0;
+        if (type->kind != TYPE_TYPEDEF)
+            break;
+
+        type = type->data.typedef_ref.underlying;
+    }
+
+    return access;
+}
+
+anvil_value_t *codegen_load_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const char *name)
+{
+    mcc_type_t *object_type = type;
+    while (object_type && object_type->kind == TYPE_TYPEDEF)
+        object_type = object_type->data.typedef_ref.underlying;
+
+    if (object_type && object_type->kind == TYPE_ARRAY)
+    {
+        anvil_value_t *indices[] = { anvil_const_i64(cg->anvil_ctx, 0), anvil_const_i64(cg->anvil_ctx, 0) };
+        return anvil_build_gep(cg->anvil_ctx, codegen_type(cg, object_type), pointer, indices, 2, "array.decay");
+    }
+
+    anvil_memory_access_t access = codegen_memory_access(type);
+    if (codegen_type_is_record(type))
+    {
+        if (!access.is_volatile)
+            return pointer;
+
+        anvil_value_t *copy = anvil_build_alloca(cg->anvil_ctx, codegen_type(cg, type), "volatile.object");
+        return codegen_copy_object(cg, type, pointer, copy, &access) ? copy : NULL;
+    }
+
+    return anvil_build_load_ex(cg->anvil_ctx, codegen_type(cg, type), pointer, &access, name);
+}
+
+bool codegen_store_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *value, anvil_value_t *pointer)
+{
+    anvil_memory_access_t access = codegen_memory_access(type);
+    if (codegen_type_is_record(type))
+        return codegen_copy_object(cg, type, value, pointer, &access);
+
+    return anvil_build_store_ex(cg->anvil_ctx, value, pointer, &access);
+}
+
 static mcc_type_t *codegen_unwrap_type(mcc_type_t *type)
 {
     while (type && type->kind == TYPE_TYPEDEF) {
@@ -50,6 +99,28 @@ static mcc_type_t *codegen_callee_function_type(mcc_ast_node_t *func_expr)
         type = codegen_unwrap_type(type->data.pointer.pointee);
     }
     return type && type->kind == TYPE_FUNCTION ? type : NULL;
+}
+
+static anvil_value_t *codegen_record_address(mcc_codegen_t *cg, mcc_ast_node_t *object)
+{
+    switch (object->kind)
+    {
+    case AST_IDENT_EXPR:
+    case AST_MEMBER_EXPR:
+    case AST_SUBSCRIPT_EXPR:
+        return codegen_lvalue(cg, object);
+    case AST_UNARY_EXPR:
+        if (object->data.unary_expr.op == UNOP_DEREF)
+            return codegen_lvalue(cg, object);
+
+        break;
+    default:
+        break;
+    }
+
+    /* Returned/conditional aggregate values live in temporaries. Addressable
+     * objects keep their own storage, including volatile member assignments. */
+    return codegen_expr(cg, object);
 }
 
 static anvil_value_t *codegen_const_int_for_mcc_type(mcc_codegen_t *cg,
@@ -116,6 +187,11 @@ anvil_value_t *codegen_convert_value(mcc_codegen_t *cg,
      * result with the C type it will eventually acquire.  The actual Anvil
      * source type is authoritative for deciding whether a cast is needed. */
     if (!from || !to) return val;
+
+    /* The operand has already been evaluated. A cast to void only discards
+     * its value, preserving volatile accesses and other side effects. */
+    if (to->kind == TYPE_VOID)
+        return val;
 
     anvil_type_t *dst = codegen_type(cg, to);
     anvil_type_t *src = anvil_value_get_type(val);
@@ -423,6 +499,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (ptr) {
                 /* For arrays, the pointer IS the value (array decays to pointer) */
                 if (sym && sym->type && sym->type->kind == TYPE_ARRAY) {
+                    if (sym->type->data.array.is_vla)
+                        return ptr;
+
                     anvil_value_t *indices[] = {
                         anvil_const_i64(cg->anvil_ctx, 0),
                         anvil_const_i64(cg->anvil_ctx, 0)
@@ -432,9 +511,8 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                                            indices, 2, "array.decay");
                 }
                 /* Load from local variable */
-                anvil_type_t *type = sym ? codegen_type(cg, sym->type) 
-                                         : anvil_type_i32(cg->anvil_ctx);
-                return anvil_build_load(cg->anvil_ctx, type, ptr, "load");
+                mcc_type_t *type = sym ? sym->type : mcc_type_int(cg->types);
+                return codegen_load_object(cg, type, ptr, "load");
             }
             
             /* For functions, get or declare the function and return its value */
@@ -447,7 +525,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (sym && sym->kind == SYM_VAR) {
                 anvil_type_t *type = codegen_type(cg, sym->type);
                 anvil_value_t *global = codegen_get_or_add_global(cg, name, type);
-                return anvil_build_load(cg->anvil_ctx, type, global, "gload");
+                return codegen_load_object(cg, sym->type, global, "gload");
             }
             
             /* Enum constant - return its integer value */
@@ -492,26 +570,32 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                         op_rhs_type = op_lhs_type;
                     }
 
-                    anvil_type_t *lhs_storage_type = codegen_type(cg, lhs_c_type);
-                    anvil_value_t *lhs = anvil_build_load(cg->anvil_ctx,
-                        lhs_storage_type, lhs_ptr, "lhs");
+                    anvil_value_t *lhs = codegen_load_object(cg, lhs_c_type, lhs_ptr, "lhs");
                     lhs = codegen_convert_value(cg, lhs, lhs_c_type,
                                                 op_lhs_type, "lhs.promote");
                     rhs = codegen_convert_value(cg, rhs, rhs_c_type,
                                                 op_rhs_type, "rhs.promote");
                     if (!lhs || !rhs) return NULL;
 
+                    bool floating = mcc_type_is_floating(op_lhs_type);
+
                     switch (op) {
                         case BINOP_ADD_ASSIGN:
-                            result = anvil_build_add(cg->anvil_ctx, lhs, rhs, "add");
+                            result = floating ? anvil_build_fadd(cg->anvil_ctx, lhs, rhs, "add") : anvil_build_add(cg->anvil_ctx, lhs, rhs, "add");
                             break;
                         case BINOP_SUB_ASSIGN:
-                            result = anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub");
+                            result = floating ? anvil_build_fsub(cg->anvil_ctx, lhs, rhs, "sub") : anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub");
                             break;
                         case BINOP_MUL_ASSIGN:
-                            result = anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul");
+                            result = floating ? anvil_build_fmul(cg->anvil_ctx, lhs, rhs, "mul") : anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul");
                             break;
                         case BINOP_DIV_ASSIGN:
+                            if (floating)
+                            {
+                                result = anvil_build_fdiv(cg->anvil_ctx, lhs, rhs, "div");
+                                break;
+                            }
+
                             result = op_lhs_type && op_lhs_type->is_unsigned
                                 ? anvil_build_udiv(cg->anvil_ctx, lhs, rhs, "div")
                                 : anvil_build_sdiv(cg->anvil_ctx, lhs, rhs, "div");
@@ -546,7 +630,8 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                                                    lhs_c_type, "assign.cast");
                 }
 
-                if (!result || !anvil_build_store(cg->anvil_ctx, result, lhs_ptr)) {
+                if (!result || !codegen_store_object(cg, lhs_c_type, result, lhs_ptr)) {
+                    mcc_error_at(cg->mcc_ctx, expr->location, "cannot lower assignment to valid IR");
                     return NULL;
                 }
                 return result;
@@ -620,8 +705,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                                                 anvil_const_i64(cg->anvil_ctx, elem_size),
                                                 "ptr.diff.elem");
                     }
-                    return codegen_convert_value(cg, diff, mcc_type_long(cg->types),
-                                                 expr->type, "ptrdiff.cast");
+                    return codegen_convert_value(cg, diff, mcc_type_llong(cg->types), expr->type, "ptrdiff.cast");
                 }
                 anvil_type_t *elem_type = codegen_type(cg, pointee);
                 anvil_value_t *index = rhs;
@@ -877,8 +961,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 }
                 case UNOP_DEREF: {
                     anvil_value_t *ptr = codegen_expr(cg, expr->data.unary_expr.operand);
-                    anvil_type_t *type = codegen_type(cg, expr->type);
-                    return anvil_build_load(cg->anvil_ctx, type, ptr, "deref");
+                    return codegen_load_object(cg, expr->type, ptr, "deref");
                 }
                 case UNOP_ADDR: {
                     mcc_ast_node_t *operand = expr->data.unary_expr.operand;
@@ -899,8 +982,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 case UNOP_PRE_DEC: {
                     anvil_value_t *ptr = codegen_lvalue(cg, expr->data.unary_expr.operand);
                     mcc_type_t *operand_type = expr->data.unary_expr.operand->type;
-                    anvil_type_t *type = codegen_type(cg, operand_type);
-                    anvil_value_t *val = anvil_build_load(cg->anvil_ctx, type, ptr, "val");
+                    anvil_value_t *val = codegen_load_object(cg, operand_type, ptr, "val");
                     anvil_value_t *result;
                     if (operand_type && operand_type->kind == TYPE_POINTER) {
                         int64_t delta = (op == UNOP_PRE_INC) ? 1 : -1;
@@ -916,15 +998,14 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                             anvil_build_add(cg->anvil_ctx, val, one, "inc") :
                             anvil_build_sub(cg->anvil_ctx, val, one, "dec");
                     }
-                    anvil_build_store(cg->anvil_ctx, result, ptr);
+                    codegen_store_object(cg, operand_type, result, ptr);
                     return result;
                 }
                 case UNOP_POST_INC:
                 case UNOP_POST_DEC: {
                     anvil_value_t *ptr = codegen_lvalue(cg, expr->data.unary_expr.operand);
                     mcc_type_t *operand_type = expr->data.unary_expr.operand->type;
-                    anvil_type_t *type = codegen_type(cg, operand_type);
-                    anvil_value_t *val = anvil_build_load(cg->anvil_ctx, type, ptr, "val");
+                    anvil_value_t *val = codegen_load_object(cg, operand_type, ptr, "val");
                     anvil_value_t *result;
                     if (operand_type && operand_type->kind == TYPE_POINTER) {
                         int64_t delta = (op == UNOP_POST_INC) ? 1 : -1;
@@ -940,7 +1021,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                             anvil_build_add(cg->anvil_ctx, val, one, "inc") :
                             anvil_build_sub(cg->anvil_ctx, val, one, "dec");
                     }
-                    anvil_build_store(cg->anvil_ctx, result, ptr);
+                    codegen_store_object(cg, operand_type, result, ptr);
                     return val; /* Return original value */
                 }
                 default:
@@ -975,7 +1056,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             then_val = codegen_convert_value(cg, then_val,
                                              expr->data.ternary_expr.then_expr->type,
                                              expr->type, "ternary.cast");
-            anvil_build_store(cg->anvil_ctx, then_val, result_ptr);
+            codegen_store_object(cg, expr->type, then_val, result_ptr);
             anvil_build_br(cg->anvil_ctx, end_block);
             
             /* Else block */
@@ -984,29 +1065,120 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             else_val = codegen_convert_value(cg, else_val,
                                              expr->data.ternary_expr.else_expr->type,
                                              expr->type, "ternary.cast");
-            anvil_build_store(cg->anvil_ctx, else_val, result_ptr);
+            codegen_store_object(cg, expr->type, else_val, result_ptr);
             anvil_build_br(cg->anvil_ctx, end_block);
             
             /* End block - load result */
             codegen_set_current_block(cg, end_block);
-            return anvil_build_load(cg->anvil_ctx, type, result_ptr, "ternary.val");
+            return codegen_load_object(cg, expr->type, result_ptr, "ternary.val");
         }
         
         case AST_CALL_EXPR: {
+            mcc_ast_node_t *callee_node = expr->data.call_expr.func;
+            if (callee_node && callee_node->kind == AST_IDENT_EXPR)
+            {
+                const char *callee_name = callee_node->data.ident_expr.name;
+                if (strcmp(callee_name, "__anvil_va_start_into") == 0 || strcmp(callee_name, "__anvil_va_copy_into") == 0)
+                {
+                    bool start = strcmp(callee_name, "__anvil_va_start_into") == 0;
+                    if (expr->data.call_expr.num_args != (start ? 1u : 2u))
+                    {
+                        mcc_error_at(cg->mcc_ctx, expr->location, "native va_list operation has the wrong number of operands");
+                        return NULL;
+                    }
+
+                    anvil_type_t *pointer = anvil_type_ptr(cg->anvil_ctx, anvil_type_i8(cg->anvil_ctx));
+                    anvil_value_t *destination = codegen_expr(cg, expr->data.call_expr.args[0]);
+                    anvil_value_t *source = start ? anvil_build_va_start(cg->anvil_ctx, "va.start") : codegen_expr(cg, expr->data.call_expr.args[1]);
+                    if (source)
+                        source = anvil_build_bitcast(cg->anvil_ctx, source, pointer, "va.native.cursor");
+
+                    if (!anvil_build_va_copy_into(cg->anvil_ctx, destination, source))
+                    {
+                        mcc_error_at(cg->mcc_ctx, expr->location, "target cannot initialize native va_list: %s", anvil_ctx_get_error(cg->anvil_ctx));
+                        return NULL;
+                    }
+
+                    return anvil_build_bitcast(cg->anvil_ctx, destination, pointer, "va.native.destination");
+                }
+
+                if (strcmp(callee_name, "__anvil_va_start") == 0)
+                {
+                    anvil_value_t *cursor = anvil_build_va_start(cg->anvil_ctx, "va.start");
+                    if (!cursor)
+                        mcc_error_at(cg->mcc_ctx, expr->location, "va_start requires a variadic function");
+
+                    return cursor;
+                }
+
+                if (strcmp(callee_name, "__anvil_va_copy") == 0)
+                {
+                    anvil_value_t *source = expr->data.call_expr.num_args == 1 ? codegen_expr(cg, expr->data.call_expr.args[0]) : NULL;
+                    anvil_value_t *copy = anvil_build_va_copy(cg->anvil_ctx, source, "va.copy");
+                    if (!copy)
+                        mcc_error_at(cg->mcc_ctx, expr->location, "target cannot lower va_copy: %s", anvil_ctx_get_error(cg->anvil_ctx));
+
+                    return copy;
+                }
+
+                if (strcmp(callee_name, "__anvil_va_arg") == 0 || strcmp(callee_name, "__anvil_va_arg_at") == 0)
+                {
+                    mcc_ast_node_t *size_node = expr->data.call_expr.num_args == 2 ? expr->data.call_expr.args[1] : NULL;
+                    if (!size_node || size_node->kind != AST_SIZEOF_EXPR || !size_node->data.sizeof_expr.type_arg)
+                    {
+                        mcc_error_at(cg->mcc_ctx, expr->location, "va_arg requires a type operand");
+                        return NULL;
+                    }
+
+                    anvil_value_t *storage = codegen_expr(cg, expr->data.call_expr.args[0]);
+                    if (strcmp(callee_name, "__anvil_va_arg_at") == 0)
+                    {
+                        anvil_type_t *cursor_type = anvil_type_ptr(cg->anvil_ctx, anvil_type_i8(cg->anvil_ctx));
+                        anvil_value_t *cursor = anvil_build_bitcast(cg->anvil_ctx, storage, cursor_type, "va.native.cursor");
+                        storage = anvil_build_alloca(cg->anvil_ctx, cursor_type, "va.cursor.reference");
+                        if (!anvil_build_store(cg->anvil_ctx, cursor, storage))
+                            return NULL;
+                    }
+
+                    anvil_type_t *object = codegen_type(cg, size_node->data.sizeof_expr.type_arg);
+                    anvil_value_t *pointer = anvil_build_va_arg(cg->anvil_ctx, storage, object, "va.argument");
+                    if (!pointer)
+                    {
+                        mcc_error_at(cg->mcc_ctx, expr->location, "target cannot lower va_arg for this type: %s", anvil_ctx_get_error(cg->anvil_ctx));
+                        return NULL;
+                    }
+
+                    return anvil_build_bitcast(cg->anvil_ctx, pointer, codegen_type(cg, expr->type), "va.address");
+                }
+            }
+
             anvil_value_t *func = codegen_expr(cg, expr->data.call_expr.func);
             mcc_type_t *callee_type =
                 codegen_callee_function_type(expr->data.call_expr.func);
+            anvil_abi_value_plan_t result_plan;
+            if (!callee_type || !codegen_abi_plan(cg, callee_type->data.function.return_type, true, &result_plan))
+                return NULL;
+
+            size_t hidden = result_plan.kind == ANVIL_ABI_VALUE_INDIRECT ? 1 : 0;
+            anvil_value_t *result_pointer = NULL;
             
             size_t num_args = expr->data.call_expr.num_args;
             anvil_value_t **args = NULL;
             mcc_func_param_t *param = callee_type ? callee_type->data.function.params : NULL;
-            if (num_args > 0) {
-                if (num_args > SIZE_MAX / sizeof(anvil_value_t *)) {
+            if (num_args + hidden > 0) {
+                if (num_args >= SIZE_MAX / sizeof(anvil_value_t *)) {
                     mcc_error(cg->mcc_ctx, "call argument table overflow");
                     return NULL;
                 }
-                args = mcc_alloc(cg->mcc_ctx, num_args * sizeof(anvil_value_t*));
-                if (!args) return NULL;
+                args = mcc_alloc_array(cg->mcc_ctx, num_args + hidden, sizeof(*args));
+                if (!args)
+                    return NULL;
+
+                if (hidden)
+                {
+                    result_pointer = codegen_abi_temporary(cg, callee_type->data.function.return_type, result_plan.temporary_alignment);
+                    args[0] = result_pointer;
+                }
                 for (size_t i = 0; i < num_args; i++) {
                     mcc_ast_node_t *arg_node = expr->data.call_expr.args[i];
                     mcc_type_t *target_type = NULL;
@@ -1016,11 +1188,16 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     } else {
                         target_type = codegen_default_arg_type(cg, arg_node->type);
                     }
-                    if (codegen_type_pass_by_reference(target_type)) {
-                        args[i] = codegen_lvalue(cg, arg_node);
+                    if (codegen_type_is_record(target_type)) {
+                        anvil_abi_value_plan_t plan;
+                        if (!codegen_abi_plan(cg, target_type, false, &plan))
+                            return NULL;
+
+                        anvil_value_t *object = codegen_expr(cg, arg_node);
+                        args[i + hidden] = codegen_abi_pack(cg, target_type, object, &plan);
                     } else {
-                        args[i] = codegen_expr(cg, arg_node);
-                        args[i] = codegen_convert_value(cg, args[i], arg_node->type,
+                        args[i + hidden] = codegen_expr(cg, arg_node);
+                        args[i + hidden] = codegen_convert_value(cg, args[i + hidden], arg_node->type,
                                                         target_type, "arg.cast");
                     }
                 }
@@ -1028,22 +1205,31 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             anvil_value_t *result = NULL;
             if (!anvil_build_call_checked(cg->anvil_ctx, func, args,
-                                          num_args, "call", &result)) {
+                                          num_args + hidden, "call", &result)) {
                 return NULL;
+            }
+            if (hidden)
+                return result_pointer;
+
+            if (codegen_type_is_record(expr->type))
+            {
+                result_pointer = codegen_abi_temporary(cg, expr->type, result_plan.temporary_alignment);
+                if (!codegen_abi_unpack(cg, expr->type, result, result_pointer, &result_plan))
+                    return NULL;
+
+                return result_pointer;
             }
             return result;
         }
         
         case AST_SUBSCRIPT_EXPR: {
             anvil_value_t *ptr = codegen_lvalue(cg, expr);
-            anvil_type_t *type = codegen_type(cg, expr->type);
-            return anvil_build_load(cg->anvil_ctx, type, ptr, "subscript");
+            return codegen_load_object(cg, expr->type, ptr, "subscript");
         }
         
         case AST_MEMBER_EXPR: {
             anvil_value_t *ptr = codegen_lvalue(cg, expr);
-            anvil_type_t *type = codegen_type(cg, expr->type);
-            return anvil_build_load(cg->anvil_ctx, type, ptr, "member");
+            return codegen_load_object(cg, expr->type, ptr, "member");
         }
         
         case AST_CAST_EXPR: {
@@ -1156,6 +1342,12 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 
             if (array_type && array_type->kind == TYPE_ARRAY) {
                 base = codegen_lvalue(cg, array_expr);
+                if (array_type->data.array.is_vla)
+                {
+                    anvil_type_t *element = codegen_type(cg, array_type->data.array.element);
+                    return anvil_build_gep(cg->anvil_ctx, element, base, &index, 1, "vla.idx");
+                }
+
                 anvil_value_t *indices[] = {
                     anvil_const_i64(cg->anvil_ctx, 0), index
                 };
@@ -1173,13 +1365,7 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
         
         case AST_MEMBER_EXPR: {
             mcc_ast_node_t *obj = expr->data.member_expr.object;
-            anvil_value_t *ptr;
-            
-            if (expr->data.member_expr.is_arrow) {
-                ptr = codegen_expr(cg, obj);
-            } else {
-                ptr = codegen_lvalue(cg, obj);
-            }
+            anvil_value_t *ptr = expr->data.member_expr.is_arrow ? codegen_expr(cg, obj) : codegen_record_address(cg, obj);
             
             /* Find field index */
             mcc_type_t *obj_type = obj->type;

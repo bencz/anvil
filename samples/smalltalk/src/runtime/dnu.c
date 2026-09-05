@@ -272,6 +272,36 @@ st_dnu_status_t st_dnu_context_init(
     return ST_DNU_OK;
 }
 
+st_dnu_status_t st_dnu_context_fork(st_dnu_context_t *destination, const st_dnu_context_t *source)
+{
+    if (destination == NULL || destination->initialized || !context_is_ready(source))
+        return ST_DNU_ERR_INVALID_ARGUMENT;
+
+    destination->abi_version = source->abi_version;
+    destination->metadata = source->metadata;
+    destination->image = source->image;
+    destination->lookup = source->lookup;
+    destination->bootstrap = source->bootstrap;
+    destination->heap = source->heap;
+    destination->selector_symbols = source->selector_symbols;
+    destination->selector_count = source->selector_count;
+    destination->message_class_id = source->message_class_id;
+    destination->message_shape_id = source->message_shape_id;
+    destination->message_selector_slot = source->message_selector_slot;
+    destination->message_arguments_slot = source->message_arguments_slot;
+    destination->array_class_id = source->array_class_id;
+    destination->array_shape_id = source->array_shape_id;
+    destination->allocator = source->allocator;
+
+    if (!st_send_site_init(&destination->does_not_understand_site, source->does_not_understand_site.selector_id, 0u)) {
+        memset(destination, 0, sizeof(*destination));
+        return ST_DNU_ERR_INVALID_STATE;
+    }
+
+    destination->initialized = true;
+    return ST_DNU_OK;
+}
+
 st_dnu_status_t st_dnu_context_attach(
     st_dnu_context_t *context, st_aot_thread_t *thread)
 {

@@ -114,4 +114,8 @@ int arm64_type_size(anvil_type_t *type);
 int arm64_type_align(anvil_type_t *type);
 bool arm64_type_is_float(anvil_type_t *type);
 
+anvil_value_t *anvil_arm64_build_va_arg(anvil_backend_t *be, anvil_value_t *storage, anvil_type_t *type, const char *name);
+anvil_value_t *anvil_arm64_build_va_copy(anvil_backend_t *be, anvil_value_t *cursor, const char *name);
+bool anvil_arm64_build_va_copy_into(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor);
+
 #endif /* ARM64_INTERNAL_H */

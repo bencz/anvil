@@ -799,6 +799,9 @@ static bool verify_memory(const anvil_module_t *mod,
                                "load in function %s has address/result type mismatch",
                                func_name(func));
         }
+        if (instr->memory_access.alignment && instr->memory_access.alignment < object_type->align)
+            return verify_fail(error, error_len, "load alignment is below the natural type alignment");
+
         return true;
     }
 
@@ -820,6 +823,9 @@ static bool verify_memory(const anvil_module_t *mod,
                                "store in function %s has value/address type mismatch",
                                func_name(func));
         }
+        if (instr->memory_access.alignment && instr->memory_access.alignment < object_type->align)
+            return verify_fail(error, error_len, "store alignment is below the natural type alignment");
+
         return true;
     }
 
@@ -1233,6 +1239,57 @@ static bool verify_alloca(const anvil_module_t *mod,
                        func_name(func));
 }
 
+static bool verify_atomic(const anvil_module_t *mod, const anvil_func_t *func, const anvil_instr_t *instr, char *error, size_t error_len)
+{
+    if (!anvil_atomic_info_valid(instr->op, &instr->atomic))
+        return verify_fail(error, error_len, "invalid atomic memory ordering");
+
+    size_t count = 0;
+    switch (instr->op)
+    {
+        case ANVIL_OP_ATOMIC_LOAD:
+            count = 1;
+            break;
+        case ANVIL_OP_ATOMIC_STORE:
+        case ANVIL_OP_ATOMIC_RMW:
+            count = 2;
+            break;
+        case ANVIL_OP_ATOMIC_CMPXCHG:
+            count = 3;
+            break;
+        default:
+            break;
+    }
+
+    bool has_result = instr->op != ANVIL_OP_ATOMIC_STORE && instr->op != ANVIL_OP_ATOMIC_FENCE;
+    if (instr->num_operands != count || (instr->result != NULL) != has_result)
+        return verify_fail(error, error_len, "invalid atomic operands or result");
+
+    for (size_t index = 0; index < count; index++)
+    {
+        if (!verify_value_ref(mod, func, instr->operands[index], error, error_len))
+            return false;
+    }
+
+    if (!count)
+        return true;
+
+    anvil_type_t *object = memory_object_type(instr->operands[0]);
+    if (!anvil_atomic_type_valid(object) || (has_result && !type_equal(object, instr->result->type)))
+        return verify_fail(error, error_len, "invalid atomic object or result type");
+
+    for (size_t index = 1; index < count; index++)
+    {
+        if (!type_equal(object, instr->operands[index]->type))
+            return verify_fail(error, error_len, "atomic value and object types differ");
+    }
+
+    if (instr->op == ANVIL_OP_ATOMIC_RMW && instr->atomic.rmw != ANVIL_ATOMIC_EXCHANGE && !anvil_type_is_integer(object))
+        return verify_fail(error, error_len, "arithmetic atomic RMW requires an integer");
+
+    return true;
+}
+
 static bool verify_instr(const anvil_module_t *mod,
                          const anvil_func_t *func,
                          const anvil_instr_t *instr,
@@ -1249,6 +1306,16 @@ static bool verify_instr(const anvil_module_t *mod,
                            "function %s contains an invalid opcode",
                            func_name(func));
     }
+    size_t alignment = instr->memory_access.alignment;
+    if ((alignment || instr->memory_access.is_volatile) &&
+        instr->op != ANVIL_OP_LOAD && instr->op != ANVIL_OP_STORE)
+    {
+        return verify_fail(error, error_len, "memory access attributes require a load or store");
+    }
+
+    if (alignment && (alignment & (alignment - 1)) != 0)
+        return verify_fail(error, error_len, "memory alignment must be a power of two");
+
     if (instr->result) {
         if (instr->result->kind != ANVIL_VAL_INSTR ||
             instr->result->data.instr != instr ||
@@ -1260,6 +1327,12 @@ static bool verify_instr(const anvil_module_t *mod,
                                func_name(func));
         }
     }
+
+    if (anvil_op_is_atomic(instr->op))
+        return verify_atomic(mod, func, instr, error, error_len);
+
+    if (instr->atomic.order || instr->atomic.failure_order || instr->atomic.rmw)
+        return verify_fail(error, error_len, "atomic metadata requires an atomic instruction");
 
     switch (instr->op) {
         case ANVIL_OP_ADD:
@@ -1350,6 +1423,10 @@ static bool verify_instr(const anvil_module_t *mod,
 
         case ANVIL_OP_NOP:
             return instr->num_operands == 0 && !instr->result;
+
+        case ANVIL_OP_VA_START:
+            return func->type->data.func.variadic && instr->num_operands == 0 && instr->result &&
+                   instr->result->type == anvil_type_ptr(mod->ctx, anvil_type_i8(mod->ctx));
 
         case ANVIL_OP_COUNT:
             break;

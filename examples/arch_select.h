@@ -49,20 +49,19 @@ typedef struct {
 } arch_entry_t;
 
 /* Supported architectures table */
-static const arch_entry_t arch_table[] = {
-    { "x86",        ANVIL_ARCH_X86,      "x86 (32-bit)",          ANVIL_FP_IEEE754  },
-    { "x86_64",     ANVIL_ARCH_X86_64,   "x86-64 (64-bit)",       ANVIL_FP_IEEE754  },
-    { "s370",       ANVIL_ARCH_S370,     "IBM S/370 (24-bit)",    ANVIL_FP_HFP      },
-    { "s370_xa",    ANVIL_ARCH_S370_XA,  "IBM S/370-XA (31-bit)", ANVIL_FP_HFP      },
-    { "s390",       ANVIL_ARCH_S390,     "IBM S/390 (31-bit)",    ANVIL_FP_HFP      },
-    { "zarch",      ANVIL_ARCH_ZARCH,    "IBM z/Architecture",    ANVIL_FP_HFP_IEEE },
-    { "ppc32",      ANVIL_ARCH_PPC32,    "PowerPC 32-bit",        ANVIL_FP_IEEE754  },
-    { "ppc64",      ANVIL_ARCH_PPC64,    "PowerPC 64-bit BE",     ANVIL_FP_IEEE754  },
-    { "ppc64le",    ANVIL_ARCH_PPC64LE,  "PowerPC 64-bit LE",     ANVIL_FP_IEEE754  },
-    { "arm64",      ANVIL_ARCH_ARM64,    "ARM64 (AArch64/Linux)", ANVIL_FP_IEEE754  },
-    { "arm64_macos", ANVIL_ARCH_ARM64,   "ARM64 (Apple Silicon)", ANVIL_FP_IEEE754  },
-    { NULL, 0, NULL, 0 }
-};
+static const arch_entry_t arch_table[] = {{"x86", ANVIL_ARCH_X86, "x86 (32-bit)", ANVIL_FP_IEEE754},
+                                          {"x86_64", ANVIL_ARCH_X86_64, "x86-64 (64-bit)", ANVIL_FP_IEEE754},
+                                          {"x86_64_windows", ANVIL_ARCH_X86_64, "x86-64 (Windows)", ANVIL_FP_IEEE754},
+                                          {"s370", ANVIL_ARCH_S370, "IBM S/370 (24-bit)", ANVIL_FP_HFP},
+                                          {"s370_xa", ANVIL_ARCH_S370_XA, "IBM S/370-XA (31-bit)", ANVIL_FP_HFP},
+                                          {"s390", ANVIL_ARCH_S390, "IBM S/390 (31-bit)", ANVIL_FP_HFP},
+                                          {"zarch", ANVIL_ARCH_ZARCH, "IBM z/Architecture", ANVIL_FP_HFP_IEEE},
+                                          {"ppc32", ANVIL_ARCH_PPC32, "PowerPC 32-bit", ANVIL_FP_IEEE754},
+                                          {"ppc64", ANVIL_ARCH_PPC64, "PowerPC 64-bit BE", ANVIL_FP_IEEE754},
+                                          {"ppc64le", ANVIL_ARCH_PPC64LE, "PowerPC 64-bit LE", ANVIL_FP_IEEE754},
+                                          {"arm64", ANVIL_ARCH_ARM64, "ARM64 (AArch64/Linux)", ANVIL_FP_IEEE754},
+                                          {"arm64_macos", ANVIL_ARCH_ARM64, "ARM64 (Apple Silicon)", ANVIL_FP_IEEE754},
+                                          {NULL, 0, NULL, 0}};
 
 /* Print usage information */
 static inline void print_arch_usage(const char *prog_name)
@@ -115,6 +114,12 @@ static inline bool parse_arch_args(int argc, char **argv, arch_config_t *config)
         /* Check for macOS ARM64 variant */
         if (strcmp(argv[1], "arm64_macos") == 0) {
             config->abi = ANVIL_ABI_DARWIN;
+            config->abi_specified = true;
+        }
+
+        if (strcmp(argv[1], "x86_64_windows") == 0)
+        {
+            config->abi = ANVIL_ABI_WIN64;
             config->abi_specified = true;
         }
     }

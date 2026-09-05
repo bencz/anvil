@@ -188,7 +188,7 @@ static void test_native_aot_image_runtime(const st_aot_compile_result_t *result)
         CHECK(ok);
     }
     used += (size_t)snprintf(command + used, sizeof(command) - used,
-        "%s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c "
+        "%s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c "
         "samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c "
         "samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/image_runtime.c "
@@ -831,7 +831,7 @@ static void test_native_emitted_block_runtime(void)
         CHECK(harness_ok);
     }
     used += (size_t)snprintf(command + used, sizeof(command) - used,
-        "%s %s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c "
+        "%s %s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/primitives/core_primitives.c "
         "samples/smalltalk/src/runtime/primitives/primitive_bridge.c "
         "samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/heap.c "
@@ -997,7 +997,7 @@ static void test_native_link(const fixture_t *fixture)
         "samples/smalltalk/src/runtime/value.c "
         "samples/smalltalk/src/runtime/primitives/core_primitives.c "
         "samples/smalltalk/src/runtime/primitives/primitive_bridge.c "
-        "samples/smalltalk/src/runtime/runtime.c "
+        "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/lookup.c "
         "samples/smalltalk/src/runtime/send_bridge.c "
         "samples/smalltalk/src/runtime/control/control.c "

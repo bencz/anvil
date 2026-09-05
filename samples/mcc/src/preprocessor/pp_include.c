@@ -7,6 +7,8 @@
  */
 
 #include "pp_internal.h"
+#include "platform/host.h"
+#include "target.h"
 #include <limits.h>
 
 /* ============================================================
@@ -64,7 +66,9 @@ bool pp_pop_include(mcc_preprocessor_t *pp)
 /* Try to open a file at the given path */
 static FILE *pp_try_open_file(const char *path)
 {
-    return fopen(path, "r");
+    /* ftell below measures bytes. Text mode translates CRLF on Windows and
+     * would make a subsequent fread appear to be a short read. */
+    return fopen(path, "rb");
 }
 
 /* Search for include file in various locations */
@@ -77,7 +81,8 @@ FILE *pp_find_include_file(mcc_preprocessor_t *pp, const char *filename,
     if (!is_system && filename[0] != '/') {
         const char *cur_file = pp->lexer->filename;
         if (cur_file) {
-            const char *slash = strrchr(cur_file, '/');
+            const char *slash = mcc_host.last_path_separator(cur_file);
+
             if (slash) {
                 size_t dir_len = slash - cur_file + 1;
                 if (dir_len + strlen(filename) < path_size) {
@@ -241,7 +246,7 @@ void pp_mark_pragma_once(mcc_preprocessor_t *pp)
  * Public API
  * ============================================================ */
 
-void mcc_preprocessor_add_include_path(mcc_preprocessor_t *pp, const char *path)
+static void append_include_path(mcc_preprocessor_t *pp, const char *path)
 {
     if (!pp || !path || pp->num_include_paths == SIZE_MAX) {
         if (pp) mcc_fatal(pp->ctx, "include path table capacity overflow");
@@ -256,4 +261,32 @@ void mcc_preprocessor_add_include_path(mcc_preprocessor_t *pp, const char *path)
     new_paths[n] = stored_path;
     pp->include_paths = new_paths;
     pp->num_include_paths = n + 1;
+}
+
+void mcc_preprocessor_add_include_path(mcc_preprocessor_t *pp, const char *path)
+{
+    if (!pp || !path)
+        return;
+
+    const char *subdirectory = mcc_target_model(pp->ctx->options.arch)->include_subdirectory;
+    if (subdirectory)
+    {
+        size_t prefix = strlen(path);
+        size_t suffix = strlen(subdirectory);
+        if (prefix > SIZE_MAX - suffix - 2)
+        {
+            mcc_fatal(pp->ctx, "target include path is too long");
+            return;
+        }
+
+        size_t length = prefix + suffix + 2;
+        char *specialized = mcc_alloc(pp->ctx, length);
+        if (!specialized)
+            return;
+
+        snprintf(specialized, length, "%s/%s", path, subdirectory);
+        append_include_path(pp, specialized);
+    }
+
+    append_include_path(pp, path);
 }

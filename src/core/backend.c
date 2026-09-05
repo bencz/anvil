@@ -3,7 +3,7 @@
  */
 
 #include "anvil/anvil_internal.h"
-#include <pthread.h>
+#include "../platform/registry.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,13 +11,32 @@
 #define MAX_BACKENDS 32
 
 /* Registered backends. Accessed concurrently when multiple threads create
- * contexts simultaneously; protected with pthread_once during the built-in
- * registration and an explicit mutex for any later anvil_register_backend()
+ * contexts simultaneously; protected with one-time initialization during built-in
+ * registration and an exclusive lock for later anvil_register_backend()
  * calls. */
 static anvil_backend_ops_t registered_backends[MAX_BACKENDS];
 static size_t num_backends = 0;
-static pthread_once_t backends_once = PTHREAD_ONCE_INIT;
-static pthread_mutex_t backends_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+anvil_error_t anvil_abi_classify_value(anvil_ctx_t *ctx, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan)
+{
+    if (!ctx || !type || type->owner_ctx != ctx || !plan)
+        return ANVIL_ERR_INVALID_ARG;
+
+    memset(plan, 0, sizeof(*plan));
+    if (anvil_type_is_integer(type) || anvil_type_is_floating(type) || anvil_type_is_pointer(type) ||
+        (is_return && type->kind == ANVIL_TYPE_VOID))
+    {
+        plan->kind = ANVIL_ABI_VALUE_DIRECT;
+        plan->transport_type = type;
+        plan->temporary_alignment = anvil_type_align(type);
+        return ANVIL_OK;
+    }
+
+    if (!ctx->backend || !ctx->backend->ops->classify_abi_value)
+        return ANVIL_ERR_INVALID_TYPE;
+
+    return ctx->backend->ops->classify_abi_value(ctx->backend, type, is_return, plan);
+}
 
 static void register_builtin_backends(void)
 {
@@ -35,7 +54,7 @@ static void register_builtin_backends(void)
 
 void anvil_init_backends(void)
 {
-    pthread_once(&backends_once, register_builtin_backends);
+    anvil_registry_platform.initialize_once(register_builtin_backends);
 }
 
 anvil_error_t anvil_register_backend(const anvil_backend_ops_t *ops)
@@ -45,27 +64,27 @@ anvil_error_t anvil_register_backend(const anvil_backend_ops_t *ops)
         return ANVIL_ERR_INVALID_ARG;
     }
 
-    pthread_mutex_lock(&backends_mutex);
+    anvil_registry_platform.lock();
     if (num_backends >= MAX_BACKENDS) {
-        pthread_mutex_unlock(&backends_mutex);
+        anvil_registry_platform.unlock();
         return ANVIL_ERR_NOMEM;
     }
     for (size_t i = 0; i < num_backends; i++) {
         if (registered_backends[i].arch == ops->arch) {
-            pthread_mutex_unlock(&backends_mutex);
+            anvil_registry_platform.unlock();
             return ANVIL_ERR_INVALID_ARG;
         }
     }
 
     char *name = strdup(ops->name);
     if (!name) {
-        pthread_mutex_unlock(&backends_mutex);
+        anvil_registry_platform.unlock();
         return ANVIL_ERR_NOMEM;
     }
     registered_backends[num_backends] = *ops;
     registered_backends[num_backends].name = name;
     num_backends++;
-    pthread_mutex_unlock(&backends_mutex);
+    anvil_registry_platform.unlock();
     return ANVIL_OK;
 }
 
@@ -76,15 +95,15 @@ anvil_backend_t *anvil_get_backend(anvil_ctx_t *ctx, anvil_arch_t arch)
     
     /* Find backend for architecture */
     const anvil_backend_ops_t *ops = NULL;
-    pthread_mutex_lock(&backends_mutex);
+    anvil_registry_platform.lock();
     for (size_t i = 0; i < num_backends; i++) {
         if (registered_backends[i].arch == arch) {
             ops = &registered_backends[i];
             break;
         }
     }
-    pthread_mutex_unlock(&backends_mutex);
-    
+    anvil_registry_platform.unlock();
+
     if (!ops) return NULL;
     
     /* Create backend instance */

@@ -843,7 +843,7 @@ static void test_native_runtime_metadata(
     }
     snprintf(command, sizeof(command),
         "/usr/bin/cc -c %s -o %s && /usr/bin/cc -Iinclude -Isamples/smalltalk/include "
-        "%s %s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c "
+        "%s %s samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "-o %s && %s", asm_path, object_path, source_path, object_path,
         exe_path, exe_path);
     CHECK(command_succeeded("image layout harness", command));

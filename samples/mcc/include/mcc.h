@@ -38,7 +38,8 @@ typedef struct mcc_context mcc_context_t;
 typedef struct mcc_options mcc_options_t;
 
 /* Target architecture (matches ANVIL) */
-typedef enum {
+typedef enum
+{
     MCC_ARCH_X86,
     MCC_ARCH_X86_64,
     MCC_ARCH_S370,
@@ -49,7 +50,8 @@ typedef enum {
     MCC_ARCH_PPC64,
     MCC_ARCH_PPC64LE,
     MCC_ARCH_ARM64,
-    MCC_ARCH_ARM64_MACOS,   /* ARM64 with Darwin ABI (Apple Silicon) */
+    MCC_ARCH_ARM64_MACOS,    /* ARM64 with Darwin ABI (Apple Silicon) */
+    MCC_ARCH_X86_64_WINDOWS, /* x86-64 with Windows ABI and LLP64 layout */
     MCC_ARCH_COUNT
 } mcc_arch_t;
 
@@ -66,6 +68,7 @@ typedef enum {
 struct mcc_options {
     mcc_arch_t arch;
     mcc_opt_level_t opt_level;
+    bool fp_vectorization;         /* Permit independent FP lanes to share instructions. */
     mcc_c_std_t c_std;              /* C language standard (-std=) */
     
     /* Output control */

@@ -13,6 +13,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Shared, target-width-aware evaluator. NULL means unsupported or unsafe to fold. */
+anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *instr, anvil_value_t *left, anvil_value_t *right);
+
+static inline unsigned anvil_opt_call_effects(const anvil_instr_t *instr)
+{
+    return anvil_instr_call_effects(instr);
+}
+
 /* ---------------------------------------------------------------------------
  * Instruction erasure.
  *
@@ -191,5 +199,7 @@ static inline int anvil_opt_replace_uses_in_func(anvil_func_t *func,
     }
     return count;
 }
+
+anvil_func_t **anvil_opt_call_order(anvil_module_t *module);
 
 #endif /* ANVIL_OPT_UTILS_H */

@@ -22,7 +22,7 @@ Each target provides its own `anvil_<arch>_lower_func_to_mir`,
 `anvil_<arch>_emit_mir_abi`; the coalescing, linear-scan allocation, and
 spill-materialization passes are target-independent and live in `src/machine/`
 (`machine_ir.c`, `regalloc.c`). ARM64 remains the canonical example of the
-contract — see `src/backend/x86_64/x86_64_mir.c` and `src/backend/x86/x86_mir.c`
+contract — see the `x86_32_lower.c` / `x86_64_lower.c` and `asm/gas32.c` / `asm/gas64.c` components under `src/backend/x86/`
 for the x86 implementations that mirror it.
 
 ## Current implementation notes

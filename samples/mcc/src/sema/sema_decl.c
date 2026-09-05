@@ -153,12 +153,49 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
         return false;
     }
     
-    /* Define variable symbol */
-    mcc_symbol_t *sym = mcc_symtab_define(sema->symtab,
-        decl->data.var_decl.name,
-        SYM_VAR,
-        var_type,
-        decl->location);
+    /* File-scope declarations and tentative definitions share one symbol.
+     * Only a second initializer is a duplicate definition. Block locals keep
+     * the ordinary same-scope redefinition checks. */
+    bool file_scope = mcc_symtab_is_global_scope(sema->symtab);
+    mcc_symbol_t *sym = file_scope ? mcc_symtab_lookup_current(sema->symtab, decl->data.var_decl.name) : NULL;
+    if (sym && sym->kind == SYM_VAR)
+    {
+        if (!mcc_type_is_compatible(sym->type, var_type))
+        {
+            mcc_error_at(sema->ctx, decl->location, "conflicting types for variable '%s'", decl->data.var_decl.name);
+            return false;
+        }
+
+        bool static_linkage = sym->storage == STORAGE_STATIC;
+        if ((decl->data.var_decl.is_static && !static_linkage) ||
+            (!decl->data.var_decl.is_static && !decl->data.var_decl.is_extern && static_linkage))
+        {
+            mcc_error_at(sema->ctx, decl->location, "conflicting linkage for variable '%s'", decl->data.var_decl.name);
+            return false;
+        }
+
+        if (decl->data.var_decl.init && sym->is_defined)
+        {
+            mcc_error_at(sema->ctx, decl->location, "redefinition of variable '%s'", decl->data.var_decl.name);
+            return false;
+        }
+    }
+    else
+    {
+        sym = mcc_symtab_define(sema->symtab, decl->data.var_decl.name, SYM_VAR, var_type, decl->location);
+        if (sym)
+        {
+            if (decl->data.var_decl.is_static)
+                sym->storage = STORAGE_STATIC;
+            else if (decl->data.var_decl.is_extern)
+                sym->storage = STORAGE_EXTERN;
+            else
+                sym->storage = STORAGE_NONE;
+        }
+    }
+
+    if (sym && decl->data.var_decl.init)
+        sym->is_defined = true;
     
     if (sym && decl->data.var_decl.init) {
         mcc_type_t *init_type = sema_analyze_expr(sema, decl->data.var_decl.init);
@@ -260,8 +297,8 @@ static bool analyze_struct_decl(mcc_sema_t *sema, mcc_ast_node_t *decl, bool is_
             mcc_ast_node_t assertion = { 0 };
             assertion.kind = AST_STATIC_ASSERT;
             assertion.location = item->location;
-            assertion.data.static_assert.expr = item->expr;
-            assertion.data.static_assert.message = item->message;
+            assertion.data.static_assert_decl.expr = item->expr;
+            assertion.data.static_assert_decl.message = item->message;
             if (!analyze_static_assert(sema, &assertion)) success = false;
         }
     }
@@ -314,24 +351,27 @@ static bool analyze_static_assert(mcc_sema_t *sema, mcc_ast_node_t *decl)
                      "_Static_assert requires C11 or later");
         return false;
     }
-    
-    if (!sema_analyze_expr(sema, decl->data.static_assert.expr)) {
+
+    if (!sema_analyze_expr(sema, decl->data.static_assert_decl.expr))
+    {
         return false;
     }
 
     int64_t result;
-    if (!sema_eval_const_expr(sema, decl->data.static_assert.expr, &result)) {
+    if (!sema_eval_const_expr(sema, decl->data.static_assert_decl.expr, &result))
+    {
         mcc_error_at(sema->ctx, decl->location,
                      "static assertion expression is not constant");
         return false;
     }
-    
+
     if (!result) {
-        if (decl->data.static_assert.message) {
-            mcc_error_at(sema->ctx, decl->location,
-                         "static assertion failed: %s",
-                         decl->data.static_assert.message);
-        } else {
+        if (decl->data.static_assert_decl.message)
+        {
+            mcc_error_at(sema->ctx, decl->location, "static assertion failed: %s", decl->data.static_assert_decl.message);
+        }
+        else
+        {
             mcc_error_at(sema->ctx, decl->location,
                          "static assertion failed");
         }

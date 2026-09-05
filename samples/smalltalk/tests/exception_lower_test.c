@@ -176,7 +176,7 @@ static bool execute_x86_64(
         "-Isamples/smalltalk/include "
         "%s samples/smalltalk/tests/exception_primitives_aot_harness.c "
         "samples/smalltalk/src/runtime/value.c "
-        "samples/smalltalk/src/runtime/runtime.c "
+        "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/lookup.c "
         "samples/smalltalk/src/runtime/send_bridge.c "
         "samples/smalltalk/src/runtime/control/control.c "

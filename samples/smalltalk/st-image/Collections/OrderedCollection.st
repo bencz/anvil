@@ -2,6 +2,20 @@ OrderedCollection := SequenceableCollection [
 
     | contents firstIndex lastIndex |
 
+    copyFrom: first to: last [
+        | result index |
+        (first < 1 or: [last < (first - 1) or: [last > self size]]) ifTrue: [^OutOfRangeError signal].
+        result := self class new: last - first + 1.
+        index := first.
+
+        [index <= last] whileTrue: [
+            result add: (self at: index).
+            index := index + 1
+        ].
+
+        ^result
+    ]
+
     class new [
         ^self new: 16
     ]

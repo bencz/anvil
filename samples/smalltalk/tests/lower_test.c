@@ -450,7 +450,7 @@ static void execute_x86_methods(compiled_t *methods, size_t count)
         if (offset > 0 && (size_t)offset < sizeof(command)) {
             snprintf(command + offset, sizeof(command) - (size_t)offset,
                      "%s samples/smalltalk/src/runtime/value.c "
-                     "samples/smalltalk/src/runtime/runtime.c "
+                     "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
                      "samples/smalltalk/src/runtime/lookup.c "
                      "samples/smalltalk/src/runtime/send_bridge.c "
                      "samples/smalltalk/src/runtime/control/control.c "
@@ -533,7 +533,7 @@ static void execute_x86_nlr_methods(const compiled_t *branch_return,
         snprintf(command, sizeof(command),
             "/usr/bin/cc -std=c11 -no-pie -Iinclude -Isamples/smalltalk/include "
             "%s %s %s samples/smalltalk/src/runtime/value.c "
-            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/lookup.c "
+            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c "
             "samples/smalltalk/src/runtime/control/control_bridge.c -o %s -pthread",
@@ -657,7 +657,7 @@ static void execute_x86_general_send(const compiled_t *caller,
         snprintf(command, sizeof(command),
             "/usr/bin/cc -std=c11 -no-pie -Iinclude -Isamples/smalltalk/include "
             "%s %s %s samples/smalltalk/src/runtime/value.c "
-            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/lookup.c "
+            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c "
             "samples/smalltalk/src/runtime/control/control_bridge.c -o %s -pthread",
@@ -1009,7 +1009,7 @@ static void execute_x86_closures(
             length += snprintf(command + length,
                 sizeof(command) - (size_t)length,
                 "%s %s samples/smalltalk/src/runtime/value.c "
-                "samples/smalltalk/src/runtime/runtime.c "
+                "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
                 "samples/smalltalk/src/runtime/lookup.c "
                 "samples/smalltalk/src/runtime/heap.c "
                 "samples/smalltalk/src/runtime/image_runtime.c "
@@ -1115,7 +1115,7 @@ static void execute_x86_primitives(const compiled_t methods[5])
             "/usr/bin/cc -std=c11 -no-pie -Iinclude -Isamples/smalltalk/include "
             "%s %s %s %s %s %s samples/smalltalk/src/runtime/value.c "
             "samples/smalltalk/src/runtime/primitives/core_primitives.c "
-            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/runtime/lookup.c "
+            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/primitives/primitive_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c "
@@ -1165,7 +1165,7 @@ static void execute_x86_block_primitives(const compiled_t methods[3])
             "samples/smalltalk/tests/block_primitives_aot_harness.c "
             "samples/smalltalk/src/compiler/primitive.c "
             "samples/smalltalk/src/runtime/value.c "
-            "samples/smalltalk/src/runtime/runtime.c "
+            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
             "samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c "
@@ -1297,7 +1297,7 @@ static void execute_x86_heap_primitives(const compiled_t methods[11])
         if (n > 0 && (size_t)n < sizeof(command)) {
             snprintf(command + n, sizeof(command) - (size_t)n,
                 "%s samples/smalltalk/src/runtime/value.c "
-                "samples/smalltalk/src/runtime/runtime.c "
+                "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
                 "samples/smalltalk/src/runtime/heap.c "
                 "samples/smalltalk/src/runtime/control/control.c "
                 "samples/smalltalk/src/runtime/control/control_roots.c "
@@ -1398,7 +1398,7 @@ static void execute_x86_instance_variables(const compiled_t methods[3])
         "/usr/bin/cc -std=c11 -no-pie -Iinclude "
         "-Isamples/smalltalk/include %s %s %s %s "
         "samples/smalltalk/src/runtime/value.c "
-        "samples/smalltalk/src/runtime/runtime.c "
+        "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
         "samples/smalltalk/src/runtime/heap.c "
         "samples/smalltalk/src/runtime/control/control.c "
         "samples/smalltalk/src/runtime/control/control_roots.c "
@@ -1561,7 +1561,7 @@ static void execute_x86_image_and_stream_lowering(
         int amount = snprintf(
             command, sizeof(command),
             "/usr/bin/cc -std=c11 -no-pie -Iinclude -Isamples/smalltalk/include %s %s %s %s "
-            "samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c "
+            "samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
             "samples/smalltalk/src/runtime/heap.c samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_roots.c "
             "samples/smalltalk/src/runtime/send_bridge.c samples/smalltalk/src/runtime/image_runtime.c "
@@ -1644,7 +1644,7 @@ static void execute_x86_cascade(const compiled_t *cascade,
     if (ok) {
         int amount = snprintf(command, sizeof(command),
             "/usr/bin/cc -std=c11 -no-pie -Iinclude -Isamples/smalltalk/include %s %s "
-            "samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c "
+            "samples/smalltalk/src/runtime/value.c samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
             "samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c samples/smalltalk/src/runtime/control/control_bridge.c -o %s -pthread",
             assembly_path, harness_path, executable_path);
@@ -2007,7 +2007,7 @@ static void execute_x86_numeric_primitives(
             command + length, sizeof(command) - (size_t)length,
             "%s "
             "samples/smalltalk/src/runtime/value.c "
-            "samples/smalltalk/src/runtime/runtime.c "
+            "samples/smalltalk/src/runtime/runtime.c samples/smalltalk/src/platform/posix/runtime.c "
             "samples/smalltalk/src/runtime/lookup.c "
             "samples/smalltalk/src/runtime/send_bridge.c "
             "samples/smalltalk/src/runtime/control/control.c "

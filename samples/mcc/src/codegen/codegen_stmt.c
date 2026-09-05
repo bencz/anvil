@@ -133,7 +133,7 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
                                                          elem_type,
                                                          "init.cast");
                         if (elem_val) {
-                            anvil_build_store(cg->anvil_ctx, elem_val, elem_ptr);
+                            codegen_store_object(cg, elem_type, elem_val, elem_ptr);
                         }
                     }
                 } else {
@@ -143,7 +143,7 @@ void codegen_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
                                                  stmt->data.var_decl.var_type,
                                                  "init.cast");
                     if (init) {
-                        anvil_build_store(cg->anvil_ctx, init, alloca_val);
+                        codegen_store_object(cg, stmt->data.var_decl.var_type, init, alloca_val);
                     }
                 }
             }
@@ -387,8 +387,10 @@ static bool count_cases(mcc_codegen_t *cg, mcc_ast_node_t *node,
             return false;
         }
         (*num_cases)++;
+        return count_cases(cg, node->data.case_stmt.stmt, num_cases, default_case);
     } else if (node->kind == AST_DEFAULT_STMT) {
         *default_case = node;
+        return count_cases(cg, node->data.default_stmt.stmt, num_cases, default_case);
     } else if (node->kind == AST_COMPOUND_STMT) {
         for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
             if (!count_cases(cg, node->data.compound_stmt.stmts[i],
@@ -404,6 +406,9 @@ static void fill_cases(mcc_ast_node_t *node, mcc_ast_node_t **cases,
     if (!node) return;
     if (node->kind == AST_CASE_STMT) {
         cases[(*case_index)++] = node;
+        fill_cases(node->data.case_stmt.stmt, cases, case_index);
+    } else if (node->kind == AST_DEFAULT_STMT) {
+        fill_cases(node->data.default_stmt.stmt, cases, case_index);
     } else if (node->kind == AST_COMPOUND_STMT) {
         for (size_t i = 0; i < node->data.compound_stmt.num_stmts; i++) {
             fill_cases(node->data.compound_stmt.stmts[i], cases, case_index);
@@ -451,6 +456,62 @@ static bool stmt_always_terminates(mcc_ast_node_t *node)
                stmt_always_terminates(node->data.if_stmt.else_stmt);
     }
     return false;
+}
+
+static void emit_switch_body(mcc_codegen_t *cg, mcc_ast_node_t *node, mcc_ast_node_t **cases,
+                             anvil_block_t **blocks, size_t count, anvil_block_t *default_block, bool *started)
+{
+    if (!node)
+        return;
+
+    if (node->kind == AST_COMPOUND_STMT)
+    {
+        for (size_t index = 0; index < node->data.compound_stmt.num_stmts; index++)
+            emit_switch_body(cg, node->data.compound_stmt.stmts[index], cases, blocks, count, default_block, started);
+
+        return;
+    }
+
+    anvil_block_t *destination = NULL;
+    mcc_ast_node_t *statement = NULL;
+    if (node->kind == AST_CASE_STMT)
+    {
+        for (size_t index = 0; index < count; index++)
+        {
+            if (cases[index] == node)
+            {
+                destination = blocks[index];
+                break;
+            }
+        }
+
+        statement = node->data.case_stmt.stmt;
+    }
+    else if (node->kind == AST_DEFAULT_STMT)
+    {
+        destination = default_block;
+        statement = node->data.default_stmt.stmt;
+    }
+    else
+    {
+        if (*started)
+            codegen_stmt(cg, node);
+
+        return;
+    }
+
+    if (!destination)
+    {
+        mcc_error(cg->mcc_ctx, "switch label has no destination");
+        return;
+    }
+
+    if (*started && !codegen_block_has_terminator(cg))
+        anvil_build_br(cg->anvil_ctx, destination);
+
+    codegen_set_current_block(cg, destination);
+    *started = true;
+    emit_switch_body(cg, statement, cases, blocks, count, default_block, started);
 }
 
 void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
@@ -581,63 +642,12 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         }
     }
     
-    /* Generate code for switch body - process statements between cases */
-    /* In C, case labels are just labels - statements continue until break/return */
-    mcc_ast_node_t *body = stmt->data.switch_stmt.body;
-    if (body && body->kind == AST_COMPOUND_STMT) {
-        anvil_block_t *current_case_block = NULL;
-        size_t case_idx = 0;
-        
-        for (size_t i = 0; i < body->data.compound_stmt.num_stmts; i++) {
-            mcc_ast_node_t *s = body->data.compound_stmt.stmts[i];
-            
-            if (s->kind == AST_CASE_STMT) {
-                /* Switch to this case's block */
-                if (case_idx < num_cases) {
-                    current_case_block = case_blocks[case_idx++];
-                    codegen_set_current_block(cg, current_case_block);
-                    /* Generate the case's direct statement if any */
-                    if (s->data.case_stmt.stmt) {
-                        codegen_stmt(cg, s->data.case_stmt.stmt);
-                    }
-                }
-            } else if (s->kind == AST_DEFAULT_STMT) {
-                /* Switch to default block */
-                if (default_block) {
-                    current_case_block = default_block;
-                    codegen_set_current_block(cg, current_case_block);
-                    if (s->data.default_stmt.stmt) {
-                        codegen_stmt(cg, s->data.default_stmt.stmt);
-                    }
-                }
-            } else if (current_case_block) {
-                /* Regular statement - add to current case block */
-                codegen_stmt(cg, s);
-            }
-        }
-        
-        /* Add fall-through branches for cases without terminators */
-        for (size_t i = 0; i < num_cases; i++) {
-            codegen_set_current_block(cg, case_blocks[i]);
-            if (!codegen_block_has_terminator(cg)) {
-                if (i + 1 < num_cases) {
-                    anvil_build_br(cg->anvil_ctx, case_blocks[i + 1]);
-                } else if (default_block) {
-                    anvil_build_br(cg->anvil_ctx, default_block);
-                } else {
-                    anvil_build_br(cg->anvil_ctx, end_block);
-                }
-            }
-        }
-        
-        /* Add fall-through for default if needed */
-        if (default_block) {
-            codegen_set_current_block(cg, default_block);
-            if (!codegen_block_has_terminator(cg)) {
-                anvil_build_br(cg->anvil_ctx, end_block);
-            }
-        }
-    }
+    /* Emit labels in source order, including stacked case/default labels.
+     * Fallthrough belongs to the live tail of the previous statement. */
+    bool started = false;
+    emit_switch_body(cg, stmt->data.switch_stmt.body, cases, case_blocks, num_cases, default_block, &started);
+    if (started && !codegen_block_has_terminator(cg) && end_block)
+        anvil_build_br(cg->anvil_ctx, end_block);
     
     if (end_block) codegen_set_current_block(cg, end_block);
     cg->break_target = old_break;
@@ -648,6 +658,27 @@ void codegen_return_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
 {
     if (stmt->data.return_stmt.expr) {
         anvil_value_t *val = codegen_expr(cg, stmt->data.return_stmt.expr);
+        if (codegen_type_is_record(cg->current_return_type))
+        {
+            anvil_abi_value_plan_t plan;
+            if (!codegen_abi_plan(cg, cg->current_return_type, true, &plan))
+                return;
+
+            if (cg->current_result_pointer)
+            {
+                if (!codegen_copy_object(cg, cg->current_return_type, val, cg->current_result_pointer, NULL))
+                    return;
+
+                anvil_build_ret(cg->anvil_ctx, cg->current_result_pointer);
+            }
+            else
+            {
+                val = codegen_abi_pack(cg, cg->current_return_type, val, &plan);
+                anvil_build_ret(cg->anvil_ctx, val);
+            }
+            return;
+        }
+
         val = codegen_convert_value(cg, val,
                                     stmt->data.return_stmt.expr->type,
                                     cg->current_return_type,

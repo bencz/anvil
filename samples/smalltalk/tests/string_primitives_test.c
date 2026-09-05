@@ -34,7 +34,8 @@ enum {
     SHAPE_STRING32 = 4,
     SHAPE_METACLASS = 5,
     SHAPE_OTHER8 = 6,
-    SHAPE_COUNT = 6
+    SHAPE_OTHER_VALUES = 7,
+    SHAPE_COUNT = 7
 };
 
 typedef struct {
@@ -128,6 +129,12 @@ static void fixture_init(fixture_t *fixture)
         .allocation_alignment = 8u, .minimum_allocation_size = 24u,
         .indexed_format = ST_INDEXED_UINT8
     };
+    fixture->shape_storage[SHAPE_OTHER_VALUES - 1u] = (StShapeDescriptor){
+        .shape_id = SHAPE_OTHER_VALUES, .class_id = CLASS_OTHER,
+        .allocation_alignment = 8u, .minimum_allocation_size = 24u,
+        .indexed_format = ST_INDEXED_VALUES
+    };
+
     for (index = 0u; index < SHAPE_COUNT; index++)
         fixture->shapes[index] = &fixture->shape_storage[index];
     fixture->descriptors = (st_runtime_descriptors_t){
@@ -241,7 +248,9 @@ static void test_context_and_contracts(void)
           && length == 0u);
     CHECK(!st_string_primitive_combined_length(0u, 0u, NULL));
     specs = st_string_primitive_specs(&count);
-    CHECK(specs != NULL && count == 3u);
+    CHECK(specs != NULL && count == 4u);
+    CHECK(specs[3].receiver_policy == ST_PRIMITIVE_CLASS_ONLY && specs[3].method_arity == 1u
+          && strcmp(specs[3].runtime_symbol, "st_aot_string_from_characters") == 0);
     CHECK(specs[0].intrinsic_id == ST_PRIMITIVE_INVALID_INTRINSIC_ID
           && specs[1].intrinsic_id == ST_PRIMITIVE_INVALID_INTRINSIC_ID
           && specs[2].intrinsic_id == ST_PRIMITIVE_INVALID_INTRINSIC_ID);
@@ -544,12 +553,47 @@ static void test_combined_image_catalog(void)
     st_primitive_result_init(&result);
     CHECK(st_primitive_resolve(&result, units, bundle.count, &catalog, NULL)
           == ST_PRIMITIVE_OK);
-    CHECK(result.binding_count == 53u);
-    CHECK(result.diagnostic_count == 16u);
+    CHECK(result.binding_count == 54u);
+    CHECK(result.diagnostic_count == 30u);
     st_primitive_result_destroy(&result);
     st_primitive_catalog_destroy(&catalog);
     free(units);
     st_source_bundle_destroy(&bundle);
+}
+
+static void test_from_characters(void)
+{
+    fixture_t fixture;
+    st_heap_t heap = {0};
+    st_string_primitive_context_t context = {0};
+    st_value_t array;
+    st_value_t result;
+    const uint32_t scalars[] = {0x61u, 0x20acu, 0x1f642u};
+    const uint32_t shapes[] = {SHAPE_STRING8, SHAPE_STRING16, SHAPE_STRING32};
+
+    fixture_init(&fixture);
+    CHECK(st_heap_init(&heap, &fixture.descriptors, (st_runtime_allocator_t){0}) == ST_HEAP_OK);
+    st_string_primitive_options_t config = options(&heap);
+    CHECK(st_string_primitive_context_init(&context, &config) == ST_STRING_PRIMITIVE_OK);
+    CHECK(st_heap_allocate(&heap, CLASS_OTHER, SHAPE_OTHER_VALUES, 1u, 1u, 0u, &array) == ST_HEAP_OK);
+
+    for (size_t index = 0u; index < sizeof(scalars) / sizeof(scalars[0]); index++) {
+        st_value_t character;
+        st_object_view_t view;
+
+        CHECK(st_value_from_character(scalars[index], &character));
+        CHECK(st_heap_indexed_reference_store(&heap, array, 0u, character) == ST_HEAP_OK);
+        CHECK(st_string_primitive_from_characters(&context, array, &result) == ST_STRING_PRIMITIVE_OK);
+        CHECK(st_heap_object_view(&heap, result, &view) == ST_HEAP_OK);
+        CHECK(view.shape_descriptor->shape_id == shapes[index] && view.indexed_length == 1u);
+        CHECK(load_scalar(&view, 0u) == scalars[index]);
+        CHECK((st_object_header_flags(st_object_header_load(&view.object->header)) & ST_HEADER_IMMUTABLE) != 0u);
+    }
+
+    CHECK(st_heap_indexed_reference_store(&heap, array, 0u, st_value_nil()) == ST_HEAP_OK);
+    CHECK(st_string_primitive_from_characters(&context, array, &result) == ST_STRING_PRIMITIVE_ERR_TYPE_MISMATCH && result == ST_VALUE_INVALID);
+    st_string_primitive_context_destroy(&context);
+    st_heap_destroy(&heap);
 }
 
 int main(void)
@@ -557,6 +601,7 @@ int main(void)
     test_context_and_contracts();
     test_compare_and_validation();
     test_concat_shapes_gc_and_oom();
+    test_from_characters();
     test_combined_image_catalog();
     if (failures != 0u) {
         fprintf(stderr, "String primitives: %u failure(s)\n", failures);

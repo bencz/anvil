@@ -522,26 +522,26 @@ src/
 │
 └── backend/
     ├── common/
-    │   └── anvil_slot_map.h    # shared slot-mapping helper
-    ├── x86/                    # x86 32-bit (MachineIR-based)
-    │   ├── x86.c               # backend ops / lifecycle
-    │   ├── x86_helpers.c, x86_internal.h
-    │   └── x86_mir.c           # source IR → MachineIR lowering + emit
-    ├── x86_64/                 # x86-64 (MachineIR-based)
-    │   ├── x86_64.c
-    │   ├── x86_64_helpers.c, x86_64_internal.h
-    │   └── x86_64_mir.c        # source IR → MachineIR lowering + emit
-    ├── s370/    s370.c         # IBM S/370 dispatcher → mainframe_mir
-    ├── s370_xa/ s370_xa.c      # IBM S/370-XA dispatcher → mainframe_mir
-    ├── s390/    s390.c         # IBM S/390 dispatcher → mainframe_mir
-    ├── zarch/   zarch.c        # IBM z/Architecture dispatcher → mainframe_mir
-    ├── ppc32/   ppc32.c        # PowerPC 32-bit dispatcher → ppc_mir
-    ├── ppc64/   ppc64.c        # PowerPC 64-bit BE dispatcher → ppc_mir
-    ├── ppc64le/ ppc64le.c      # PowerPC 64-bit LE dispatcher → ppc_mir
+    │   ├── anvil_slot_map.h    # shared slot-mapping helper
+    │   └── gnu_data.c, gnu_data.h # GAS constants, relocations and aggregate layout
+    ├── x86/                    # x86 family: 32-bit and 64-bit modes
+    │   ├── x86_32_lower.c, x86_64_lower.c
+    │   ├── x86_32_legal.c, x86_64_legal.c
+    │   ├── x86_32_codegen.c, x86_64_codegen.c
+    │   ├── x86_32_helpers.c, x86_64_helpers.c
+    │   ├── x86_32_internal.h, x86_64_internal.h
+    │   ├── targets/             # Identity, lifecycle and backend vtables
+    │   ├── abi/                 # ABI/CC descriptors and varargs
+    │   └── asm/                 # 32-bit and 64-bit GAS printers
+    ├── systemz/
+    │   ├── systemz_lower.c, systemz_legal.c, systemz_codegen.c
+    │   ├── targets/             # S/370, XA, S/390 and z/Architecture
+    │   ├── abi/                 # Linkage policies
+    │   └── asm/                 # HLASM printer
     ├── ppc/
-    │   └── ppc_mir.c           # shared PowerPC MachineIR backend
-    ├── mainframe/
-    │   └── mainframe_mir.c     # shared IBM mainframe MachineIR backend
+    │   ├── ppc_lower.c, ppc_legal.c, ppc_emit.c, ppc_codegen.c
+    │   ├── targets/             # PPC32, PPC64 and PPC64LE
+    │   └── abi/                 # ELF32, ELFv1 and ELFv2 policies
     └── arm64/
         ├── arm64.c, arm64_helpers.c, arm64_internal.h
         ├── arm64_mir.c         # reference MachineIR backend
@@ -550,7 +550,8 @@ src/
 
 The thin per-architecture `*.c` files (e.g. `s370.c`, `ppc32.c`, `x86.c`)
 provide the `anvil_backend_ops_t` and delegate the real lowering/emission to the
-shared or per-target `*_mir.c` translation units.
+family pipeline components. PPC and SystemZ keep ISA descriptors in `targets/`
+and bind linkage/emission policies through vtables; see [BACKENDS.md](BACKENDS.md).
 
 ## Supported Architectures
 
@@ -573,7 +574,7 @@ ANVIL supports the following target architectures:
 
 **x86/x86-64:**
 - Rewritten to lower through the shared MachineIR/regalloc path (no longer
-  legacy direct source-IR emitters); see `x86_mir.c` / `x86_64_mir.c`
+  legacy direct source-IR emitters); see the mode-specific lowering/legalization/emission components in `src/backend/x86/`
 - x86 (32-bit): cdecl, stdcall, and fastcall calling conventions; 64-bit
   integers legalized into lo/hi register pairs
 - x86-64: System V and Windows x64 ABIs via target/ABI descriptors
@@ -582,7 +583,7 @@ ANVIL supports the following target architectures:
 **IBM Mainframe (S/370, S/390, z/Architecture):**
 - HLASM syntax output
 - Shared MachineIR backend with target descriptors for S/370, S/370-XA, S/390, and z/Architecture
-- GCCMVS compatibility mode
+- ANVIL MVS-oriented arena linkage; native ABI interoperability remains incomplete
 - Hexadecimal Floating Point (HFP) and IEEE 754 support
 - Chained save areas for stack management
 - Uppercase symbol names
