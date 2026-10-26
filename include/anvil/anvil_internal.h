@@ -117,6 +117,8 @@ struct anvil_value {
         struct {
             anvil_value_t **elements;
             size_t num_elements;
+            /* Union constants hold one element: this member's value. */
+            size_t union_member;
         } aggregate;
         struct {
             anvil_value_t *symbol;
@@ -166,6 +168,7 @@ struct anvil_type {
             size_t *offsets;
             size_t num_fields;
             bool packed;
+            bool is_union;   /* every field at offset 0 */
             bool identified;
             bool complete;
             struct anvil_type *symbol_next;
@@ -185,6 +188,8 @@ struct anvil_type {
             size_t num_params;
             bool variadic;
             anvil_cc_t cc;
+            /* NULL when every parameter is ANVIL_PARAM_PLAIN. */
+            unsigned char *param_attrs;
         } func;
     } data;
 };
@@ -199,6 +204,10 @@ struct anvil_block {
     struct anvil_block *next;
     uint32_t id;
     struct anvil_block *ctx_next_owned;
+
+    /* Equal to the parent's verify_epoch while the verifier knows this
+     * block is linked into the function (constant-time membership). */
+    uint64_t verify_epoch;
     
     /* For control flow analysis */
     anvil_block_t **preds;
@@ -240,6 +249,21 @@ struct anvil_func {
     bool effects_explicit;
     bool fp_vectorization;
     struct anvil_cfg *cfg_cache;
+
+    /* Open-addressing table of the names of every block created for this
+     * function (borrowed from the blocks).  A repeated name, such as one
+     * "loop.preheader" per loop, is made unique so emitted labels never
+     * collide; each entry remembers the next suffix to try for that name,
+     * keeping repeated creation amortized constant time. */
+    struct anvil_block_name {
+        const char *name;
+        unsigned long next_suffix;
+    } *block_names;
+    size_t block_name_capacity;
+    size_t block_name_count;
+
+    /* Advanced on every verification; see anvil_block.verify_epoch. */
+    uint64_t verify_epoch;
 };
 
 /* Global variable */
@@ -273,6 +297,11 @@ struct anvil_module {
     } strings;
     
     struct anvil_module *next;
+
+    /* A destroyed module stays as an empty tombstone until its context is
+     * destroyed, so objects that still name it never alias a new module and
+     * destruction need not visit every object of the context. */
+    bool destroyed;
 };
 
 /* Backend structure */
@@ -337,6 +366,7 @@ struct anvil_ctx {
     
     /* Modules */
     anvil_module_t *modules;
+    anvil_module_t *destroyed_modules;  /* tombstones, freed with the ctx */
     
     /* ID counters */
     uint32_t next_value_id;

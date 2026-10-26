@@ -274,6 +274,13 @@ void anvil_ctx_destroy(anvil_ctx_t *ctx)
     anvil_ir_free_all(ctx);
     anvil_value_free_all(ctx);
 
+    /* Module tombstones are referenced only by the objects freed above. */
+    while (ctx->destroyed_modules) {
+        anvil_module_t *next = ctx->destroyed_modules->next;
+        free(ctx->destroyed_modules);
+        ctx->destroyed_modules = next;
+    }
+
     /* Free every type registered against this context. */
     anvil_type_t *type = ctx->types;
     while (type) {

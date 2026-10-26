@@ -763,7 +763,7 @@ static void test_real_image_catalog_binding(void)
     CHECK(st_primitive_catalog_init(&catalog,
                                     (st_primitive_allocator_t){0}));
     specs = st_string_primitive_specs(&spec_count);
-    CHECK(specs != NULL && spec_count == 3u);
+    CHECK(specs != NULL && spec_count == 4u);
     for (size_t index = 0u; index < spec_count; index++)
         CHECK(st_primitive_catalog_register(
                   &catalog, &specs[index], NULL) == ST_PRIMITIVE_OK);

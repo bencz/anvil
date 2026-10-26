@@ -9,6 +9,32 @@
 /* Forward declarations */
 typedef struct mcc_ast_node mcc_ast_node_t;
 struct mcc_type;
+struct mcc_symbol;
+
+/* One step from an aggregate into a subobject of a resolved initializer.
+ * For records, `index` is the physical member ordinal that codegen uses for
+ * struct GEP (named members and anonymous record members, in order). */
+typedef enum {
+    MCC_INIT_STEP_ELEMENT,       /* array element */
+    MCC_INIT_STEP_FIELD,         /* struct member */
+    MCC_INIT_STEP_UNION_MEMBER   /* union member (aliases offset zero) */
+} mcc_init_step_kind_t;
+
+typedef struct {
+    mcc_init_step_kind_t kind;
+    size_t index;
+    struct mcc_type *type;       /* type of the subobject reached */
+} mcc_init_step_t;
+
+/* A leaf of a brace initializer after sema resolved designators and brace
+ * elision.  Entries keep source order: a later entry overrides any earlier
+ * entry for the same or an enclosing subobject. */
+typedef struct {
+    mcc_init_step_t *path;
+    size_t path_len;
+    struct mcc_type *type;       /* type of the initialized subobject */
+    mcc_ast_node_t *value;       /* scalar, string literal or record value */
+} mcc_init_entry_t;
 
 /* C23 Attribute kinds */
 typedef enum {
@@ -203,6 +229,7 @@ struct mcc_ast_node {
             bool is_inline;         /* C99 inline */
             bool is_noreturn;       /* C11 _Noreturn */
             mcc_attribute_t *attrs; /* C23/GNU attributes */
+            struct mcc_symbol *symbol; /* Resolved symbol (set by sema) */
         } func_decl;
         
         /* Variable declaration */
@@ -215,6 +242,7 @@ struct mcc_ast_node {
             bool is_const;
             bool is_volatile;
             mcc_attribute_t *attrs; /* C23/GNU attributes */
+            struct mcc_symbol *symbol; /* Resolved symbol (set by sema) */
         } var_decl;
         
         /* Parameter declaration */
@@ -432,6 +460,10 @@ struct mcc_ast_node {
         struct {
             mcc_ast_node_t **exprs;
             size_t num_exprs;
+            /* Filled by sema for the object being initialized. */
+            mcc_init_entry_t *entries;
+            size_t num_entries;
+            bool resolved;
         } init_list;
         
         /* C99: Compound literal (type){ init } */

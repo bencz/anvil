@@ -181,6 +181,15 @@ static void dump_linkage(FILE *out, anvil_linkage_t linkage)
 }
 
 /* Print type to file */
+static void dump_param_attr(FILE *out, const anvil_type_t *type, size_t index)
+{
+    switch (anvil_type_func_param_attr(type, index)) {
+        case ANVIL_PARAM_BYVAL: fprintf(out, " byval"); break;
+        case ANVIL_PARAM_SRET: fprintf(out, " sret"); break;
+        default: break;
+    }
+}
+
 void anvil_dump_type(FILE *out, anvil_type_t *type)
 {
     if (!type) {
@@ -250,6 +259,7 @@ void anvil_dump_type(FILE *out, anvil_type_t *type)
             for (size_t i = 0; i < type->data.func.num_params; i++) {
                 if (i > 0) fprintf(out, ", ");
                 anvil_dump_type(out, type->data.func.params[i]);
+                dump_param_attr(out, type, i);
             }
             if (type->data.func.variadic) {
                 if (type->data.func.num_params > 0) fprintf(out, ", ");
@@ -307,6 +317,14 @@ void anvil_dump_value(FILE *out, anvil_value_t *val)
             break;
 
         case ANVIL_VAL_CONST_STRUCT:
+            if (val->type && val->type->kind == ANVIL_TYPE_STRUCT &&
+                val->type->data.struc.is_union) {
+                fprintf(out, "{union member %zu: ", val->data.aggregate.union_member);
+                if (val->data.aggregate.num_elements == 1)
+                    anvil_dump_value(out, val->data.aggregate.elements[0]);
+                fprintf(out, "}");
+                break;
+            }
             fprintf(out, "{struct ");
             for (size_t i = 0; i < val->data.aggregate.num_elements; i++) {
                 if (i) fprintf(out, ", ");
@@ -541,6 +559,7 @@ void anvil_dump_func(FILE *out, anvil_func_t *func)
         for (size_t i = 0; i < func->type->data.func.num_params; i++) {
             if (i > 0) fprintf(out, ", ");
             anvil_dump_type(out, func->type->data.func.params[i]);
+            dump_param_attr(out, func->type, i);
             if (func->params && i < func->num_params && func->params[i]) {
                 fprintf(out, " ");
                 anvil_dump_value(out, func->params[i]);

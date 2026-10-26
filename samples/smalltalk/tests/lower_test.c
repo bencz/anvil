@@ -2556,7 +2556,7 @@ int main(void)
               == ST_PRIMITIVE_OK);
     CHECK(st_primitive_resolve(&primitive_bindings, units, FIXTURE_COUNT,
                                &primitive_catalog, NULL) == ST_PRIMITIVE_OK);
-    CHECK(primitive_bindings.binding_count == 79u);
+    CHECK(primitive_bindings.binding_count == 80u);
     st_selector_table_t send_selectors = {0};
     st_selector_id_t not_id = 0u;
     st_selector_id_t and_id = 0u;

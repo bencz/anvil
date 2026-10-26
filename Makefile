@@ -43,6 +43,8 @@ CORE_SRCS = \
 
 BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/gnu_data.c \
+	$(SRC_DIR)/backend/common/abi_layout.c \
+	$(SRC_DIR)/backend/common/aggregate_mir.c \
 	$(SRC_DIR)/backend/x86/targets/x86_32.c \
 	$(SRC_DIR)/backend/x86/targets/x86_64.c \
 	$(SRC_DIR)/backend/x86/x86_32_helpers.c \
@@ -80,12 +82,14 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc/abi/elf32.c \
 	$(SRC_DIR)/backend/ppc/abi/elfv1.c \
 	$(SRC_DIR)/backend/ppc/abi/elfv2.c \
+	$(SRC_DIR)/backend/ppc/abi/elf64_args.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc32.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc64.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
 	$(SRC_DIR)/backend/arm64/arm64_varargs.c \
+	$(SRC_DIR)/backend/arm64/abi/aapcs64.c \
 	$(SRC_DIR)/backend/arm64/arm64_mir.c
 
 ANALYSIS_SRCS = \
@@ -176,6 +180,8 @@ TESTS = \
 	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression \
 	$(BUILD_DIR)/tests/fcmp_backend_regression \
 	$(BUILD_DIR)/tests/typed_gep_backend_regression \
+	$(BUILD_DIR)/tests/struct_gep_global_regression \
+	$(BUILD_DIR)/tests/block_name_regression \
 	$(BUILD_DIR)/tests/call_reloc_core_regression \
 	$(BUILD_DIR)/tests/smalltalk_lexer_regression \
 	$(BUILD_DIR)/tests/smalltalk_ast_regression \
@@ -227,7 +233,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/smalltalk_dispatch_regression
 
 .PHONY: all clean lib examples tests smalltalk-aotc smalltalk-aot-link \
-	smalltalk-runtime smalltalk-app test-win64-abi test-fcmp-i1-runtime \
+	smalltalk-runtime smalltalk-app test-win64-abi test-fcmp-i1-runtime test-aggregate-abi \
 	test-sanitize test-valgrind install examples-runtime test-examples \
 	clean-examples-runtime examples-advanced test-examples-advanced \
 	clean-examples-advanced
@@ -256,13 +262,15 @@ $(BUILD_DIR)/examples/%: $(EXAMPLES_DIR)/%.c $(LIB_PATH)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -lanvil
 	@echo "Built $@"
 
-tests: lib $(TESTS) $(BUILD_DIR)/tests/win64_abi_codegen $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
+tests: lib $(TESTS) $(BUILD_DIR)/tests/win64_abi_codegen $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen \
+		$(BUILD_DIR)/tests/aggregate_abi_codegen
 	@for test in $(TESTS); do \
 		echo "Running $$test"; \
 		$$test || exit 1; \
 	done
 	@BUILD_DIR=$(BUILD_DIR) bash tests/run_win64_abi.sh
 	@BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
+	@BUILD_DIR=$(BUILD_DIR) bash tests/run_aggregate_abi.sh
 
 # Build every object in an isolated tree so sanitizer flags cannot be mixed
 # with the normal archive. LeakSanitizer is disabled here because it cannot
@@ -288,6 +296,9 @@ test-win64-abi: $(BUILD_DIR)/tests/win64_abi_codegen
 
 test-fcmp-i1-runtime: $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
 	BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
+
+test-aggregate-abi: $(BUILD_DIR)/tests/aggregate_abi_codegen
+	BUILD_DIR=$(BUILD_DIR) bash tests/run_aggregate_abi.sh
 
 $(BUILD_DIR)/tests/%: tests/%.c tests/platform/$(HOST_PLATFORM)/host.c tests/platform/host.h $(LIB_PATH)
 	@mkdir -p $(dir $@)
@@ -1270,6 +1281,9 @@ $(BUILD_DIR)/tests/smalltalk_aot_compile_regression: \
 		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
 		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/fiber_catalog.c \
+		samples/smalltalk/src/runtime/primitives/socket_catalog.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c \
 		samples/smalltalk/src/runtime/lookup.c samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/image_runtime.c \
 		samples/smalltalk/src/runtime/closure_bridge.c \
@@ -1302,6 +1316,9 @@ $(BUILD_DIR)/tests/smalltalk_aot_compile_regression: \
 		samples/smalltalk/src/runtime/primitives/block_primitives.c \
 		samples/smalltalk/src/runtime/primitives/exception_primitives.c \
 		samples/smalltalk/src/runtime/primitives/reflection_primitives.c \
+		samples/smalltalk/src/runtime/primitives/fiber_catalog.c \
+		samples/smalltalk/src/runtime/primitives/socket_catalog.c \
+		samples/smalltalk/src/runtime/primitives/product_primitives.c \
 		samples/smalltalk/src/runtime/lookup.c \
 		samples/smalltalk/src/runtime/send_bridge.c \
 		samples/smalltalk/src/runtime/image_runtime.c \

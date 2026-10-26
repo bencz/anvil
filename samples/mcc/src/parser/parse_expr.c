@@ -594,6 +594,115 @@ mcc_ast_node_t *parse_expression(mcc_parser_t *p)
  * Constant Expression
  * ============================================================ */
 
+static int64_t truncate_to(mcc_type_t *type, int64_t value)
+{
+    while (type && type->kind == TYPE_TYPEDEF)
+        type = type->data.typedef_ref.underlying;
+    if (!type || type->size == 0 || type->size >= 8) return value;
+    unsigned bits = (unsigned)type->size * 8;
+    uint64_t mask = (UINT64_C(1) << bits) - 1;
+    uint64_t raw = (uint64_t)value & mask;
+    if (type->kind == TYPE_BOOL) return value != 0;
+    if (!type->is_unsigned && (raw >> (bits - 1)))
+        raw |= ~mask;
+    return (int64_t)raw;
+}
+
+bool parse_eval_int_constant(mcc_parser_t *p, mcc_ast_node_t *e, int64_t *out)
+{
+    int64_t a, b, c;
+    if (!e) return false;
+    switch (e->kind) {
+        case AST_INT_LIT:
+            *out = (int64_t)e->data.int_lit.value;
+            return true;
+        case AST_CHAR_LIT:
+            *out = (int64_t)e->data.char_lit.value;
+            return true;
+        case AST_IDENT_EXPR:
+            for (mcc_enum_entry_t *en = p->enumerators; en; en = en->next)
+                if (strcmp(en->name, e->data.ident_expr.name) == 0) {
+                    *out = en->value;
+                    return true;
+                }
+            return false;
+        case AST_SIZEOF_EXPR:
+            if (!e->data.sizeof_expr.type_arg) return false;
+            *out = (int64_t)mcc_type_sizeof(e->data.sizeof_expr.type_arg);
+            return *out > 0;
+        case AST_ALIGNOF_EXPR:
+            if (!e->data.alignof_expr.type_arg) return false;
+            *out = (int64_t)mcc_type_alignof(e->data.alignof_expr.type_arg);
+            return *out > 0;
+        case AST_CAST_EXPR: {
+            mcc_type_t *target = e->data.cast_expr.target_type;
+            if (!target || !mcc_type_is_integer(target) ||
+                !parse_eval_int_constant(p, e->data.cast_expr.expr, &a))
+                return false;
+            *out = truncate_to(target, a);
+            return true;
+        }
+        case AST_UNARY_EXPR:
+            if (!parse_eval_int_constant(p, e->data.unary_expr.operand, &a))
+                return false;
+            switch (e->data.unary_expr.op) {
+                case UNOP_POS: *out = a; return true;
+                case UNOP_NEG: *out = (int64_t)(0 - (uint64_t)a); return true;
+                case UNOP_BIT_NOT: *out = ~a; return true;
+                case UNOP_NOT: *out = !a; return true;
+                default: return false;
+            }
+        case AST_TERNARY_EXPR:
+            if (!parse_eval_int_constant(p, e->data.ternary_expr.cond, &c))
+                return false;
+            return parse_eval_int_constant(
+                p, c ? e->data.ternary_expr.then_expr
+                     : e->data.ternary_expr.else_expr, out);
+        case AST_BINARY_EXPR: {
+            mcc_binop_t op = e->data.binary_expr.op;
+            if (!parse_eval_int_constant(p, e->data.binary_expr.lhs, &a))
+                return false;
+            /* && and || do not evaluate an operand they do not need. */
+            if (op == BINOP_AND && !a) { *out = 0; return true; }
+            if (op == BINOP_OR && a) { *out = 1; return true; }
+            if (!parse_eval_int_constant(p, e->data.binary_expr.rhs, &b))
+                return false;
+            uint64_t ua = (uint64_t)a, ub = (uint64_t)b;
+            switch (op) {
+                case BINOP_ADD: *out = (int64_t)(ua + ub); return true;
+                case BINOP_SUB: *out = (int64_t)(ua - ub); return true;
+                case BINOP_MUL: *out = (int64_t)(ua * ub); return true;
+                case BINOP_DIV:
+                    if (!b || (a == INT64_MIN && b == -1)) return false;
+                    *out = a / b; return true;
+                case BINOP_MOD:
+                    if (!b || (a == INT64_MIN && b == -1)) return false;
+                    *out = a % b; return true;
+                case BINOP_LSHIFT:
+                    if (b < 0 || b > 63) return false;
+                    *out = (int64_t)(ua << b); return true;
+                case BINOP_RSHIFT:
+                    if (b < 0 || b > 63) return false;
+                    *out = a >> b; return true;
+                case BINOP_BIT_AND: *out = a & b; return true;
+                case BINOP_BIT_OR: *out = a | b; return true;
+                case BINOP_BIT_XOR: *out = a ^ b; return true;
+                case BINOP_LT: *out = a < b; return true;
+                case BINOP_GT: *out = a > b; return true;
+                case BINOP_LE: *out = a <= b; return true;
+                case BINOP_GE: *out = a >= b; return true;
+                case BINOP_EQ: *out = a == b; return true;
+                case BINOP_NE: *out = a != b; return true;
+                case BINOP_AND: *out = b != 0; return true;
+                case BINOP_OR: *out = b != 0; return true;
+                default: return false;
+            }
+        }
+        default:
+            return false;
+    }
+}
+
 mcc_ast_node_t *parse_constant_expr(mcc_parser_t *p)
 {
     /* Constant expression is a conditional expression that can be

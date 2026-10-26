@@ -425,7 +425,11 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
             fprintf(stderr, "Analyzing: %s\n", files[i]);
         }
         
-        if (!mcc_sema_analyze(sema, asts[i])) {
+        bool analyzed = mcc_sema_analyze(sema, asts[i]);
+        /* Internal-linkage names of this unit must not leak into the next. */
+        if (analyzed)
+            mcc_symtab_close_unit(sema->symtab, (unsigned)i);
+        if (!analyzed) {
             mcc_sema_destroy(sema);
             for (size_t j = 0; j < num_files; j++) {
                 if (parsers[j]) mcc_parser_destroy(parsers[j]);

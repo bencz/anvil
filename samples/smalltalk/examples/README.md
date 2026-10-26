@@ -54,8 +54,9 @@ entrypoint contract and a from-scratch source example.
   and application, materializes all five assembly profiles, assembles and links
   the x86-64 profile with the product runtime, executes it, and requires exit
   status zero, empty stderr and the exact bytes
-  `Hello from Anvil Smalltalk\n` on stdout. `Transcript` is the authenticated
-  descriptor-1 `ExternalStream`; output uses the real `StreamWritePrimitive`.
+  `Hello from Anvil Smalltalk\n` on stdout. `Transcript` is the image class
+  over a descriptor-1 `ExternalStream`; output uses the real
+  `StreamWritePrimitive`.
 - `closures` exercises an escaping value capture, a self capture and a
   non-local return. Its end-to-end gate uses the same matrix and native
   toolchain as `hello`; the executable must produce no output and return exit

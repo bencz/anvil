@@ -24,14 +24,7 @@ static int cross_assemble(const char *assembly, const char *target)
         return 1;
     }
     FILE *out = fdopen(fd, "wb");
-    bool ppc_numeric_regs = strncmp(target, "powerpc", 7) == 0;
-    bool write_ok = out != NULL;
-    for (size_t i = 0; write_ok && assembly[i]; i++)
-    {
-        if (ppc_numeric_regs && (assembly[i] == 'r' || assembly[i] == 'f') && assembly[i + 1] >= '0' && assembly[i + 1] <= '9')
-            continue;
-        write_ok = fputc((unsigned char)assembly[i], out) != EOF;
-    }
+    bool write_ok = out != NULL && fputs(assembly, out) != EOF;
     bool close_ok = out ? fclose(out) == 0 : false;
     if (!out || !write_ok || !close_ok)
     {

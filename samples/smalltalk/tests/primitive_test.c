@@ -493,7 +493,7 @@ static void test_real_image_requires_real_implementations(void)
         st_source_bundle_destroy(&bundle);
         return;
     }
-    CHECK(bundle.image_count == 50u && bundle.count == 50u);
+    CHECK(bundle.image_count == 64u && bundle.count == 64u);
     units = malloc(bundle.count * sizeof(*units));
     CHECK(units != NULL);
     if (!units) {
@@ -509,10 +509,10 @@ static void test_real_image_requires_real_implementations(void)
           == ST_PRIMITIVE_OK);
     CHECK(!st_primitive_result_succeeded(&result));
     CHECK(result.binding_count == 0u);
-    /* Current image contract: 69 pragma uses / 64 distinct names. Until a
+    /* Current image contract: 84 pragma uses / 79 distinct names. Until a
      * lowering or RT symbol is genuinely implemented and registered, every
      * use must remain a hard missing-implementation diagnostic. */
-    CHECK(result.diagnostic_count == 69u);
+    CHECK(result.diagnostic_count == 84u);
     for (index = 0u; index < result.diagnostic_count; index++)
         CHECK(result.diagnostics[index].code ==
               ST_PRIMITIVE_DIAG_MISSING_IMPLEMENTATION);

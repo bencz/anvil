@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <glob.h>
 #include <spawn.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -280,58 +281,33 @@ static void remove_tree(const char *path)
     }
 }
 
+/* Mirrors SMALLTALK_PRODUCT_RUNTIME_SRCS in the root Makefile: the runtime
+ * object is every source of the shipped runtime, discovered by pattern, so
+ * new primitive families cannot silently go missing from this gate. */
+static const char *const runtime_source_patterns[] = {
+    "samples/smalltalk/src/platform/posix/*.c",
+    "samples/smalltalk/src/compiler/primitive.c",
+    "samples/smalltalk/src/runtime/*.c",
+    "samples/smalltalk/src/runtime/control/*.c",
+    "samples/smalltalk/src/runtime/primitives/*.c",
+    "samples/smalltalk/src/product/application_startup.c",
+    "samples/smalltalk/examples/support/native_main.c"
+};
+
 static bool build_runtime_object(
     const char *object_path, const char *launch_symbol)
 {
-    static const char *const sources[] = {
-        "samples/smalltalk/src/compiler/primitive.c",
-        "samples/smalltalk/src/runtime/value.c",
-        "samples/smalltalk/src/runtime/runtime.c",
-        "samples/smalltalk/src/platform/posix/runtime.c",
-        "samples/smalltalk/src/runtime/heap.c",
-        "samples/smalltalk/src/runtime/lookup.c",
-        "samples/smalltalk/src/runtime/send_bridge.c",
-        "samples/smalltalk/src/runtime/image_runtime.c",
-        "samples/smalltalk/src/runtime/closure_bridge.c",
-        "samples/smalltalk/src/runtime/aot_bootstrap.c",
-        "samples/smalltalk/src/runtime/dnu.c",
-        "samples/smalltalk/src/runtime/control/control.c",
-        "samples/smalltalk/src/runtime/control/control_roots.c",
-        "samples/smalltalk/src/runtime/control/control_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/core_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/heap_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/heap_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/float_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/float_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/integer_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/integer_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/stream_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/stream_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/string_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/string_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/symbol_intern.c",
-        "samples/smalltalk/src/runtime/primitives/block_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/block_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/exception_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/exception_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/reflection_primitives.c",
-        "samples/smalltalk/src/runtime/primitives/reflection_primitive_bridge.c",
-        "samples/smalltalk/src/runtime/primitives/product_primitives.c",
-        "samples/smalltalk/src/product/application_startup.c",
-        "samples/smalltalk/examples/support/native_main.c"
+    static const char *const prefix[] = {
+        "/usr/bin/gcc", "-std=c11", "-D_GNU_SOURCE", "-O2", "-Iinclude",
+        "-Isamples/smalltalk/include", NULL /* launch definition */, "-r"
     };
-    enum {
-        PREFIX_COUNT = 8,
-        SUFFIX_COUNT = 3,
-        ARGUMENT_CAPACITY = PREFIX_COUNT
-            + (int)(sizeof(sources) / sizeof(sources[0]))
-            + SUFFIX_COUNT
-    };
-    char *arguments[ARGUMENT_CAPACITY];
+    enum { PREFIX_COUNT = sizeof(prefix) / sizeof(prefix[0]), SUFFIX_COUNT = 3 };
     char launch_definition[256];
+    glob_t sources;
+    char **arguments = NULL;
     size_t argument = 0u;
     int exit_code = -1;
+    bool ok = false;
 
     if (object_path == NULL || launch_symbol == NULL
             || snprintf(
@@ -341,24 +317,40 @@ static bool build_runtime_object(
         return false;
     }
 
-    arguments[argument++] = "/usr/bin/gcc";
-    arguments[argument++] = "-std=c11";
-    arguments[argument++] = "-D_GNU_SOURCE";
-    arguments[argument++] = "-O2";
-    arguments[argument++] = "-Iinclude";
-    arguments[argument++] = "-Isamples/smalltalk/include";
-    arguments[argument++] = launch_definition;
-    arguments[argument++] = "-r";
-    for (size_t index = 0u;
-         index < sizeof(sources) / sizeof(sources[0]); index++) {
-        arguments[argument++] = (char *)sources[index];
+    memset(&sources, 0, sizeof(sources));
+    for (size_t index = 0u; index < sizeof(runtime_source_patterns)
+             / sizeof(runtime_source_patterns[0]); index++) {
+        /* GLOB_ERR is deliberately absent: a pattern with no match is a
+         * missing source and fails the exact-count check below. */
+        size_t before = sources.gl_pathc;
+        if (glob(runtime_source_patterns[index],
+                 index == 0u ? 0 : GLOB_APPEND, NULL, &sources) != 0
+                || sources.gl_pathc == before) {
+            fprintf(stderr, "runtime source pattern matched nothing: %s\n",
+                    runtime_source_patterns[index]);
+            goto done;
+        }
+    }
+
+    arguments = calloc(PREFIX_COUNT + sources.gl_pathc + SUFFIX_COUNT,
+                       sizeof(*arguments));
+    if (arguments == NULL) goto done;
+    for (size_t index = 0u; index < PREFIX_COUNT; index++) {
+        arguments[argument++] = prefix[index] != NULL
+            ? (char *)prefix[index] : launch_definition;
+    }
+    for (size_t index = 0u; index < sources.gl_pathc; index++) {
+        arguments[argument++] = sources.gl_pathv[index];
     }
     arguments[argument++] = "-o";
     arguments[argument++] = (char *)object_path;
     arguments[argument] = NULL;
-    CHECK(argument + 1u == ARGUMENT_CAPACITY);
 
-    return run_process(arguments, &exit_code) && exit_code == 0;
+    ok = run_process(arguments, &exit_code) && exit_code == 0;
+done:
+    free(arguments);
+    globfree(&sources);
+    return ok;
 }
 
 int main(void)

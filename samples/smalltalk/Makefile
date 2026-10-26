@@ -133,6 +133,9 @@ AOT_BOOTSTRAP_TEST = $(BUILD_DIR)/aot_bootstrap_test
 DNU_OBJECT = $(BUILD_DIR)/dnu.o
 DNU_TEST_OBJECT = $(BUILD_DIR)/dnu_test.o
 DNU_TEST = $(BUILD_DIR)/dnu_test
+FIBER_CATALOG_OBJECT = $(BUILD_DIR)/fiber_catalog.o
+SOCKET_CATALOG_OBJECT = $(BUILD_DIR)/socket_catalog.o
+PRODUCT_PRIMITIVES_OBJECT = $(BUILD_DIR)/product_primitives.o
 IMAGE_PRIMITIVE_CATALOG_TEST_OBJECT = \
 	$(BUILD_DIR)/image_primitive_catalog_test.o
 IMAGE_PRIMITIVE_CATALOG_TEST = $(BUILD_DIR)/image_primitive_catalog_test
@@ -926,17 +929,36 @@ $(IMAGE_PRIMITIVE_CATALOG_TEST): \
 		$(INTEGER_PRIMITIVES_OBJECT) $(STREAM_PRIMITIVES_OBJECT) \
 		$(STRING_PRIMITIVES_OBJECT) $(BLOCK_PRIMITIVES_OBJECT) \
 		$(EXCEPTION_PRIMITIVES_OBJECT) $(REFLECTION_PRIMITIVES_OBJECT) \
+		$(FIBER_CATALOG_OBJECT) $(SOCKET_CATALOG_OBJECT) \
+		$(PRODUCT_PRIMITIVES_OBJECT) \
 		$(IMAGE_PRIMITIVE_CATALOG_TEST_OBJECT)
 	$(CC) $(CFLAGS) $(THREAD_FLAGS) $^ -o $@ -lm
+
+$(BUILD_DIR)/fiber_catalog.o: \
+		src/runtime/primitives/fiber_catalog.c \
+		include/st_fiber_primitives.h include/st_primitive.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(DEPFLAGS) \
+		-I../../include $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/socket_catalog.o: \
+		src/runtime/primitives/socket_catalog.c \
+		include/st_socket_primitives.h include/st_primitive.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(DEPFLAGS) \
+		-I../../include $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/product_primitives.o: \
+		src/runtime/primitives/product_primitives.c \
+		include/st_product_primitives.h include/st_primitive.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(DEPFLAGS) \
+		-I../../include $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/image_primitive_catalog_test.o: \
 		tests/image_primitive_catalog_test.c \
 		include/st_source_bundle.h include/st_primitive.h \
-		include/st_core_primitives.h include/st_heap_primitives.h \
-		include/st_float_primitives.h include/st_integer_primitives.h \
-		include/st_stream_primitives.h include/st_string_primitives.h \
-		include/st_block_primitives.h include/st_exception_primitives.h \
-		include/st_reflection_primitives.h
+		include/st_product_primitives.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(THREAD_FLAGS) $(DEPFLAGS) \
 		-I../../include $(INCLUDES) -c $< -o $@

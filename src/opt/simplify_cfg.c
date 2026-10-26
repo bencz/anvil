@@ -10,6 +10,7 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
+#include "anvil/anvil_analysis.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -812,4 +813,50 @@ anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func)
     if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
         return ANVIL_PASS_RUN_ERROR;
     return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
+}
+
+anvil_error_t anvil_func_remove_unreachable_blocks(anvil_func_t *func)
+{
+    if (!func || !func->parent || !func->parent->ctx)
+        return ANVIL_ERR_INVALID_ARG;
+    anvil_ctx_t *ctx = func->parent->ctx;
+    if (func->is_declaration || !func->blocks || !func->entry)
+        return ANVIL_OK;
+
+    block_index_t index;
+    if (!block_index_build(func, &index)) return ANVIL_ERR_NOMEM;
+    bool *reachable = anvil_ctx_calloc(ctx, index.count, sizeof(*reachable));
+    anvil_block_t **worklist = anvil_ctx_malloc(ctx,
+                                                index.count * sizeof(*worklist));
+    anvil_error_t status = ANVIL_OK;
+    if (!reachable || !worklist ||
+        !mark_reachable_iterative(&index, func->entry, reachable, worklist)) {
+        status = anvil_ctx_get_last_error(ctx) != ANVIL_OK
+            ? anvil_ctx_get_last_error(ctx) : ANVIL_ERR_NOMEM;
+        goto done;
+    }
+
+    /* Detach PHI edges first, then unlink: a removed block never feeds a
+     * kept PHI and reachable code never names a removed block. */
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        size_t slot;
+        if (block_index_find(&index, block, &slot) && !reachable[slot] &&
+            block->last)
+            (void)rewrite_successor_phis(block->last, block, NULL);
+    }
+    for (anvil_block_t *block = func->blocks; block;) {
+        anvil_block_t *next = block->next;
+        size_t slot;
+        if (block_index_find(&index, block, &slot) && !reachable[slot] &&
+            block != func->entry)
+            remove_block(func, block);
+        block = next;
+    }
+    anvil_func_invalidate_cfg(func);
+
+done:
+    free(reachable);
+    free(worklist);
+    block_index_destroy(&index);
+    return status;
 }

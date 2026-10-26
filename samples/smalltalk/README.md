@@ -206,7 +206,7 @@ method.  A 10,000-class regression guards both linear storage and lookup probe
 counts.
 
 The source-image loader consumes the checked `st-image/manifest.txt`, parses
-all 50 image units before application units, and builds one dense
+all 64 image units before application units, and builds one dense
 class/metaclass graph with inherited slot layouts. A real integration gate
 adds `HelloApplication`, semantically analyzes every image/application method,
 and proves deterministic IDs and lexical inheritance. Independent budgets
@@ -334,8 +334,8 @@ Frontend-ready application inputs live under `examples/`.  Their
 `application.manifest` sources are loaded strictly after the real `st-image`
 and are gated through parsing, class-graph construction, semantic analysis,
 whole-image AOT compilation and product linking. `hello` executes the real
-`Transcript nextPutAll: ...; lf` protocol through the authenticated descriptor-1
-stream, and `closures` executes escaping captures and a non-local return. The
+`Transcript nextPutAll: ...; lf` protocol of the image's `Transcript` class
+over a descriptor-1 `ExternalStream`, and `closures` executes escaping captures and a non-local return. The
 application startup uses metadata ABI v5 for the exact global, literal, class,
 shape, selector, method, block and root-map contracts. No checked-in assembly,
 captured output, placeholder entrypoint, or JIT path is involved. See

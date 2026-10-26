@@ -24,16 +24,7 @@ static int cross_assemble(const char *assembly, const char *target)
         return 1;
 
     FILE *file = fopen(source, "wb");
-    bool ok = file != NULL;
-    bool numeric_registers = strncmp(target, "powerpc", 7) == 0;
-
-    for (size_t i = 0; ok && assembly[i]; i++)
-    {
-        if (numeric_registers && (assembly[i] == 'r' || assembly[i] == 'f') && assembly[i + 1] >= '0' && assembly[i + 1] <= '9')
-            continue;
-
-        ok = fputc((unsigned char)assembly[i], file) != EOF;
-    }
+    bool ok = file != NULL && fputs(assembly, file) != EOF;
 
     if (file && fclose(file) != 0)
         ok = false;

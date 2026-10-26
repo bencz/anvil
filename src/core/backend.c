@@ -131,3 +131,12 @@ anvil_backend_t *anvil_get_backend(anvil_ctx_t *ctx, anvil_arch_t arch)
     
     return be;
 }
+
+bool anvil_ctx_supports_param_attr(anvil_ctx_t *ctx, anvil_param_attr_t attr)
+{
+    if (attr == ANVIL_PARAM_PLAIN) return true;
+    if (!ctx || !ctx->backend || !ctx->backend->ops ||
+        (unsigned)attr >= sizeof(unsigned) * 8)
+        return false;
+    return (ctx->backend->ops->param_attr_support & (1u << attr)) != 0;
+}

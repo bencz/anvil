@@ -352,5 +352,6 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .atomic_is_lock_free = arm64_atomic_is_lock_free,
     .build_va_arg = anvil_arm64_build_va_arg,
     .build_va_copy = anvil_arm64_build_va_copy,
-    .build_va_copy_into = anvil_arm64_build_va_copy_into
+    .build_va_copy_into = anvil_arm64_build_va_copy_into,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
 };

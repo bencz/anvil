@@ -7,6 +7,41 @@
 
 #include "sema_internal.h"
 
+/* True when every identifier in `expr` is a visible enumerator, so the
+ * expression can be analyzed and folded wherever it appears (a parameter
+ * bound such as [n] names a parameter that is not in scope yet). */
+static bool expr_names_only_enumerators(mcc_sema_t *sema, mcc_ast_node_t *expr)
+{
+    if (!expr) return true;
+    switch (expr->kind) {
+        case AST_INT_LIT:
+        case AST_CHAR_LIT:
+            return true;
+        case AST_IDENT_EXPR: {
+            mcc_symbol_t *sym = mcc_symtab_lookup(sema->symtab,
+                                                  expr->data.ident_expr.name);
+            return sym && sym->kind == SYM_ENUM_CONST;
+        }
+        case AST_UNARY_EXPR:
+            return expr_names_only_enumerators(sema, expr->data.unary_expr.operand);
+        case AST_BINARY_EXPR:
+            return expr_names_only_enumerators(sema, expr->data.binary_expr.lhs) &&
+                   expr_names_only_enumerators(sema, expr->data.binary_expr.rhs);
+        case AST_TERNARY_EXPR:
+            return expr_names_only_enumerators(sema, expr->data.ternary_expr.cond) &&
+                   expr_names_only_enumerators(sema, expr->data.ternary_expr.then_expr) &&
+                   expr_names_only_enumerators(sema, expr->data.ternary_expr.else_expr);
+        case AST_CAST_EXPR:
+            return expr_names_only_enumerators(sema, expr->data.cast_expr.expr);
+        case AST_SIZEOF_EXPR:
+            return !expr->data.sizeof_expr.expr_arg;
+        case AST_ALIGNOF_EXPR:
+            return !expr->data.alignof_expr.expr_arg;
+        default:
+            return false;
+    }
+}
+
 mcc_type_t *sema_resolve_type(mcc_sema_t *sema, mcc_type_t *type)
 {
     if (!type) return NULL;
@@ -23,12 +58,41 @@ mcc_type_t *sema_resolve_type(mcc_sema_t *sema, mcc_type_t *type)
         }
         return resolved;
     }
-    if (type->kind == TYPE_POINTER) {
+    if (type->kind == TYPE_TYPEDEF) {
+        mcc_type_t *underlying = sema_resolve_type(
+            sema, type->data.typedef_ref.underlying);
+        type->data.typedef_ref.underlying = underlying;
+        if (underlying) {
+            type->size = underlying->size;
+            type->align = underlying->align;
+        }
+    } else if (type->kind == TYPE_POINTER) {
         type->data.pointer.pointee = sema_resolve_type(
             sema, type->data.pointer.pointee);
     } else if (type->kind == TYPE_ARRAY) {
         type->data.array.element = sema_resolve_type(
             sema, type->data.array.element);
+        /* The parser only recognizes a literal bound; any other integer
+         * constant expression (sizeof(T), 2 * N, an enumerator) makes an
+         * ordinary array, not a VLA (C11 6.7.6.2p4). */
+        int64_t length;
+        mcc_type_t *element = type->data.array.element;
+        mcc_ast_node_t *bound = type->data.array.length_expr;
+        if (type->data.array.is_vla && bound && element &&
+            expr_names_only_enumerators(sema, bound) &&
+            sema_analyze_expr(sema, bound) &&
+            sema_eval_const_expr(sema, bound, &length)) {
+            if (length < 0) {
+                mcc_error_at(sema->ctx, type->data.array.length_expr->location,
+                             "array size is negative");
+                length = 0;
+            }
+            type->data.array.is_vla = false;
+            type->data.array.length_expr = NULL;
+            type->data.array.length = (size_t)length;
+            type->size = element->size * (size_t)length;
+            type->align = element->align;
+        }
     } else if (type->kind == TYPE_FUNCTION) {
         type->data.function.return_type = sema_resolve_type(
             sema, type->data.function.return_type);
@@ -58,6 +122,10 @@ bool sema_check_lvalue(mcc_sema_t *sema, mcc_ast_node_t *expr, mcc_location_t lo
             
         case AST_MEMBER_EXPR:
             /* Member access is an lvalue */
+            return true;
+
+        case AST_COMPOUND_LIT:
+            /* C99 6.5.2.5p4: a compound literal is an lvalue */
             return true;
             
         case AST_UNARY_EXPR:
@@ -155,6 +223,13 @@ bool sema_check_complete_type(mcc_sema_t *sema, mcc_type_t *type, mcc_location_t
 bool sema_check_assignment_compat(mcc_sema_t *sema, mcc_type_t *lhs, mcc_type_t *rhs, mcc_location_t loc)
 {
     if (!lhs || !rhs) return false;
+
+    /* An array operand is converted to a pointer to its first element
+     * (C11 6.3.2.1p3) before it is assigned. */
+    if (rhs->kind == TYPE_ARRAY) {
+        mcc_type_t *decayed = mcc_type_decay(sema->types, rhs);
+        if (decayed) rhs = decayed;
+    }
 
     /* Same type */
     if (mcc_type_is_same(lhs, rhs)) return true;

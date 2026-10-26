@@ -31,7 +31,12 @@ anvil_value_t *codegen_find_local(mcc_codegen_t *cg, const char *name);
 void codegen_add_local(mcc_codegen_t *cg, const char *name, anvil_value_t *value);
 
 /* Get or create global variable reference */
-anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type);
+anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type, anvil_linkage_t linkage);
+/* Linkage of a file-scope symbol: internal for `static`. */
+anvil_linkage_t codegen_symbol_linkage(const mcc_symbol_t *sym);
+/* Assembly name of a file-scope symbol (unique for internal linkage in a
+ * multi-file compilation); `name` when the symbol has none. */
+const char *codegen_link_name(const mcc_symbol_t *sym, const char *name);
 
 /* ============================================================
  * String Literal Management (codegen.c)
@@ -53,6 +58,11 @@ anvil_block_t *codegen_get_label_block(mcc_codegen_t *cg, const char *name);
 
 /* Set current block for code generation */
 void codegen_set_current_block(mcc_codegen_t *cg, anvil_block_t *block);
+
+/* Fixed-size automatic storage, created in the function's entry block so it
+ * exists on every path (including jumps past its declaration). */
+anvil_value_t *codegen_entry_alloca(mcc_codegen_t *cg, anvil_type_t *type,
+                                    const char *name);
 
 /* Check if block has terminator */
 bool codegen_block_has_terminator(mcc_codegen_t *cg);
@@ -78,10 +88,14 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym);
 anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type);
 bool codegen_type_is_record(mcc_type_t *type);
 bool codegen_abi_plan(mcc_codegen_t *cg, mcc_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
+/* True when the target lowers BYVAL/SRET aggregate parameters itself. */
+bool codegen_abi_uses_param_attrs(mcc_codegen_t *cg);
 anvil_value_t *codegen_abi_temporary(mcc_codegen_t *cg, mcc_type_t *type, size_t alignment);
 anvil_value_t *codegen_abi_pack(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const anvil_abi_value_plan_t *plan);
 bool codegen_abi_unpack(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *value, anvil_value_t *pointer, const anvil_abi_value_plan_t *plan);
 bool codegen_copy_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *source, anvil_value_t *destination, const anvil_memory_access_t *access);
+/* Stores zero over every byte of an object (padding included). */
+bool codegen_zero_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *destination);
 anvil_type_t *codegen_param_type(mcc_codegen_t *cg, mcc_type_t *type);
 
 /* Build an integer constant whose Anvil type matches `anvil_type`.
@@ -136,6 +150,14 @@ void codegen_for_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt);
 /* Generate code for switch statement */
 void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt);
 
+/* Destination block of a case/default label of the innermost switch. */
+anvil_block_t *codegen_switch_label_block(mcc_codegen_t *cg,
+                                          mcc_ast_node_t *label);
+
+/* Merge block of the innermost switch, created on first use; NULL outside
+ * a switch. */
+anvil_block_t *codegen_switch_end_block(mcc_codegen_t *cg);
+
 /* Generate code for return statement */
 void codegen_return_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt);
 
@@ -154,5 +176,51 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var);
 
 anvil_value_t *codegen_load_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const char *name);
 bool codegen_store_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *value, anvil_value_t *pointer);
+
+/* ============================================================
+ * Variable-Length Arrays (codegen_vla.c)
+ * ============================================================ */
+
+/* True when an array type has a runtime dimension at any depth. */
+bool codegen_type_has_vla(mcc_type_t *type);
+/* Element type left after stripping every array dimension. */
+mcc_type_t *codegen_vla_innermost(mcc_type_t *type);
+/* Evaluates and records the runtime dimensions of `type` (through pointers
+ * for adjusted parameters). */
+bool codegen_vla_bind(mcc_codegen_t *cg, mcc_type_t *type);
+/* Number of innermost elements in an object of `type`, as a size_t value. */
+anvil_value_t *codegen_vla_element_count(mcc_codegen_t *cg, mcc_type_t *type);
+/* Pointer to the first element of a VLA object (array-to-pointer decay). */
+anvil_value_t *codegen_vla_decay(mcc_codegen_t *cg, mcc_type_t *array,
+                                 anvil_value_t *object);
+/* Address of base[index] for elements of `element` type, where an element
+ * has a runtime size or lives in an array that does. */
+anvil_value_t *codegen_vla_subscript(mcc_codegen_t *cg, mcc_type_t *element,
+                                     anvil_value_t *base, mcc_ast_node_t *index);
+/* True for a type with a runtime array dimension, possibly behind
+ * pointers, such as int (*)[n]. */
+bool codegen_type_is_variably_modified(mcc_type_t *type);
+/* pointer +/- delta elements (delta is any integer value), scaling by the
+ * runtime size of a variably modified pointee. */
+anvil_value_t *codegen_pointer_offset(mcc_codegen_t *cg, mcc_type_t *pointer_type,
+                                      anvil_value_t *pointer, anvil_value_t *delta,
+                                      bool subtract);
+/* lhs - rhs in elements of the pointee (ptrdiff_t-sized result). */
+anvil_value_t *codegen_pointer_diff(mcc_codegen_t *cg, mcc_type_t *pointer_type,
+                                    anvil_value_t *lhs, anvil_value_t *rhs);
+
+/* ============================================================
+ * Object Initialization (codegen_init.c)
+ * ============================================================ */
+
+/* Initializes an object with automatic storage at `destination`. */
+bool codegen_init_object(mcc_codegen_t *cg, mcc_type_t *type,
+                         anvil_value_t *destination, mcc_ast_node_t *init);
+
+/* Builds the constant for an object with static storage; NULL `init`
+ * yields zero.  Reports a diagnostic and returns NULL when an element is
+ * not a supported constant. */
+anvil_value_t *codegen_const_initializer(mcc_codegen_t *cg, mcc_type_t *type,
+                                         mcc_ast_node_t *init);
 
 #endif /* MCC_CODEGEN_INTERNAL_H */

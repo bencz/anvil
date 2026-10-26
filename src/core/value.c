@@ -303,9 +303,15 @@ bool anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr)
     return true;
 }
 
+bool anvil_value_is_global(const anvil_value_t *val)
+{
+    return val && val->kind == ANVIL_VAL_GLOBAL;
+}
+
 anvil_module_t *anvil_value_get_module(const anvil_value_t *val)
 {
-    return val ? val->owner_module : NULL;
+    return val && val->owner_module && !val->owner_module->destroyed
+        ? val->owner_module : NULL;
 }
 
 /* Constants */
@@ -547,6 +553,9 @@ static bool reloc_addend_fits_target(const anvil_ctx_t *ctx, int64_t addend);
 static bool constant_gep_is_well_typed(const anvil_value_t *value)
 {
     const anvil_value_t *base = value->data.reloc.base;
+    /* With no index the GEP is a pointer cast: same address, new type. */
+    bool is_cast = value->data.reloc.num_indices == 0 &&
+                   !value->data.reloc.indices;
     if (!base || !value->owner_module ||
         (base->kind != ANVIL_VAL_CONST_SYMBOL_ADDR &&
          base->kind != ANVIL_VAL_CONST_GEP) ||
@@ -560,10 +569,12 @@ static bool constant_gep_is_well_typed(const anvil_value_t *value)
         !anvil_types_equal(base->type->data.pointee,
                            value->data.reloc.source_type) ||
         !value->type || value->type->kind != ANVIL_TYPE_PTR ||
-        value->data.reloc.num_indices == 0 ||
-        !value->data.reloc.indices ||
-        value->data.reloc.num_indices >
-            SIZE_MAX / sizeof(*value->data.reloc.indices)) return false;
+        value->type->owner_ctx != value->owner_ctx ||
+        (!is_cast &&
+         (value->data.reloc.num_indices == 0 ||
+          !value->data.reloc.indices ||
+          value->data.reloc.num_indices >
+              SIZE_MAX / sizeof(*value->data.reloc.indices)))) return false;
 
     anvil_type_t *current = value->data.reloc.source_type;
     int64_t addend = base->data.reloc.addend;
@@ -579,7 +590,7 @@ static bool constant_gep_is_well_typed(const anvil_value_t *value)
             !anvil_gep_accumulate_offset(&addend, step_offset)) return false;
     }
     return reloc_addend_fits_target(value->owner_ctx, addend) &&
-           anvil_types_equal(value->type->data.pointee, current) &&
+           (is_cast || anvil_types_equal(value->type->data.pointee, current)) &&
            addend == value->data.reloc.addend;
 }
 
@@ -610,6 +621,7 @@ static anvil_const_dag_status_t check_constant_dag_impl(
         if (!frame->entered) {
             if (!cur || !value_is_constant(cur) || !cur->type ||
                 cur->owner_ctx != ctx || cur->type->owner_ctx != ctx ||
+                (cur->owner_module && cur->owner_module->destroyed) ||
                 (cur->owner_module && required_module &&
                  cur->owner_module != required_module) ||
                 !anvil_types_equal(cur->type, frame->expected_type)) {
@@ -669,7 +681,11 @@ static anvil_const_dag_status_t check_constant_dag_impl(
                        ? cur->type->data.array.count : SIZE_MAX)
                 : (is_struct && cur->type->kind == ANVIL_TYPE_STRUCT &&
                    cur->type->data.struc.complete
-                       ? cur->type->data.struc.num_fields : SIZE_MAX);
+                       ? (cur->type->data.struc.is_union
+                              ? (cur->data.aggregate.union_member <
+                                     cur->type->data.struc.num_fields ? 1 : SIZE_MAX)
+                              : cur->type->data.struc.num_fields)
+                       : SIZE_MAX);
             if ((!is_array && !is_struct) ||
                 cur->data.aggregate.num_elements != expected_count ||
                 (cur->data.aggregate.num_elements > 0 &&
@@ -718,6 +734,8 @@ static anvil_const_dag_status_t check_constant_dag_impl(
             expected_type = child ? child->type : NULL;
         } else if (cur->kind == ANVIL_VAL_CONST_ARRAY) {
             expected_type = cur->type->data.array.elem;
+        } else if (cur->type->data.struc.is_union) {
+            expected_type = cur->type->data.struc.fields[cur->data.aggregate.union_member];
         } else {
             expected_type = cur->type->data.struc.fields[child_index];
         }
@@ -900,7 +918,7 @@ anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx,
 {
     if (!ctx || !struct_type || struct_type->owner_ctx != ctx ||
         struct_type->kind != ANVIL_TYPE_STRUCT ||
-        !struct_type->data.struc.complete ||
+        !struct_type->data.struc.complete || struct_type->data.struc.is_union ||
         num_fields != struct_type->data.struc.num_fields ||
         (num_fields > 0 && !fields) ||
         num_fields > SIZE_MAX / sizeof(*fields)) {
@@ -956,6 +974,41 @@ anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx,
         return NULL;
     }
     return constant_register(ctx, value);
+}
+
+anvil_value_t *anvil_const_union(anvil_ctx_t *ctx, anvil_type_t *union_type,
+                                 size_t member, anvil_value_t *value)
+{
+    if (!ctx || !anvil_type_is_union(union_type) || union_type->owner_ctx != ctx ||
+        !union_type->data.struc.complete ||
+        member >= union_type->data.struc.num_fields || !value ||
+        value->owner_ctx != ctx || !value_is_constant(value) ||
+        !anvil_types_equal(value->type, union_type->data.struc.fields[member])) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                                 "Union constant requires a complete union and a constant of the chosen member's type");
+        return NULL;
+    }
+    anvil_value_t *result = anvil_value_create(ctx, ANVIL_VAL_CONST_STRUCT,
+                                               union_type, NULL);
+    if (!result) return NULL;
+    result->data.aggregate.elements = anvil_ctx_malloc(ctx, sizeof(anvil_value_t *));
+    if (!result->data.aggregate.elements) {
+        value_discard_new(ctx, result);
+        return NULL;
+    }
+    result->data.aggregate.elements[0] = value;
+    result->data.aggregate.num_elements = 1;
+    result->data.aggregate.union_member = member;
+    result->owner_module = value->owner_module;
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag(result, ctx);
+    if (dag != ANVIL_CONST_DAG_VALID) {
+        if (dag == ANVIL_CONST_DAG_INVALID)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Union constant is not a well-typed acyclic constant DAG");
+        value_discard_new(ctx, result);
+        return NULL;
+    }
+    return constant_register(ctx, result);
 }
 
 anvil_value_t *anvil_const_symbol_addr(anvil_value_t *symbol)
@@ -1087,6 +1140,44 @@ anvil_value_t *anvil_const_gep(anvil_value_t *base,
         if (dag == ANVIL_CONST_DAG_INVALID)
             anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
                             "Malformed typed constant GEP");
+        value_discard_new(ctx, value);
+        return NULL;
+    }
+    return constant_register(ctx, value);
+}
+
+anvil_value_t *anvil_const_ptr_cast(anvil_value_t *base, anvil_type_t *ptr_type)
+{
+    if (!base) return NULL;
+    anvil_ctx_t *ctx = base->owner_ctx;
+    if (!ctx || !base->owner_module ||
+        (base->kind != ANVIL_VAL_CONST_SYMBOL_ADDR &&
+         base->kind != ANVIL_VAL_CONST_GEP) ||
+        !base->type || base->type->kind != ANVIL_TYPE_PTR ||
+        !ptr_type || ptr_type->owner_ctx != ctx ||
+        ptr_type->kind != ANVIL_TYPE_PTR) {
+        if (ctx) anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                                 "Constant pointer cast requires a live relocatable base and a pointer type");
+        return NULL;
+    }
+    if (anvil_types_equal(base->type, ptr_type)) return base;
+
+    anvil_value_t *value = anvil_value_create(ctx, ANVIL_VAL_CONST_GEP,
+                                              ptr_type, NULL);
+    if (!value) return NULL;
+    value->owner_module = base->owner_module;
+    value->data.reloc.symbol = base->data.reloc.symbol;
+    value->data.reloc.base = base;
+    value->data.reloc.source_type = base->type->data.pointee;
+    value->data.reloc.indices = NULL;
+    value->data.reloc.num_indices = 0;
+    value->data.reloc.addend = base->data.reloc.addend;
+    anvil_const_dag_status_t dag = anvil_value_check_constant_dag_for_module(
+        value, ctx, base->owner_module);
+    if (dag != ANVIL_CONST_DAG_VALID) {
+        if (dag == ANVIL_CONST_DAG_INVALID)
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
+                            "Malformed constant pointer cast");
         value_discard_new(ctx, value);
         return NULL;
     }

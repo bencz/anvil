@@ -71,14 +71,13 @@ Float operation performs the explicit `asFloat` conversion requested by that
 operation. Float equality stays Float-only, preserving the equality/hash
 contract instead of silently equating a rounded binary64 value with a rational.
 
-`Transcript` is intentionally an external bootstrap global, not a magic class
-or a sample-specific primitive. The image runtime allocates one authenticated
-`ExternalStream`, stores descriptor `1` as a SmallInteger and publishes that
-object as a GC root before application entry. String-literal materialization,
-global loading, runtime-symbol lowering and the real `StreamWritePrimitive`
-are covered by generated x86-64 execution and ARM64 assembly gates. The
-remaining application tool must orchestrate those existing contracts and the
-system linker; it must not replace them with host-side simulated output.
+`Transcript` is an ordinary image class (`Streams/Transcript.st`), not a
+name supplied by the compiler or the runtime. Its class-side stream protocol
+(`nextPut:`, `nextPutAll:`, `lf`, `cr`, `crlf`, `show:`) delegates to an
+`ExternalStream` over descriptor `1`, so output goes through the real
+`StreamWritePrimitive`. The compiler resolves it like any other class read from
+the image sources; neither the launch descriptor nor application startup knows
+its name.
 
 There is no JIT or runtime machine-code generation. Offline profiles may guide
 the AOT compiler, but the resulting code is assembled and linked before the

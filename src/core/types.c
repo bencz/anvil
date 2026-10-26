@@ -44,6 +44,7 @@ void anvil_type_free(anvil_type_t *type)
             break;
         case ANVIL_TYPE_FUNC:
             free(type->data.func.params);
+            free(type->data.func.param_attrs);
             break;
         default:
             break;
@@ -373,8 +374,8 @@ anvil_type_t *anvil_type_named_struct(anvil_ctx_t *ctx, const char *name)
     return type;
 }
 
-bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
-                                size_t num_fields, bool packed)
+static bool record_set_body(anvil_type_t *type, anvil_type_t **fields,
+                            size_t num_fields, bool packed, bool is_union)
 {
     if (!type || type->kind != ANVIL_TYPE_STRUCT ||
         !type->data.struc.identified || type->data.struc.complete) {
@@ -420,6 +421,7 @@ bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
     }
 
     size_t offset = 0;
+    size_t union_size = 0;
     size_t max_align = packed ? 1 : ctx->data_layout.aggregate_abi_align;
     size_t max_preferred = packed ? 1
                                   : ctx->data_layout.aggregate_preferred_align;
@@ -434,12 +436,19 @@ bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
             return false;
         }
         new_fields[i] = fields[i];
-        new_offsets[i] = offset;
-        offset += fields[i]->size;
+        if (is_union) {
+            /* Members overlap at offset 0; the size is the largest one. */
+            new_offsets[i] = 0;
+            if (fields[i]->size > union_size) union_size = fields[i]->size;
+        } else {
+            new_offsets[i] = offset;
+            offset += fields[i]->size;
+        }
         if (field_align > max_align) max_align = field_align;
         if (fields[i]->preferred_align > max_preferred)
             max_preferred = fields[i]->preferred_align;
     }
+    if (is_union) offset = union_size;
     size_t total = offset;
     if (!packed && !checked_align_up(offset, max_align, &total)) {
         free(new_fields);
@@ -453,11 +462,35 @@ bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
     type->data.struc.offsets = new_offsets;
     type->data.struc.num_fields = num_fields;
     type->data.struc.packed = packed;
+    type->data.struc.is_union = is_union;
     type->data.struc.complete = true;
     type->size = total;
     type->align = packed ? 1 : max_align;
     type->preferred_align = packed ? 1 : max_preferred;
     return true;
+}
+
+bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
+                                size_t num_fields, bool packed)
+{
+    return record_set_body(type, fields, num_fields, packed, false);
+}
+
+bool anvil_type_union_set_body(anvil_type_t *type, anvil_type_t **members,
+                               size_t num_members)
+{
+    if (num_members == 0) {
+        if (type && type->owner_ctx)
+            anvil_set_error(type->owner_ctx, ANVIL_ERR_INVALID_TYPE,
+                            "A union needs at least one member");
+        return false;
+    }
+    return record_set_body(type, members, num_members, false, true);
+}
+
+bool anvil_type_is_union(const anvil_type_t *type)
+{
+    return type && type->kind == ANVIL_TYPE_STRUCT && type->data.struc.is_union;
 }
 
 anvil_type_t *anvil_type_literal_struct(anvil_ctx_t *ctx,
@@ -635,6 +668,32 @@ anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
                                   anvil_type_t **params, size_t num_params,
                                   bool variadic, anvil_cc_t cc)
 {
+    return anvil_type_func_attrs(ctx, ret, params, NULL, num_params, variadic, cc);
+}
+
+static bool param_is_aggregate_pointer(const anvil_type_t *type)
+{
+    const anvil_type_t *pointee = type && type->kind == ANVIL_TYPE_PTR
+        ? type->data.pointee : NULL;
+    return pointee && anvil_sem_type_is_sized(pointee) && pointee->size > 0 &&
+           (pointee->kind == ANVIL_TYPE_STRUCT || pointee->kind == ANVIL_TYPE_ARRAY);
+}
+
+anvil_param_attr_t anvil_type_func_param_attr(const anvil_type_t *type,
+                                              size_t index)
+{
+    if (!type || type->kind != ANVIL_TYPE_FUNC ||
+        index >= type->data.func.num_params || !type->data.func.param_attrs)
+        return ANVIL_PARAM_PLAIN;
+    return (anvil_param_attr_t)type->data.func.param_attrs[index];
+}
+
+anvil_type_t *anvil_type_func_attrs(anvil_ctx_t *ctx, anvil_type_t *ret,
+                                    anvil_type_t **params,
+                                    const anvil_param_attr_t *attrs,
+                                    size_t num_params, bool variadic,
+                                    anvil_cc_t cc)
+{
     anvil_cc_t effective_cc = ANVIL_CC_DEFAULT;
     if (!ctx) return NULL;
     if (!ctx->target_configured) {
@@ -681,9 +740,34 @@ anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
         }
     }
 
+    bool any_attr = false;
+    for (size_t i = 0; attrs && i < num_params; i++) {
+        if (attrs[i] == ANVIL_PARAM_PLAIN) continue;
+        any_attr = true;
+        bool valid = (attrs[i] == ANVIL_PARAM_BYVAL ||
+                      (attrs[i] == ANVIL_PARAM_SRET && i == 0 &&
+                       (!ret || ret->kind == ANVIL_TYPE_VOID))) &&
+                     param_is_aggregate_pointer(params[i]);
+        if (!valid) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "BYVAL/SRET parameters must point to a sized struct or array; "
+                            "SRET is only the first parameter of a void function");
+            return NULL;
+        }
+    }
+
     anvil_type_t *type = anvil_type_create(ctx, ANVIL_TYPE_FUNC);
     if (!type) return NULL;
 
+    if (any_attr) {
+        type->data.func.param_attrs = anvil_ctx_calloc(ctx, num_params, 1);
+        if (!type->data.func.param_attrs) {
+            anvil_type_free(type);
+            return NULL;
+        }
+        for (size_t i = 0; i < num_params; i++)
+            type->data.func.param_attrs[i] = (unsigned char)attrs[i];
+    }
     type->data.func.ret = ret ? ret : ctx->type_void;
     type->data.func.num_params = num_params;
     type->data.func.variadic = variadic;
@@ -779,7 +863,8 @@ static bool types_equal_graph(const anvil_type_t *lhs,
             if (!lhs->data.struc.complete || !rhs->data.struc.complete)
                 return false;
             if (lhs->data.struc.num_fields != rhs->data.struc.num_fields ||
-                lhs->data.struc.packed != rhs->data.struc.packed) {
+                lhs->data.struc.packed != rhs->data.struc.packed ||
+                lhs->data.struc.is_union != rhs->data.struc.is_union) {
                 return false;
             }
             for (size_t i = 0; i < lhs->data.struc.num_fields; i++) {
@@ -799,7 +884,9 @@ static bool types_equal_graph(const anvil_type_t *lhs,
             }
             for (size_t i = 0; i < lhs->data.func.num_params; i++) {
                 if (!types_equal_graph(lhs->data.func.params[i],
-                                       rhs->data.func.params[i], &pair)) {
+                                       rhs->data.func.params[i], &pair) ||
+                    anvil_type_func_param_attr(lhs, i) !=
+                        anvil_type_func_param_attr(rhs, i)) {
                     return false;
                 }
             }

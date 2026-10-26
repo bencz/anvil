@@ -464,7 +464,7 @@ static void test_static_vtable_and_checked_calls(void)
 
     anvil_module_destroy(other);
     if (foreign_init) {
-        CHECK(foreign_init->owner_module == NULL &&
+        CHECK(anvil_value_get_module(foreign_init) == NULL &&
               anvil_value_check_constant_dag(foreign_init, ctx) ==
                   ANVIL_CONST_DAG_INVALID,
               "destroying a module must tombstone its relocatable constant DAG without UAF");

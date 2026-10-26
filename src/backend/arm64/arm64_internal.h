@@ -8,6 +8,7 @@
 #define ARM64_INTERNAL_H
 
 #include "anvil/anvil_internal.h"
+#include "../common/aggregate_mir.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -58,6 +59,62 @@
 #define ARM64_REG_CLASS_NONE     0
 #define ARM64_REG_CLASS_GPR      1
 #define ARM64_REG_CLASS_FPR      2
+
+/* ============================================================================
+ * Aggregates passed (BYVAL) or returned (SRET) by value - AAPCS64
+ * ============================================================================ */
+
+typedef enum {
+    ARM64_AGG_REGS,         /* HFA in v registers, else 1..2 x registers;
+                               arguments fall back to the stack when the
+                               registers run out */
+    ARM64_AGG_REFERENCE,    /* argument: pointer to a caller-owned copy */
+    ARM64_AGG_INDIRECT      /* result: memory whose address is passed in x8 */
+} arm64_agg_placement_t;
+
+typedef struct {
+    arm64_agg_placement_t placement;
+    anvil_agg_part_t parts[4];
+    unsigned num_parts;
+    bool fp;                /* homogeneous floating aggregate */
+    size_t size;
+    size_t align;
+} arm64_agg_plan_t;
+
+/* Argument assignment state and result, advanced by the ABI one argument
+ * at a time. */
+typedef struct {
+    size_t gpr;
+    size_t fpr;
+    int64_t stack;          /* offset of the next stack argument slot */
+} arm64_arg_state_t;
+
+typedef struct {
+    int reg;                /* first x/v register number, or -1 for memory */
+    int64_t offset;         /* stack argument offset when reg < 0 */
+} arm64_arg_loc_t;
+
+/* Procedure call standard (abi/aapcs64.c). */
+typedef struct arm64_abi_desc {
+    anvil_abi_t abi;
+    const char *name;
+    unsigned num_gpr_args;
+    unsigned num_fpr_args;
+    int indirect_result_reg;        /* address of a result in memory */
+    int indirect_call_reg;          /* target of an indirect call */
+    bool unnamed_args_on_stack;     /* variadic arguments always in memory */
+    bool has_register_va_list;      /* va_list with register save areas */
+    bool (*classify_aggregate)(anvil_type_t *type, bool is_return, arm64_agg_plan_t *plan);
+    arm64_arg_loc_t (*assign_scalar)(const struct arm64_abi_desc *desc, arm64_arg_state_t *state,
+                                     bool fp, bool unnamed);
+    arm64_arg_loc_t (*assign_aggregate)(const struct arm64_abi_desc *desc, arm64_arg_state_t *state,
+                                        const arm64_agg_plan_t *plan);
+} arm64_abi_desc_t;
+
+const arm64_abi_desc_t *arm64_get_abi_desc(anvil_abi_t abi);
+
+/* Register shape for the shared aggregate helpers. */
+extern const anvil_agg_target_t arm64_agg_target;
 
 /* ============================================================================
  * String Table Entry

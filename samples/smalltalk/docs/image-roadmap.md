@@ -110,7 +110,7 @@ primarily in Smalltalk and must not become a large C primitive catalog.
 
 - abstract Stream protocol
 - ExternalStream descriptor ownership and error reporting
-- `Transcript` as an authenticated bootstrap global over stdout
+- `Transcript` as an image class over a descriptor-1 `ExternalStream`
 - complete writes across interruption and short writes
 - filesystem and process services in optional platform packages
 

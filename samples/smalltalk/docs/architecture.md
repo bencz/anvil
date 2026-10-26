@@ -262,8 +262,8 @@ explicit milestones rather than being hidden behind primitive success.
 
 The image-side output protocol is `Stream`/`ExternalStream`, with `lf` routed
 through `nextPut:` and `nextPutAll:` routed through that primitive. `Transcript`
-is an external bootstrap root published as an `ExternalStream` over descriptor
-1 through explicit class/shape/ivar metadata. The image runtime owns dense
+is an ordinary image class whose class-side protocol writes through an
+`ExternalStream` over descriptor 1; no compiler or runtime code names it. The image runtime owns dense
 authenticated global/literal tables. Lowering uses authenticated frame-indexed
 loads and the generic six-argument runtime primitive ABI; merely returning a
 String is still not claimed to be console output.

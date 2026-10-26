@@ -35,6 +35,11 @@ struct mcc_symbol {
     
     /* Storage info */
     mcc_storage_class_t storage;
+
+    /* Assembly symbol of a file-scope object or function (NULL otherwise).
+     * Internal-linkage symbols of a closed translation unit get a name
+     * unique within the combined output. */
+    const char *link_name;
     
     /* For variables: stack offset or global name */
     union {
@@ -110,6 +115,11 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
                                  mcc_sym_kind_t kind, mcc_type_t *type,
                                  mcc_location_t loc);
 mcc_symbol_t *mcc_symtab_lookup(mcc_symtab_t *symtab, const char *name);
+
+/* Ends translation unit `unit` of a multi-file compilation: its
+ * internal-linkage objects and functions leave the shared file scope and
+ * receive the unique link name "<name>.<unit>". */
+void mcc_symtab_close_unit(mcc_symtab_t *symtab, unsigned unit);
 mcc_symbol_t *mcc_symtab_lookup_current(mcc_symtab_t *symtab, const char *name);
 
 /* Tag namespace operations */

@@ -51,6 +51,7 @@ Execution/ObjectMemory.st
 Execution/ClosureCell.st
 Streams/Stream.st
 Streams/ExternalStream.st
+Streams/Transcript.st
 Streams/ReadStream.st
 Streams/WriteStream.st
 Exceptions/SocketError.st

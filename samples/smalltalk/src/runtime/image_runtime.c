@@ -28,7 +28,6 @@ struct st_image_runtime_state {
     size_t bitmap_block_size;
     size_t state_block_size;
     st_image_string_layout_t string_layout;
-    st_image_external_stream_layout_t external_stream_layout;
     const st_image_root_provider_t **root_providers;
     size_t root_provider_count;
     size_t root_provider_capacity;
@@ -183,30 +182,6 @@ static bool string_layout_is_valid(
         && shape->indexed_format == ST_INDEXED_UINT8;
 }
 
-static bool external_stream_layout_is_valid(
-    const st_runtime_descriptors_t *descriptors,
-    st_image_external_stream_layout_t layout)
-{
-    const StClassDescriptor *class_descriptor;
-    const StShapeDescriptor *shape;
-    size_t word;
-    uint64_t mask;
-    if (layout_pair_is_absent(layout.class_id, layout.shape_id)) {
-        return layout.descriptor_fixed_word_index == 0u;
-    }
-    class_descriptor = st_runtime_class(descriptors, layout.class_id);
-    shape = st_runtime_shape(descriptors, layout.shape_id);
-    if (class_descriptor == NULL || shape == NULL
-            || shape->class_id != layout.class_id
-            || shape->indexed_format != ST_INDEXED_NONE
-            || layout.descriptor_fixed_word_index >= shape->fixed_word_count)
-        return false;
-    word = layout.descriptor_fixed_word_index >> 6;
-    mask = UINT64_C(1) << (layout.descriptor_fixed_word_index & 63u);
-    return word < shape->fixed_pointer_bitmap_word_count
-        && (shape->fixed_pointer_bitmap[word] & mask) != 0u;
-}
-
 static st_image_runtime_status_t validate_value(const st_heap_t *heap,
                                                  st_value_t value)
 {
@@ -308,9 +283,7 @@ st_image_runtime_status_t st_image_runtime_init(
                 != ST_RUNTIME_OK
             || !normalize_allocator(options->table_allocator, &allocator)
             || !string_layout_is_valid(options->descriptors,
-                                       options->string_layout)
-            || !external_stream_layout_is_valid(
-                options->descriptors, options->external_stream_layout))
+                                       options->string_layout))
         return ST_IMAGE_RUNTIME_ERR_INVALID_ARGUMENT;
     if (options->global_count > UINT32_MAX
             || options->literal_count > UINT32_MAX
@@ -349,7 +322,6 @@ st_image_runtime_status_t st_image_runtime_init(
     state->global_bitmap_words = global_words;
     state->literal_bitmap_words = literal_words;
     state->string_layout = options->string_layout;
-    state->external_stream_layout = options->external_stream_layout;
     if (options->borrowed_heap != NULL) {
         if (st_heap_descriptors(options->borrowed_heap)
                 != options->descriptors) {
@@ -743,38 +715,6 @@ st_image_runtime_status_t st_image_runtime_bootstrap_global_value(
     }
     state->roots[global_index] = value;
     bitmap_set(state->global_initialized, global_index);
-    return ST_IMAGE_RUNTIME_OK;
-}
-
-st_image_runtime_status_t st_image_runtime_bootstrap_transcript(
-    st_image_runtime_t *runtime, uint32_t global_index,
-    st_value_t *result_out)
-{
-    st_image_runtime_state_t *state = runtime_state(runtime);
-    st_object_view_t view;
-    st_value_t value;
-    st_value_t descriptor;
-    st_image_runtime_status_t status;
-    if (result_out != NULL) {
-        *result_out = (st_value_t)ST_VALUE_INVALID;
-    }
-    if (state == NULL || result_out == NULL
-            || layout_pair_is_absent(state->external_stream_layout.class_id,
-                                     state->external_stream_layout.shape_id)
-            || !st_value_from_small_integer(1, &descriptor))
-        return ST_IMAGE_RUNTIME_ERR_INVALID_ARGUMENT;
-    status = publish_allocated(runtime, false, global_index,
-                               state->external_stream_layout.class_id,
-                               state->external_stream_layout.shape_id,
-                               0u, 0u, &value, &view);
-    if (status != ST_IMAGE_RUNTIME_OK) {
-        return status;
-    }
-    ((st_value_t *)view.fixed_words)
-        [state->external_stream_layout.descriptor_fixed_word_index]
-            = descriptor;
-    bitmap_set(state->global_initialized, global_index);
-    *result_out = value;
     return ST_IMAGE_RUNTIME_OK;
 }
 

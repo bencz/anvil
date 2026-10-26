@@ -19,7 +19,7 @@ static unsigned failures;
 enum {
     CLASS_OBJECT = 1,
     CLASS_STRING,
-    CLASS_EXTERNAL_STREAM,
+    CLASS_RECORD,
     CLASS_NIL,
     CLASS_FALSE,
     CLASS_TRUE,
@@ -101,12 +101,12 @@ static void descriptors_init(descriptors_t *fixture)
     }
     fixture->shape_storage[CLASS_STRING - 1u].indexed_format =
         ST_INDEXED_UINT8;
-    fixture->shape_storage[CLASS_EXTERNAL_STREAM - 1u]
+    fixture->shape_storage[CLASS_RECORD - 1u]
         .minimum_allocation_size = 32u;
-    fixture->shape_storage[CLASS_EXTERNAL_STREAM - 1u].fixed_word_count = 1u;
-    fixture->shape_storage[CLASS_EXTERNAL_STREAM - 1u]
+    fixture->shape_storage[CLASS_RECORD - 1u].fixed_word_count = 1u;
+    fixture->shape_storage[CLASS_RECORD - 1u]
         .fixed_pointer_bitmap = &fixture->stream_bitmap;
-    fixture->shape_storage[CLASS_EXTERNAL_STREAM - 1u]
+    fixture->shape_storage[CLASS_RECORD - 1u]
         .fixed_pointer_bitmap_word_count = 1u;
     fixture->descriptors = (st_runtime_descriptors_t) {
         fixture->classes, CLASS_COUNT - 1u,
@@ -128,10 +128,7 @@ static st_image_runtime_options_t options_for(
         .global_count = global_count,
         .literals = literals,
         .literal_count = literal_count,
-        .string_layout = { CLASS_STRING, CLASS_STRING },
-        .external_stream_layout = {
-            CLASS_EXTERNAL_STREAM, CLASS_EXTERNAL_STREAM, 0u
-        }
+        .string_layout = { CLASS_STRING, CLASS_STRING }
     };
 }
 
@@ -192,10 +189,10 @@ static void test_bootstrap_load_roots_and_gc(void)
     StFrame frame = {0};
     st_value_t result;
     st_value_t string;
-    st_value_t transcript;
+    st_value_t record;
     st_value_t dynamic_root = ST_VALUE_INVALID;
     st_object_view_t view;
-    int64_t descriptor_value = 0;
+    int64_t record_value = 0;
     visitor_t visitor = {0};
     st_heap_collection_stats_t stats;
 
@@ -271,14 +268,19 @@ static void test_bootstrap_load_roots_and_gc(void)
           == ST_IMAGE_RUNTIME_ERR_CONFLICT
           && result == ST_VALUE_INVALID);
 
-    CHECK(st_image_runtime_bootstrap_transcript(&image, 3u, &transcript)
+    CHECK(st_heap_allocate(&heap, CLASS_RECORD, CLASS_RECORD, 0u, 0u, 0u,
+                           &record) == ST_HEAP_OK);
+    CHECK(st_heap_object_view(&heap, record, &view) == ST_HEAP_OK
+          && st_value_from_small_integer(
+              1, &((st_value_t *)view.fixed_words)[0]));
+    CHECK(st_image_runtime_bootstrap_global_value(&image, 3u, record)
           == ST_IMAGE_RUNTIME_OK);
-    CHECK(st_heap_object_view(&heap, transcript, &view) == ST_HEAP_OK
-          && st_value_to_small_integer(
-              ((st_value_t *)view.fixed_words)[0], &descriptor_value)
-          && descriptor_value == 1);
     CHECK(st_image_runtime_global_load(&frame, 3u, &result)
-          == ST_IMAGE_RUNTIME_OK && result == transcript);
+          == ST_IMAGE_RUNTIME_OK && result == record);
+    CHECK(st_heap_object_view(&heap, result, &view) == ST_HEAP_OK
+          && st_value_to_small_integer(
+              ((st_value_t *)view.fixed_words)[0], &record_value)
+          && record_value == 1);
 
     CHECK(st_image_runtime_visit_roots(&image, record_root, &visitor,
                                        &visitor.count)
@@ -287,7 +289,7 @@ static void test_bootstrap_load_roots_and_gc(void)
           && visitor.values[0] == existing
           && visitor.values[1] == seven
           && visitor.values[2] == st_value_false()
-          && visitor.values[3] == transcript
+          && visitor.values[3] == record
           && visitor.values[4] == st_value_true()
           && visitor.values[5] == string);
     visitor = (visitor_t){ .stop_after = 2u };
@@ -304,7 +306,7 @@ static void test_bootstrap_load_roots_and_gc(void)
           && !st_heap_contains(&heap, garbage)
           && st_heap_contains(&heap, existing)
           && st_heap_contains(&heap, string)
-          && st_heap_contains(&heap, transcript));
+          && st_heap_contains(&heap, record));
 
     CHECK(st_heap_allocate(&heap, CLASS_OBJECT, CLASS_OBJECT, 0u, 0u, 0u,
                            &dynamic_root) == ST_HEAP_OK);
@@ -434,7 +436,9 @@ static void test_validation_transaction_and_oom(void)
     };
     CHECK(st_image_runtime_init(&owned, &owned_options)
           == ST_IMAGE_RUNTIME_OK && owned.owns_heap);
-    CHECK(st_image_runtime_bootstrap_transcript(&owned, 0u, &value)
+    CHECK(st_heap_allocate(st_image_runtime_heap(&owned), CLASS_RECORD,
+                           CLASS_RECORD, 0u, 0u, 0u, &value) == ST_HEAP_OK);
+    CHECK(st_image_runtime_bootstrap_global_value(&owned, 0u, value)
           == ST_IMAGE_RUNTIME_OK
           && st_heap_contains(st_image_runtime_heap(&owned), value));
     st_image_runtime_destroy(&owned);

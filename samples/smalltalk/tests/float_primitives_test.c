@@ -869,7 +869,7 @@ static void test_catalog_and_real_image_contract(void)
     CHECK(st_source_bundle_load(&bundle, image, NULL, 0u, NULL) ==
           ST_SOURCE_LOAD_OK);
     if (bundle.diagnostic.status != ST_SOURCE_LOAD_OK) goto done;
-    CHECK(bundle.count == 50u);
+    CHECK(bundle.count == 64u);
     units = malloc(bundle.count * sizeof(*units));
     CHECK(units != NULL);
     if (!units) {

@@ -1652,6 +1652,11 @@ static void x64_emit_instr(x64_mir_emit_t *emit, size_t instr_index, const anvil
     case ANVIL_MIR_OP_KEEPALIVE:
         break;
     case ANVIL_MIR_OP_CALL_RESULT:
+        /* An additional fixed-register result of the preceding call: the
+         * allocator placed it in that register, so nothing moves. */
+        if (x64_phys_of(emit, info->def) < 0)
+            emit->failed = true;
+        break;
     case ANVIL_MIR_OP_RET_VALUE_PART:
         emit->failed = true;
         break;

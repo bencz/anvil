@@ -10,6 +10,7 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_x86_64_mir.h"
+#include "../common/aggregate_mir.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -62,6 +63,59 @@ typedef struct {
 } anvil_x64_abi_desc_t;
 
 const anvil_x64_abi_desc_t *anvil_x64_get_abi_desc(anvil_abi_t abi);
+
+/* Machine placement of a struct or array passed (BYVAL) or returned (SRET)
+ * by value under the descriptor's ABI. */
+typedef enum {
+    X64_AGG_REGS,           /* parts in argument / return registers */
+    X64_AGG_STACK,          /* copied into the stack argument area */
+    X64_AGG_REFERENCE,      /* pointer to a caller-owned copy */
+    X64_AGG_HIDDEN_POINTER  /* result written through the caller's pointer,
+                               which is passed first and returned in RAX */
+} x64_agg_placement_t;
+
+/* One eightbyte: fp selects the SSE class (XMM) over INTEGER (GPR). */
+typedef anvil_agg_part_t x64_agg_part_t;
+
+typedef struct {
+    x64_agg_placement_t placement;
+    x64_agg_part_t parts[2];
+    unsigned num_parts;
+    unsigned num_gpr;
+    unsigned num_fpr;
+    size_t size;
+    size_t align;
+} x64_agg_plan_t;
+
+/* SysV/Darwin (psABI 3.2.3) or Win64 classification of an aggregate.  For
+ * arguments X64_AGG_REGS assumes enough free registers; callers fall back to
+ * X64_AGG_STACK when they are not available. */
+bool x64_classify_aggregate(const anvil_x64_abi_desc_t *desc, anvil_type_t *type,
+                            bool is_return, x64_agg_plan_t *plan);
+
+/* Argument assignment state, advanced one argument at a time. */
+typedef struct {
+    size_t gpr;
+    size_t fpr;
+    size_t position;        /* positional ABIs: argument slots used */
+    int64_t stack;          /* offset of the next stack argument */
+} x64_arg_state_t;
+
+typedef struct {
+    int reg;                /* argument register, or -1 for memory */
+    int shadow_reg;         /* positional ABIs: the integer register of a
+                               floating argument's slot (variadic copies) */
+    int64_t offset;         /* stack argument offset when reg < 0 */
+} x64_arg_loc_t;
+
+/* Location of the next scalar argument. */
+x64_arg_loc_t x64_assign_scalar(const anvil_x64_abi_desc_t *desc, x64_arg_state_t *state, bool fp);
+
+/* Location of a BYVAL aggregate classified X64_AGG_REGS or X64_AGG_STACK:
+ * regs[part] for every part when they all fit (reg >= 0), else the stack
+ * offset of its memory image. */
+x64_arg_loc_t x64_assign_aggregate(const anvil_x64_abi_desc_t *desc, x64_arg_state_t *state,
+                                   const x64_agg_plan_t *plan, int regs[2]);
 
 typedef struct {
     const char *str;

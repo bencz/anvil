@@ -352,15 +352,26 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                 }
                 /* If we're here with field_name_str == NULL, it's an anonymous bitfield */
                 
-                /* Parse array brackets for this field */
+                /* Parse array brackets for this field.  Dimensions are
+                 * collected first and applied inside-out: int m[2][3] is
+                 * an array of 2 arrays of 3 ints. */
+                size_t field_dims[32];
+                bool field_flexible[32];
+                int field_num_dims = 0;
                 while (parse_match(p, TOK_LBRACKET)) {
                     size_t arr_size = 0;
                     bool is_flexible = false;
                     
                     if (!parse_check(p, TOK_RBRACKET)) {
                         mcc_ast_node_t *size_expr = parse_expression(p);
-                        if (size_expr && size_expr->kind == AST_INT_LIT) {
-                            arr_size = size_expr->data.int_lit.value;
+                        int64_t bound;
+                        if (size_expr && parse_eval_int_constant(p, size_expr, &bound) &&
+                            bound >= 0) {
+                            arr_size = (size_t)bound;
+                        } else {
+                            mcc_error_at(p->ctx, loc,
+                                         "struct member array size must be a "
+                                         "non-negative integer constant expression");
                         }
                     } else {
                         /* C99: Flexible array member */
@@ -371,10 +382,19 @@ mcc_type_t *parse_struct_or_union(mcc_parser_t *p, bool is_union)
                         }
                     }
                     parse_expect(p, TOK_RBRACKET, "]");
-                    
-                    mcc_type_t *arr = parse_array_type(p, field_type, arr_size);
+                    if (field_num_dims == 32) {
+                        mcc_error_at(p->ctx, loc,
+                                     "array declarator exceeds 32 dimensions");
+                        return NULL;
+                    }
+                    field_dims[field_num_dims] = arr_size;
+                    field_flexible[field_num_dims] = is_flexible;
+                    field_num_dims++;
+                }
+                for (int dim = field_num_dims - 1; dim >= 0; dim--) {
+                    mcc_type_t *arr = parse_array_type(p, field_type, field_dims[dim]);
                     if (!arr) return NULL;
-                    arr->data.array.is_flexible = is_flexible;
+                    arr->data.array.is_flexible = field_flexible[dim];
                     field_type = arr;
                 }
                 
@@ -512,8 +532,11 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
             int64_t value = next_value;
             if (parse_match(p, TOK_ASSIGN)) {
                 mcc_ast_node_t *val_expr = parse_constant_expr(p);
-                if (val_expr && val_expr->kind == AST_INT_LIT) {
-                    value = val_expr->data.int_lit.value;
+                if (!val_expr || !parse_eval_int_constant(p, val_expr, &value)) {
+                    mcc_error_at(p->ctx, name_tok->location,
+                                 "enumerator value for '%s' is not an integer "
+                                 "constant expression", name_tok->text);
+                    value = next_value;
                 }
             }
             if (value < INT_MIN || value > INT_MAX) {
@@ -528,6 +551,16 @@ mcc_type_t *parse_enum(mcc_parser_t *p)
             if (!econst->name) return etype;
             econst->value = value;
             econst->next = NULL;
+
+            /* Later bounds and enumerators may refer to it. */
+            mcc_enum_entry_t *visible = mcc_alloc(p->ctx, sizeof(*visible));
+            if (visible) {
+                visible->name = econst->name;
+                visible->value = value;
+                visible->depth = p->typedef_depth;
+                visible->next = p->enumerators;
+                p->enumerators = visible;
+            }
             
             if (!constants) constants = econst;
             if (const_tail) const_tail->next = econst;
@@ -971,8 +1004,13 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
             is_vla = true;
         } else {
             mcc_ast_node_t *size_expr = parse_constant_expr(p);
-            if (size_expr && size_expr->kind == AST_INT_LIT) {
-                arr_size = size_expr->data.int_lit.value;
+            int64_t bound;
+            if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
+                if (bound < 0) {
+                    mcc_error_at(p->ctx, size_expr->location, "array size is negative");
+                    bound = 0;
+                }
+                arr_size = (size_t)bound;
             } else {
                 /* C99: VLA — keep the expression so the codegen can emit a
                  * dynamic alloca with the runtime count. */
@@ -1074,18 +1112,34 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                 
                 /* Parse array brackets - collect all dimensions first */
                 size_t array_dims[32];
+                bool dim_is_vla[32];
+                mcc_ast_node_t *dim_exprs[32];
                 int num_dims = 0;
                 
                 while (parse_check(p, TOK_LBRACKET)) {
                     parse_advance(p);
                     size_t dim = 0;
+                    bool is_vla = false;
+                    mcc_ast_node_t *length_expr = NULL;
                     if (!parse_check(p, TOK_RBRACKET)) {
                         if (parse_check(p, TOK_STAR)) {
                             parse_advance(p);  /* VLA [*] */
+                            is_vla = true;
                         } else {
                             mcc_ast_node_t *size_expr = parse_constant_expr(p);
-                            if (size_expr && size_expr->kind == AST_INT_LIT) {
-                                dim = size_expr->data.int_lit.value;
+                            int64_t bound;
+                            if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
+                                if (bound < 0) {
+                                    mcc_error_at(p->ctx, size_expr->location,
+                                                 "array size is negative");
+                                    bound = 0;
+                                }
+                                dim = (size_t)bound;
+                            } else {
+                                /* A runtime bound such as int m[rows][cols]:
+                                 * the stride of the adjusted pointer. */
+                                is_vla = true;
+                                length_expr = size_expr;
                             }
                         }
                     }
@@ -1095,7 +1149,10 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                                      "array declarator exceeds 32 dimensions");
                         return NULL;
                     }
-                    array_dims[num_dims++] = dim;
+                    array_dims[num_dims] = dim;
+                    dim_is_vla[num_dims] = is_vla;
+                    dim_exprs[num_dims] = length_expr;
+                    num_dims++;
                 }
                 
                 if (num_dims > 0) {
@@ -1106,7 +1163,9 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                         mcc_type_t *arr = parse_array_type(
                             p, param_type, array_dims[i]);
                         if (!arr) return NULL;
-                        arr->data.array.is_vla = false;
+                        arr->data.array.is_vla = dim_is_vla[i];
+                        arr->data.array.length_expr = dim_exprs[i];
+                        if (dim_is_vla[i]) arr->size = 0;
                         param_type = arr;
                     }
                     /* First dimension decays to pointer */
@@ -1345,8 +1404,13 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
             bool is_vla = false;
             if (!parse_check(p, TOK_RBRACKET)) {
                 mcc_ast_node_t *size_expr = parse_constant_expr(p);
-                if (size_expr && size_expr->kind == AST_INT_LIT) {
-                    dim = size_expr->data.int_lit.value;
+                int64_t bound;
+                if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
+                    if (bound < 0) {
+                        mcc_error_at(p->ctx, size_expr->location, "array size is negative");
+                        bound = 0;
+                    }
+                    dim = (size_t)bound;
                 } else if (size_expr) {
                     /* Non-constant dimension → VLA. */
                     is_vla = true;

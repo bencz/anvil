@@ -11,13 +11,8 @@
 extern "C" {
 #endif
 
-#define ST_IMAGE_RUNTIME_ABI_VERSION UINT32_C(2)
+#define ST_IMAGE_RUNTIME_ABI_VERSION UINT32_C(3)
 #define ST_IMAGE_ROOT_PROVIDER_ABI_VERSION UINT32_C(1)
-
-/* Reserved semantic identity for the image-initialized stdout stream.  Its
- * dense runtime index is assigned by the application AOT plan and is never
- * inferred from a manifest position or source-level name at runtime. */
-#define ST_IMAGE_EXTERNAL_ID_TRANSCRIPT UINT32_C(0xf0000001)
 
 typedef enum {
     ST_IMAGE_RUNTIME_OK = 0,
@@ -57,12 +52,6 @@ typedef struct {
 } st_image_string_layout_t;
 
 typedef struct {
-    uint32_t class_id;
-    uint32_t shape_id;
-    size_t descriptor_fixed_word_index;
-} st_image_external_stream_layout_t;
-
-typedef struct {
     const st_runtime_descriptors_t *descriptors;
     /* Exactly one heap mode is selected. A non-NULL borrowed_heap remains
      * owned by the caller; otherwise the sidecar constructs and owns a heap
@@ -75,7 +64,6 @@ typedef struct {
     const st_image_runtime_entry_t *literals;
     size_t literal_count;
     st_image_string_layout_t string_layout;
-    st_image_external_stream_layout_t external_stream_layout;
 } st_image_runtime_options_t;
 
 typedef struct st_image_runtime_state st_image_runtime_state_t;
@@ -127,10 +115,8 @@ _Noreturn st_value_t st_aot_image_runtime_contract_violation(
 
 /* Bootstrap mutators fill only a reserved, uninitialized dense slot and are
  * transactional with respect to publication. String bytes are copied into a
- * newly allocated immutable byte-indexed object. Transcript is an instance
- * of the explicitly configured ExternalStream layout whose configured fixed
- * descriptor ivar receives the authenticated SmallInteger 1 (stdout). No
- * class/global names or manifest positions are inferred. */
+ * newly allocated immutable byte-indexed object. No class/global names or
+ * manifest positions are inferred. */
 st_image_runtime_status_t st_image_runtime_bootstrap_string_literal(
     st_image_runtime_t *runtime, uint32_t literal_index,
     const void *bytes, size_t byte_count, st_value_t *result_out);
@@ -142,10 +128,6 @@ st_image_runtime_status_t st_image_runtime_bootstrap_string_literal(
  * made visible to generated code. */
 st_image_runtime_status_t st_image_runtime_bootstrap_global_value(
     st_image_runtime_t *runtime, uint32_t global_index, st_value_t value);
-
-st_image_runtime_status_t st_image_runtime_bootstrap_transcript(
-    st_image_runtime_t *runtime, uint32_t global_index,
-    st_value_t *result_out);
 
 typedef bool (*st_image_runtime_root_visitor_fn)(
     void *user, const st_value_t *root_slot);

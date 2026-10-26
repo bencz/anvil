@@ -1,12 +1,10 @@
 #include "st_application_launch.h"
 
-#include "st_image_runtime.h"
-
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
-#define LAUNCH_WORD_COUNT 62u
+#define LAUNCH_WORD_COUNT 58u
 #define LAUNCH_FIELD_COUNT (1u + 4u + 1u + LAUNCH_WORD_COUNT)
 
 static const st_class_graph_entity_t *class_entity(
@@ -96,7 +94,7 @@ st_application_launch_status_t st_application_launch_emit(
     _Static_assert(offsetof(st_application_launch_descriptor_t,
                             expected_global_count) == 32u,
                    "launch header ABI changed");
-    _Static_assert(sizeof(st_application_launch_descriptor_t) == 280u,
+    _Static_assert(sizeof(st_application_launch_descriptor_t) == 264u,
                    "launch descriptor ABI changed");
     if (result == NULL || result->module != NULL || compiled == NULL
             || compiled->status != ST_AOT_COMPILE_OK
@@ -119,7 +117,7 @@ st_application_launch_status_t st_application_launch_emit(
         plan->small_integer_entity_id, plan->array_entity_id,
         plan->method_dictionary_entity_id, plan->symbol_entity_id,
         plan->compiled_method_entity_id, plan->string_entity_id,
-        plan->external_stream_entity_id, plan->block_entity_id,
+        plan->block_entity_id,
         plan->closure_cell_entity_id, plan->message_entity_id,
         plan->large_positive_entity_id, plan->large_negative_entity_id,
         plan->boxed_float64_entity_id
@@ -131,8 +129,6 @@ st_application_launch_status_t st_application_launch_emit(
     if (!selector_has_arity(selectors, plan->entry_selector_id, 0u)
             || !selector_has_arity(
                 selectors, plan->does_not_understand_selector_id, 1u)
-            || !declared_slot(graph, plan->external_stream_entity_id,
-                              plan->external_stream_descriptor_slot)
             || !declared_slot(graph, plan->message_entity_id,
                               plan->message_selector_slot)
             || !declared_slot(graph, plan->message_entity_id,
@@ -154,8 +150,6 @@ st_application_launch_status_t st_application_launch_emit(
         compiled, plan->entry_entity_id, ST_IMAGE_LAYOUT_FIXED_POINTERS, true);
     descriptor.entry_selector_id = plan->entry_selector_id;
     descriptor.entry_arity = 0u;
-    descriptor.transcript_semantic_external_id = ST_IMAGE_EXTERNAL_ID_TRANSCRIPT;
-    descriptor.transcript_runtime_index = plan->transcript_runtime_index;
 
 #define SET_CLASS(field_name, entity_name) \
     descriptor.field_name = runtime_class(compiled, plan->entity_name)
@@ -184,9 +178,6 @@ st_application_launch_status_t st_application_launch_emit(
     descriptor.string_uint8_shape_id = shape_for(compiled, plan->string_entity_id, ST_IMAGE_LAYOUT_INDEXED_UINT8, true);
     descriptor.string_uint16_shape_id = shape_for(compiled, plan->string_entity_id, ST_IMAGE_LAYOUT_INDEXED_UINT16, false);
     descriptor.string_uint32_shape_id = shape_for(compiled, plan->string_entity_id, ST_IMAGE_LAYOUT_INDEXED_UINT32, false);
-    SET_CLASS(external_stream_class_id, external_stream_entity_id);
-    descriptor.external_stream_shape_id = shape_for(compiled, plan->external_stream_entity_id, ST_IMAGE_LAYOUT_FIXED_POINTERS, true);
-    descriptor.external_stream_descriptor_slot = plan->external_stream_descriptor_slot;
     SET_CLASS(block_class_id, block_entity_id);
     descriptor.block_shape_id = shape_for(compiled, plan->block_entity_id, ST_IMAGE_LAYOUT_CLOSURE, true);
     SET_CLASS(closure_cell_class_id, closure_cell_entity_id);
@@ -215,7 +206,6 @@ st_application_launch_status_t st_application_launch_emit(
             || descriptor.string_uint8_shape_id == 0u
             || descriptor.string_uint16_shape_id == 0u
             || descriptor.string_uint32_shape_id == 0u
-            || descriptor.external_stream_shape_id == 0u
             || descriptor.block_shape_id == 0u
             || descriptor.closure_cell_shape_id == 0u
             || descriptor.message_shape_id == 0u
@@ -225,12 +215,6 @@ st_application_launch_status_t st_application_launch_emit(
         goto invalid_plan;
     }
     words = (uint32_t *)((unsigned char *)&descriptor + 32u);
-    for (size_t index = 0u; index < compiled->global_count; index++)
-        if (compiled->globals[index].semantic_external_id == ST_IMAGE_EXTERNAL_ID_TRANSCRIPT
-                && compiled->globals[index].runtime_index == plan->transcript_runtime_index)
-            goto transcript_found;
-    goto invalid_plan;
-transcript_found:
     length = snprintf(metadata_symbol, sizeof(metadata_symbol), "%s_descriptor", compiled->provenance.symbol_prefix);
     if (length < 0 || (size_t)length >= sizeof(metadata_symbol)) goto invalid_plan;
     length = snprintf(result->symbol, sizeof(result->symbol), "%s_launch_descriptor", compiled->provenance.symbol_prefix);

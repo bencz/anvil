@@ -169,7 +169,18 @@ anvil_value_t *codegen_find_global(mcc_codegen_t *cg, const char *name)
     return NULL;
 }
 
-anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type)
+const char *codegen_link_name(const mcc_symbol_t *sym, const char *name)
+{
+    return sym && sym->link_name ? sym->link_name : name;
+}
+
+anvil_linkage_t codegen_symbol_linkage(const mcc_symbol_t *sym)
+{
+    return sym && sym->storage == STORAGE_STATIC
+        ? ANVIL_LINK_INTERNAL : ANVIL_LINK_EXTERNAL;
+}
+
+anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, anvil_type_t *type, anvil_linkage_t linkage)
 {
     /* Check if already exists */
     anvil_value_t *existing = codegen_find_global(cg, name);
@@ -177,7 +188,7 @@ anvil_value_t *codegen_get_or_add_global(mcc_codegen_t *cg, const char *name, an
     
     /* Referencing a symbol does not define storage for it. A later source
      * definition upgrades this declaration through the module API. */
-    anvil_value_t *global = anvil_module_declare_global(cg->anvil_mod, name, type, ANVIL_LINK_EXTERNAL);
+    anvil_value_t *global = anvil_module_declare_global(cg->anvil_mod, name, type, linkage);
     if (!global) return NULL;
     
     /* Add to cache */
@@ -268,6 +279,18 @@ anvil_block_t *codegen_get_label_block(mcc_codegen_t *cg, const char *name)
  * Block Management
  * ============================================================ */
 
+anvil_value_t *codegen_entry_alloca(mcc_codegen_t *cg, anvil_type_t *type,
+                                    const char *name)
+{
+    if (!cg->alloca_block)
+        return anvil_build_alloca(cg->anvil_ctx, type, name);
+    anvil_block_t *resume = cg->current_block;
+    codegen_set_current_block(cg, cg->alloca_block);
+    anvil_value_t *storage = anvil_build_alloca(cg->anvil_ctx, type, name);
+    codegen_set_current_block(cg, resume);
+    return storage;
+}
+
 void codegen_set_current_block(mcc_codegen_t *cg, anvil_block_t *block)
 {
     cg->current_block = block;
@@ -319,8 +342,11 @@ anvil_func_t *codegen_get_or_declare_func(mcc_codegen_t *cg, mcc_symbol_t *sym)
     /* Create function type */
     anvil_type_t *func_type = codegen_type(cg, sym->type);
     
-    /* Declare the function */
-    func = anvil_func_declare(cg->anvil_mod, sym->name, func_type);
+    /* Declare the function with its final linkage: a static function used
+     * before its definition must not be declared external first. */
+    func = anvil_func_declare_linkage(cg->anvil_mod,
+                                      codegen_link_name(sym, sym->name),
+                                      func_type, codegen_symbol_linkage(sym));
     codegen_add_func(cg, sym, func);
     
     return func;

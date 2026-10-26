@@ -3,13 +3,8 @@
 #include "st_aot_compile.h"
 #include "st_block_primitives.h"
 #include "st_core_primitives.h"
-#include "st_exception_primitives.h"
-#include "st_float_primitives.h"
 #include "st_heap_primitives.h"
-#include "st_integer_primitives.h"
-#include "st_reflection_primitives.h"
-#include "st_stream_primitives.h"
-#include "st_string_primitives.h"
+#include "st_product_primitives.h"
 
 #include <anvil/anvil.h>
 
@@ -105,7 +100,7 @@ static void test_native_aot_image_runtime(const st_aot_compile_result_t *result)
         "for(size_t i=0;i<64;i++)r[i]=st_value_nil();StFrame f={.thread=t,.method=m->runtime_descriptor,"
         ".receiver=st_value_nil(),.roots=m->frame_root_capacity?r:0,.root_count=m->frame_root_capacity};"
         "return m->code(&f);}\n"
-        "int main(void){static const char*nm[Z]={\"Object\",\"ByteString\",\"ExternalStream\","
+        "int main(void){static const char*nm[Z]={\"Object\",\"ByteString\",\"HostRecord\","
         "\"Nil\",\"False\",\"True\",\"SmallInteger\",\"Character\",\"Metaclass\"};"
         "StClassDescriptor c[Z];StShapeDescriptor s[Z];const StClassDescriptor*cp[Z];"
         "const StShapeDescriptor*sp[Z];uint64_t bm=1;for(uint32_t i=0;i<Z;i++){c[i]=(StClassDescriptor)"
@@ -120,20 +115,20 @@ static void test_native_aot_image_runtime(const st_aot_compile_result_t *result)
         "for(size_t i=0;i<mini_descriptor.global_count;i++)g[i]=(st_image_runtime_entry_t){i+1,ST_VALUE_INVALID};"
         "for(size_t i=0;i<mini_descriptor.string_literal_count;i++)l[i]=(st_image_runtime_entry_t){i+1,ST_VALUE_INVALID};"
         "st_image_runtime_options_t o={.descriptors=&d,.borrowed_heap=&h,.globals=g,.global_count=mini_descriptor.global_count,"
-        ".literals=l,.literal_count=mini_descriptor.string_literal_count,.string_layout={S,S},"
-        ".external_stream_layout={E,E,0}};st_image_runtime_t image={0};"
-        "if(st_image_runtime_init(&image,&o)!=ST_IMAGE_RUNTIME_OK)return 4;st_value_t transcript=ST_VALUE_INVALID;"
+        ".literals=l,.literal_count=mini_descriptor.string_literal_count,.string_layout={S,S}};"
+        "st_image_runtime_t image={0};"
+        "if(st_image_runtime_init(&image,&o)!=ST_IMAGE_RUNTIME_OK)return 4;st_value_t host=ST_VALUE_INVALID;"
         "size_t ti=mini_descriptor.global_count;for(size_t i=0;i<mini_descriptor.global_count;i++)"
         "if(mini_descriptor.globals[i].semantic_external_id==0xf0000001u)ti=mini_descriptor.globals[i].runtime_index;"
-        "if(ti>=mini_descriptor.global_count||st_image_runtime_bootstrap_transcript(&image,ti,&transcript)"
-        "!=ST_IMAGE_RUNTIME_OK)return 5;for(size_t i=0;i<mini_descriptor.string_literal_count;i++){"
+        "if(ti>=mini_descriptor.global_count||st_heap_allocate(&h,E,E,0,0,0,&host)!=ST_HEAP_OK"
+        "||st_image_runtime_bootstrap_global_value(&image,ti,host)!=ST_IMAGE_RUNTIME_OK)return 5;for(size_t i=0;i<mini_descriptor.string_literal_count;i++){"
         "const st_image_string_literal_metadata_t*x=&mini_descriptor.string_literals[i];st_value_t v;"
         "if(x->literal_id!=i||st_image_runtime_bootstrap_string_literal(&image,x->literal_id,x->bytes,x->length,&v)"
         "!=ST_IMAGE_RUNTIME_OK)return 6;}st_lookup_context_t lookup={0};if(st_lookup_context_init(&lookup,&d,"
         "(st_lookup_allocator_t){0})!=ST_LOOKUP_FOUND)return 7;uint32_t ids[5]={N,F,T,I,C};st_aot_thread_t t={0};"
         "if(!st_aot_thread_init(&t,&lookup,ids,0,0,0,0,0,0,0)||!st_aot_thread_image_attach(&t,&image))return 8;"
         "st_value_t a=call(fm(\"first\"),&t),r=call(fm(\"run\"),&t),z=call(fm(\"last\"),&t);"
-        "st_object_view_t av,zv;if(r!=transcript||st_heap_object_view(&h,a,&av)!=ST_HEAP_OK||"
+        "st_object_view_t av,zv;if(r!=host||st_heap_object_view(&h,a,&av)!=ST_HEAP_OK||"
         "st_heap_object_view(&h,z,&zv)!=ST_HEAP_OK||av.indexed_length!=5||zv.indexed_length!=5||"
         "memcmp(av.indexed_elements,\"alpha\",5)||memcmp(zv.indexed_elements,\"omega\",5))return 9;"
         "if(!st_aot_thread_image_detach(&t,&image))return 10;st_aot_thread_destroy(&t);"
@@ -217,41 +212,12 @@ static bool register_core_catalog(st_primitive_catalog_t *catalog)
     return true;
 }
 
-typedef const st_primitive_spec_t *(*spec_provider_t)(size_t *count_out);
-
+/* The complete catalog is the product catalog itself, so this gate cannot
+ * drift from the primitive families the shipped compiler registers. */
 static bool register_complete_catalog(st_primitive_catalog_t *catalog)
 {
-    static const spec_provider_t providers[] = {
-        st_core_primitive_specs,
-        st_heap_primitive_specs,
-        st_float_primitive_specs,
-        st_integer_primitive_specs,
-        st_stream_primitive_specs,
-        st_string_primitive_specs,
-        st_block_primitive_specs,
-        st_exception_primitive_specs,
-        st_reflection_primitive_specs
-    };
-    if (!st_primitive_catalog_init(
-            catalog, (st_primitive_allocator_t) {0})) {
-        return false;
-    }
-    for (size_t provider_index = 0u;
-         provider_index < sizeof(providers) / sizeof(providers[0]);
-         provider_index++) {
-        size_t count = 0u;
-        const st_primitive_spec_t *specs = providers[provider_index](&count);
-        if (specs == NULL || count == 0u) {
-            return false;
-        }
-        for (size_t spec_index = 0u; spec_index < count; spec_index++) {
-            if (st_primitive_catalog_register(
-                    catalog, &specs[spec_index], NULL) != ST_PRIMITIVE_OK) {
-                return false;
-            }
-        }
-    }
-    return true;
+    return st_product_primitive_catalog_build(
+               catalog, (st_primitive_allocator_t) {0}) == ST_PRIMITIVE_OK;
 }
 
 static bool build_graph_and_primitives(
@@ -364,7 +330,7 @@ static bool fixture_init_real(fixture_t *fixture)
     return build_graph_and_primitives(fixture, true)
         && st_primitive_result_succeeded(&fixture->primitives)
         && fixture->primitives.diagnostic_count == 0u
-        && fixture->primitives.binding_count == 69u;
+        && fixture->primitives.binding_count == 84u;
 }
 
 static void fixture_destroy(fixture_t *fixture)
@@ -1034,7 +1000,7 @@ static void test_real_image_complete_compile(void)
         return;
     }
     CHECK(st_primitive_result_succeeded(&fixture.primitives));
-    CHECK(fixture.primitives.binding_count == 69u);
+    CHECK(fixture.primitives.binding_count == 84u);
     CHECK(fixture.primitives.diagnostic_count == 0u);
     options = options_for(&fixture, ANVIL_ARCH_X86_64);
     st_aot_compile_result_init(&result);
@@ -1082,15 +1048,16 @@ static void test_global_and_literal_integration(void)
     static const char application[] =
         "MiniApplication := Object [\n"
         "  first [ ^'alpha' ]\n"
-        "  run [ ^Transcript ]\n"
+        "  run [ ^HostObject ]\n"
         "  last [ ^'omega' ]\n"
         "]\n";
     static const anvil_arch_t targets[] = {
         ANVIL_ARCH_X86_64, ANVIL_ARCH_ARM64, ANVIL_ARCH_PPC64,
         ANVIL_ARCH_PPC64LE, ANVIL_ARCH_ZARCH
     };
-    st_aot_external_global_t transcript = {
-        "Transcript", 10u, UINT32_C(0xf0000001), 1u
+    /* An embedder-supplied global (not declared by any source class). */
+    st_aot_external_global_t host_object = {
+        "HostObject", 10u, UINT32_C(0xf0000001), 1u
     };
     fixture_t fixture;
     size_t target_index;
@@ -1102,10 +1069,10 @@ static void test_global_and_literal_integration(void)
                                                        targets[target_index]);
         st_aot_compile_result_t result;
         uint32_t expected_literal = 0u;
-        bool saw_transcript = false;
+        bool saw_host_object = false;
         char *assembly = NULL;
         size_t length = 0u;
-        options.external_globals = &transcript;
+        options.external_globals = &host_object;
         options.external_global_count = 1u;
         st_aot_compile_result_init(&result);
         CHECK(st_aot_compile(&result, &options) == ST_AOT_COMPILE_OK);
@@ -1119,15 +1086,15 @@ static void test_global_and_literal_integration(void)
             CHECK(result.globals[global].semantic_external_id != 0u);
             CHECK(result.globals[global].runtime_index < result.global_count);
             if (result.globals[global].semantic_external_id
-                    == transcript.semantic_external_id) {
-                saw_transcript = true;
+                    == host_object.semantic_external_id) {
+                saw_host_object = true;
                 CHECK(result.globals[global].runtime_index == 1u);
                 CHECK(result.globals[global].name_length == 10u);
-                CHECK(memcmp(result.globals[global].name, "Transcript", 10u)
+                CHECK(memcmp(result.globals[global].name, "HostObject", 10u)
                       == 0);
             }
         }
-        CHECK(saw_transcript);
+        CHECK(saw_host_object);
         for (size_t method = 0u; method < result.method_count; method++) {
             const st_lower_result_t *lowering = &result.methods[method].lowering;
             for (size_t literal = 0u;
@@ -1167,7 +1134,7 @@ static void test_global_and_literal_integration(void)
         st_aot_compile_options_t options = options_for(&fixture,
                                                        ANVIL_ARCH_X86_64);
         st_aot_compile_result_t result;
-        st_aot_external_global_t invalid[2] = { transcript, transcript };
+        st_aot_external_global_t invalid[2] = { host_object, host_object };
         options.external_globals = invalid;
         options.external_global_count = 2u;
         invalid[0].runtime_index = 0u;

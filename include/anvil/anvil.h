@@ -480,6 +480,13 @@ anvil_type_t *anvil_type_literal_struct(anvil_ctx_t *ctx,
                                          anvil_type_t **fields,
                                          size_t num_fields, bool packed);
 anvil_type_t *anvil_type_named_struct(anvil_ctx_t *ctx, const char *name);
+/* Union layout for an opaque identified struct: every member starts at
+ * offset 0; the size is the largest member rounded to the largest
+ * alignment.  Member addresses come from struct GEP like struct fields, and
+ * target ABIs classify a by-value union from all of its members. */
+bool anvil_type_union_set_body(anvil_type_t *type, anvil_type_t **members,
+                               size_t num_members);
+bool anvil_type_is_union(const anvil_type_t *type);
 bool anvil_type_struct_set_body(anvil_type_t *type, anvil_type_t **fields,
                                 size_t num_fields, bool packed);
 bool anvil_type_struct_is_identified(const anvil_type_t *type);
@@ -512,6 +519,33 @@ anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
  * constructed, so function-type equality always includes the effective CC. */
 anvil_type_t *anvil_type_func(anvil_ctx_t *ctx, anvil_type_t *ret,
                                anvil_type_t **params, size_t num_params, bool variadic);
+
+/* Parameter attributes for passing aggregates with C by-value semantics.
+ * The selected target's ABI decides the machine placement (registers, a
+ * stack copy or a reference); frontends only describe the C signature. */
+typedef enum {
+    ANVIL_PARAM_PLAIN = 0,
+    /* A ptr<T> to a struct or array passed by value.  The callee receives a
+     * pointer to an object it owns and may modify.  The caller's object may
+     * be passed by reference, so it must be one the callee may write (a
+     * temporary copy). */
+    ANVIL_PARAM_BYVAL = 1,
+    /* Only as the first parameter of a function returning void: a ptr<T> to
+     * the caller-owned object that receives an aggregate result.  The target
+     * returns it in registers or through its hidden result-pointer rule. */
+    ANVIL_PARAM_SRET = 2
+} anvil_param_attr_t;
+
+/* Function type with per-parameter attributes (NULL attrs = all plain). */
+anvil_type_t *anvil_type_func_attrs(anvil_ctx_t *ctx, anvil_type_t *ret,
+                                    anvil_type_t **params,
+                                    const anvil_param_attr_t *attrs,
+                                    size_t num_params, bool variadic,
+                                    anvil_cc_t cc);
+anvil_param_attr_t anvil_type_func_param_attr(const anvil_type_t *type,
+                                              size_t index);
+/* True when the selected target's backend implements `attr`. */
+bool anvil_ctx_supports_param_attr(anvil_ctx_t *ctx, anvil_param_attr_t attr);
 anvil_cc_t anvil_type_func_cc_value(const anvil_type_t *type);
 
 /* Get type size in bytes */
@@ -545,6 +579,8 @@ anvil_module_t *anvil_value_get_module(const anvil_value_t *val);
 /* Check if value is a comparison result (boolean) */
 bool anvil_value_is_bool(anvil_value_t *val);
 bool anvil_value_is_const_int(anvil_value_t *val);
+/* True for a module global variable (an object with static storage). */
+bool anvil_value_is_global(const anvil_value_t *val);
 bool anvil_value_is_const_float(anvil_value_t *val);
 int64_t anvil_const_int_signed_value(anvil_value_t *val);
 uint64_t anvil_const_int_unsigned_value(anvil_value_t *val);
@@ -610,6 +646,12 @@ const char *anvil_block_get_name(anvil_block_t *block);
 /* Check if block has a terminator instruction (ret, br, br_cond, switch) */
 bool anvil_block_has_terminator(anvil_block_t *block);
 
+/* Unlinks every block that no path from the entry block reaches and drops
+ * the PHI incoming edges they contributed.  Frontends that emit code for
+ * statements after a jump (to keep labels inside them reachable) call this
+ * before verification. */
+anvil_error_t anvil_func_remove_unreachable_blocks(anvil_func_t *func);
+
 /* ============================================================================
  * IR Builder API
  * ============================================================================ */
@@ -639,6 +681,10 @@ anvil_value_t *anvil_const_null(anvil_ctx_t *ctx, anvil_type_t *ptr_type);
 anvil_value_t *anvil_const_string(anvil_ctx_t *ctx, const char *str);
 anvil_value_t *anvil_const_array(anvil_ctx_t *ctx, anvil_type_t *elem_type,
                                   anvil_value_t **elements, size_t num_elements);
+/* Constant of a union-layout type holding `value` in member `member`; the
+ * remaining bytes of the union are zero. */
+anvil_value_t *anvil_const_union(anvil_ctx_t *ctx, anvil_type_t *union_type,
+                                 size_t member, anvil_value_t *value);
 anvil_value_t *anvil_const_struct(anvil_ctx_t *ctx, anvil_type_t *struct_type,
                                    anvil_value_t **fields, size_t num_fields);
 /* Relocatable constants are owned by the exact module containing `symbol`.
@@ -650,6 +696,9 @@ anvil_value_t *anvil_const_gep(anvil_value_t *base,
                                 anvil_type_t *source_type,
                                 anvil_value_t **indices,
                                 size_t num_indices);
+/* The same relocatable address viewed through another pointer type, e.g.
+ * (void *)&object or (char *)function in a static initializer. */
+anvil_value_t *anvil_const_ptr_cast(anvil_value_t *base, anvil_type_t *ptr_type);
 
 /* Set global variable initializer */
 bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
@@ -839,6 +888,8 @@ typedef struct anvil_backend_ops {
     unsigned (*vector_operation_cost)(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type);
     anvil_value_t *(*build_va_copy)(anvil_backend_t *be, anvil_value_t *cursor, const char *name);
     bool (*build_va_copy_into)(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor);
+    /* Bit mask of (1u << anvil_param_attr_t) values the target lowers. */
+    unsigned param_attr_support;
 } anvil_backend_ops_t;
 
 /* Register a custom backend */

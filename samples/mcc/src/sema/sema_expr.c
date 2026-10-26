@@ -168,6 +168,12 @@ mcc_type_t *sema_analyze_binary_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
         return expr->type;
     }
     
+    /* Array operands of additive operators decay to pointers (6.3.2.1p3). */
+    if (op == BINOP_ADD || op == BINOP_SUB) {
+        if (mcc_type_is_array(lhs_type)) lhs_type = mcc_type_decay(sema->types, lhs_type);
+        if (mcc_type_is_array(rhs_type)) rhs_type = mcc_type_decay(sema->types, rhs_type);
+    }
+
     /* Pointer arithmetic */
     if (mcc_type_is_pointer(lhs_type) && mcc_type_is_integer(rhs_type)) {
         if (op == BINOP_ADD || op == BINOP_SUB) {
@@ -563,6 +569,45 @@ mcc_type_t *sema_analyze_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 
         case AST_INIT_LIST:
             return analyze_init_list(sema, expr);
+
+        case AST_DESIGNATED_INIT:
+            /* Only reachable outside an object initializer; brace
+             * initializers resolve designators in sema_init.c. */
+            mcc_error_at(sema->ctx, expr->location,
+                         "designated initializer outside an initializer list");
+            return NULL;
+
+        case AST_COMPOUND_LIT: {
+            /* C99 6.5.2.5: an unnamed object of the given type, initialized
+             * like a declaration.  It is an lvalue. */
+            mcc_type_t *type = sema_resolve_type(sema, expr->data.compound_lit.type);
+            mcc_ast_node_t *init = expr->data.compound_lit.init;
+            if (!type || !init || init->kind != AST_INIT_LIST) {
+                mcc_error_at(sema->ctx, expr->location,
+                             "invalid compound literal");
+                return NULL;
+            }
+            mcc_type_t *object = type;
+            while (object->kind == TYPE_TYPEDEF)
+                object = object->data.typedef_ref.underlying;
+            if (object->kind == TYPE_ARRAY && object->data.array.is_vla) {
+                mcc_error_at(sema->ctx, expr->location,
+                             "compound literal has variable-length array type");
+                return NULL;
+            }
+            type = sema_resolve_initializer(sema, type, init);
+            object = type;
+            while (object->kind == TYPE_TYPEDEF)
+                object = object->data.typedef_ref.underlying;
+            if (object->kind == TYPE_ARRAY && object->data.array.length == 0) {
+                mcc_error_at(sema->ctx, expr->location,
+                             "compound literal has incomplete array type");
+                return NULL;
+            }
+            expr->data.compound_lit.type = type;
+            expr->type = type;
+            return type;
+        }
 
         case AST_ALIGNOF_EXPR:
             /* _Alignof(type) yields a size_t constant. If an expression

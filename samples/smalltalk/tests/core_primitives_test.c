@@ -184,10 +184,10 @@ static void test_real_image_catalog_subset(void)
     CHECK(st_primitive_resolve(&result, units, bundle.count, &catalog, NULL) ==
           ST_PRIMITIVE_OK);
     /* Exactly these 19 pragma uses have executable handlers today. The other
-     * 50 uses must remain hard diagnostics until their RT/boxing contracts
+     * 65 uses must remain hard diagnostics until their RT/boxing contracts
      * exist; registering names without implementations would be a stub. */
     CHECK(result.binding_count == 19u);
-    CHECK(result.diagnostic_count == 50u);
+    CHECK(result.diagnostic_count == 65u);
     for (index = 0u; index < result.diagnostic_count; ++index)
         CHECK(result.diagnostics[index].code ==
               ST_PRIMITIVE_DIAG_MISSING_IMPLEMENTATION);

@@ -611,13 +611,14 @@ anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value
 anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_type,
                                        anvil_value_t *ptr, unsigned field_idx, const char *name)
 {
+    /* Like load/store/GEP, a global value addresses an object of its own
+     * type; any other base must be a pointer to the struct. */
     if (!ctx || !struct_type ||
         struct_type->owner_ctx != ctx ||
         !builder_value_is_usable(ctx, ptr) ||
         struct_type->kind != ANVIL_TYPE_STRUCT ||
-        !struct_type->data.struc.complete || !ptr->type ||
-        ptr->type->kind != ANVIL_TYPE_PTR ||
-        !anvil_types_equal(ptr->type->data.pointee, struct_type) ||
+        !struct_type->data.struc.complete ||
+        !anvil_types_equal(anvil_sem_memory_object_type(ptr), struct_type) ||
         field_idx >= struct_type->data.struc.num_fields) {
         builder_invalid(ctx, "Struct GEP received invalid arguments");
         return NULL;

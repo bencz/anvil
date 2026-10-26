@@ -1,6 +1,5 @@
 #include "st_application_aot.h"
 
-#include "st_image_runtime.h"
 #include "st_product_primitives.h"
 #include "st_source_bundle.h"
 
@@ -220,7 +219,6 @@ static bool build_launch_plan(
     FIND_ROLE(symbol_entity_id, "Symbol");
     FIND_ROLE(compiled_method_entity_id, "CompiledMethod");
     FIND_ROLE(string_entity_id, "String");
-    FIND_ROLE(external_stream_entity_id, "ExternalStream");
     FIND_ROLE(block_entity_id, "Block");
     FIND_ROLE(closure_cell_entity_id, "ClosureCell");
     FIND_ROLE(message_entity_id, "Message");
@@ -237,9 +235,6 @@ static bool build_launch_plan(
                 sizeof("doesNotUnderstand:") - 1u,
                 &plan->does_not_understand_selector_id)
             || !find_declared_slot(
-                graph, plan->external_stream_entity_id, "descriptor",
-                &plan->external_stream_descriptor_slot)
-            || !find_declared_slot(
                 graph, plan->message_entity_id, "selector",
                 &plan->message_selector_slot)
             || !find_declared_slot(
@@ -247,7 +242,6 @@ static bool build_launch_plan(
                 &plan->message_arguments_slot)) {
         return false;
     }
-    plan->transcript_runtime_index = 0u;
     return true;
 }
 
@@ -380,7 +374,6 @@ st_application_aot_status_t st_application_aot_compile(
     st_application_launch_plan_t launch_plan;
     st_application_aot_allocator_t allocator;
     char symbol_prefix[ST_AOT_SYMBOL_PREFIX_MAX + 1u];
-    st_aot_external_global_t transcript;
     size_t source_count = 0u;
     int prefix_length;
 
@@ -483,12 +476,6 @@ st_application_aot_status_t st_application_aot_compile(
         goto failure;
     }
 
-    transcript = (st_aot_external_global_t) {
-        .name = "Transcript",
-        .name_length = sizeof("Transcript") - 1u,
-        .semantic_external_id = ST_IMAGE_EXTERNAL_ID_TRANSCRIPT,
-        .runtime_index = 0u
-    };
     result->profile_count = ST_APPLICATION_AOT_PROFILE_COUNT;
     for (size_t index = 0u;
          index < ST_APPLICATION_AOT_PROFILE_COUNT; index++) {
@@ -510,8 +497,8 @@ st_application_aot_status_t st_application_aot_compile(
             .graph = &graph,
             .selectors = &selectors,
             .primitives = &primitives,
-            .external_globals = &transcript,
-            .external_global_count = 1u,
+            .external_globals = NULL,
+            .external_global_count = 0u,
             .target = profile->target,
             .abi = profile_definitions[index].abi,
             .syntax = ANVIL_SYNTAX_DEFAULT,

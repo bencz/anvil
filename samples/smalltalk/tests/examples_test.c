@@ -23,7 +23,6 @@ static unsigned failures;
 
 #define EXAMPLE_PATH_CAPACITY 1024u
 #define EXAMPLE_MANIFEST_CAPACITY 4096u
-#define EXAMPLE_TRANSCRIPT_EXTERNAL_ID UINT32_C(0xfffffffe)
 
 typedef struct {
     const char *directory_name;
@@ -165,56 +164,6 @@ static bool analyze_method(const st_class_graph_result_t *graph,
     return succeeded;
 }
 
-/* Transcript is an image-initialized object global, not a class.  Until the
- * bootstrap-global table is promoted into the production graph API, this
- * frontend gate supplies precisely that one external to semantic analysis.
- * It deliberately supplies no value and cannot be used for lowering. */
-static bool analyze_method_with_transcript(
-    const st_class_graph_result_t *graph,
-    const st_class_graph_method_t *method, st_sema_result_t *sema)
-{
-    static const char transcript_name[] = "Transcript";
-    st_class_graph_sema_view_t view;
-    st_sema_external_t *entries;
-    st_sema_catalog_t catalog;
-    size_t count;
-    bool succeeded;
-
-    st_sema_result_init(sema);
-    st_class_graph_sema_view_init(&view);
-    if (st_class_graph_sema_view_build_minimal(&view, graph, method->id)
-            != ST_CLASS_GRAPH_OK) {
-        st_class_graph_sema_view_destroy(&view);
-        return false;
-    }
-    count = view.catalog.count;
-    if (count == SIZE_MAX) {
-        st_class_graph_sema_view_destroy(&view);
-        return false;
-    }
-    entries = malloc((count + 1u) * sizeof(*entries));
-    if (entries == NULL) {
-        st_class_graph_sema_view_destroy(&view);
-        return false;
-    }
-    if (count != 0u)
-        memcpy(entries, view.catalog.entries, count * sizeof(*entries));
-    memset(&entries[count], 0, sizeof(entries[count]));
-    entries[count].name.data = transcript_name;
-    entries[count].name.length = sizeof(transcript_name) - 1u;
-    entries[count].kind = ST_SEMA_EXTERNAL_GLOBAL;
-    entries[count].external_id = EXAMPLE_TRANSCRIPT_EXTERNAL_ID;
-    catalog = view.catalog;
-    catalog.entries = entries;
-    catalog.count = count + 1u;
-    succeeded = st_sema_analyze_method(sema, method->node, &catalog)
-                    == ST_SEMA_OK
-        && st_sema_succeeded(sema);
-    free(entries);
-    st_class_graph_sema_view_destroy(&view);
-    return succeeded;
-}
-
 static const st_ast_node_t *expression_literal_argument(
     const st_ast_node_t *message, size_t index)
 {
@@ -243,6 +192,8 @@ static void check_hello_protocol(const st_class_graph_result_t *graph,
     const st_sema_reference_t *reference;
     const st_sema_binding_t *binding;
     st_sema_result_t sema;
+    const st_class_graph_entity_t *transcript =
+        find_top_level_class(graph, "Transcript");
 
     CHECK(method != NULL);
     if (method == NULL) return;
@@ -280,7 +231,9 @@ static void check_hello_protocol(const st_class_graph_result_t *graph,
               && memcmp(argument->as.text.data, output,
                         sizeof(output) - 1u) == 0);
 
-    if (!analyze_method_with_transcript(graph, method, &sema)) {
+    /* Transcript is an ordinary image class: sema must resolve it through
+     * the class graph built from the image sources, with no injected name. */
+    if (!analyze_method(graph, method, &sema)) {
         CHECK(false);
         st_sema_result_destroy(&sema);
         return;
@@ -291,7 +244,8 @@ static void check_hello_protocol(const st_class_graph_result_t *graph,
     if (reference != NULL && reference->binding < sema.binding_count) {
         binding = &sema.bindings[reference->binding];
         CHECK(binding->kind == ST_SEMA_BIND_GLOBAL);
-        CHECK(binding->external_id == EXAMPLE_TRANSCRIPT_EXTERNAL_ID);
+        CHECK(transcript != NULL
+              && binding->external_id == transcript->id);
         CHECK((binding->flags & ST_SEMA_BINDING_EXTERNAL) != 0u);
     }
     st_sema_result_destroy(&sema);

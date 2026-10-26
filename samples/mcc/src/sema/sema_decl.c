@@ -57,6 +57,9 @@ bool sema_analyze_func_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
         SYM_FUNC,
         func_type,
         decl->location);
+    decl->data.func_decl.symbol = sym;
+    if (sym && decl->data.func_decl.is_static)
+        sym->storage = STORAGE_STATIC;
     
     if (sym && decl->data.func_decl.is_definition) {
         if (sym->is_defined) {
@@ -194,10 +197,21 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
         }
     }
 
+    decl->data.var_decl.symbol = sym;
     if (sym && decl->data.var_decl.init)
         sym->is_defined = true;
     
-    if (sym && decl->data.var_decl.init) {
+    if (sym && decl->data.var_decl.init &&
+        decl->data.var_decl.init->kind == AST_INIT_LIST) {
+        /* Brace initializers are resolved against the declared object; an
+         * array of unknown size takes its length from the initializer. */
+        mcc_type_t *complete = sema_resolve_initializer(
+            sema, var_type, decl->data.var_decl.init);
+        if (complete != var_type) {
+            decl->data.var_decl.var_type = complete;
+            if (sym->type == var_type) sym->type = complete;
+        }
+    } else if (sym && decl->data.var_decl.init) {
         mcc_type_t *init_type = sema_analyze_expr(sema, decl->data.var_decl.init);
 
         if (mcc_type_is_integer(var_type) &&
@@ -219,16 +233,16 @@ bool sema_analyze_var_decl(mcc_sema_t *sema, mcc_ast_node_t *decl)
             var_type->data.array.length == 0 &&
             !var_type->data.array.is_vla) {
             mcc_ast_node_t *init = decl->data.var_decl.init;
-            size_t length = 0;
-            if (init->kind == AST_INIT_LIST) {
-                length = init->data.init_list.num_exprs;
-            } else if (init->kind == AST_STRING_LIT &&
-                       var_type->data.array.element->kind == TYPE_CHAR) {
-                length = strlen(init->data.string_lit.value) + 1;
-            }
-            if (length > 0) {
-                var_type->data.array.length = length;
-                var_type->size = var_type->data.array.element->size * length;
+            if (init->kind == AST_STRING_LIT &&
+                var_type->data.array.element->kind == TYPE_CHAR) {
+                mcc_type_t *complete = mcc_type_array(
+                    sema->types, var_type->data.array.element,
+                    strlen(init->data.string_lit.value) + 1);
+                if (complete) {
+                    decl->data.var_decl.var_type = complete;
+                    if (sym->type == var_type) sym->type = complete;
+                    var_type = complete;
+                }
             }
         }
         if (init_type) {

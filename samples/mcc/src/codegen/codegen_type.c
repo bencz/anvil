@@ -99,13 +99,6 @@ static anvil_type_t *codegen_record_type(mcc_codegen_t *cg, mcc_type_t *type)
     }
 
     size_t field_capacity = num_fields;
-    if (type->kind == TYPE_UNION && num_fields != 0) {
-        if (field_capacity == SIZE_MAX) {
-            return codegen_record_fail(cg, type,
-                                       "union storage field count overflow");
-        }
-        field_capacity++;
-    }
     anvil_type_t **field_types = field_capacity
         ? mcc_alloc_array(cg->mcc_ctx, field_capacity, sizeof(*field_types))
         : NULL;
@@ -129,35 +122,14 @@ static anvil_type_t *codegen_record_type(mcc_codegen_t *cg, mcc_type_t *type)
                                    "record field count changed during lowering");
     }
 
-    size_t body_fields = num_fields;
-    if (type->kind == TYPE_UNION && num_fields != 0) {
-        anvil_type_t *anchor = field_types[0];
-        size_t max_size = anvil_type_size(anchor);
-        size_t max_align = anvil_type_align(anchor);
-        for (size_t field = 1; field < num_fields; field++) {
-            size_t field_size = anvil_type_size(field_types[field]);
-            size_t field_align = anvil_type_align(field_types[field]);
-            if (field_size > max_size) max_size = field_size;
-            if (field_align > max_align) {
-                max_align = field_align;
-                anchor = field_types[field];
-            }
-        }
-        field_types[0] = anchor;
-        body_fields = 1;
-        size_t anchor_size = anvil_type_size(anchor);
-        if (anchor_size < max_size) {
-            field_types[1] = anvil_type_array(cg->anvil_ctx,
-                anvil_type_u8(cg->anvil_ctx), max_size - anchor_size);
-            if (!field_types[1]) {
-                return codegen_record_fail(cg, type, NULL);
-            }
-            body_fields = 2;
-        }
-    }
-
-    if (!anvil_type_struct_set_body(record_type, field_types, body_fields,
-                                    false)) {
+    /* A union is a native union layout: every member at offset 0, so
+     * member access is a struct GEP and target ABIs classify it from all
+     * members. */
+    bool body_ok = type->kind == TYPE_UNION && num_fields != 0
+        ? anvil_type_union_set_body(record_type, field_types, num_fields)
+        : anvil_type_struct_set_body(record_type, field_types, num_fields,
+                                     false);
+    if (!body_ok) {
         mcc_error(cg->mcc_ctx, "failed to lower %s layout: %s",
                   type->kind == TYPE_UNION ? "union" : "struct",
                   anvil_ctx_get_error(cg->anvil_ctx));
@@ -255,9 +227,18 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
             }
             anvil_type_t **param_types = mcc_alloc_array(cg->mcc_ctx,
                 (size_t)num_params + 1, sizeof(*param_types));
-            if (!param_types) return NULL;
-            if (hidden)
+            bool attrs_mode = codegen_abi_uses_param_attrs(cg);
+            anvil_param_attr_t *attrs = attrs_mode
+                ? mcc_alloc_array(cg->mcc_ctx, (size_t)num_params + 1, sizeof(*attrs))
+                : NULL;
+            if (!param_types || (attrs_mode && !attrs)) return NULL;
+            if (hidden) {
                 param_types[0] = ret_type;
+                if (attrs_mode) {
+                    attrs[0] = ANVIL_PARAM_SRET;
+                    ret_type = anvil_type_void(cg->anvil_ctx);
+                }
+            }
             
             int i = 0;
             for (mcc_func_param_t *p = type->data.function.params; p; p = p->next, i++) {
@@ -269,6 +250,8 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                 param_types[i + hidden] = codegen_param_type(cg, p->type);
                 if (!param_types[i + hidden])
                     return NULL;
+                if (attrs_mode && codegen_type_is_record(p->type))
+                    attrs[i + hidden] = ANVIL_PARAM_BYVAL;
             }
             if (i != num_params) {
                 mcc_error(cg->mcc_ctx,
@@ -276,8 +259,9 @@ anvil_type_t *codegen_type(mcc_codegen_t *cg, mcc_type_t *type)
                 return NULL;
             }
             
-            return anvil_type_func(cg->anvil_ctx, ret_type, param_types, (size_t)num_params + hidden,
-                                   type->data.function.is_variadic);
+            return anvil_type_func_attrs(cg->anvil_ctx, ret_type, param_types, attrs,
+                                         (size_t)num_params + hidden,
+                                         type->data.function.is_variadic, ANVIL_CC_DEFAULT);
         }
         default:
             mcc_error(cg->mcc_ctx,

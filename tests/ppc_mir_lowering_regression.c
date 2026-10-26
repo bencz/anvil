@@ -310,17 +310,21 @@ static void test_ppc_stack_call_args_use_variant_word_size(void)
         const char *callee_name;
         const char *caller_name;
         anvil_type_t *(*type_fn)(anvil_ctx_t *);
+        int64_t expected_first_offset;
         int64_t expected_second_offset;
     } cases[] = {
+        /* SVR4 counts stack words from the first memory argument; the
+         * 64-bit ELF ABIs address the whole parameter save area, whose
+         * first eight doublewords shadow r3-r10. */
         { ANVIL_ARCH_PPC32, ANVIL_PPC_VARIANT_PPC32,
           "ppc32_stack_args", "ppc32_callee10", "ppc32_stack_call",
-          anvil_type_i32, 4 },
+          anvil_type_i32, 0, 4 },
         { ANVIL_ARCH_PPC64, ANVIL_PPC_VARIANT_PPC64,
           "ppc64_stack_args", "ppc64_callee10", "ppc64_stack_call",
-          anvil_type_i64, 8 },
+          anvil_type_i64, 64, 72 },
         { ANVIL_ARCH_PPC64LE, ANVIL_PPC_VARIANT_PPC64LE,
           "ppc64le_stack_args", "ppc64le_callee10", "ppc64le_stack_call",
-          anvil_type_i64, 8 },
+          anvil_type_i64, 64, 72 },
     };
 
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
@@ -375,7 +379,7 @@ static void test_ppc_stack_call_args_use_variant_word_size(void)
                         if (info.op == ANVIL_MIR_OP_CALL_STACK_ARG) {
                             CHECK(info.has_imm && info.num_uses == 1,
                                   "PowerPC stack arg should carry offset and source");
-                            if (info.imm == 0) saw_offset0 = true;
+                            if (info.imm == cases[c].expected_first_offset) saw_offset0 = true;
                             if (info.imm == cases[c].expected_second_offset) {
                                 saw_second_offset = true;
                             }
@@ -386,7 +390,7 @@ static void test_ppc_stack_call_args_use_variant_word_size(void)
                         }
                     }
                     CHECK(saw_offset0,
-                          "ninth PowerPC integer arg should use stack offset 0");
+                          "ninth PowerPC integer arg should use the ABI's first stack slot");
                     CHECK(saw_second_offset,
                           "tenth PowerPC integer arg should use variant word-size offset");
                     CHECK(saw_call,
@@ -641,92 +645,99 @@ static void test_ppc_numeric_casts_have_typed_lowering(void)
         const char *name;
         const char *required;
         const char *normalization;
+        bool helper;
     } cases[] = {
+        /* 32-bit implementations: fctiwz, and 2^52 + x - 2^52 built from
+         * words for int -> double; a run-time helper otherwise. */
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_SITOFP,
           ANVIL_MIR_REG_GPR, 32, ANVIL_MIR_REG_FPR, 64,
-          INT32_MIN, "ppc32_sitofp_min", "bl __floatsidf", "mr r3, r14" },
+          INT32_MIN, "ppc32_sitofp_min", "\txoris %r0, %r0, 0x8000\n", "\tfsub %f15, %f0, %f15\n", false },
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_UITOFP,
           ANVIL_MIR_REG_GPR, 32, ANVIL_MIR_REG_FPR, 32,
-          -1, "ppc32_uitofp_max", "bl __floatunsisf", "mr r3, r14" },
+          -1, "ppc32_uitofp_max", "\tlis %r0, 0x4330\n", "\tfrsp %f15, %f15\n", false },
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_FPTOSI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 32,
           INT64_C(0x41dfffffffc00000), "ppc32_fptosi_limit",
-          "bl __fixdfsi", "mr r15, r3" },
+          "\tfctiwz %f0, %f14\n", "\tlwz %r15, ", false },
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_FPTOUI,
           ANVIL_MIR_REG_FPR, 32, ANVIL_MIR_REG_GPR, 32,
           INT64_C(0x4f7fffff), "ppc32_fptoui_limit",
-          "bl __fixunssfsi", "mr r15, r3" },
+          "bl __fixunssfsi", "mr %r15, %r3", true },
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_FPEXT,
           ANVIL_MIR_REG_FPR, 32, ANVIL_MIR_REG_FPR, 64,
-          INT64_C(0x3f800000), "ppc32_fpext", "fmr f15, f14", NULL },
+          INT64_C(0x3f800000), "ppc32_fpext", "fmr %f15, %f14", NULL, false },
         { ANVIL_PPC_VARIANT_PPC32, ANVIL_MIR_OP_FPTRUNC,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_FPR, 32,
           INT64_C(0x3ff0000000000000), "ppc32_fptrunc",
-          "frsp f15, f14", NULL },
+          "frsp %f15, %f14", NULL, false },
 
+        /* 64-bit implementations: fcfid / fctidz; unsigned 64-bit and
+         * single-precision wide forms need ISA 2.06. */
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_SITOFP,
           ANVIL_MIR_REG_GPR, 64, ANVIL_MIR_REG_FPR, 64,
-          INT64_MIN, "ppc64_sitofp_min", "bl __floatdidf", "mr r3, r14" },
+          INT64_MIN, "ppc64_sitofp_min", "\tfcfid %f15, %f0\n", "\tstd %r14, ", false },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_UITOFP,
           ANVIL_MIR_REG_GPR, 64, ANVIL_MIR_REG_FPR, 32,
-          -1, "ppc64_uitofp_max", "bl __floatundisf", "mr r3, r14" },
+          -1, "ppc64_uitofp_max", "bl __floatundisf", "mr %r3, %r14", true },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_FPTOSI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 64,
           INT64_C(0x43dfffffffffffff), "ppc64_fptosi_limit",
-          "bl __fixdfdi", "mr r15, r3" },
+          "\tfctidz %f0, %f14\n", "\tld %r15, ", false },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_FPTOUI,
           ANVIL_MIR_REG_FPR, 32, ANVIL_MIR_REG_GPR, 64,
           INT64_C(0x5f7fffff), "ppc64_fptoui_limit",
-          "bl __fixunssfdi", "mr r15, r3" },
+          "bl __fixunssfdi", "mr %r15, %r3", true },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_FPEXT,
           ANVIL_MIR_REG_FPR, 32, ANVIL_MIR_REG_FPR, 64,
-          INT64_C(0x3f800000), "ppc64_fpext", "fmr f15, f14", NULL },
+          INT64_C(0x3f800000), "ppc64_fpext", "fmr %f15, %f14", NULL, false },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_FPTRUNC,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_FPR, 32,
           INT64_C(0x3ff0000000000000), "ppc64_fptrunc",
-          "frsp f15, f14", NULL },
+          "frsp %f15, %f14", NULL, false },
 
+        /* ppc64le (POWER8 baseline) has every ISA 2.06 form. */
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_SITOFP,
           ANVIL_MIR_REG_GPR, 8, ANVIL_MIR_REG_FPR, 32,
-          -128, "ppc64le_sitofp_i8_min", "bl __floatsisf", "extsb r3, r14" },
+          -128, "ppc64le_sitofp_i8_min", "\tfcfids %f15, %f0\n", "\textsb %r0, %r14\n", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_UITOFP,
           ANVIL_MIR_REG_GPR, 16, ANVIL_MIR_REG_FPR, 64,
-          65535, "ppc64le_uitofp_u16_max", "bl __floatunsidf",
-          "rlwinm r3, r14, 0, 16, 31" },
+          65535, "ppc64le_uitofp_u16_max", "\tfcfid %f15, %f0\n",
+          "\trlwinm %r0, %r14, 0, 16, 31\n", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPTOSI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 8,
           INT64_C(0xc05fc00000000000), "ppc64le_fptosi_i8_min",
-          "bl __fixdfsi", "extsb r15, r3" },
+          "\tfctiwz %f0, %f14\n", "\textsb %r15, %r15\n", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPTOUI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 16,
           INT64_C(0x40efffe000000000), "ppc64le_fptoui_u16_max",
-          "bl __fixunsdfsi", "rlwinm r15, r3, 0, 16, 31" },
+          "\tfctiwuz %f0, %f14\n", "\trlwinm %r15, %r15, 0, 16, 31\n", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPEXT,
           ANVIL_MIR_REG_FPR, 32, ANVIL_MIR_REG_FPR, 64,
-          INT64_C(0x3f800000), "ppc64le_fpext", "fmr f15, f14", NULL },
+          INT64_C(0x3f800000), "ppc64le_fpext", "fmr %f15, %f14", NULL, false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPTRUNC,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_FPR, 32,
           INT64_C(0x3ff0000000000000), "ppc64le_fptrunc",
-          "frsp f15, f14", NULL },
+          "frsp %f15, %f14", NULL, false },
+        /* fcfids rounds once: 2^24 + 1 must not round through double. */
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_SITOFP,
           ANVIL_MIR_REG_GPR, 64, ANVIL_MIR_REG_FPR, 32,
           INT64_C(16777217), "ppc64le_i64_to_f32_halfway_2p24",
-          "bl __floatdisf", "mr r3, r14" },
+          "\tfcfids %f15, %f0\n", "\tstd %r14, ", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_SITOFP,
           ANVIL_MIR_REG_GPR, 64, ANVIL_MIR_REG_FPR, 64,
           INT64_C(9007199254740993), "ppc64le_i64_to_f64_halfway_2p53",
-          "bl __floatdidf", "mr r3, r14" },
+          "\tfcfid %f15, %f0\n", "\tstd %r14, ", false },
         { ANVIL_PPC_VARIANT_PPC64, ANVIL_MIR_OP_UITOFP,
           ANVIL_MIR_REG_GPR, 64, ANVIL_MIR_REG_FPR, 64,
-          -1, "ppc64_u64max_to_f64", "bl __floatundidf", "mr r3, r14" },
+          -1, "ppc64_u64max_to_f64", "bl __floatundidf", "mr %r3, %r14", true },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPTOSI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 64,
           INT64_C(0x7ff8000000000000), "ppc64le_nan_fptosi_poison_domain",
-          "bl __fixdfdi", "mr r15, r3" },
+          "\tfctidz %f0, %f14\n", "\tld %r15, ", false },
         { ANVIL_PPC_VARIANT_PPC64LE, ANVIL_MIR_OP_FPTOUI,
           ANVIL_MIR_REG_FPR, 64, ANVIL_MIR_REG_GPR, 64,
           INT64_C(0x7ff0000000000000), "ppc64le_inf_fptoui_poison_domain",
-          "bl __fixunsdfdi", "mr r15, r3" },
+          "\tfctiduz %f0, %f14\n", "\tld %r15, ", false },
     };
 
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
@@ -771,12 +782,12 @@ static void test_ppc_numeric_casts_have_typed_lowering(void)
                 check_contains(asm_text, cases[c].normalization,
                                "PowerPC conversion must normalize source/result width");
             }
-            if (cases[c].op == ANVIL_MIR_OP_SITOFP ||
-                cases[c].op == ANVIL_MIR_OP_UITOFP ||
-                cases[c].op == ANVIL_MIR_OP_FPTOSI ||
-                cases[c].op == ANVIL_MIR_OP_FPTOUI) {
-                check_contains(asm_text, "\tmflr r0\n",
+            if (cases[c].helper) {
+                check_contains(asm_text, "\tmflr %r0\n",
                                "helper-based conversion must preserve the link register");
+            } else {
+                check_not_contains(asm_text, "\tbl ",
+                                   "inline conversion must not call a helper");
             }
             free(asm_text);
         }
@@ -850,9 +861,9 @@ static void test_ppc_source_numeric_casts_lower_end_to_end(void)
         { ANVIL_ARCH_PPC32, true, "ppc32_source_casts",
           "__floatdidf", "__floatundidf", "__fixdfdi", "__fixunsdfdi" },
         { ANVIL_ARCH_PPC64, true, "ppc64_source_casts",
-          "__floatdidf", "__floatundidf", "__fixdfdi", "__fixunsdfdi" },
+          "\tfcfid ", "__floatundidf", "\tfctidz ", "__fixunsdfdi" },
         { ANVIL_ARCH_PPC64LE, true, "ppc64le_source_casts",
-          "__floatdidf", "__floatundidf", "__fixdfdi", "__fixunsdfdi" },
+          "\tfcfid ", "\tfcfidu ", "\tfctidz ", "\tfctiduz " },
     };
 
     for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
@@ -989,13 +1000,13 @@ static void test_ppc_source_numeric_casts_lower_end_to_end(void)
               "source-level PowerPC conversion assembly should be non-empty");
         if (asm_text) {
             check_contains(asm_text, targets[t].signed_helper,
-                           "source SITOFP should select helper by integer width");
+                           "source SITOFP should select its instruction or helper");
             check_contains(asm_text, targets[t].unsigned_helper,
                            "source UITOFP should preserve unsigned semantics");
             check_contains(asm_text, targets[t].fix_signed_helper,
-                           "source FPTOSI should select signed truncating helper");
+                           "source FPTOSI should select a signed truncating conversion");
             check_contains(asm_text, targets[t].fix_unsigned_helper,
-                           "source FPTOUI should select unsigned truncating helper");
+                           "source FPTOUI should select an unsigned truncating conversion");
             check_contains(asm_text, "\tfrsp ",
                            "source FPTRUNC should round to single precision");
             free(asm_text);
@@ -1084,21 +1095,21 @@ static void test_ppc_single_precision_ops_and_dynamic_alloca_backchain(void)
               "PPC dynamic alloca should emit on every ABI");
         if (text) {
             const char *update = desc->word_size == 8
-                ? "\tstdux r1, r1, r11\n" : "\tstwux r1, r1, r11\n";
+                ? "\tstdux %r1, %r1, %r11\n" : "\tstwux %r1, %r1, %r11\n";
             CHECK(count_occurrences(text, update) == 2,
                   "each dynamic allocation must atomically update SP/backchain");
             check_contains(text, desc->word_size == 8
-                                      ? "\tclrrdi r11, r11, 4\n"
-                                      : "\trlwinm r11, r11, 0, 0, 27\n",
+                                      ? "\tclrrdi %r11, %r11, 4\n"
+                                      : "\trlwinm %r11, %r11, 0, 0, 27\n",
                            "dynamic allocation size must be rounded to 16 bytes");
             char payload_offset[48];
-            snprintf(payload_offset, sizeof(payload_offset), "r1, %u\n",
+            snprintf(payload_offset, sizeof(payload_offset), "%%r1, %u\n",
                      desc->min_frame_size);
             check_contains(text, payload_offset,
                            "dynamic allocation result must skip the backchain prefix");
-            check_contains(text, "\tmr r1, r31\n",
+            check_contains(text, "\tmr %r1, %r31\n",
                            "dynamic-allocation epilogue must restore SP from stable frame pointer");
-            check_not_contains(text, "\tsubf r1, r11, r1\n",
+            check_not_contains(text, "\tsubf %r1, %r11, %r1\n",
                                "dynamic allocation must not update SP without a backchain");
             free(text);
         }

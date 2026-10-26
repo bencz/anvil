@@ -28,6 +28,9 @@ anvil_value_t *codegen_load_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_va
     while (object_type && object_type->kind == TYPE_TYPEDEF)
         object_type = object_type->data.typedef_ref.underlying;
 
+    if (object_type && object_type->kind == TYPE_ARRAY && codegen_type_has_vla(object_type))
+        return codegen_vla_decay(cg, object_type, pointer);
+
     if (object_type && object_type->kind == TYPE_ARRAY)
     {
         anvil_value_t *indices[] = { anvil_const_i64(cg->anvil_ctx, 0), anvil_const_i64(cg->anvil_ctx, 0) };
@@ -108,6 +111,7 @@ static anvil_value_t *codegen_record_address(mcc_codegen_t *cg, mcc_ast_node_t *
     case AST_IDENT_EXPR:
     case AST_MEMBER_EXPR:
     case AST_SUBSCRIPT_EXPR:
+    case AST_COMPOUND_LIT:
         return codegen_lvalue(cg, object);
     case AST_UNARY_EXPR:
         if (object->data.unary_expr.op == UNOP_DEREF)
@@ -227,7 +231,11 @@ anvil_value_t *codegen_convert_value(mcc_codegen_t *cg,
             if (anvil_type_is_floating(src) &&
                 anvil_type_size(src) == anvil_type_size(dst)) return val;
         } else if (mcc_type_is_pointer(to)) {
-            if (anvil_type_is_pointer(src)) return val;
+            /* Compatible C pointer types may still lower to different
+             * pointees, e.g. long (*)[2] passed for long (*)[n]. */
+            if (anvil_type_is_pointer(src))
+                return src == dst ? val
+                    : anvil_build_bitcast(cg->anvil_ctx, val, dst, cast_name);
         } else if (mcc_type_is_record(to) || to->kind == TYPE_ARRAY ||
                    to->kind == TYPE_FUNCTION || to->kind == TYPE_VOID) {
             return val;
@@ -499,8 +507,8 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (ptr) {
                 /* For arrays, the pointer IS the value (array decays to pointer) */
                 if (sym && sym->type && sym->type->kind == TYPE_ARRAY) {
-                    if (sym->type->data.array.is_vla)
-                        return ptr;
+                    if (codegen_type_has_vla(sym->type))
+                        return codegen_vla_decay(cg, sym->type, ptr);
 
                     anvil_value_t *indices[] = {
                         anvil_const_i64(cg->anvil_ctx, 0),
@@ -524,7 +532,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             /* Global variable - create global reference and load */
             if (sym && sym->kind == SYM_VAR) {
                 anvil_type_t *type = codegen_type(cg, sym->type);
-                anvil_value_t *global = codegen_get_or_add_global(cg, name, type);
+                anvil_value_t *global = codegen_get_or_add_global(cg, codegen_link_name(sym, name), type, codegen_symbol_linkage(sym));
                 return codegen_load_object(cg, sym->type, global, "gload");
             }
             
@@ -553,6 +561,14 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 if (op == BINOP_ASSIGN) {
                     result = codegen_convert_value(cg, rhs, rhs_c_type,
                                                    lhs_c_type, "assign.cast");
+                } else if ((op == BINOP_ADD_ASSIGN || op == BINOP_SUB_ASSIGN) &&
+                           mcc_type_is_pointer(codegen_unwrap_type(lhs_c_type))) {
+                    /* p += n / p -= n step whole pointee objects. */
+                    anvil_value_t *pointer = codegen_load_object(cg, lhs_c_type,
+                                                                 lhs_ptr, "lhs");
+                    result = codegen_pointer_offset(cg, codegen_unwrap_type(lhs_c_type),
+                                                    pointer, rhs,
+                                                    op == BINOP_SUB_ASSIGN);
                 } else {
                     /* C compound assignments perform the operation after the
                      * usual promotions, then convert once back to the lhs.
@@ -688,40 +704,26 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             if (!lhs || !rhs) return NULL;
             
-            /* Handle pointer arithmetic */
+            /* Handle pointer arithmetic.  Array operands have already
+             * decayed to pointers; their types must decay too. */
             mcc_type_t *lhs_type = expr->data.binary_expr.lhs->type;
             mcc_type_t *rhs_type = expr->data.binary_expr.rhs->type;
+            if (lhs_type && codegen_unwrap_type(lhs_type)->kind == TYPE_ARRAY)
+                lhs_type = codegen_decay_type(cg, lhs_type);
+            if (rhs_type && codegen_unwrap_type(rhs_type)->kind == TYPE_ARRAY)
+                rhs_type = codegen_decay_type(cg, rhs_type);
             
             if ((op == BINOP_ADD || op == BINOP_SUB) && lhs_type && lhs_type->kind == TYPE_POINTER) {
-                mcc_type_t *pointee = lhs_type->data.pointer.pointee;
                 if (op == BINOP_SUB && rhs_type && rhs_type->kind == TYPE_POINTER) {
-                    anvil_type_t *i64 = anvil_type_i64(cg->anvil_ctx);
-                    anvil_value_t *lhs_int = anvil_build_ptrtoint(cg->anvil_ctx, lhs, i64, "ptr.lhs");
-                    anvil_value_t *rhs_int = anvil_build_ptrtoint(cg->anvil_ctx, rhs, i64, "ptr.rhs");
-                    anvil_value_t *diff = anvil_build_sub(cg->anvil_ctx, lhs_int, rhs_int, "ptr.diff");
-                    size_t elem_size = pointee ? mcc_type_sizeof(pointee) : 1;
-                    if (elem_size > 1) {
-                        diff = anvil_build_sdiv(cg->anvil_ctx, diff,
-                                                anvil_const_i64(cg->anvil_ctx, elem_size),
-                                                "ptr.diff.elem");
-                    }
-                    return codegen_convert_value(cg, diff, mcc_type_llong(cg->types), expr->type, "ptrdiff.cast");
+                    anvil_value_t *diff = codegen_pointer_diff(cg, lhs_type, lhs, rhs);
+                    return codegen_convert_value(cg, diff, mcc_type_ptrdiff_t(cg->types),
+                                                 expr->type, "ptrdiff.cast");
                 }
-                anvil_type_t *elem_type = codegen_type(cg, pointee);
-                anvil_value_t *index = rhs;
-                if (op == BINOP_ADD) {
-                    return anvil_build_gep(cg->anvil_ctx, elem_type, lhs, &index, 1, "ptr.gep");
-                }
-                index = anvil_build_neg(cg->anvil_ctx, rhs, "ptr.negidx");
-                return anvil_build_gep(cg->anvil_ctx, elem_type, lhs, &index, 1, "ptr.gep");
+                return codegen_pointer_offset(cg, lhs_type, lhs, rhs, op == BINOP_SUB);
             }
             
-            if (op == BINOP_ADD && rhs_type && rhs_type->kind == TYPE_POINTER) {
-                mcc_type_t *pointee = rhs_type->data.pointer.pointee;
-                anvil_type_t *elem_type = codegen_type(cg, pointee);
-                anvil_value_t *index = lhs;
-                return anvil_build_gep(cg->anvil_ctx, elem_type, rhs, &index, 1, "ptr.gep");
-            }
+            if (op == BINOP_ADD && rhs_type && rhs_type->kind == TYPE_POINTER)
+                return codegen_pointer_offset(cg, rhs_type, rhs, lhs, false);
 
             if (op >= BINOP_EQ && op <= BINOP_GE) {
                 if (mcc_type_is_pointer(lhs_type) && mcc_type_is_integer(rhs_type)) {
@@ -985,12 +987,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     anvil_value_t *val = codegen_load_object(cg, operand_type, ptr, "val");
                     anvil_value_t *result;
                     if (operand_type && operand_type->kind == TYPE_POINTER) {
-                        int64_t delta = (op == UNOP_PRE_INC) ? 1 : -1;
-                        anvil_value_t *index = anvil_const_i64(cg->anvil_ctx, delta);
-                        anvil_type_t *elem_type =
-                            codegen_type(cg, operand_type->data.pointer.pointee);
-                        result = anvil_build_gep(cg->anvil_ctx, elem_type, val,
-                                                 &index, 1, "ptr.inc");
+                        result = codegen_pointer_offset(
+                            cg, operand_type, val, anvil_const_i64(cg->anvil_ctx, 1),
+                            op == UNOP_PRE_DEC);
                     } else {
                         anvil_value_t *one = codegen_const_int_for_mcc_type(cg,
                             operand_type, 1);
@@ -1008,12 +1007,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     anvil_value_t *val = codegen_load_object(cg, operand_type, ptr, "val");
                     anvil_value_t *result;
                     if (operand_type && operand_type->kind == TYPE_POINTER) {
-                        int64_t delta = (op == UNOP_POST_INC) ? 1 : -1;
-                        anvil_value_t *index = anvil_const_i64(cg->anvil_ctx, delta);
-                        anvil_type_t *elem_type =
-                            codegen_type(cg, operand_type->data.pointer.pointee);
-                        result = anvil_build_gep(cg->anvil_ctx, elem_type, val,
-                                                 &index, 1, "ptr.inc");
+                        result = codegen_pointer_offset(
+                            cg, operand_type, val, anvil_const_i64(cg->anvil_ctx, 1),
+                            op == UNOP_POST_DEC);
                     } else {
                         anvil_value_t *one = codegen_const_int_for_mcc_type(cg,
                             operand_type, 1);
@@ -1293,7 +1289,18 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
              * records the unique selected association; emit only that arm. */
             return codegen_expr(cg, expr->data.generic_expr.selected_expr);
 
+        case AST_COMPOUND_LIT: {
+            anvil_value_t *object = codegen_lvalue(cg, expr);
+            return object ? codegen_load_object(cg, expr->data.compound_lit.type,
+                                                object, "compound.value")
+                          : NULL;
+        }
+
         default:
+            /* Never drop an expression silently: callers would otherwise
+             * skip the store and miscompile without a diagnostic. */
+            mcc_error_at(cg->mcc_ctx, expr->location,
+                         "code generation is not implemented for this expression");
             return NULL;
     }
 }
@@ -1314,7 +1321,7 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             /* Global variable - return global reference */
             if (sym && sym->kind == SYM_VAR) {
                 anvil_type_t *type = codegen_type(cg, sym->type);
-                anvil_value_t *global = codegen_get_or_add_global(cg, name, type);
+                anvil_value_t *global = codegen_get_or_add_global(cg, codegen_link_name(sym, name), type, codegen_symbol_linkage(sym));
                 return global;
             }
             
@@ -1337,16 +1344,25 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             mcc_type_t *array_type = codegen_unwrap_type(array_expr->type);
 
             anvil_value_t *base;
+            if (!array_type) return NULL;
+
+            /* Runtime-sized elements, or an array with a runtime dimension:
+             * scale by the element's runtime count. */
+            if (array_type->kind == TYPE_ARRAY && codegen_type_has_vla(array_type))
+                return codegen_vla_subscript(cg, array_type->data.array.element,
+                                             codegen_lvalue(cg, array_expr),
+                                             expr->data.subscript_expr.index);
+            if (array_type->kind == TYPE_POINTER &&
+                codegen_type_has_vla(array_type->data.pointer.pointee))
+                return codegen_vla_subscript(cg, array_type->data.pointer.pointee,
+                                             codegen_expr(cg, array_expr),
+                                             expr->data.subscript_expr.index);
+
             anvil_value_t *index = codegen_expr(cg, expr->data.subscript_expr.index);
-            if (!array_type || !index) return NULL;
+            if (!index) return NULL;
 
             if (array_type && array_type->kind == TYPE_ARRAY) {
                 base = codegen_lvalue(cg, array_expr);
-                if (array_type->data.array.is_vla)
-                {
-                    anvil_type_t *element = codegen_type(cg, array_type->data.array.element);
-                    return anvil_build_gep(cg->anvil_ctx, element, base, &index, 1, "vla.idx");
-                }
 
                 anvil_value_t *indices[] = {
                     anvil_const_i64(cg->anvil_ctx, 0), index
@@ -1363,6 +1379,19 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             }
         }
         
+        case AST_COMPOUND_LIT: {
+            /* C99 6.5.2.5: an unnamed object with automatic storage in the
+             * enclosing block, initialized like a declaration. */
+            mcc_type_t *type = expr->data.compound_lit.type;
+            anvil_value_t *object = codegen_entry_alloca(
+                cg, codegen_type(cg, type), "compound.lit");
+            if (!object ||
+                !codegen_init_object(cg, type, object,
+                                     expr->data.compound_lit.init))
+                return NULL;
+            return object;
+        }
+
         case AST_MEMBER_EXPR: {
             mcc_ast_node_t *obj = expr->data.member_expr.object;
             anvil_value_t *ptr = expr->data.member_expr.is_arrow ? codegen_expr(cg, obj) : codegen_record_address(cg, obj);
@@ -1401,25 +1430,11 @@ anvil_value_t *codegen_lvalue(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 }
 
                 if (!match && !anonymous_path) return NULL;
-                if (current_type->kind == TYPE_UNION) {
-                    /* A union is represented by one maximally aligned storage
-                     * field. Every member aliases offset zero; cast that
-                     * storage pointer to the selected member pointer type. */
-                    ptr = anvil_build_struct_gep(cg->anvil_ctx,
-                        codegen_type(cg, current_type), ptr, 0,
-                        "union.storage");
-                    mcc_type_t *member_type = match
-                        ? match->type : anonymous_path->type;
-                    anvil_type_t *member_ptr_type = anvil_type_ptr(
-                        cg->anvil_ctx, codegen_type(cg, member_type));
-                    ptr = anvil_build_bitcast(cg->anvil_ctx, ptr,
-                                              member_ptr_type,
-                                              "union.member");
-                } else {
-                    ptr = anvil_build_struct_gep(cg->anvil_ctx,
-                        codegen_type(cg, current_type), ptr,
-                        (unsigned)field_idx, "field");
-                }
+                /* Union members are union-layout fields at offset zero. */
+                ptr = anvil_build_struct_gep(cg->anvil_ctx,
+                    codegen_type(cg, current_type), ptr,
+                    (unsigned)field_idx,
+                    current_type->kind == TYPE_UNION ? "union.member" : "field");
                 if (match) return ptr;
                 current_type = anonymous_path->type;
             }

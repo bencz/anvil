@@ -410,7 +410,7 @@ static void test_complete_image_resolution_counts(void)
     CHECK(st_source_bundle_load(&bundle, image, NULL, 0u, NULL)
           == ST_SOURCE_LOAD_OK);
     if (bundle.diagnostic.status != ST_SOURCE_LOAD_OK) return;
-    CHECK(bundle.count == 50u);
+    CHECK(bundle.count == 64u);
     units = malloc(bundle.count * sizeof(*units));
     CHECK(units != NULL);
     if (units == NULL) goto done;
@@ -431,8 +431,8 @@ static void test_complete_image_resolution_counts(void)
     CHECK(st_primitive_resolve(&resolution, units, bundle.count,
                                &catalog, NULL) == ST_PRIMITIVE_OK);
     CHECK(resolution.binding_count == 50u);
-    CHECK(resolution.diagnostic_count == 19u);
-    CHECK(resolution.binding_count + resolution.diagnostic_count == 69u);
+    CHECK(resolution.diagnostic_count == 34u);
+    CHECK(resolution.binding_count + resolution.diagnostic_count == 84u);
     for (index = 0u; index < resolution.diagnostic_count; ++index) {
         const st_primitive_diagnostic_t *diagnostic
             = &resolution.diagnostics[index];
@@ -444,7 +444,7 @@ static void test_complete_image_resolution_counts(void)
         else
             CHECK(false);
     }
-    CHECK(float_fallbacks == 0u && missing_implementations == 19u);
+    CHECK(float_fallbacks == 0u && missing_implementations == 34u);
     st_primitive_result_destroy(&resolution);
     st_primitive_catalog_destroy(&catalog);
 done:

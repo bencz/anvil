@@ -14,6 +14,8 @@ const anvil_ppc_target_desc_t ppc32_target_desc = {
     .word_size = 4,
     .little_endian = false,
     .uses_function_descriptors = false,
+    .has_fp_int64_convert = false,
+    .has_fp_unsigned_convert = false,
     .min_frame_size = 32,
     .lr_save_offset = 4,
     .toc_save_offset = 0,
@@ -92,5 +94,6 @@ const anvil_backend_ops_t anvil_backend_ppc32 = {
     .reset = ppc32_reset,
     .codegen_module = ppc32_codegen_module,
     .codegen_func = ppc32_codegen_func,
-    .get_arch_info = ppc32_get_arch_info
+    .get_arch_info = ppc32_get_arch_info,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
 };

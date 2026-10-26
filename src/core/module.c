@@ -144,6 +144,38 @@ static anvil_error_t verify_codegen_stage(anvil_module_t *mod,
     return ANVIL_ERR_INVALID_OP;
 }
 
+static bool func_type_attrs_supported(anvil_ctx_t *ctx, const anvil_type_t *type)
+{
+    if (!type || type->kind != ANVIL_TYPE_FUNC || !type->data.func.param_attrs)
+        return true;
+    for (size_t i = 0; i < type->data.func.num_params; i++)
+        if (!anvil_ctx_supports_param_attr(ctx, anvil_type_func_param_attr(type, i)))
+            return false;
+    return true;
+}
+
+/* A target that does not lower a parameter attribute would silently treat
+ * an aggregate as a plain pointer; refuse before any lowering. */
+static anvil_error_t check_param_attr_support(anvil_module_t *mod)
+{
+    for (anvil_func_t *func = mod->funcs; func; func = func->next) {
+        bool ok = func_type_attrs_supported(mod->ctx, func->type);
+        for (anvil_block_t *block = func->blocks; ok && block; block = block->next)
+            for (anvil_instr_t *instr = block->first; ok && instr; instr = instr->next)
+                if (instr->op == ANVIL_OP_CALL && instr->num_operands > 0)
+                    ok = func_type_attrs_supported(
+                        mod->ctx, anvil_sem_callee_func_type(instr->operands[0]));
+        if (!ok) {
+            anvil_set_error(mod->ctx, ANVIL_ERR_CODEGEN,
+                            "target %s does not implement BYVAL/SRET parameters (function %s)",
+                            mod->ctx->backend->ops->name,
+                            func->name ? func->name : "<anonymous>");
+            return ANVIL_ERR_CODEGEN;
+        }
+    }
+    return ANVIL_OK;
+}
+
 anvil_module_t *anvil_module_create(anvil_ctx_t *ctx, const char *name)
 {
     if (!ctx) return NULL;
@@ -201,18 +233,9 @@ void anvil_module_destroy(anvil_module_t *mod)
         }
     }
     
-    /* Invalidate module ownership on context-owned values before the module
-     * and function records disappear. */
-    for (anvil_value_t *value = mod->ctx ? mod->ctx->owned_values : NULL;
-         value; value = value->ctx_next_owned) {
-        if (value->owner_module == mod) value->owner_module = NULL;
-    }
-    for (anvil_block_t *block = mod->ctx ? mod->ctx->owned_blocks : NULL;
-         block; block = block->ctx_next_owned)
-        if (block->owner_module == mod) block->owner_module = NULL;
-    for (anvil_instr_t *instr = mod->ctx ? mod->ctx->owned_instrs : NULL;
-         instr; instr = instr->ctx_next_owned)
-        if (instr->owner_module == mod) instr->owner_module = NULL;
+    /* Values, blocks and instructions are context-owned and keep naming this
+     * module; it becomes a tombstone below, so ownership checks reject them
+     * without visiting every object of the context. */
 
     /* Function handles are context-owned/tombstoned so checked APIs can
      * diagnose use after module destruction without dereferencing freed
@@ -238,7 +261,16 @@ void anvil_module_destroy(anvil_module_t *mod)
     free(mod->symbols);
     
     free(mod->name);
-    free(mod);
+    if (!mod->ctx) {
+        free(mod);
+        return;
+    }
+    anvil_ctx_t *ctx = mod->ctx;
+    memset(mod, 0, sizeof(*mod));
+    mod->ctx = ctx;
+    mod->destroyed = true;
+    mod->next = ctx->destroyed_modules;
+    ctx->destroyed_modules = mod;
 }
 
 static anvil_value_t *module_add_global_impl(anvil_module_t *mod,
@@ -362,6 +394,9 @@ anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *l
     }
 
     anvil_error_t verify_err = verify_codegen_stage(mod, "before optimization");
+    if (verify_err != ANVIL_OK) return verify_err;
+
+    verify_err = check_param_attr_support(mod);
     if (verify_err != ANVIL_OK) return verify_err;
 
     anvil_error_t opt_err = anvil_module_optimize(mod);

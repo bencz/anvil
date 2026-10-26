@@ -173,6 +173,7 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
     if (kind == SYM_VAR || kind == SYM_PARAM) {
         if (mcc_symtab_is_global_scope(symtab)) {
             sym->data.global_name = sym->name;
+            sym->link_name = sym->name;
         } else {
             /* Allocate stack slot */
             size_t size = type ? type->size : 4;
@@ -200,6 +201,7 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
         }
     } else if (kind == SYM_FUNC) {
         sym->data.global_name = sym->name;
+        sym->link_name = sym->name;
     }
     
     /* Insert into hash table */
@@ -209,6 +211,36 @@ mcc_symbol_t *mcc_symtab_define(mcc_symtab_t *symtab, const char *name,
     symtab->current->num_symbols++;
     
     return sym;
+}
+
+void mcc_symtab_close_unit(mcc_symtab_t *symtab, unsigned unit)
+{
+    mcc_scope_t *scope = symtab ? symtab->global : NULL;
+    if (!scope) return;
+    for (size_t bucket = 0; bucket < scope->table_size; bucket++) {
+        mcc_symbol_t **link = &scope->symbols[bucket];
+        while (*link) {
+            mcc_symbol_t *sym = *link;
+            if ((sym->kind == SYM_VAR || sym->kind == SYM_FUNC) &&
+                sym->storage == STORAGE_STATIC) {
+                char suffix[16];
+                int length = snprintf(suffix, sizeof(suffix), ".%u", unit);
+                size_t name_length = strlen(sym->name);
+                char *unique = mcc_alloc(symtab->ctx,
+                                         name_length + (size_t)length + 1);
+                if (unique) {
+                    memcpy(unique, sym->name, name_length);
+                    memcpy(unique + name_length, suffix, (size_t)length + 1);
+                    sym->link_name = unique;
+                }
+                /* The AST keeps the symbol; only name lookup forgets it. */
+                *link = sym->next;
+                scope->num_symbols--;
+                continue;
+            }
+            link = &sym->next;
+        }
+    }
 }
 
 mcc_symbol_t *mcc_symtab_lookup(mcc_symtab_t *symtab, const char *name)

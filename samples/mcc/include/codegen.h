@@ -32,12 +32,32 @@ struct mcc_codegen {
     anvil_block_t *break_target;
     anvil_block_t *continue_target;
     
-    /* Switch statement info */
-    struct {
+    /* Innermost switch being generated.  case/default labels may appear at
+     * any depth of its body and resolve to these blocks; the merge block is
+     * created by the first edge that reaches it, so it is never orphaned. */
+    struct mcc_switch_info {
+        mcc_ast_node_t **cases;
+        anvil_block_t **blocks;
+        size_t num_cases;
         anvil_block_t *default_block;
-        anvil_block_t *exit_block;
-        anvil_value_t *switch_value;
+        anvil_block_t *end_block;
+        int id;
+        bool active;
     } switch_info;
+
+    /* Entry block of the current function.  It stays unterminated while the
+     * body is generated so a declaration that control flow never reaches in
+     * sequence still gets storage; codegen_func branches it to the body. */
+    anvil_block_t *alloca_block;
+
+    /* Runtime lengths of the variable-length array dimensions evaluated in
+     * the current function (C11 6.7.6.2p5: once, at the declaration). */
+    struct {
+        mcc_type_t *type;
+        anvil_value_t *length;
+    } *vla_lengths;
+    size_t num_vla_lengths;
+    size_t cap_vla_lengths;
     
     /* Local variable mapping (name -> anvil_value_t*) */
     struct {

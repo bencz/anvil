@@ -29,6 +29,10 @@ typedef struct {
     unsigned word_size;
     bool little_endian;
     bool uses_function_descriptors;
+    /* fcfid / fctidz: 64-bit integer <-> double conversions. */
+    bool has_fp_int64_convert;
+    /* ISA 2.06 fcfids, fcfidu(s), fctiwuz, fctiduz. */
+    bool has_fp_unsigned_convert;
     unsigned min_frame_size;
     unsigned lr_save_offset;
     unsigned toc_save_offset;

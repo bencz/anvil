@@ -250,7 +250,9 @@ static bool ppc_legal_instr(const anvil_ppc_target_desc_t *desc, const anvil_mir
     }
     case ANVIL_MIR_OP_INCOMING_STACK_ARG:
     case ANVIL_MIR_OP_CALL_STACK_ARG:
-        if (instr->has_imm && instr->imm >= 0 && (instr->imm % (int64_t)desc->word_size) == 0) {
+        /* Word aligned; a 64-bit ABI single float sits in the low word of
+         * its doubleword. */
+        if (instr->has_imm && instr->imm >= 0 && (instr->imm % 4) == 0) {
             return true;
         }
         return ppc_legal_fail(error, error_len, "PowerPC MIR stack instruction %zu needs a word-aligned stack offset", instr_index);
@@ -308,7 +310,11 @@ static bool ppc_legal_instr(const anvil_ppc_target_desc_t *desc, const anvil_mir
         return true;
     case ANVIL_MIR_OP_CALL_RESULT: {
         const anvil_mir_vreg_info_t *def = instr->def != ANVIL_MIR_NO_VREG ? ppc_legal_vreg_info(desc, mir, instr->def, instr_index, error, error_len) : NULL;
-        if (!instr->symbol && instr->num_uses == 0 && def && def->reg_class == ANVIL_MIR_REG_GPR && def->size_bits == 32 && def->has_fixed_reg && def->fixed_phys_reg == 4 && desc->word_size == 4) {
+        /* Second result register: r4 (64-bit pair or two-doubleword
+         * aggregate) or f2-f8 (floating aggregate). */
+        bool gpr = def && def->reg_class == ANVIL_MIR_REG_GPR && def->size_bits == desc->word_size * 8 && def->fixed_phys_reg == desc->gpr_return_reg + 1;
+        bool fpr = def && def->reg_class == ANVIL_MIR_REG_FPR && def->fixed_phys_reg > desc->fpr_return_reg && def->fixed_phys_reg <= desc->fpr_return_reg + 7;
+        if (!instr->symbol && instr->num_uses == 0 && def && def->has_fixed_reg && (gpr || fpr)) {
             return true;
         }
         return ppc_legal_fail(error, error_len, "PowerPC MIR instruction %zu has an invalid call-result pseudo", instr_index);

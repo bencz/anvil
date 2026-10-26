@@ -201,6 +201,16 @@ bool anvil_gnu_emit_constant(anvil_strbuf_t *out, const anvil_type_t *type, cons
         }
         return true;
     case ANVIL_VAL_CONST_STRUCT: {
+        if (type->kind == ANVIL_TYPE_STRUCT && type->data.struc.complete && type->data.struc.is_union) {
+            /* The chosen member at offset 0, then zeros. */
+            size_t member = value->data.aggregate.union_member;
+            if (value->data.aggregate.num_elements != 1 || member >= type->data.struc.num_fields)
+                return false;
+            const anvil_type_t *member_type = type->data.struc.fields[member];
+            return member_type->size <= type->size &&
+                   anvil_gnu_emit_constant(out, member_type, value->data.aggregate.elements[0], pointer_size, symbol_prefix, strings, format_symbol, format_user) &&
+                   anvil_gnu_emit_zero(out, type->size - member_type->size);
+        }
         if (type->kind != ANVIL_TYPE_STRUCT || !type->data.struc.complete || value->data.aggregate.num_elements != type->data.struc.num_fields)
             return false;
         size_t cursor = 0;

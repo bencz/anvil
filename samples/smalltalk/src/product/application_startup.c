@@ -154,8 +154,6 @@ static bool launch_is_valid(
             || launch->metadata_abi_version != ST_IMAGE_METADATA_ABI_VERSION
             || launch->flags != 0u || launch->metadata == NULL
             || launch->entry_arity != 0u
-            || launch->transcript_semantic_external_id
-                != ST_IMAGE_EXTERNAL_ID_TRANSCRIPT
             || launch->expected_global_count == 0u
             || !zero_reserved(launch)) {
         return false;
@@ -236,7 +234,6 @@ static bool build_runtime_entries(
     if (globals == NULL) {
         return false;
     }
-    size_t transcript_count = 0u;
     for (size_t index = 0u; index < metadata->global_count; index++) {
         const st_image_global_metadata_t *global = &metadata->globals[index];
         if (global->runtime_index >= metadata->global_count
@@ -244,23 +241,10 @@ static bool build_runtime_entries(
             state->allocator.deallocate(state->allocator.user, globals);
             return false;
         }
-        if (global->semantic_external_id
-                == ST_IMAGE_EXTERNAL_ID_TRANSCRIPT) {
-            transcript_count++;
-            if (global->runtime_index
-                    != state->launch->transcript_runtime_index) {
-                state->allocator.deallocate(state->allocator.user, globals);
-                return false;
-            }
-        }
         globals[index] = (st_image_runtime_entry_t) {
             .id = global->runtime_index + 1u,
             .value = ST_VALUE_INVALID
         };
-    }
-    if (transcript_count != 1u) {
-        state->allocator.deallocate(state->allocator.user, globals);
-        return false;
     }
     if (metadata->string_literal_count != 0u) {
         size_t literal_bytes;
@@ -430,11 +414,6 @@ static st_application_startup_status_t initialize_image(
             .string_layout = {
                 state->launch->string_class_id,
                 state->launch->string_uint8_shape_id
-            },
-            .external_stream_layout = {
-                state->launch->external_stream_class_id,
-                state->launch->external_stream_shape_id,
-                state->launch->external_stream_descriptor_slot
             }
         });
     state->allocator.deallocate(state->allocator.user, literals);
@@ -457,14 +436,6 @@ static st_application_startup_status_t initialize_image(
                 ? ST_APPLICATION_STARTUP_ERR_OUT_OF_MEMORY
                 : ST_APPLICATION_STARTUP_ERR_IMAGE;
         }
-    }
-    status = st_image_runtime_bootstrap_transcript(
-        &state->image, state->launch->transcript_runtime_index,
-        &bootstrapped);
-    if (status != ST_IMAGE_RUNTIME_OK) {
-        return status == ST_IMAGE_RUNTIME_ERR_OUT_OF_MEMORY
-            ? ST_APPLICATION_STARTUP_ERR_OUT_OF_MEMORY
-            : ST_APPLICATION_STARTUP_ERR_IMAGE;
     }
     return ST_APPLICATION_STARTUP_OK;
 }
@@ -546,9 +517,6 @@ static st_application_startup_status_t initialize_bootstrap(
         const st_image_entity_metadata_t *entity;
         uint32_t runtime_class_id;
 
-        if (global->semantic_external_id == ST_IMAGE_EXTERNAL_ID_TRANSCRIPT) {
-            continue;
-        }
         if (global->semantic_external_id == 0u
                 || global->semantic_external_id > state->metadata->entity_count) {
             return ST_APPLICATION_STARTUP_ERR_INVALID_METADATA;

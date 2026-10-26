@@ -73,9 +73,10 @@ typedef struct {
     void *user;
 } st_aot_allocator_t;
 
-/* Bootstrap globals not declared by the class graph (for example
- * Transcript).  The name participates only in semantic resolution and
- * metadata; lowering consumes semantic_external_id, never spelling. */
+/* Embedder-supplied globals not declared by the class graph.  The product
+ * driver supplies none: every image global is a class read from the image
+ * sources.  The name participates only in semantic resolution and metadata;
+ * lowering consumes semantic_external_id, never spelling. */
 typedef struct {
     const char *name;
     size_t name_length;

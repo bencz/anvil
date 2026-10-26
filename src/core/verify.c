@@ -64,14 +64,23 @@ static bool type_equal(const anvil_type_t *lhs, const anvil_type_t *rhs)
     return anvil_types_equal(lhs, rhs);
 }
 
+/* Valid once anvil_func_verify has stamped the linked blocks of `func`
+ * with its current epoch: a block that is unlinked, or belongs to another
+ * function, never carries both this parent and this epoch. */
 static bool block_belongs_to_func(const anvil_func_t *func,
                                   const anvil_block_t *block)
 {
-    if (!func || !block) return false;
-    for (const anvil_block_t *cur = func->blocks; cur; cur = cur->next) {
-        if (cur == block) return true;
-    }
-    return false;
+    return func && block && block->parent == func &&
+           block->verify_epoch == func->verify_epoch;
+}
+
+static void mark_func_blocks(const anvil_func_t *func)
+{
+    /* Verification never changes IR; the epoch is bookkeeping only. */
+    anvil_func_t *mutable_func = (anvil_func_t *)func;
+    mutable_func->verify_epoch++;
+    for (anvil_block_t *block = mutable_func->blocks; block; block = block->next)
+        block->verify_epoch = mutable_func->verify_epoch;
 }
 
 static bool module_has_global_value(const anvil_module_t *mod,
@@ -910,8 +919,7 @@ static bool verify_struct_gep(const anvil_module_t *mod,
         !verify_value_ref(mod, func, index, error, error_len)) {
         return false;
     }
-    if (!base->type || base->type->kind != ANVIL_TYPE_PTR ||
-        !type_equal(base->type->data.pointee, instr->aux_type) ||
+    if (!type_equal(anvil_sem_memory_object_type(base), instr->aux_type) ||
         index->kind != ANVIL_VAL_CONST_INT ||
         index->data.i < 0 ||
         (size_t)index->data.i >= instr->aux_type->data.struc.num_fields) {
@@ -1428,6 +1436,14 @@ static bool verify_instr(const anvil_module_t *mod,
             return func->type->data.func.variadic && instr->num_operands == 0 && instr->result &&
                    instr->result->type == anvil_type_ptr(mod->ctx, anvil_type_i8(mod->ctx));
 
+        case ANVIL_OP_ATOMIC_LOAD:
+        case ANVIL_OP_ATOMIC_STORE:
+        case ANVIL_OP_ATOMIC_RMW:
+        case ANVIL_OP_ATOMIC_CMPXCHG:
+        case ANVIL_OP_ATOMIC_FENCE:
+            /* Dispatched to verify_atomic before this switch. */
+            return verify_atomic(mod, func, instr, error, error_len);
+
         case ANVIL_OP_COUNT:
             break;
     }
@@ -1550,6 +1566,7 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
                            "function %s must have an entry block",
                            func_name(func));
     }
+    mark_func_blocks(func);
     if (!block_belongs_to_func(func, func->entry)) {
         return verify_fail(error, error_len,
                            "function %s entry block is not in the function",

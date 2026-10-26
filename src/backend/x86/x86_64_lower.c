@@ -45,6 +45,14 @@ typedef struct {
     size_t num_blocks;
     size_t num_edge_blocks;
     bool failed;
+    /* SRET result: in registers (sret_object holds it until RET) or through
+     * the caller's hidden pointer (returned in RAX). */
+    bool sret_in_regs;
+    x64_agg_plan_t sret_plan;
+    anvil_mir_vreg_t sret_object;
+    /* Argument state after the named parameters (va_start). */
+    x64_arg_state_t named_args;
+    anvil_mir_vreg_t sret_pointer;
 } x64_mir_lower_t;
 
 static bool x64_type_is_fp(anvil_type_t *type)
@@ -259,50 +267,66 @@ static bool create_mir_blocks(x64_mir_lower_t *lower)
     return true;
 }
 
-static int x64_arg_reg_for(const anvil_x64_abi_desc_t *desc, anvil_type_t *type, size_t position, size_t gpr_count, size_t fpr_count)
+/* ------------------------------------------------------------------
+ * Aggregates passed (BYVAL) or returned (SRET) by value.
+ * ------------------------------------------------------------------ */
+
+/* Parts move through the shared helpers, which never emit shifts: those
+ * would need the emitter's RAX/RCX scratch registers. */
+static const anvil_agg_target_t X64_AGG_TARGET = {8, false};
+
+static anvil_mir_vreg_t agg_frame_object(x64_mir_lower_t *lower, size_t size, size_t align)
 {
-    if (x64_type_is_fp(type)) {
-        size_t idx = desc->positional_args ? position : fpr_count;
-        if ((int)idx >= desc->num_fp_arg_regs)
-            return -1;
-        return desc->fp_arg_regs[idx];
-    }
-    size_t idx = desc->positional_args ? position : gpr_count;
-    if ((int)idx >= desc->num_int_arg_regs)
-        return -1;
-    return desc->int_arg_regs[idx];
+    return anvil_agg_frame_object(lower->mir, size, align, X64_AGG_TARGET);
 }
 
-static bool arg_still_uses_register(const anvil_x64_abi_desc_t *desc, anvil_type_t *type, size_t position, size_t gpr_count, size_t fpr_count)
+static anvil_mir_vreg_t agg_load_part(x64_mir_lower_t *lower, const x64_agg_part_t *part, anvil_mir_vreg_t base)
 {
-    return x64_arg_reg_for(desc, type, position, gpr_count, fpr_count) >= 0;
+    return anvil_agg_load_part(lower->mir, part, base, X64_AGG_TARGET);
 }
 
-static void advance_arg_count(anvil_type_t *type, size_t *gpr_count, size_t *fpr_count)
+static bool agg_store_part(x64_mir_lower_t *lower, const x64_agg_part_t *part, anvil_mir_vreg_t value, anvil_mir_vreg_t base)
 {
-    if (x64_type_is_fp(type)) {
-        (*fpr_count)++;
-    } else {
-        (*gpr_count)++;
-    }
+    return anvil_agg_store_part(lower->mir, part, value, base, X64_AGG_TARGET);
 }
 
-static int64_t x64_stack_arg_slot_size(anvil_type_t *type)
+static x64_agg_part_t agg_chunk(size_t size, size_t offset)
 {
-    int64_t size = type ? x64_type_size(type) : 8;
-    if (size <= 0)
-        size = 8;
-    if (size < 8)
-        size = 8;
-    return (size + 7) & ~INT64_C(7);
+    return anvil_agg_chunk(size, offset, X64_AGG_TARGET);
+}
+
+static bool agg_copy(x64_mir_lower_t *lower, anvil_mir_vreg_t from, anvil_mir_vreg_t to, size_t size)
+{
+    return anvil_agg_copy(lower->mir, from, to, size, X64_AGG_TARGET);
+}
+
+static uint16_t agg_part_bits(const x64_agg_part_t *part)
+{
+    return anvil_agg_part_bits(part, X64_AGG_TARGET);
+}
+
+/* An incoming argument as an ordinary virtual register.  Where it arrives
+ * is the ABI module's decision (x64_assign_*). */
+static anvil_mir_vreg_t lower_incoming_value(x64_mir_lower_t *lower, int reg, int64_t offset, anvil_mir_reg_class_t cls, uint16_t bits, bool is_signed)
+{
+    anvil_mir_vreg_t value = anvil_mir_add_vreg_typed(lower->mir, cls, bits, is_signed);
+    if (value == ANVIL_MIR_NO_VREG)
+        return ANVIL_MIR_NO_VREG;
+    if (reg < 0)
+        return anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, value, offset) ? value : ANVIL_MIR_NO_VREG;
+
+    anvil_mir_vreg_t incoming = anvil_mir_add_vreg_typed(lower->mir, cls, bits, is_signed);
+    anvil_mir_vreg_t uses[] = {incoming};
+    if (incoming == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, incoming, reg) || !anvil_mir_set_live_in(lower->mir, incoming, true) ||
+        !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, value, uses, 1))
+        return ANVIL_MIR_NO_VREG;
+    return value;
 }
 
 static bool lower_params(x64_mir_lower_t *lower)
 {
     const anvil_x64_abi_desc_t *desc = lower->desc;
-    size_t gpr_count = 0;
-    size_t fpr_count = 0;
-    int64_t stack_offset = 0;
+    x64_arg_state_t state = {0, 0, 0, 0};
 
     anvil_mir_block_t entry = block_get(lower, lower->func->blocks);
     if (entry == ANVIL_MIR_NO_BLOCK || !anvil_mir_set_current_block(lower->mir, entry)) {
@@ -316,34 +340,65 @@ static bool lower_params(x64_mir_lower_t *lower)
         if (param->type->kind == ANVIL_TYPE_VECTOR)
             return false;
 
-        anvil_mir_vreg_t local = x64_add_vreg_for_type(lower, param->type);
-        if (local == ANVIL_MIR_NO_VREG)
-            return false;
+        anvil_param_attr_t attr = anvil_type_func_param_attr(lower->func->type, i);
+        if (attr != ANVIL_PARAM_PLAIN) {
+            x64_agg_plan_t plan;
+            if (!x64_classify_aggregate(desc, param->type->data.pointee, attr == ANVIL_PARAM_SRET, &plan))
+                return false;
 
-        if (arg_still_uses_register(desc, param->type, i, gpr_count, fpr_count)) {
-            int reg = x64_arg_reg_for(desc, param->type, i, gpr_count, fpr_count);
-            anvil_mir_vreg_t incoming = x64_add_vreg_for_type(lower, param->type);
-            if (incoming == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, incoming, reg) || !anvil_mir_set_live_in(lower->mir, incoming, true)) {
-                return false;
+            if (attr == ANVIL_PARAM_SRET && plan.placement == X64_AGG_REGS) {
+                /* The result lives in a local object until RET loads it
+                 * into the return registers; no argument slot is used. */
+                anvil_mir_vreg_t object = agg_frame_object(lower, plan.size, plan.align);
+                if (object == ANVIL_MIR_NO_VREG || !map_put(lower, param, object))
+                    return false;
+                lower->sret_in_regs = true;
+                lower->sret_plan = plan;
+                lower->sret_object = object;
+                continue;
             }
 
-            anvil_mir_vreg_t uses[] = {incoming};
-            if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, local, uses, 1)) {
-                return false;
+            if (attr == ANVIL_PARAM_BYVAL && plan.placement != X64_AGG_REFERENCE) {
+                /* The callee's own copy, filled from registers or from the
+                 * caller's stack argument area. */
+                anvil_mir_vreg_t object = agg_frame_object(lower, plan.size, plan.align);
+                int regs[2];
+                x64_arg_loc_t loc = x64_assign_aggregate(desc, &state, &plan, regs);
+                if (object == ANVIL_MIR_NO_VREG)
+                    return false;
+                if (loc.reg >= 0) {
+                    for (unsigned part = 0; part < plan.num_parts; part++) {
+                        const x64_agg_part_t *p = &plan.parts[part];
+                        anvil_mir_vreg_t value = lower_incoming_value(lower, regs[part], 0, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+                        if (value == ANVIL_MIR_NO_VREG || !agg_store_part(lower, p, value, object))
+                            return false;
+                    }
+                } else {
+                    for (size_t offset = 0; offset < plan.size; offset += 8) {
+                        x64_agg_part_t chunk = agg_chunk(plan.size, offset);
+                        anvil_mir_vreg_t value = lower_incoming_value(lower, -1, loc.offset + (int64_t)offset, ANVIL_MIR_REG_GPR, 64, false);
+                        if (value == ANVIL_MIR_NO_VREG || !agg_store_part(lower, &chunk, value, object))
+                            return false;
+                    }
+                }
+                if (!map_put(lower, param, object))
+                    return false;
+                continue;
             }
-            advance_arg_count(param->type, &gpr_count, &fpr_count);
-        } else {
-            if (!anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, local, stack_offset)) {
-                return false;
-            }
-            stack_offset += x64_stack_arg_slot_size(param->type);
-            advance_arg_count(param->type, &gpr_count, &fpr_count);
+            /* X64_AGG_REFERENCE / X64_AGG_HIDDEN_POINTER: an ordinary pointer
+             * argument; a hidden result pointer is also returned in RAX. */
         }
 
-        if (!map_put(lower, param, local))
+        x64_arg_loc_t loc = x64_assign_scalar(desc, &state, x64_type_is_fp(param->type));
+        anvil_mir_vreg_t value = lower_incoming_value(lower, loc.reg, loc.offset, x64_type_is_fp(param->type) ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR,
+                                                      x64_bits_for_type(param->type), x64_type_is_signed(param->type));
+        if (value == ANVIL_MIR_NO_VREG || !map_put(lower, param, value))
             return false;
+        if (attr == ANVIL_PARAM_SRET)
+            lower->sret_pointer = value;
     }
 
+    lower->named_args = state;
     return true;
 }
 
@@ -688,8 +743,45 @@ static anvil_type_t *call_func_type(anvil_value_t *callee)
     return NULL;
 }
 
+/* Physical return register of the given SysV/Win64 part. */
+static int agg_return_reg(const anvil_x64_abi_desc_t *desc, const x64_agg_plan_t *plan, unsigned part)
+{
+    bool fp = plan->parts[part].fp;
+    unsigned before = 0;
+    for (unsigned i = 0; i < part; i++)
+        before += plan->parts[i].fp == fp;
+    if (fp)
+        return before == 0 ? desc->fp_ret_reg : desc->fp_ret_reg + 1;
+    return before == 0 ? desc->int_ret_reg : desc->int_ret_hi_reg;
+}
+
 static bool add_return(x64_mir_lower_t *lower, anvil_value_t *value)
 {
+    if (!value && lower->sret_in_regs) {
+        /* Load the result object into its return registers; the extra
+         * register stays live up to RET through KEEPALIVE. */
+        const x64_agg_plan_t *plan = &lower->sret_plan;
+        anvil_mir_vreg_t fixed[2] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
+        for (unsigned part = 0; part < plan->num_parts; part++) {
+            const x64_agg_part_t *p = &plan->parts[part];
+            anvil_mir_vreg_t loaded = agg_load_part(lower, p, lower->sret_object);
+            fixed[part] = anvil_mir_add_vreg_typed(lower->mir, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+            anvil_mir_vreg_t uses[] = {loaded};
+            int reg = agg_return_reg(lower->desc, plan, part);
+            if (loaded == ANVIL_MIR_NO_VREG || fixed[part] == ANVIL_MIR_NO_VREG || reg < 0 ||
+                !anvil_mir_set_fixed_reg(lower->mir, fixed[part], reg) ||
+                !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed[part], uses, 1))
+                return false;
+        }
+        if (plan->num_parts == 2 && !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, &fixed[1], 1))
+            return false;
+        return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, &fixed[0], 1);
+    }
+    if (!value && lower->sret_pointer != ANVIL_MIR_NO_VREG) {
+        /* A hidden result pointer is returned in RAX. */
+        anvil_mir_vreg_t uses[] = {lower->sret_pointer};
+        return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, uses, 1);
+    }
     if (!value) {
         return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0);
     }
@@ -935,29 +1027,15 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
             return false;
     }
 
-    size_t gpr_count = 0;
-    size_t fpr_count = 0;
-    size_t num_call_uses = 0;
-    int64_t stack_offset = 0;
+    x64_arg_state_t state = {0, 0, 0, 0};
+    size_t num_call_uses = direct_call ? 0 : 1;     /* [0]: call target */
     bool ok = true;
+    /* Aggregate result returned in registers into the caller's object. */
+    bool sret_in_regs = false;
+    x64_agg_plan_t sret_plan;
+    anvil_mir_vreg_t sret_object = ANVIL_MIR_NO_VREG;
 
-    if (!direct_call) {
-        anvil_mir_vreg_t target_src = lower_value(lower, callee);
-        anvil_mir_vreg_t target_fixed = x64_add_vreg_for_type(lower, callee->type);
-        if (target_src == ANVIL_MIR_NO_VREG || target_fixed == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, target_fixed, desc->indirect_call_reg)) {
-            free(call_uses);
-            return false;
-        }
-
-        anvil_mir_vreg_t target_uses[] = {target_src};
-        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, target_fixed, target_uses, 1)) {
-            free(call_uses);
-            return false;
-        }
-        call_uses[num_call_uses++] = target_fixed;
-    }
-
-    for (size_t i = 0; i < num_args; i++) {
+    for (size_t i = 0; ok && i < num_args; i++) {
         anvil_value_t *arg = instr->operands[i + 1];
         anvil_mir_vreg_t src = lower_value(lower, arg);
         if (src == ANVIL_MIR_NO_VREG) {
@@ -965,58 +1043,124 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
             break;
         }
 
-        if (!arg_still_uses_register(desc, arg->type, i, gpr_count, fpr_count)) {
-            anvil_mir_vreg_t stack_use[] = {src};
-            if (!anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_CALL_STACK_ARG, ANVIL_MIR_NO_VREG, stack_use, 1, stack_offset)) {
+        anvil_param_attr_t attr = anvil_type_func_param_attr(fn_type, i);
+        if (attr != ANVIL_PARAM_PLAIN) {
+            x64_agg_plan_t plan;
+            if (!x64_classify_aggregate(desc, arg->type->data.pointee, attr == ANVIL_PARAM_SRET, &plan)) {
                 ok = false;
                 break;
             }
-            stack_offset += 8;
-            advance_arg_count(arg->type, &gpr_count, &fpr_count);
+            if (attr == ANVIL_PARAM_SRET && plan.placement == X64_AGG_REGS) {
+                /* Not passed: the result registers are stored into it. */
+                sret_in_regs = true;
+                sret_plan = plan;
+                sret_object = src;
+                continue;
+            }
+            if (attr == ANVIL_PARAM_BYVAL && plan.placement == X64_AGG_REFERENCE) {
+                /* A pointer to a 16-byte aligned caller copy. */
+                anvil_mir_vreg_t copy = agg_frame_object(lower, plan.size, 16);
+                if (copy == ANVIL_MIR_NO_VREG || !agg_copy(lower, src, copy, plan.size)) {
+                    ok = false;
+                    break;
+                }
+                src = copy;
+            } else if (attr == ANVIL_PARAM_BYVAL) {
+                int regs[2];
+                x64_arg_loc_t loc = x64_assign_aggregate(desc, &state, &plan, regs);
+                if (loc.reg >= 0) {
+                    anvil_mir_vreg_t values[2];
+                    for (unsigned part = 0; ok && part < plan.num_parts; part++) {
+                        values[part] = agg_load_part(lower, &plan.parts[part], src);
+                        ok = values[part] != ANVIL_MIR_NO_VREG;
+                    }
+                    for (unsigned part = 0; ok && part < plan.num_parts; part++) {
+                        const x64_agg_part_t *p = &plan.parts[part];
+                        anvil_mir_vreg_t fixed = anvil_mir_add_vreg_typed(lower->mir, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+                        anvil_mir_vreg_t uses[] = {values[part]};
+                        ok = fixed != ANVIL_MIR_NO_VREG && anvil_mir_set_fixed_reg(lower->mir, fixed, regs[part]) &&
+                             anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed, uses, 1);
+                        call_uses[num_call_uses++] = fixed;
+                    }
+                } else {
+                    for (size_t offset = 0; ok && offset < plan.size; offset += 8) {
+                        x64_agg_part_t chunk = agg_chunk(plan.size, offset);
+                        anvil_mir_vreg_t value = agg_load_part(lower, &chunk, src);
+                        anvil_mir_vreg_t stack_use[] = {value};
+                        ok = value != ANVIL_MIR_NO_VREG &&
+                             anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_CALL_STACK_ARG, ANVIL_MIR_NO_VREG, stack_use, 1, loc.offset + (int64_t)offset);
+                    }
+                }
+                continue;
+            }
+            /* Reference copies and hidden result pointers travel as an
+             * ordinary pointer argument below. */
+        }
+
+        x64_arg_loc_t loc = x64_assign_scalar(desc, &state, x64_type_is_fp(arg->type));
+        if (loc.reg < 0) {
+            anvil_mir_vreg_t stack_use[] = {src};
+            ok = anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_CALL_STACK_ARG, ANVIL_MIR_NO_VREG, stack_use, 1, loc.offset);
             continue;
         }
 
-        int reg = x64_arg_reg_for(desc, arg->type, i, gpr_count, fpr_count);
         anvil_mir_vreg_t fixed_arg = x64_add_vreg_for_type(lower, arg->type);
-        if (fixed_arg == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, fixed_arg, reg)) {
-            ok = false;
-            break;
-        }
-
         anvil_mir_vreg_t copy_uses[] = {src};
-        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed_arg, copy_uses, 1)) {
+        if (fixed_arg == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, fixed_arg, loc.reg) ||
+            !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed_arg, copy_uses, 1)) {
             ok = false;
             break;
         }
         call_uses[num_call_uses++] = fixed_arg;
-        if (desc->is_win64 && is_variadic && x64_type_is_fp(arg->type) && i < (size_t)desc->num_int_arg_regs) {
+        /* Positional ABIs also pass a variadic callee's floating arguments
+         * in the slot's integer register. */
+        if (is_variadic && loc.shadow_reg >= 0) {
             const anvil_mir_vreg_info_t *src_info = anvil_mir_get_vreg_info(lower->mir, src);
             if (!src_info || (src_info->size_bits != 32 && src_info->size_bits != 64)) {
                 ok = false;
                 break;
             }
             anvil_mir_vreg_t duplicate = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, src_info->size_bits, false);
-            if (duplicate == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, duplicate, desc->int_arg_regs[i])) {
-                ok = false;
-                break;
-            }
             anvil_mir_vreg_t duplicate_uses[] = {src};
-            if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_BITCAST, duplicate, duplicate_uses, 1)) {
+            if (duplicate == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, duplicate, loc.shadow_reg) ||
+                !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_BITCAST, duplicate, duplicate_uses, 1)) {
                 ok = false;
                 break;
             }
             call_uses[num_call_uses++] = duplicate;
         }
-        advance_arg_count(arg->type, &gpr_count, &fpr_count);
+    }
+
+    /* The target is loaded last, next to the call. */
+    if (ok && !direct_call) {
+        anvil_mir_vreg_t target_src = lower_value(lower, callee);
+        anvil_mir_vreg_t target_fixed = x64_add_vreg_for_type(lower, callee->type);
+        anvil_mir_vreg_t target_uses[] = {target_src};
+        ok = target_src != ANVIL_MIR_NO_VREG && target_fixed != ANVIL_MIR_NO_VREG &&
+             anvil_mir_set_fixed_reg(lower->mir, target_fixed, desc->indirect_call_reg) &&
+             anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, target_fixed, target_uses, 1);
+        call_uses[0] = target_fixed;
     }
 
     if (!ok) {
         free(call_uses);
         return false;
     }
+    /* SysV variadic calls report the vector registers used, including the
+     * SSE parts of aggregates. */
+    if (is_variadic && !desc->is_win64)
+        vector_args = state.fpr < 8 ? (int)state.fpr : 8;
 
     anvil_mir_vreg_t call_def = ANVIL_MIR_NO_VREG;
-    if (instr->result && !x64_type_is_void(instr->result->type)) {
+    anvil_mir_vreg_t sret_second = ANVIL_MIR_NO_VREG;
+    if (sret_in_regs) {
+        const x64_agg_part_t *p = &sret_plan.parts[0];
+        call_def = anvil_mir_add_vreg_typed(lower->mir, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+        if (call_def == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, call_def, agg_return_reg(desc, &sret_plan, 0))) {
+            free(call_uses);
+            return false;
+        }
+    } else if (instr->result && !x64_type_is_void(instr->result->type)) {
         call_def = x64_add_vreg_for_type(lower, instr->result->type);
         int ret_reg = x64_type_is_fp(instr->result->type) ? desc->fp_ret_reg : desc->int_ret_reg;
         if (call_def == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, call_def, ret_reg)) {
@@ -1034,6 +1178,30 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
     if (!anvil_mir_set_instr_clobbers(lower->mir, call_index, ANVIL_MIR_REG_GPR, desc->call_gpr_clobbers) ||
         !anvil_mir_set_instr_clobbers(lower->mir, call_index, ANVIL_MIR_REG_FPR, desc->call_fpr_clobbers))
         return false;
+
+    if (sret_in_regs) {
+        /* The second result register is defined by the same call. */
+        if (sret_plan.num_parts == 2) {
+            const x64_agg_part_t *p = &sret_plan.parts[1];
+            sret_second = anvil_mir_add_vreg_typed(lower->mir, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+            if (sret_second == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, sret_second, agg_return_reg(desc, &sret_plan, 1)) ||
+                !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT, sret_second, NULL, 0))
+                return false;
+        }
+        anvil_mir_vreg_t results[2] = {call_def, sret_second};
+        for (unsigned part = 0; part < sret_plan.num_parts; part++) {
+            const x64_agg_part_t *p = &sret_plan.parts[part];
+            anvil_mir_vreg_t local = anvil_mir_add_vreg_typed(lower->mir, p->fp ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR, agg_part_bits(p), false);
+            anvil_mir_vreg_t uses[] = {results[part]};
+            if (local == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, local, uses, 1))
+                return false;
+            results[part] = local;
+        }
+        for (unsigned part = 0; part < sret_plan.num_parts; part++)
+            if (!agg_store_part(lower, &sret_plan.parts[part], results[part], sret_object))
+                return false;
+        return true;
+    }
 
     if (instr->result && call_def != ANVIL_MIR_NO_VREG) {
         anvil_mir_vreg_t local_result = x64_add_vreg_for_type(lower, instr->result->type);
@@ -1578,16 +1746,10 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
 
         anvil_mir_vreg_t def = x64_add_vreg_for_type(lower, instr->result->type);
         if (!lower->desc->is_win64) {
-            size_t gpr = 0;
-            size_t fpr = 0;
-            size_t stack = 0;
-            for (size_t parameter = 0; parameter < lower->func->num_params; parameter++) {
-                anvil_type_t *type = lower->func->params[parameter]->type;
-                if (!arg_still_uses_register(lower->desc, type, parameter, gpr, fpr))
-                    stack += (size_t)x64_stack_arg_slot_size(type);
-
-                advance_arg_count(type, &gpr, &fpr);
-            }
+            /* Registers and stack bytes the named parameters used. */
+            size_t gpr = lower->named_args.gpr;
+            size_t fpr = lower->named_args.fpr;
+            size_t stack = (size_t)lower->named_args.stack;
 
             int slot = anvil_mir_add_frame_slot(lower->mir, 208 * 8, 16);
             size_t index = anvil_mir_num_instrs(lower->mir);
@@ -1765,6 +1927,8 @@ anvil_mir_func_t *anvil_x86_64_lower_func_to_mir(anvil_func_t *func)
 
     x64_mir_lower_t lower;
     memset(&lower, 0, sizeof(lower));
+    lower.sret_object = ANVIL_MIR_NO_VREG;
+    lower.sret_pointer = ANVIL_MIR_NO_VREG;
     lower.desc = desc;
     lower.func = func;
     lower.mir = anvil_mir_func_create(func->name);

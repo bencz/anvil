@@ -304,6 +304,7 @@ static bool x64_legal_instr(const anvil_mir_func_t *mir, size_t instr_index, con
     case ANVIL_MIR_OP_BR:
     case ANVIL_MIR_OP_BR_COND:
     case ANVIL_MIR_OP_KEEPALIVE:
+    case ANVIL_MIR_OP_CALL_RESULT:
         return true;
 
     case ANVIL_MIR_OP_INVALID:

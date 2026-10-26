@@ -27,6 +27,15 @@ typedef struct mcc_typedef_entry {
     struct mcc_typedef_entry *next;
 } mcc_typedef_entry_t;
 
+/* Enumerator visible to parse-time integer constant expressions (array
+ * bounds and later enumerators), scoped like typedef names. */
+typedef struct mcc_enum_entry {
+    const char *name;
+    int64_t value;
+    int depth;
+    struct mcc_enum_entry *next;
+} mcc_enum_entry_t;
+
 /* Parser state */
 struct mcc_parser {
     mcc_context_t *ctx;
@@ -46,6 +55,9 @@ struct mcc_parser {
     /* Typedef table (LIFO, head is innermost) + current block depth. */
     mcc_typedef_entry_t *typedefs;
     int typedef_depth;
+
+    /* Enumerators (LIFO, head is innermost), popped with typedef scopes. */
+    mcc_enum_entry_t *enumerators;
 
     /* Error recovery */
     bool panic_mode;

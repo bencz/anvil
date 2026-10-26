@@ -10,6 +10,7 @@
 static void free_unlinked_func(anvil_func_t *func)
 {
     if (!func) return;
+    free(func->block_names);
     free(func->params);
     free(func->name);
     free(func);
@@ -62,6 +63,7 @@ void anvil_func_free_all(anvil_ctx_t *ctx)
     while (func) {
         anvil_func_t *next = func->ctx_next_owned;
         anvil_func_invalidate_cfg(func);
+        free(func->block_names);
         free(func->params);
         free(func->name);
         free(func);
@@ -366,6 +368,78 @@ anvil_block_t *anvil_func_get_entry(anvil_func_t *func)
     return func ? func->entry : NULL;
 }
 
+static size_t block_name_slot(const char *name, size_t capacity)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (const unsigned char *c = (const unsigned char *)name; *c; c++)
+        hash = (hash ^ *c) * UINT64_C(1099511628211);
+    return (size_t)hash & (capacity - 1);
+}
+
+static struct anvil_block_name *block_name_find(const anvil_func_t *func,
+                                                const char *name)
+{
+    if (!func->block_name_capacity) return NULL;
+    for (size_t slot = block_name_slot(name, func->block_name_capacity);
+         func->block_names[slot].name;
+         slot = (slot + 1) & (func->block_name_capacity - 1))
+        if (strcmp(func->block_names[slot].name, name) == 0)
+            return &func->block_names[slot];
+    return NULL;
+}
+
+/* Records `name`, growing the table at half load. */
+static bool block_name_insert(anvil_ctx_t *ctx, anvil_func_t *func,
+                              const char *name)
+{
+    if ((func->block_name_count + 1) * 2 > func->block_name_capacity) {
+        size_t capacity = func->block_name_capacity
+            ? func->block_name_capacity * 2 : 16;
+        if (capacity < func->block_name_capacity ||
+            capacity > SIZE_MAX / sizeof(*func->block_names)) {
+            anvil_set_error(ctx, ANVIL_ERR_NOMEM,
+                            "Block name table overflows size_t");
+            return false;
+        }
+        struct anvil_block_name *slots =
+            anvil_ctx_calloc(ctx, capacity, sizeof(*slots));
+        if (!slots) return false;
+        for (size_t i = 0; i < func->block_name_capacity; i++) {
+            if (!func->block_names[i].name) continue;
+            size_t slot = block_name_slot(func->block_names[i].name, capacity);
+            while (slots[slot].name) slot = (slot + 1) & (capacity - 1);
+            slots[slot] = func->block_names[i];
+        }
+        free(func->block_names);
+        func->block_names = slots;
+        func->block_name_capacity = capacity;
+    }
+    size_t slot = block_name_slot(name, func->block_name_capacity);
+    while (func->block_names[slot].name)
+        slot = (slot + 1) & (func->block_name_capacity - 1);
+    func->block_names[slot].name = name;
+    func->block_names[slot].next_suffix = 1;
+    func->block_name_count++;
+    return true;
+}
+
+/* A copy of `name` that no other block of `func` uses: "name", or
+ * "name.N" with the smallest N not yet tried for this name. */
+static char *unique_block_name(anvil_ctx_t *ctx, anvil_func_t *func,
+                               const char *name)
+{
+    struct anvil_block_name *base = block_name_find(func, name);
+    if (!base) return anvil_ctx_strdup(ctx, name);
+    size_t length = strlen(name);
+    if (length > SIZE_MAX - 24) return NULL;
+    char *candidate = anvil_ctx_malloc(ctx, length + 24);
+    if (!candidate) return NULL;
+    for (;;) {
+        snprintf(candidate, length + 24, "%s.%lu", name, base->next_suffix++);
+        if (!block_name_find(func, candidate)) return candidate;
+    }
+}
+
 anvil_block_t *anvil_block_prepare(anvil_func_t *func, const char *name)
 {
     if (!func) return NULL;
@@ -380,8 +454,9 @@ anvil_block_t *anvil_block_prepare(anvil_func_t *func, const char *name)
     anvil_block_t *block = anvil_ctx_calloc(ctx, 1, sizeof(*block));
     if (!block) return NULL;
     
-    block->name = name ? anvil_ctx_strdup(ctx, name) : NULL;
-    if (name && !block->name) {
+    block->name = name ? unique_block_name(ctx, func, name) : NULL;
+    if (name && (!block->name || !block_name_insert(ctx, func, block->name))) {
+        free(block->name);
         free(block);
         return NULL;
     }

@@ -168,26 +168,33 @@ run_test() {
     fi
 
     # Step 1: Compile with native compiler and run
+    # A test the reference compiler cannot build verifies nothing: fail.
     if ! $CC -std="$std" -o "$native_bin" "$src" -lc 2>/dev/null; then
-        echo -e "${YELLOW}SKIP${NC} (native compile failed)"
-        return 0
+        echo -e "${RED}FAIL${NC} (reference compiler rejected the test)"
+        return 1
     fi
 
     run_with_timeout $TIMEOUT_SEC "$native_bin" > "$native_out" 2>&1
     local native_exit=$?
     if [ $native_exit -eq 124 ]; then
-        echo -e "${YELLOW}SKIP${NC} (native timeout)"
+        echo -e "${RED}FAIL${NC} (reference binary timed out)"
         rm -f "$native_bin"
-        return 0
+        return 1
     fi
     rm -f "$native_bin"
 
-    # Step 2: Compile with MCC (may crash with trace trap but still generate output)
+    # Step 2: Compile with MCC.  Any diagnostic error or crash fails the
+    # test, even if partial assembly was written.
     local mcc_opts="-arch=$MCC_ARCH -std=$std -I$MCC_DIR/includes"
     [ -n "$opt" ] && mcc_opts="$mcc_opts $opt"
+    rm -f "$mcc_asm"
     "$MCC" $mcc_opts -o "$mcc_asm" "$src" 2>/dev/null
-    
-    # Check if assembly was generated (even if MCC crashed after generating it)
+    local mcc_status=$?
+    if [ $mcc_status -ne 0 ]; then
+        echo -e "${RED}FAIL${NC} (MCC exited with status $mcc_status)"
+        rm -f "$mcc_asm"
+        return 1
+    fi
     if [ ! -f "$mcc_asm" ] || [ ! -s "$mcc_asm" ]; then
         echo -e "${RED}FAIL${NC} (MCC produced no output)"
         return 1
@@ -236,7 +243,15 @@ run_all_tests() {
     local test_file="$2"
     
     if [ -n "$test_file" ]; then
-        # Run single test
+        # Run single test; a bare name refers to this directory.
+        if [ ! -f "$test_file" ] && [ -f "$SCRIPT_DIR/$test_file" ]; then
+            test_file="$SCRIPT_DIR/$test_file"
+        fi
+        if [ ! -f "$test_file" ]; then
+            echo "  test file not found: $test_file"
+            ((failed++)) || true
+            return
+        fi
         if run_test "$test_file" "$opt"; then
             ((passed++)) || true
         else

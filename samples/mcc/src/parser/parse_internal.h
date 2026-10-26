@@ -71,8 +71,18 @@ static inline void parse_typedef_scope_leave(mcc_parser_t *p)
     while (p->typedefs && p->typedefs->depth >= p->typedef_depth) {
         p->typedefs = p->typedefs->next;
     }
+    while (p->enumerators && p->enumerators->depth >= p->typedef_depth) {
+        p->enumerators = p->enumerators->next;
+    }
     if (p->typedef_depth > 0) p->typedef_depth--;
 }
+
+/* Evaluates an integer constant expression (C11 6.6p6) at parse time:
+ * literals, enumerators seen so far, sizeof/_Alignof of a type, casts to
+ * integer types and the arithmetic, bitwise, relational, logical and
+ * conditional operators.  Returns false when `expr` is not one. */
+bool parse_eval_int_constant(mcc_parser_t *p, mcc_ast_node_t *expr,
+                             int64_t *value);
 
 /* Parse type specifier */
 mcc_type_t *parse_type_specifier(mcc_parser_t *p);

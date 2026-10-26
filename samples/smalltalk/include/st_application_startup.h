@@ -65,8 +65,8 @@ typedef struct {
 } st_application_startup_context_t;
 
 /* Authenticates the target-native launch/metadata pair, creates the image
- * heap and every required runtime sidecar, bootstraps all String literals and
- * the Transcript stdout stream, and installs the real DNU policy. The launch
+ * heap and every required runtime sidecar, bootstraps all String literals,
+ * publishes every class global, and installs the real DNU policy. The launch
  * descriptor and all linked AOT metadata/code are borrowed image-lifetime
  * storage. Initialization is transactional. */
 st_application_startup_status_t st_application_startup_context_init(

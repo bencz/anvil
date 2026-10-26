@@ -31,6 +31,14 @@ mcc_type_t *sema_analyze_cast_expr(mcc_sema_t *sema, mcc_ast_node_t *expr);
 mcc_type_t *sema_analyze_sizeof_expr(mcc_sema_t *sema, mcc_ast_node_t *expr);
 mcc_type_t *sema_analyze_comma_expr(mcc_sema_t *sema, mcc_ast_node_t *expr);
 
+/* Initializer Resolution (sema_init.c)
+ * Flattens a brace initializer for an object of `type` into the typed leaf
+ * entries of `init` (an entry with a NULL value zeroes its subobject).
+ * Returns the object type, completed when `type` is an array of unknown
+ * size; diagnostics are reported through the context. */
+mcc_type_t *sema_resolve_initializer(mcc_sema_t *sema, mcc_type_t *type,
+                                     mcc_ast_node_t *init);
+
 /* Statement Analysis (sema_stmt.c) */
 bool sema_analyze_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt);
 bool sema_analyze_compound_stmt(mcc_sema_t *sema, mcc_ast_node_t *stmt);

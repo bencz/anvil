@@ -91,7 +91,7 @@ test-unit:
 		-o $(OBJDIR)/context_target_test
 	@$(OBJDIR)/context_target_test
 	@$(CC) $(CFLAGS) $(TESTDIR)/unit/layout.c src/context.c src/c_std.c src/target.c \
-		src/types.c src/codegen/codegen_type.c $(ANVIL_LIB) \
+		src/types.c src/symtab.c $(CODEGEN_SRCS) $(ANVIL_LIB) \
 		-o $(OBJDIR)/layout_test
 	@$(OBJDIR)/layout_test
 	@echo "MCC context/allocator unit tests passed"

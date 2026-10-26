@@ -93,6 +93,27 @@ static bool systemz_emit_global_strings(anvil_strbuf_t *out, const systemz_globa
     return !out->failed;
 }
 
+/* IBM hexadecimal floating point: sign, excess-64 base-16 exponent and a
+ * 24-bit (short) or 56-bit (long) fraction 0.F, rounded to nearest.  HFP
+ * data is emitted as exact hex so it never depends on the assembler's
+ * decimal conversion. */
+static bool systemz_hfp_bits(double value, size_t size, uint64_t *bits)
+{
+    unsigned fraction_bits = size == 4 ? 24 : 56;
+    if (value == 0.0) { *bits = 0; return true; }
+    if (value != value || value - value != 0.0) return false;
+    uint64_t sign = value < 0;
+    double magnitude = value < 0 ? -value : value;
+    int exponent = 64;
+    while (magnitude >= 1.0) { magnitude /= 16.0; exponent++; }
+    while (magnitude < 1.0 / 16.0) { magnitude *= 16.0; exponent--; }
+    uint64_t fraction = (uint64_t)(magnitude * (double)(UINT64_C(1) << fraction_bits) + 0.5);
+    if (fraction >> fraction_bits) { fraction >>= 4; exponent++; }
+    if (exponent < 0 || exponent > 127) return false;
+    *bits = (sign << (size * 8 - 1)) | ((uint64_t)exponent << fraction_bits) | fraction;
+    return true;
+}
+
 static bool systemz_emit_global_initializer(anvil_strbuf_t *out, anvil_type_t *type, anvil_value_t *init, anvil_fp_format_t fp_format, size_t pointer_size, systemz_global_string_pool_t *strings)
 {
     if (!out || !type || type->size == 0)
@@ -111,10 +132,36 @@ static bool systemz_emit_global_initializer(anvil_strbuf_t *out, anvil_type_t *t
         systemz_emit_data_int(out, type->size, type->is_signed ? init->data.i : (int64_t)init->data.u);
         return !out->failed;
     case ANVIL_VAL_CONST_FLOAT:
-        if (type->kind == ANVIL_TYPE_F32) {
-            anvil_strbuf_appendf(out, "DC    %s'%g'\n", fp_format == ANVIL_FP_IEEE754 || fp_format == ANVIL_FP_HFP_IEEE ? "EB" : "E", init->data.f);
+        /* %.9g / %.17g are the shortest decimal forms that round-trip a
+         * binary32 / binary64 value; %g kept only 6 significant digits. */
+        if (fp_format != ANVIL_FP_IEEE754 && fp_format != ANVIL_FP_HFP_IEEE &&
+            (type->kind == ANVIL_TYPE_F32 || type->kind == ANVIL_TYPE_F64)) {
+            uint64_t bits;
+            size_t size = type->kind == ANVIL_TYPE_F32 ? 4 : 8;
+            double value = size == 4 ? (double)(float)init->data.f : init->data.f;
+            if (!systemz_hfp_bits(value, size, &bits))
+                return false;
+            if (size == 4)
+                anvil_strbuf_appendf(out, "DC    XL4'%08X'\n", (unsigned)bits);
+            else
+                anvil_strbuf_appendf(out, "DC    XL8'%016llX'\n", (unsigned long long)bits);
+        } else if (type->kind == ANVIL_TYPE_F32) {
+            float value = (float)init->data.f;
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            /* NaN and infinities have no decimal spelling: emit their bits. */
+            if (value - value != 0.0f)
+                anvil_strbuf_appendf(out, "DC    XL4'%08X'\n", (unsigned)bits);
+            else
+                anvil_strbuf_appendf(out, "DC    EB'%.9g'\n", (double)value);
         } else if (type->kind == ANVIL_TYPE_F64) {
-            anvil_strbuf_appendf(out, "DC    %s'%g'\n", fp_format == ANVIL_FP_IEEE754 || fp_format == ANVIL_FP_HFP_IEEE ? "DB" : "D", init->data.f);
+            double value = init->data.f;
+            uint64_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            if (value - value != 0.0)
+                anvil_strbuf_appendf(out, "DC    XL8'%016llX'\n", (unsigned long long)bits);
+            else
+                anvil_strbuf_appendf(out, "DC    DB'%.17g'\n", value);
         } else
             return false;
         return !out->failed;
@@ -162,6 +209,17 @@ static bool systemz_emit_global_initializer(anvil_strbuf_t *out, anvil_type_t *t
         }
         return true;
     case ANVIL_VAL_CONST_STRUCT: {
+        if (type->kind == ANVIL_TYPE_STRUCT && type->data.struc.complete && type->data.struc.is_union) {
+            /* The chosen member at offset 0, then zeros. */
+            size_t member = init->data.aggregate.union_member;
+            if (init->data.aggregate.num_elements != 1 || member >= type->data.struc.num_fields ||
+                type->data.struc.fields[member]->size > type->size)
+                return false;
+            if (!systemz_emit_global_initializer(out, type->data.struc.fields[member], init->data.aggregate.elements[0], fp_format, pointer_size, strings))
+                return false;
+            systemz_emit_data_zero(out, type->size - type->data.struc.fields[member]->size);
+            return !out->failed;
+        }
         if (type->kind != ANVIL_TYPE_STRUCT || !type->data.struc.complete || init->data.aggregate.num_elements != type->data.struc.num_fields)
             return false;
         size_t cursor = 0;
@@ -216,8 +274,33 @@ bool systemz_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, anvil_fp_for
         }
         if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL || g->value->data.global.linkage == ANVIL_LINK_COMMON)
             anvil_strbuf_appendf(out, "         ENTRY %s\n", upper);
-        anvil_strbuf_appendf(out, "%-8s ", upper);
-        if (!systemz_emit_global_initializer(out, g->value->type, g->value->data.global.init, fp_format, pointer_size, &strings)) {
+
+        /* DC X/C data carries no implicit alignment: align every global to
+         * its type, then define the label at that location. */
+        size_t align = g->value->type->align;
+        if (align >= 8)
+            anvil_strbuf_append(out, "         DS    0D\n");
+        else if (align >= 4)
+            anvil_strbuf_append(out, "         DS    0F\n");
+        else if (align >= 2)
+            anvil_strbuf_append(out, "         DS    0H\n");
+        anvil_strbuf_appendf(out, "%-8s EQU   *\n", upper);
+
+        /* Every data line of an aggregate starts in the operation field,
+         * never in column 1 (the name field). */
+        anvil_strbuf_t data;
+        anvil_strbuf_init(&data);
+        bool emitted = systemz_emit_global_initializer(&data, g->value->type, g->value->data.global.init, fp_format, pointer_size, &strings);
+        const char *cursor = data.data;
+        while (emitted && cursor && *cursor) {
+            const char *end = strchr(cursor, '\n');
+            size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+            anvil_strbuf_appendf(out, "         %.*s\n", (int)length, cursor);
+            cursor = end ? end + 1 : cursor + length;
+        }
+        emitted = emitted && !data.failed;
+        anvil_strbuf_destroy(&data);
+        if (!emitted) {
             free(strings.entries);
             return false;
         }

@@ -951,12 +951,12 @@ static void test_specs_against_real_image(void)
     st_primitive_result_init(&result);
     CHECK(st_primitive_resolve(&result, units, bundle.count, &catalog, NULL) ==
           ST_PRIMITIVE_OK);
-    /* Image contract: 69 pragma uses. The implemented sets cover 34 uses;
+    /* Image contract: 84 pragma uses. The implemented sets cover 34 uses;
      * IntNotEquals is a real core handler not currently named by the image.
-     * The remaining 35 uses stay hard missing-implementation diagnostics. */
+     * The remaining 50 uses stay hard missing-implementation diagnostics. */
     CHECK(result.binding_count == 34u);
-    CHECK(result.diagnostic_count == 35u);
-    CHECK(result.binding_count + result.diagnostic_count == 69u);
+    CHECK(result.diagnostic_count == 50u);
+    CHECK(result.binding_count + result.diagnostic_count == 84u);
     for (index = 0u; index < result.diagnostic_count; ++index)
         CHECK(result.diagnostics[index].code ==
               ST_PRIMITIVE_DIAG_MISSING_IMPLEMENTATION);

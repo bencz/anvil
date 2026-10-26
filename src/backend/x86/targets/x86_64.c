@@ -103,5 +103,6 @@ const anvil_backend_ops_t anvil_backend_x86_64 = {
     .build_va_copy = anvil_x64_build_va_copy,
     .build_va_copy_into = anvil_x64_build_va_copy_into,
     .atomic_is_lock_free = x64_atomic_is_lock_free,
-    .vector_operation_cost = x64_vector_operation_cost
+    .vector_operation_cost = x64_vector_operation_cost,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
 };

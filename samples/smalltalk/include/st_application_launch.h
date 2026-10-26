@@ -8,8 +8,9 @@ extern "C" {
 #endif
 
 #define ST_APPLICATION_LAUNCH_MAGIC UINT64_C(0x414e5653544c4348)
-#define ST_APPLICATION_LAUNCH_ABI_VERSION UINT32_C(1)
-#define ST_APPLICATION_LAUNCH_RESERVED_COUNT 8u
+#define ST_APPLICATION_LAUNCH_ABI_VERSION UINT32_C(2)
+/* Keeps the descriptor a whole number of 8-byte words (no tail padding). */
+#define ST_APPLICATION_LAUNCH_RESERVED_COUNT 9u
 
 /* Target-native, immutable launch contract.  Every identity is resolved and
  * cross-checked by the AOT product compiler.  Startup performs no class,
@@ -31,8 +32,6 @@ typedef struct {
     uint32_t entry_default_shape_id;
     uint32_t entry_selector_id;
     uint32_t entry_arity;
-    uint32_t transcript_semantic_external_id;
-    uint32_t transcript_runtime_index;
 
     uint32_t nil_class_id;
     uint32_t false_class_id;
@@ -63,9 +62,6 @@ typedef struct {
     uint32_t string_uint8_shape_id;
     uint32_t string_uint16_shape_id;
     uint32_t string_uint32_shape_id;
-    uint32_t external_stream_class_id;
-    uint32_t external_stream_shape_id;
-    uint32_t external_stream_descriptor_slot;
 
     uint32_t block_class_id;
     uint32_t block_shape_id;
@@ -109,8 +105,6 @@ typedef struct {
     st_class_graph_id_t symbol_entity_id;
     st_class_graph_id_t compiled_method_entity_id;
     st_class_graph_id_t string_entity_id;
-    st_class_graph_id_t external_stream_entity_id;
-    uint32_t external_stream_descriptor_slot;
     st_class_graph_id_t block_entity_id;
     st_class_graph_id_t closure_cell_entity_id;
     st_class_graph_id_t message_entity_id;
@@ -120,7 +114,6 @@ typedef struct {
     st_class_graph_id_t large_positive_entity_id;
     st_class_graph_id_t large_negative_entity_id;
     st_class_graph_id_t boxed_float64_entity_id;
-    uint32_t transcript_runtime_index;
 } st_application_launch_plan_t;
 
 typedef enum {
