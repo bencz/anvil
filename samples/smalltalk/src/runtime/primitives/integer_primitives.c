@@ -1,4 +1,5 @@
 #include "st_integer_primitives.h"
+#include "st_fatal.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -247,10 +248,12 @@ static st_integer_primitive_status_t publish_magnitude(
 
     count = normalized_count(limbs, count);
     if (magnitude_fits_small(negative, limbs, count, &small)) {
-        if (!st_value_from_small_integer(small, result_out)) abort();
+        if (!st_value_from_small_integer(small, result_out))
+            st_fatal("integer primitive", "a SmallInteger-range magnitude cannot be encoded");
         return ST_INTEGER_PRIMITIVE_OK;
     }
-    if (count == 0u) abort();
+    if (count == 0u)
+        st_fatal("integer primitive", "zero magnitude reached LargeInteger construction");
 
     class_id = negative
         ? context->large_negative_class_id
@@ -263,14 +266,15 @@ static st_integer_primitive_status_t publish_magnitude(
         ST_HEADER_IMMUTABLE, &result);
     if (heap_status != ST_HEAP_OK) return map_heap_status(heap_status);
     heap_status = st_heap_object_view(context->heap, result, &view);
-    if (heap_status != ST_HEAP_OK
-            || view.class_descriptor->class_id != class_id
+    if (heap_status != ST_HEAP_OK)
+        st_fatal("integer primitive: new LargeInteger view", st_heap_status_string(heap_status));
+    if (view.class_descriptor->class_id != class_id
             || view.shape_descriptor->shape_id != shape_id
             || view.shape_descriptor->fixed_word_count != 1u
             || view.shape_descriptor->indexed_format != ST_INDEXED_UINT32
             || view.indexed_length != count || view.indexed_capacity != count
             || view.fixed_words == NULL || view.indexed_elements == NULL)
-        abort();
+        st_fatal("integer primitive", "new LargeInteger has an unexpected class or shape");
 
     metadata = ST_LARGE_INTEGER_METADATA_MAGIC
         | (negative ? ST_LARGE_INTEGER_NEGATIVE : 0u);
@@ -458,7 +462,8 @@ static size_t subtract_magnitudes(
         result[index] = (uint32_t)(minuend - subtrahend);
         borrow = minuend < subtrahend;
     }
-    if (borrow != 0u) abort();
+    if (borrow != 0u)
+        st_fatal("integer primitive", "magnitude subtraction underflowed (left < right)");
     return normalized_count(result, left_count);
 }
 
@@ -641,7 +646,8 @@ static void subtract_shifted(
         left[index] = (uint32_t)(minuend - subtrahend);
         borrow = minuend < subtrahend;
     }
-    if (borrow != 0u) abort();
+    if (borrow != 0u)
+        st_fatal("integer primitive", "shifted magnitude subtraction underflowed during division");
 }
 
 static st_integer_primitive_status_t divide_magnitudes(
@@ -757,7 +763,8 @@ static st_integer_primitive_status_t increment_magnitude(
     uint64_t carry = 1u;
 
     if (limbs == NULL) {
-        if (count != 0u) abort();
+        if (count != 0u)
+            st_fatal("integer primitive", "increment of a null magnitude with a nonzero count");
         limbs = scratch_allocate(context, 1u);
         if (limbs == NULL)
             return ST_INTEGER_PRIMITIVE_ERR_OUT_OF_MEMORY;
@@ -893,7 +900,8 @@ st_integer_primitive_status_t st_integer_compare(
             left.limbs, left.count, right.limbs, right.count);
         if (left.negative) comparison = -comparison;
     }
-    if (!st_value_from_small_integer(comparison, result_out)) abort();
+    if (!st_value_from_small_integer(comparison, result_out))
+        st_fatal("integer primitive", "comparison result cannot be encoded as a SmallInteger");
     return ST_INTEGER_PRIMITIVE_OK;
 }
 
@@ -1168,7 +1176,8 @@ st_integer_primitive_status_t st_integer_hash(
     hash = (hash ^ (hash >> 30u)) * UINT64_C(0xbf58476d1ce4e5b9);
     hash = (hash ^ (hash >> 27u)) * UINT64_C(0x94d049bb133111eb);
     hash = (hash ^ (hash >> 31u)) & (uint64_t)ST_SMALL_INTEGER_MAX;
-    if (!st_value_from_small_integer((int64_t)hash, result_out)) abort();
+    if (!st_value_from_small_integer((int64_t)hash, result_out))
+        st_fatal("integer primitive", "hash result cannot be encoded as a SmallInteger");
     return ST_INTEGER_PRIMITIVE_OK;
 }
 
@@ -1244,7 +1253,7 @@ st_integer_primitive_status_t st_integer_from_binary64_bits(
                 && remainder >= (UINT64_C(1) << (right_shift - 1u));
             break;
         default:
-            abort();
+            st_fatal_code("integer primitive", "unreachable rounding mode kind", (uint64_t)rounding);
         }
     }
     if (increment) quotient++;

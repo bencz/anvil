@@ -24,7 +24,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_X86_64] = {
         .arch = ANVIL_ARCH_X86_64,
@@ -39,7 +42,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_S370] = {
         .arch = ANVIL_ARCH_S370,
@@ -54,7 +60,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_HFP,           /* IBM Hexadecimal FP only */
         .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP),
+        .ieee_features = 0,
+        .access_fault_granularity = 2048 /* 2 KB storage-key blocks */
     },
     [ANVIL_ARCH_S370_XA] = {
         .arch = ANVIL_ARCH_S370_XA,
@@ -69,7 +78,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_HFP,           /* IBM Hexadecimal FP only */
         .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP),
+        .ieee_features = 0,
+        .access_fault_granularity = 2048 /* 2 KB storage-key blocks */
     },
     [ANVIL_ARCH_S390] = {
         .arch = ANVIL_ARCH_S390,
@@ -84,7 +96,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_HFP,           /* HFP default, some models have IEEE */
         .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = ANVIL_FEATURE_ZARCH_BFP,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_ZARCH] = {
         .arch = ANVIL_ARCH_ZARCH,
@@ -99,7 +114,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_HFP_IEEE,      /* Both HFP and IEEE 754 supported */
         .abi = ANVIL_ABI_MVS,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP_IEEE),
+        .ieee_features = ANVIL_FEATURE_ZARCH_BFP,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_PPC32] = {
         .arch = ANVIL_ARCH_PPC32,
@@ -114,7 +132,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_PPC64] = {
         .arch = ANVIL_ARCH_PPC64,
@@ -129,7 +150,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_PPC64LE] = {
         .arch = ANVIL_ARCH_PPC64LE,
@@ -144,7 +168,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     },
     [ANVIL_ARCH_ARM64] = {
         .arch = ANVIL_ARCH_ARM64,
@@ -159,7 +186,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .fp_format = ANVIL_FP_IEEE754,
         .abi = ANVIL_ABI_SYSV,               /* Default to Linux, can be changed to DARWIN */
         .has_condition_codes = true,
-        .has_delay_slots = false
+        .has_delay_slots = false,
+        .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
+        .ieee_features = 0,
+        .access_fault_granularity = 4096 /* 4 KB pages */
     }
 };
 
@@ -517,11 +547,16 @@ anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi)
     }
     if (abi == ANVIL_ABI_DEFAULT)
         abi = arch_info_table[ctx->arch].abi;
-
     if (ctx->target_frozen && ctx->abi != abi) {
         anvil_set_error(ctx, ANVIL_ERR_INVALID_OP,
                         "Target ABI is frozen by existing IR/types");
         return ANVIL_ERR_INVALID_OP;
+    }
+    if (ctx->backend && ctx->backend->ops && ctx->backend->ops->abi_support &&
+        !(ctx->backend->ops->abi_support & (1u << abi))) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "The %s backend does not implement the requested ABI",
+                        ctx->backend->ops->name ? ctx->backend->ops->name : "selected");
+        return ANVIL_ERR_INVALID_ARG;
     }
     ctx->abi = abi;
     ctx->data_layout = data_layout_for(ctx->arch, abi);
@@ -533,6 +568,77 @@ anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx)
 {
     if (!ctx) return ANVIL_ABI_DEFAULT;
     return ctx->abi;
+}
+
+anvil_error_t anvil_ctx_set_reloc_model(anvil_ctx_t *ctx, anvil_reloc_model_t model)
+{
+    if (!ctx) return ANVIL_ERR_INVALID_ARG;
+    if ((unsigned)model > (unsigned)ANVIL_RELOC_PIC)
+        return ANVIL_ERR_INVALID_ARG;
+    if (!ctx->target_configured) {
+        anvil_set_error(ctx, ANVIL_ERR_NO_TARGET, "Select a target before setting the relocation model");
+        return ANVIL_ERR_NO_TARGET;
+    }
+    const anvil_backend_ops_t *ops = ctx->backend ? ctx->backend->ops : NULL;
+    if (model != ANVIL_RELOC_DEFAULT && model != ANVIL_RELOC_STATIC &&
+        (!ops || !ops->reloc_model_supported || !ops->reloc_model_supported(ctx->backend, model))) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "The %s backend cannot produce the requested relocation model for this ABI",
+                        ops && ops->name ? ops->name : "selected");
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    ctx->reloc_model = model;
+    return ANVIL_OK;
+}
+
+anvil_reloc_model_t anvil_ctx_get_reloc_model(anvil_ctx_t *ctx)
+{
+    if (!ctx) return ANVIL_RELOC_STATIC;
+    if (ctx->reloc_model != ANVIL_RELOC_DEFAULT)
+        return ctx->reloc_model;
+    const anvil_backend_ops_t *ops = ctx->backend ? ctx->backend->ops : NULL;
+    return ops && ops->default_reloc_model ? ops->default_reloc_model(ctx->backend) : ANVIL_RELOC_STATIC;
+}
+
+bool anvil_symbol_uses_got(anvil_ctx_t *ctx, const anvil_value_t *symbol)
+{
+    if (!ctx || !symbol)
+        return false;
+    if (symbol->kind == ANVIL_VAL_CONST_SYMBOL_ADDR)
+        return anvil_symbol_uses_got(ctx, symbol->data.reloc.symbol);
+    anvil_linkage_t linkage;
+    bool defined;
+    if (symbol->kind == ANVIL_VAL_GLOBAL) {
+        linkage = symbol->data.global.linkage;
+        defined = !symbol->data.global.is_declaration;
+    } else if (symbol->kind == ANVIL_VAL_FUNC && symbol->data.func) {
+        linkage = symbol->data.func->linkage;
+        defined = !symbol->data.func->is_declaration;
+    } else {
+        return false;
+    }
+    if (linkage == ANVIL_LINK_INTERNAL)
+        return false;
+    switch (anvil_ctx_get_reloc_model(ctx)) {
+    case ANVIL_RELOC_PIC:
+        return true;
+    case ANVIL_RELOC_PIE:
+        return !defined || linkage == ANVIL_LINK_WEAK;
+    default:
+        return false;
+    }
+}
+
+/* Why `format` is not usable on the selected architecture with `features`,
+ * or NULL: the architecture descriptor lists the formats it offers and the
+ * CPU features the IEEE formats need (S/390 BFP arrived with the G5). */
+static const char *anvil_fp_format_problem(anvil_ctx_t *ctx, anvil_fp_format_t format, anvil_cpu_features_t features)
+{
+    const anvil_arch_info_t *info = &arch_info_table[ctx->arch];
+    if (!(info->fp_formats & ANVIL_FP_FORMAT_BIT(format)))
+        return "the architecture does not offer this floating-point format";
+    if ((format == ANVIL_FP_IEEE754 || format == ANVIL_FP_HFP_IEEE) && (features & info->ieee_features) != info->ieee_features)
+        return "IEEE floating point needs a CPU model with binary floating point";
+    return NULL;
 }
 
 anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_format)
@@ -548,53 +654,12 @@ anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_for
         return ANVIL_ERR_NO_TARGET;
     }
     
-    /* Validate FP format for the current architecture */
-    const anvil_arch_info_t *arch_info = &arch_info_table[ctx->arch];
-    
-    switch (ctx->arch) {
-        case ANVIL_ARCH_S370:
-        case ANVIL_ARCH_S370_XA:
-            /* S/370 and S/370-XA only support HFP */
-            if (fp_format != ANVIL_FP_HFP) {
-                anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
-                    "Architecture %s only supports HFP floating-point format",
-                    arch_info->name);
-                return ANVIL_ERR_INVALID_ARG;
-            }
-            break;
-            
-        case ANVIL_ARCH_S390:
-            /* S/390 supports HFP (default) and IEEE on some models */
-            if (fp_format != ANVIL_FP_HFP && fp_format != ANVIL_FP_IEEE754) {
-                anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
-                    "Architecture %s supports HFP or IEEE754 floating-point format",
-                    arch_info->name);
-                return ANVIL_ERR_INVALID_ARG;
-            }
-            break;
-            
-        case ANVIL_ARCH_ZARCH:
-            /* z/Architecture supports both HFP and IEEE */
-            if (fp_format != ANVIL_FP_HFP && fp_format != ANVIL_FP_IEEE754 && 
-                fp_format != ANVIL_FP_HFP_IEEE) {
-                anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
-                    "Architecture %s supports HFP, IEEE754, or HFP_IEEE floating-point format",
-                    arch_info->name);
-                return ANVIL_ERR_INVALID_ARG;
-            }
-            break;
-            
-        default:
-            /* Other architectures only support IEEE 754 */
-            if (fp_format != ANVIL_FP_IEEE754) {
-                anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
-                    "Architecture %s only supports IEEE754 floating-point format",
-                    arch_info->name);
-                return ANVIL_ERR_INVALID_ARG;
-            }
-            break;
+    const char *problem = anvil_fp_format_problem(ctx, fp_format, ctx->cpu_features);
+    if (problem) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "%s", problem);
+        return ANVIL_ERR_INVALID_ARG;
     }
-    
+
     ctx->fp_format = fp_format;
     return ANVIL_OK;
 }
@@ -782,13 +847,24 @@ anvil_error_t anvil_ctx_set_cpu(anvil_ctx_t *ctx, anvil_cpu_model_t cpu)
 
     /* Validate CPU model is compatible with current architecture. */
     anvil_arch_t model_arch = anvil_cpu_table_info_arch(info);
-    if (info && model_arch != ANVIL_ARCH_COUNT && model_arch != ctx->arch) {
+    if (info && model_arch != ANVIL_ARCH_COUNT && !anvil_cpu_arch_runs(model_arch, ctx->arch)) {
         anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
             "CPU model '%s' is not compatible with current architecture",
             anvil_cpu_table_info_name(info));
         return ANVIL_ERR_INVALID_ARG;
     }
 
+    /* The generic model is the architecture's baseline, not "no features"
+     * (x86-64 keeps SSE2). */
+    if (cpu == ANVIL_CPU_GENERIC)
+        cpu = anvil_arch_default_cpu(ctx->arch);
+
+    /* The selected floating-point format must stay usable. */
+    const char *problem = anvil_fp_format_problem(ctx, ctx->fp_format, anvil_cpu_model_features(cpu));
+    if (problem) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "CPU model '%s': %s", anvil_cpu_table_info_name(anvil_cpu_table_find(cpu)), problem);
+        return ANVIL_ERR_INVALID_ARG;
+    }
     ctx->cpu_model = cpu;
     anvil_update_cpu_features(ctx);
 
@@ -820,6 +896,11 @@ anvil_error_t anvil_ctx_enable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t fe
         anvil_set_error(ctx, ANVIL_ERR_NO_TARGET,
                         "Select a target before enabling CPU features");
         return ANVIL_ERR_NO_TARGET;
+    }
+    /* Feature bits are per architecture family: reject another family's. */
+    if (feature & ~anvil_cpu_arch_feature_mask(ctx->arch)) {
+        anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG, "CPU feature is not defined for the current architecture");
+        return ANVIL_ERR_INVALID_ARG;
     }
     
     ctx->features_enabled |= feature;

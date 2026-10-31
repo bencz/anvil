@@ -49,7 +49,7 @@ anvil_value_t *codegen_abi_temporary(mcc_codegen_t *cg, mcc_type_t *type, size_t
         return NULL;
 
     if (alignment <= anvil_type_align(object))
-        return anvil_build_alloca(cg->anvil_ctx, object, "abi.object");
+        return codegen_entry_alloca(cg, object, "abi.object");
 
     size_t size = anvil_type_size(object);
     if (!alignment || (alignment & (alignment - 1)) || size > SIZE_MAX - alignment + 1)
@@ -58,7 +58,7 @@ anvil_value_t *codegen_abi_temporary(mcc_codegen_t *cg, mcc_type_t *type, size_t
     /* Keep the complete rounded range inside a fixed allocation. This also
      * works when the object's natural alignment is smaller than the ABI's. */
     anvil_type_t *storage = anvil_type_array(cg->anvil_ctx, anvil_type_u8(cg->anvil_ctx), size + alignment - 1);
-    anvil_value_t *pointer = anvil_build_alloca(cg->anvil_ctx, storage, "abi.storage");
+    anvil_value_t *pointer = codegen_entry_alloca(cg, storage, "abi.storage");
     const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
     anvil_type_t *integer = arch->ptr_size == 4 ? anvil_type_u32(cg->anvil_ctx) : anvil_type_u64(cg->anvil_ctx);
     anvil_value_t *address = anvil_build_ptrtoint(cg->anvil_ctx, pointer, integer, "abi.address");

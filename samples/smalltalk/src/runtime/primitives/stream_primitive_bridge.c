@@ -1,4 +1,5 @@
 #include "st_stream_primitive_bridge.h"
+#include "st_fatal.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -33,8 +34,7 @@ uint32_t st_aot_stream_write_primitive_execute(
 _Noreturn st_value_t st_aot_stream_primitive_contract_violation(
     uint32_t status, uint32_t detail, const StFrame *frame)
 {
-    (void)status;
-    (void)detail;
     (void)frame;
-    abort();
+    st_fatal_code("stream primitive contract violation",
+                          st_stream_primitive_status_string((st_stream_primitive_status_t)status), detail);
 }

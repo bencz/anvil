@@ -88,6 +88,16 @@ the stable frame base; R13 advances through storage assumed to be owned by the
 caller. R1 points to an address list. The emitter marks and strips a terminal bit
 on parameter addresses, including its private 64-bit list representation.
 
+Aggregates and 64-bit integers follow `systemz_abi_ops_t`. A BYVAL argument's
+list entry addresses a copy made for that call; an SRET function returns the
+result address in R15. On the 31-bit targets a 64-bit integer argument takes
+two consecutive list entries (high word first, the words contiguous in the
+value area) and a 64-bit result returns in R15 (high) and R0 (low), the
+epilogue then restoring from R1. Multiplication, division, variable shifts and
+floating conversions call the libgcc-named helpers (`__MULDI3`, `__DIVDI3`,
+`__ASHLDI3`, `__FLOATDIDF`, ...) in this same linkage; the run-time library must
+provide them, in HFP form for HFP targets.
+
 There is no storage acquisition, arena capacity check or stack-growth runtime.
 The generated prologue assumes more storage than the minimum caller-provided
 save area. It must not be advertised as general MVS, Metal C, LE or GCCMVS
@@ -112,15 +122,33 @@ together; renaming the existing layout would be incorrect. See [IBM: If starting
 
 Further open items found during source review:
 
-- FPR allocation currently permits registers without a complete call-clobber
-  and preservation policy. z/OS normally treats FPR8-FPR15 as nonvolatile;
-  language options can affect the contract. See [IBM AFP conventions](https://www.ibm.com/docs/en/cobol-zos/6.5.0?topic=ecco-afp).
-- R0 occurs as a base register in emitted memory operands. Base-field zero has
-  special ISA semantics; these sequences require instruction-level correction
-  and execution tests, not only assembly substring checks. See [IBM's register-zero addressing rules](https://www.ibm.com/docs/en/hla-and-tf/1.6.0?topic=instruction-using-general-register-zero).
-- Long functions, literal reach, HLASM continuation fields, symbol visibility,
-  external relocations and the selected character encoding need assembler and
-  binder validation. Uppercasing a name is not a universal ABI requirement.
+- FPRs: every CALL clobbers all FPRs (the MVS linkage saves none), and the
+  pools depend on the CPU model: S/370 allocates F2 with F4/F6 as spill
+  scratch; BFP-capable models allocate F1-F13 with F14/F15 as scratch. z/OS
+  normally treats FPR8-FPR15 as nonvolatile; language options can affect the
+  contract. See [IBM AFP conventions](https://www.ibm.com/docs/en/cobol-zos/6.5.0?topic=ecco-afp).
+- Emitted memory operands and shift counts never use R0 as a base register
+  (base-field zero means no base; see [IBM's register-zero addressing rules](https://www.ibm.com/docs/en/hla-and-tf/1.6.0?topic=instruction-using-general-register-zero)):
+  parameter addresses go through R14, dynamic allocation through R1. This is
+  checked by assembly substring tests only; execution tests are still missing.
+- Base register: with the relative-branch facility (S/390 G2 and later,
+  `ANVIL_FEATURE_ZARCH_IMMREL`) R12 addresses the function's literal pool
+  (`LARL R12,name#LIT` on z/Architecture; on S/390 a `BRAS` over an `AL4`
+  constant), so a function may be as long as `J`/`BRC` reach (64 KB). On
+  S/370 and S/370-XA a function that fits one base register keeps the
+  entry-point base; a longer one bases R12 on its literal pool (`BAL
+  R12,12(,R15)` over an `AL4` constant at entry) and every branch loads its
+  target from the pool and branches through R15 (`BCR`). The pool itself
+  must stay under 4 KB; a function whose pool would not is refused.
+- Names: one deterministic mapping for every module. A lowercase name of at
+  most 8 characters is uppercased; any other name keeps up to three leading
+  characters, then `@` and a hash (8 characters in all, as OBJ externals
+  require). `ENTRY`/`EXTRN` of a renamed symbol add `ALIAS C'source-name'`
+  (continued in column 16 when it passes column 71). Internal labels use `#`
+  (`NAME#B3`, `NAME#LIT`), which no mapped name contains.
+- External relocations and the selected character encoding still need
+  assembler and binder validation; no HLASM-compatible assembler is part of
+  the test suite.
 - The 64-bit terminal-bit parameter-list convention, aggregate arguments,
   register returns and cross-language calls have not been certified against a
   chosen native compiler/runtime contract.

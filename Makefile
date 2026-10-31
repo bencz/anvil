@@ -45,6 +45,18 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/gnu_data.c \
 	$(SRC_DIR)/backend/common/abi_layout.c \
 	$(SRC_DIR)/backend/common/aggregate_mir.c \
+	$(SRC_DIR)/backend/common/wide_mir.c \
+	$(SRC_DIR)/backend/common/mir_isel.c \
+	$(SRC_DIR)/backend/common/narrow_mir.c \
+	$(SRC_DIR)/backend/common/parallel_move.c \
+	$(SRC_DIR)/backend/common/va_cursor.c \
+	$(SRC_DIR)/backend/common/ir_lower.c \
+	$(SRC_DIR)/backend/common/vector_isa.c \
+	$(SRC_DIR)/backend/x86/x86_64_vector.c \
+	$(SRC_DIR)/backend/x86/x86_32_scalar.c \
+	$(SRC_DIR)/backend/arm64/arm64_vector.c \
+	$(SRC_DIR)/backend/ppc/ppc_vector.c \
+	$(SRC_DIR)/backend/common/obj_format.c \
 	$(SRC_DIR)/backend/x86/targets/x86_32.c \
 	$(SRC_DIR)/backend/x86/targets/x86_64.c \
 	$(SRC_DIR)/backend/x86/x86_32_helpers.c \
@@ -56,10 +68,14 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/x86/x86_32_codegen.c \
 	$(SRC_DIR)/backend/x86/x86_64_codegen.c \
 	$(SRC_DIR)/backend/x86/abi/x86_32_abi.c \
+	$(SRC_DIR)/backend/x86/abi/x86_32_varargs.c \
 	$(SRC_DIR)/backend/x86/abi/x86_64_abi.c \
 	$(SRC_DIR)/backend/x86/abi/x86_64_varargs.c \
 	$(SRC_DIR)/backend/x86/asm/gas32.c \
+	$(SRC_DIR)/backend/x86/asm/gas32_sse2.c \
+	$(SRC_DIR)/backend/x86/asm/gas32_x87.c \
 	$(SRC_DIR)/backend/x86/asm/gas64.c \
+	$(SRC_DIR)/backend/x86/asm/x86_gas.c \
 	$(SRC_DIR)/backend/systemz/systemz_target.c \
 	$(SRC_DIR)/backend/systemz/systemz_lower.c \
 	$(SRC_DIR)/backend/systemz/systemz_legal.c \
@@ -83,13 +99,15 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/ppc/abi/elfv1.c \
 	$(SRC_DIR)/backend/ppc/abi/elfv2.c \
 	$(SRC_DIR)/backend/ppc/abi/elf64_args.c \
+	$(SRC_DIR)/backend/ppc/abi/varargs.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc32.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc64.c \
 	$(SRC_DIR)/backend/ppc/targets/ppc64le.c \
 	$(SRC_DIR)/backend/arm64/arm64.c \
 	$(SRC_DIR)/backend/arm64/arm64_helpers.c \
-	$(SRC_DIR)/backend/arm64/arm64_varargs.c \
 	$(SRC_DIR)/backend/arm64/abi/aapcs64.c \
+	$(SRC_DIR)/backend/arm64/abi/linux.c \
+	$(SRC_DIR)/backend/arm64/abi/darwin.c \
 	$(SRC_DIR)/backend/arm64/arm64_mir.c
 
 ANALYSIS_SRCS = \
@@ -104,6 +122,9 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/inline.c \
 	$(SRC_DIR)/opt/unroll.c \
 	$(SRC_DIR)/opt/vectorize.c \
+	$(SRC_DIR)/opt/loop_vectorize.c \
+	$(SRC_DIR)/opt/loop_strength.c \
+	$(SRC_DIR)/opt/tail_recursion.c \
 	$(SRC_DIR)/opt/mem2reg.c \
 	$(SRC_DIR)/opt/sroa.c \
 	$(SRC_DIR)/opt/licm.c \
@@ -165,6 +186,8 @@ TESTS = \
 	$(BUILD_DIR)/tests/unroll_regression \
 	$(BUILD_DIR)/tests/interval_split_regression \
 	$(BUILD_DIR)/tests/vector_regression \
+	$(BUILD_DIR)/tests/loop_vectorize_regression \
+	$(BUILD_DIR)/tests/scalar_operation_regression \
 	$(BUILD_DIR)/tests/loop_preheader_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \
@@ -173,12 +196,17 @@ TESTS = \
 	$(BUILD_DIR)/tests/optimizer_regression \
 	$(BUILD_DIR)/tests/machine_regalloc_regression \
 	$(BUILD_DIR)/tests/arm64_mir_lowering_regression \
+	$(BUILD_DIR)/tests/arm64_abi_regression \
 	$(BUILD_DIR)/tests/x86_64_mir_lowering_regression \
 	$(BUILD_DIR)/tests/x86_mir_lowering_regression \
 	$(BUILD_DIR)/tests/ppc_mir_lowering_regression \
 	$(BUILD_DIR)/tests/backend_dispatch_regression \
 	$(BUILD_DIR)/tests/mainframe_mir_lowering_regression \
 	$(BUILD_DIR)/tests/fcmp_backend_regression \
+	$(BUILD_DIR)/tests/isel_immediates_regression \
+	$(BUILD_DIR)/tests/narrow_int_regression \
+	$(BUILD_DIR)/tests/reloc_model_regression \
+	$(BUILD_DIR)/tests/variadic_aggregate_regression \
 	$(BUILD_DIR)/tests/typed_gep_backend_regression \
 	$(BUILD_DIR)/tests/struct_gep_global_regression \
 	$(BUILD_DIR)/tests/block_name_regression \
@@ -270,7 +298,7 @@ tests: lib $(TESTS) $(BUILD_DIR)/tests/win64_abi_codegen $(BUILD_DIR)/tests/fcmp
 	done
 	@BUILD_DIR=$(BUILD_DIR) bash tests/run_win64_abi.sh
 	@BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
-	@BUILD_DIR=$(BUILD_DIR) bash tests/run_aggregate_abi.sh
+	@bash tests/run_aggregate_abi.sh $(BUILD_DIR)
 
 # Build every object in an isolated tree so sanitizer flags cannot be mixed
 # with the normal archive. LeakSanitizer is disabled here because it cannot
@@ -298,7 +326,7 @@ test-fcmp-i1-runtime: $(BUILD_DIR)/tests/fcmp_i1_runtime_codegen
 	BUILD_DIR=$(BUILD_DIR) bash tests/run_fcmp_i1_runtime.sh
 
 test-aggregate-abi: $(BUILD_DIR)/tests/aggregate_abi_codegen
-	BUILD_DIR=$(BUILD_DIR) bash tests/run_aggregate_abi.sh
+	bash tests/run_aggregate_abi.sh $(BUILD_DIR)
 
 $(BUILD_DIR)/tests/%: tests/%.c tests/platform/$(HOST_PLATFORM)/host.c tests/platform/host.h $(LIB_PATH)
 	@mkdir -p $(dir $@)

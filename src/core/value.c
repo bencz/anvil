@@ -124,6 +124,7 @@ void anvil_ir_free_all(anvil_ctx_t *ctx)
         free(instr->operands);
         free(instr->phi_blocks);
         free(instr->switch_blocks);
+        free(instr->call_arg_attrs);
         free(instr);
         instr = next;
     }
@@ -174,6 +175,7 @@ void anvil_instr_discard_new(anvil_ctx_t *ctx, anvil_instr_t *instr)
     free(instr->operands);
     free(instr->phi_blocks);
     free(instr->switch_blocks);
+    free(instr->call_arg_attrs);
     free(instr);
 }
 
@@ -258,6 +260,14 @@ bool anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr)
         anvil_set_error(ctx, ANVIL_ERR_INVALID_OP,
                         "Instruction is already inserted");
         return false;
+    }
+    for (size_t i = 0; i < instr->num_operands; i++) {
+        if (!anvil_sem_global_operand_allowed(instr->operands[i], instr->op, i)) {
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE,
+                            "Global %s used as a value: a global names its storage; take its address with a GEP",
+                            instr->operands[i]->name ? instr->operands[i]->name : "<anon>");
+            return false;
+        }
     }
     
     anvil_block_t *block = ctx->insert_block;
@@ -1262,4 +1272,50 @@ double anvil_const_float_value(anvil_value_t *val)
 {
     if (!anvil_value_is_const_float(val)) return 0.0;
     return val->data.f;
+}
+
+bool anvil_global_set_constant(anvil_value_t *global, bool constant)
+{
+    if (!global || global->kind != ANVIL_VAL_GLOBAL || !global->owner_module) {
+        if (global && global->owner_ctx)
+            anvil_set_error(global->owner_ctx, ANVIL_ERR_INVALID_ARG, "Only a live global can be marked constant");
+        return false;
+    }
+    if (constant && global->data.global.is_declaration) {
+        anvil_set_error(global->owner_ctx, ANVIL_ERR_INVALID_OP, "A global declaration cannot be marked constant; define it first");
+        return false;
+    }
+    global->data.global.is_constant = constant;
+    return true;
+}
+
+bool anvil_global_is_constant(const anvil_value_t *global)
+{
+    return global && global->kind == ANVIL_VAL_GLOBAL && global->data.global.is_constant;
+}
+
+bool anvil_instr_copy_attributes(anvil_instr_t *copy, const anvil_instr_t *original)
+{
+    copy->fcmp_pred = original->fcmp_pred;
+    copy->call_cc = original->call_cc;
+    copy->memory_access = original->memory_access;
+    copy->atomic = original->atomic;
+    copy->aux_type = original->aux_type;
+    if (original->call_arg_attrs && original->num_operands > 1) {
+        size_t count = original->num_operands - 1;
+        copy->call_arg_attrs = malloc(count);
+        if (!copy->call_arg_attrs)
+            return false;
+        memcpy(copy->call_arg_attrs, original->call_arg_attrs, count);
+    }
+    return true;
+}
+
+anvil_param_attr_t anvil_call_arg_attr(const anvil_instr_t *call, const anvil_type_t *fn_type, size_t index)
+{
+    if (fn_type && index < fn_type->data.func.num_params)
+        return anvil_type_func_param_attr(fn_type, index);
+    if (call && call->call_arg_attrs && index + 1 < call->num_operands)
+        return (anvil_param_attr_t)call->call_arg_attrs[index];
+    return ANVIL_PARAM_PLAIN;
 }

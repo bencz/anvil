@@ -11,7 +11,8 @@
  *   a = x + y
  *   b = a      // Reuse previous result
  * 
- * This pass works within basic blocks (local CSE).
+ * anvil_pass_cse works within basic blocks; anvil_pass_gvn across blocks,
+ * replacing an expression by an equal one in a dominating block.
  */
 
 #include "anvil/anvil_internal.h"
@@ -22,19 +23,27 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Expression entry for tracking computed values. Hash table cells with
- * result==NULL are empty slots. */
+enum { EXPR_OPERANDS = 3 };
+
+/* What makes two pure instructions compute the same value: opcode, FCMP
+ * predicate, GEP source type, operands and result type (casts of one value
+ * differ by it). */
 typedef struct {
     anvil_op_t op;
     anvil_fcmp_pred_t fcmp_pred;
-    anvil_value_t *op1;
-    anvil_value_t *op2;
+    const anvil_type_t *aux_type;
+    anvil_value_t *operands[EXPR_OPERANDS];
+    size_t count;
+    anvil_type_t *type;
+} expr_key_t;
+
+/* Hash table cells with result==NULL are empty slots. */
+typedef struct {
+    expr_key_t key;
     anvil_value_t *result;
 } expr_entry_t;
 
-/* Open-addressing hash table keyed by (op, op1, op2). Previously a fixed
- * 256-entry linear-scan array that silently dropped expressions beyond 256
- * and turned every lookup into O(n). */
+/* Open-addressing hash table keyed by expr_key_t. */
 typedef struct {
     anvil_ctx_t *ctx;
     expr_entry_t *entries;
@@ -52,6 +61,8 @@ static bool is_cse_candidate(anvil_op_t op)
         case ANVIL_OP_ADD:
         case ANVIL_OP_SUB:
         case ANVIL_OP_MUL:
+        case ANVIL_OP_UMULH:
+        case ANVIL_OP_SMULH:
         case ANVIL_OP_SDIV:
         case ANVIL_OP_UDIV:
         case ANVIL_OP_SMOD:
@@ -63,6 +74,7 @@ static bool is_cse_candidate(anvil_op_t op)
         case ANVIL_OP_SHL:
         case ANVIL_OP_SHR:
         case ANVIL_OP_SAR:
+        case ANVIL_OP_ROTL:
         /* Comparison operations */
         case ANVIL_OP_CMP_EQ:
         case ANVIL_OP_CMP_NE:
@@ -75,10 +87,60 @@ static bool is_cse_candidate(anvil_op_t op)
         case ANVIL_OP_CMP_UGT:
         case ANVIL_OP_CMP_UGE:
         case ANVIL_OP_FCMP:
+        /* Integer and pointer conversions (FP conversions depend on the
+         * floating-point environment) */
+        case ANVIL_OP_SEXT:
+        case ANVIL_OP_ZEXT:
+        case ANVIL_OP_TRUNC:
+        case ANVIL_OP_BITCAST:
+        case ANVIL_OP_PTRTOINT:
+        case ANVIL_OP_INTTOPTR:
+        case ANVIL_OP_NEG:
+        case ANVIL_OP_NOT:
+        /* Address arithmetic and selection */
+        case ANVIL_OP_GEP:
+        case ANVIL_OP_STRUCT_GEP:
+        case ANVIL_OP_SELECT:
             return true;
         default:
             return false;
     }
+}
+
+static bool is_unary(anvil_op_t op)
+{
+    switch (op) {
+        case ANVIL_OP_SEXT:
+        case ANVIL_OP_ZEXT:
+        case ANVIL_OP_TRUNC:
+        case ANVIL_OP_BITCAST:
+        case ANVIL_OP_PTRTOINT:
+        case ANVIL_OP_INTTOPTR:
+        case ANVIL_OP_NEG:
+        case ANVIL_OP_NOT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* The key of a candidate; false when it has no result or another shape. */
+static bool expr_key(const anvil_instr_t *instr, expr_key_t *key)
+{
+    size_t arity = is_unary(instr->op) ? 1 : instr->op == ANVIL_OP_SELECT ? 3 : 2;
+    bool walk = instr->op == ANVIL_OP_GEP || instr->op == ANVIL_OP_STRUCT_GEP;
+    if (!instr->result || (walk ? instr->num_operands < 2 || instr->num_operands > EXPR_OPERANDS : instr->num_operands != arity))
+        return false;
+    *key = (expr_key_t){
+        .op = instr->op,
+        .fcmp_pred = instr->fcmp_pred,
+        .aux_type = walk ? instr->aux_type : NULL,
+        .count = instr->num_operands,
+        .type = instr->result->type,
+    };
+    for (size_t operand = 0; operand < instr->num_operands; operand++)
+        key->operands[operand] = instr->operands[operand];
+    return true;
 }
 
 /* Check if operation is commutative */
@@ -87,6 +149,8 @@ static bool is_commutative(anvil_op_t op)
     switch (op) {
         case ANVIL_OP_ADD:
         case ANVIL_OP_MUL:
+        case ANVIL_OP_UMULH:
+        case ANVIL_OP_SMULH:
         case ANVIL_OP_AND:
         case ANVIL_OP_OR:
         case ANVIL_OP_XOR:
@@ -98,15 +162,46 @@ static bool is_commutative(anvil_op_t op)
     }
 }
 
-/* Mix function — good enough for pointer+small-integer inputs. */
-static inline uint64_t expr_hash(anvil_op_t op, anvil_fcmp_pred_t fcmp_pred,
-                                 anvil_value_t *op1, anvil_value_t *op2)
+/* Constants are not interned: two integer constants of one type and value
+ * are the same operand. */
+static bool same_operand(const anvil_value_t *left, const anvil_value_t *right)
 {
-    uint64_t h = (uint64_t)op * 0x9E3779B185EBCA87ULL;
-    h ^= (uint64_t)(unsigned)fcmp_pred * 0xD6E8FEB86659FD93ULL;
-    h ^= (uintptr_t)op1 + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
-    h ^= (uintptr_t)op2 + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    return left == right || (anvil_opt_is_const_int(left) && anvil_opt_is_const_int(right) && left->data.i == right->data.i &&
+                             anvil_types_equal(left->type, right->type));
+}
+
+/* An operand's identity for hashing and ordering, by value for constants. */
+static uint64_t operand_identity(const anvil_value_t *value)
+{
+    if (anvil_opt_is_const_int(value))
+        return ((uint64_t)value->data.i * 0xFF51AFD7ED558CCDULL) ^ (value->type ? (uint64_t)value->type->size << 56 : 0) ^ 1;
+    return (uintptr_t)value;
+}
+
+/* Mix function — good enough for pointer+small-integer inputs. */
+static uint64_t expr_hash(const expr_key_t *key)
+{
+    uint64_t h = (uint64_t)key->op * 0x9E3779B185EBCA87ULL;
+    if (key->type)
+        h ^= ((uint64_t)key->type->kind << 32 | (uint64_t)key->type->size) * 0xC2B2AE3D27D4EB4FULL;
+    h ^= (uint64_t)(unsigned)key->fcmp_pred * 0xD6E8FEB86659FD93ULL;
+    h ^= (uintptr_t)key->aux_type + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    for (size_t operand = 0; operand < key->count; operand++)
+        h ^= operand_identity(key->operands[operand]) + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     return h;
+}
+
+static bool expr_equal(const expr_key_t *left, const expr_key_t *right)
+{
+    if (left->op != right->op || left->fcmp_pred != right->fcmp_pred || left->count != right->count ||
+        !anvil_types_equal(left->type, right->type) ||
+        (left->aux_type != right->aux_type && !anvil_types_equal(left->aux_type, right->aux_type)))
+        return false;
+    for (size_t operand = 0; operand < left->count; operand++) {
+        if (!same_operand(left->operands[operand], right->operands[operand]))
+            return false;
+    }
+    return true;
 }
 
 static void expr_table_init(expr_table_t *table, anvil_ctx_t *ctx)
@@ -135,30 +230,28 @@ static void expr_table_clear(expr_table_t *table)
 
 /* Normalise operand order for commutative ops so both orderings hash/match
  * the same slot. */
-static inline void normalise_operands(anvil_op_t op, anvil_value_t **op1, anvil_value_t **op2)
+static inline void normalise_operands(expr_key_t *key)
 {
-    if (is_commutative(op) && (uintptr_t)*op1 > (uintptr_t)*op2) {
-        anvil_value_t *tmp = *op1; *op1 = *op2; *op2 = tmp;
+    if (key->count == 2 && is_commutative(key->op) && operand_identity(key->operands[0]) > operand_identity(key->operands[1])) {
+        anvil_value_t *tmp = key->operands[0];
+        key->operands[0] = key->operands[1];
+        key->operands[1] = tmp;
     }
 }
 
-static anvil_value_t *expr_table_lookup(expr_table_t *table, anvil_op_t op,
-                                         anvil_fcmp_pred_t fcmp_pred,
-                                         anvil_value_t *op1, anvil_value_t *op2)
+static anvil_value_t *expr_table_lookup(expr_table_t *table, expr_key_t key)
 {
     if (!table->entries || table->cap == 0) return NULL;
 
-    normalise_operands(op, &op1, &op2);
+    normalise_operands(&key);
     size_t mask = table->cap - 1;
-    size_t i = (size_t)expr_hash(op, fcmp_pred, op1, op2) & mask;
+    size_t i = (size_t)expr_hash(&key) & mask;
 
     for (size_t probe = 0; probe < table->cap; probe++) {
         expr_entry_t *e = &table->entries[i];
         if (!e->result) return NULL;
-        if (e->op == op && e->fcmp_pred == fcmp_pred &&
-            e->op1 == op1 && e->op2 == op2) {
+        if (expr_equal(&e->key, &key))
             return e->result;
-        }
         i = (i + 1) & mask;
     }
     return NULL;
@@ -166,10 +259,7 @@ static anvil_value_t *expr_table_lookup(expr_table_t *table, anvil_op_t op,
 
 static void expr_table_resize(expr_table_t *table);
 
-static void expr_table_add(expr_table_t *table, anvil_op_t op,
-                           anvil_fcmp_pred_t fcmp_pred,
-                           anvil_value_t *op1, anvil_value_t *op2,
-                           anvil_value_t *result)
+static void expr_table_add(expr_table_t *table, expr_key_t key, anvil_value_t *result)
 {
     if (!result) return;
     if (!table->entries) return;
@@ -180,25 +270,19 @@ static void expr_table_add(expr_table_t *table, anvil_op_t op,
         if (!table->entries) return;
     }
 
-    normalise_operands(op, &op1, &op2);
+    normalise_operands(&key);
     size_t mask = table->cap - 1;
-    size_t i = (size_t)expr_hash(op, fcmp_pred, op1, op2) & mask;
+    size_t i = (size_t)expr_hash(&key) & mask;
 
     while (table->entries[i].result) {
         /* A global lookup may replace an expression from a sibling block. */
-        if (table->entries[i].op == op &&
-            table->entries[i].fcmp_pred == fcmp_pred &&
-            table->entries[i].op1 == op1 &&
-            table->entries[i].op2 == op2) {
+        if (expr_equal(&table->entries[i].key, &key)) {
             table->entries[i].result = result;
             return;
         }
         i = (i + 1) & mask;
     }
-    table->entries[i].op = op;
-    table->entries[i].fcmp_pred = fcmp_pred;
-    table->entries[i].op1 = op1;
-    table->entries[i].op2 = op2;
+    table->entries[i].key = key;
     table->entries[i].result = result;
     table->size++;
 }
@@ -225,10 +309,8 @@ static void expr_table_resize(expr_table_t *table)
     table->size = 0;
 
     for (size_t i = 0; i < old_cap; i++) {
-        if (old[i].result) {
-            expr_table_add(table, old[i].op, old[i].fcmp_pred,
-                           old[i].op1, old[i].op2, old[i].result);
-        }
+        if (old[i].result)
+            expr_table_add(table, old[i].key, old[i].result);
     }
     free(old);
 }
@@ -258,14 +340,10 @@ static bool cse_block(anvil_block_t *block)
             continue;
         }
 
-        /* Need at least 2 operands for binary ops */
-        if (instr->num_operands < 2) continue;
+        expr_key_t key;
+        if (!expr_key(instr, &key)) continue;
 
-        anvil_value_t *op1 = instr->operands[0];
-        anvil_value_t *op2 = instr->operands[1];
-
-        anvil_value_t *existing = expr_table_lookup(
-            &table, instr->op, instr->fcmp_pred, op1, op2);
+        anvil_value_t *existing = expr_table_lookup(&table, key);
 
         if (existing && instr->result) {
             /* The earlier expression dominates this instruction, and a valid
@@ -280,8 +358,7 @@ static bool cse_block(anvil_block_t *block)
                 changed = true;
             }
         } else if (instr->result) {
-            expr_table_add(&table, instr->op, instr->fcmp_pred,
-                           op1, op2, instr->result);
+            expr_table_add(&table, key, instr->result);
         }
     }
 
@@ -337,12 +414,11 @@ anvil_pass_result_t anvil_pass_gvn(anvil_func_t *func)
         anvil_block_t *block = cfg.blocks[block_index];
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
         {
-            if (!is_cse_candidate(instr->op) || instr->op == ANVIL_OP_FCMP || instr->num_operands != 2 || !instr->result)
+            expr_key_t key;
+            if (!is_cse_candidate(instr->op) || instr->op == ANVIL_OP_FCMP || !expr_key(instr, &key))
                 continue;
 
-            anvil_value_t *left = instr->operands[0];
-            anvil_value_t *right = instr->operands[1];
-            anvil_value_t *existing = expr_table_lookup(&table, instr->op, instr->fcmp_pred, left, right);
+            anvil_value_t *existing = expr_table_lookup(&table, key);
             size_t defining_block = existing ? anvil_opt_cfg_index(&cfg, existing->data.instr->parent) : SIZE_MAX;
             if (existing && anvil_types_equal(existing->type, instr->result->type) && anvil_opt_cfg_dominates(&cfg, defining_block, block_index))
             {
@@ -352,7 +428,7 @@ anvil_pass_result_t anvil_pass_gvn(anvil_func_t *func)
             }
             else
             {
-                expr_table_add(&table, instr->op, instr->fcmp_pred, left, right, instr->result);
+                expr_table_add(&table, key, instr->result);
                 if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
                     break;
             }

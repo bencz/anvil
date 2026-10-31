@@ -69,6 +69,11 @@ struct mcc_options {
     mcc_arch_t arch;
     mcc_opt_level_t opt_level;
     bool fp_vectorization;         /* Permit independent FP lanes to share instructions. */
+    bool fp_reassociation;         /* Permit reordering FP additions (-fassociative-math). */
+    bool fp_contraction;           /* Permit fusing a*b+c (-ffp-contract=fast). */
+    bool no_builtin;               /* Library names are ordinary functions (-fno-builtin, -ffreestanding). */
+    bool no_math_errno;            /* Math routines need not set errno (-fno-math-errno). */
+    int reloc_model;               /* anvil_reloc_model_t: -fPIC, -fPIE, -fno-pic (0: target default) */
     mcc_c_std_t c_std;              /* C language standard (-std=) */
     
     /* Output control */
@@ -79,6 +84,9 @@ struct mcc_options {
     bool emit_sema;             /* -sema-dump */
     bool emit_sema_verbose;     /* -dump-sema-verbose */
     bool dump_ir;               /* -dump-ir */
+    bool dump_ir_optimized;     /* -dump-ir-opt: after the optimizer */
+    const char *cpu;            /* -mcpu=NAME: ANVIL CPU model (NULL: the
+                                   architecture's default) */
     
     /* Input files (multiple file support) */
     const char **input_files;

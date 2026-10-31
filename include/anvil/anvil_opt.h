@@ -44,6 +44,9 @@ typedef enum {
     ANVIL_PASS_INLINE,         /* Bounded leaf-function inlining (O3) */
     ANVIL_PASS_UNROLL,         /* Completely unroll small proven-trip loops (O3) */
     ANVIL_PASS_VECTORIZE,      /* Pack independent memory streams with target costs (O3) */
+    ANVIL_PASS_LOOP_VECTORIZE, /* Vector copies of counted unit-stride loops (O3) */
+    ANVIL_PASS_LOOP_STRENGTH,  /* Pointer streams for strided loop addresses (O2+) */
+    ANVIL_PASS_TAIL_RECURSION, /* Recursive returns as loops, with an accumulator (O2+) */
     ANVIL_PASS_COUNT
 } anvil_pass_id_t;
 
@@ -202,6 +205,17 @@ anvil_pass_result_t anvil_pass_licm(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_inline(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_unroll(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_vectorize(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_loop_vectorize(anvil_func_t *func);
+/* In loops stepping an induction variable by one, `gep T base, i, ...` with
+ * a loop-invariant base and sizeof(T) no scaled-index size becomes an
+ * access through a pointer advancing by one T (no multiply per
+ * iteration); narrow indices only where the header's i < n proves they do
+ * not wrap. */
+anvil_pass_result_t anvil_pass_loop_strength(anvil_func_t *func);
+/* Returns of f(args) or x + f(args) of the function itself become jumps
+ * back to a loop over the parameters, the x's accumulated and added to the
+ * other returns (no allocas, variadic or by-value arguments). */
+anvil_pass_result_t anvil_pass_tail_recursion(anvil_func_t *func);
 
 /* Propagate integer constants using executable edges and sparse SSA uses. */
 anvil_pass_result_t anvil_pass_sccp(anvil_func_t *func);

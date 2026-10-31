@@ -1,5 +1,6 @@
 #include "st_socket.h"
 #include "st_image_runtime.h"
+#include "st_fatal.h"
 #include "fiber_io.h"
 #include "../platform/fiber.h"
 
@@ -173,10 +174,10 @@ static st_socket_status_t suspend_operation(StFrame *frame, uintptr_t native, ui
             break;
 
         if (!st_socket_platform.would_block(cancel_error))
-            abort();
+            st_fatal_code("socket", "cannot cancel a pending operation", (uint64_t)cancel_error);
 
         if (st_fiber_io_wait(frame, native, events, UINT64_MAX, &cancel_error) != ST_FIBER_OK)
-            abort();
+            st_fatal_code("socket", "waiting for a cancelled operation failed", (uint64_t)cancel_error);
     }
 
     *error_out = original_error;

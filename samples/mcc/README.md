@@ -68,6 +68,17 @@ make clean && make
 # Set optimization level
 ./mcc -O2 -o output.asm input.c
 
+# Pick the CPU model (instruction choices follow its features)
+./mcc -O3 -mcpu=haswell -o output.s input.c
+
+# Floating-point policies (all off by default)
+./mcc -O3 -ffp-vectorize -fassociative-math -ffp-contract=fast -o output.s input.c
+
+# sqrt/sqrtf run as the target's square-root instruction; the library is
+# called only for a NaN result (errno).  -fno-math-errno drops that call,
+# -fno-builtin / -ffreestanding keep every library call as written.
+./mcc -O2 -fno-math-errno -o output.s input.c
+
 # Check syntax only (multiple files supported)
 ./mcc -fsyntax-only file1.c file2.c
 
@@ -79,6 +90,9 @@ make clean && make
 
 # Compile, assemble/link, execute, and compare against the native compiler
 make test-exec
+
+# Kernels against a reference compiler: same output, best-of-N time, .text size
+tests/bench/run_bench.sh --cc=clang --opt=-O2 --runs=3
 ```
 
 ## Standard Library Headers

@@ -249,6 +249,19 @@ Integer or floating-point subtraction.
 
 Integer or floating-point multiplication.
 
+#### umulh / smulh
+
+```
+%result = umulh %lhs, %rhs
+%result = smulh %lhs, %rhs
+```
+
+The high half of the double-width product of two integers of one type,
+unsigned or signed (`anvil_build_umulh`, `anvil_build_smulh`). Legal only
+where the backend prices it (`anvil_vector_shape_cost`,
+`ANVIL_VECTOR_SHAPE_SCALAR`); strength reduction divides by constants with
+it.
+
 #### sdiv
 
 ```
@@ -734,6 +747,51 @@ Selects between two values based on a condition. Like the ternary operator (`con
 %abs = select %is_negative, %negated, %val
 ```
 
+#### rotl
+
+```
+%result = rotl i32 %value, %amount
+```
+
+`%value` rotated left by `%amount` modulo its width (`anvil_build_rotl`;
+operand types as for the shifts). Legal where the backend prices it in the
+scalar shape; strength reduction forms it from `(x << k) | (x >> (w - k))`.
+
+#### add_sat_u / add_sat_s / sub_sat_u / sub_sat_s
+
+```
+%result = add_sat_u <16 x u8> %a, %b
+```
+
+The exact sum or difference clamped to the integer type's range, unsigned
+or signed (`anvil_build_saturating`; unsigned 8-bit 250 + 10 is 255). Integer
+scalars or vectors of one type; legal only where the backend prices the
+operation.
+
+#### accum_zext / accum_sext
+
+```
+%result = accum_zext <M x T> %acc, <N x U> %lanes
+```
+
+`%acc` plus every lane of `%lanes`, zero- or sign-extended to `T`
+(`anvil_build_accumulate`). `%lanes` is an integer vector of `%acc`'s size
+with N = 2, 4 or 8 times M lanes. Which lanes of `%lanes` add into which lane
+of `%acc` is the target's choice: only the sum of all of the result's lanes
+is defined, which is what a reduction needs. Legal only where the backend
+prices it for `%acc`'s type and the shape `ANVIL_VECTOR_SHAPE_WIDEN2/4/8`.
+
+#### splat
+
+```
+%result = splat <N x T> %scalar
+```
+
+A vector with `%scalar` in every lane (`anvil_build_splat`). `%scalar` has the
+vector's element type. Like every vector operation it is legal only where the
+backend's `vector_operation_cost` accepts it for that vector type; the
+optimizer asks before creating one.
+
 ## Floating-Point Instructions
 
 Unless an operation says otherwise, binary FP arithmetic uses IEEE-754
@@ -800,6 +858,19 @@ Floating-point negation.
 ```
 
 Floating-point absolute value.
+
+#### fsqrt
+
+```
+%result = fsqrt %val
+```
+
+IEEE-754 square root of an FP scalar or vector, correctly rounded: NaN for a
+negative operand, `-0` for `-0` (`anvil_build_fsqrt`). Like `fma`, legal only
+where the backend prices it (`anvil_vector_shape_cost` with
+`ANVIL_VECTOR_SHAPE_SCALAR` for a scalar); a front end asks first and, where
+its language's routine has more to do (C's `sqrt` may set `errno`), keeps
+that work around the operation.
 
 ### Comparison
 
@@ -897,6 +968,10 @@ entry:
 1. Every basic block must end with a terminator instruction (br, br_cond, ret, ret_void)
 2. Terminator instructions can only appear at the end of a block
 3. Every basic block must be reachable from the entry block
+4. A block may be marked cold (`anvil_block_set_cold`): it rarely runs, as an
+   error or fallback path does. Only placement changes: back ends lay cold
+   blocks, and the blocks only they lead to, after the rest of the function.
+   The IR dump notes `; cold` on its label.
 
 ### SSA Rules
 
@@ -1338,15 +1413,16 @@ ANVIL IR values can be one of several kinds:
 
 | Category | Operations |
 |----------|------------|
-| **Arithmetic** | add, sub, mul, sdiv, udiv, smod, umod, neg |
+| **Arithmetic** | add, sub, mul, umulh, smulh, sdiv, udiv, smod, umod, neg |
 | **Bitwise** | and, or, xor, not, shl, shr, sar |
 | **Comparison** | cmp_eq, cmp_ne, cmp_lt, cmp_le, cmp_gt, cmp_ge, cmp_ult, cmp_ule, cmp_ugt, cmp_uge |
 | **Memory** | alloca (incl. dynamic), load, store, gep, struct_gep |
 | **Control Flow** | br, br_cond, switch, call, ret (ret_void is ret with no operand) |
 | **Type Conversion** | trunc, zext, sext, bitcast, ptrtoint, inttoptr |
-| **Floating-Point** | fadd, fsub, fmul, fdiv, fneg, fabs, fcmp |
+| **Floating-Point** | fadd, fsub, fmul, fdiv, fneg, fabs, fsqrt, fma, fcmp |
 | **FP Conversion** | fptrunc, fpext, fptosi, fptoui, sitofp, uitofp |
 | **Miscellaneous** | phi, select, nop |
+| **Vector** | splat; fadd/fsub/fmul/fdiv, load and store on `<N x T>` |
 
 `ANVIL_OP_NOP` is the canonical zero-operand, zero-result semantic no-op. Passes
 normally erase instructions directly; NOP exists for explicit padding/testing

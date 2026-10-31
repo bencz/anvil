@@ -1,4 +1,5 @@
 #include "st_dnu.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -526,7 +527,8 @@ st_value_t st_dnu_send_failure(
             || context->attached_thread->failure != st_dnu_send_failure
             || context->attached_thread->failure_user != context
             || context->active) {
-        abort();
+        st_fatal_code("dnu", "send failure cannot be routed to doesNotUnderstand: (send status)",
+                      (uint64_t)status);
     }
 
     context->active = true;
@@ -534,7 +536,7 @@ st_value_t st_dnu_send_failure(
         context, caller, site, receiver, argv, argc, &result);
     context->active = false;
     if (dnu_status != ST_DNU_OK) {
-        abort();
+        st_fatal("dnu: doesNotUnderstand: dispatch failed", st_dnu_status_string(dnu_status));
     }
     return result;
 }

@@ -114,6 +114,19 @@ typedef enum {
     ANVIL_ABI_MVS            /* IBM MVS/z/OS */
 } anvil_abi_t;
 
+/* How generated code reaches symbols.  STATIC: absolute or PC-relative
+ * addresses resolved at link time.  PIE: a position-independent
+ * executable (symbols it does not define go through the GOT, calls to them
+ * through the PLT).  PIC: a shared object (every symbol another module could
+ * preempt goes through the GOT/PLT).  DEFAULT: the target's convention
+ * (Mach-O is always PIE). */
+typedef enum {
+    ANVIL_RELOC_DEFAULT = 0,
+    ANVIL_RELOC_STATIC,
+    ANVIL_RELOC_PIE,
+    ANVIL_RELOC_PIC
+} anvil_reloc_model_t;
+
 /* Data types */
 typedef enum {
     ANVIL_TYPE_VOID,
@@ -237,6 +250,35 @@ typedef enum {
     ANVIL_OP_ATOMIC_RMW,
     ANVIL_OP_ATOMIC_CMPXCHG,
     ANVIL_OP_ATOMIC_FENCE,
+
+    /* Vectors */
+    ANVIL_OP_SPLAT,          /* Scalar copied into every lane of a vector */
+    /* Reductions: every lane of a vector combined into one lane-typed
+     * value (anvil_op_is_reduction). */
+    ANVIL_OP_REDUCE_OR,      /* Bitwise OR of the lanes of an integer vector */
+    ANVIL_OP_REDUCE_ADD,     /* Wrapping sum of integer lanes */
+    ANVIL_OP_REDUCE_AND,
+    ANVIL_OP_REDUCE_XOR,
+    ANVIL_OP_REDUCE_SMIN,    /* Signed minimum of integer lanes */
+    ANVIL_OP_REDUCE_SMAX,
+    ANVIL_OP_REDUCE_UMIN,    /* Unsigned minimum of integer lanes */
+    ANVIL_OP_REDUCE_UMAX,
+    ANVIL_OP_REDUCE_FADD,    /* Sum of FP lanes in an unspecified order */
+    ANVIL_OP_FMA,            /* a * b + c rounded once (FP scalars or vectors) */
+    ANVIL_OP_FSQRT,          /* IEEE square root, correctly rounded (FP scalars or vectors) */
+    ANVIL_OP_UMULH,          /* High half of the double-width unsigned product */
+    ANVIL_OP_SMULH,          /* High half of the double-width signed product */
+    /* acc + the zero/sign-extended lanes of a narrower vector of the same
+     * size, summed in groups into acc's lanes (anvil_build_accumulate). */
+    ANVIL_OP_ACCUM_ZEXT,
+    ANVIL_OP_ACCUM_SEXT,
+    /* Saturating integer arithmetic: the exact result clamped to the
+     * type's range, unsigned or signed (anvil_build_saturating). */
+    ANVIL_OP_ADD_SAT_U,
+    ANVIL_OP_ADD_SAT_S,
+    ANVIL_OP_SUB_SAT_U,
+    ANVIL_OP_SUB_SAT_S,
+    ANVIL_OP_ROTL,           /* Rotate left by an amount taken modulo the width */
     
     ANVIL_OP_COUNT
 } anvil_op_t;
@@ -311,7 +353,16 @@ typedef struct {
     anvil_abi_t abi;         /* OS ABI / platform variant */
     bool has_condition_codes;
     bool has_delay_slots;
+    unsigned fp_formats;     /* ANVIL_FP_FORMAT_BIT of each format offered */
+    anvil_cpu_features_t ieee_features; /* CPU features the IEEE formats need */
+    /* Memory protection granularity in bytes (a power of two; the page or
+     * storage-key block size): an access within one aligned block of this
+     * size cannot fault when another byte of the block is accessible.  0
+     * when not known; optimizations that read ahead are then off. */
+    size_t access_fault_granularity;
 } anvil_arch_info_t;
+
+#define ANVIL_FP_FORMAT_BIT(format) (1u << (unsigned)(format))
 
 /* Error codes */
 typedef enum {
@@ -359,6 +410,11 @@ anvil_error_t anvil_ctx_set_abi(anvil_ctx_t *ctx, anvil_abi_t abi);
 
 /* Get current OS ABI */
 anvil_abi_t anvil_ctx_get_abi(anvil_ctx_t *ctx);
+/* Selects the relocation model; rejected when the target (for its ABI)
+ * cannot produce it. */
+anvil_error_t anvil_ctx_set_reloc_model(anvil_ctx_t *ctx, anvil_reloc_model_t model);
+/* The effective model: the one set, or the target's default. */
+anvil_reloc_model_t anvil_ctx_get_reloc_model(anvil_ctx_t *ctx);
 
 /* Set floating-point format (for architectures that support multiple formats) */
 anvil_error_t anvil_ctx_set_fp_format(anvil_ctx_t *ctx, anvil_fp_format_t fp_format);
@@ -397,8 +453,16 @@ anvil_error_t anvil_ctx_disable_feature(anvil_ctx_t *ctx, anvil_cpu_features_t f
 /* Get CPU model name as string */
 const char *anvil_cpu_model_name(anvil_cpu_model_t cpu);
 
+/* CPU model by its name (as anvil_cpu_model_name spells it, e.g. "power7",
+ * "pentium4", "z13") among those that run code for `arch` (names repeat
+ * across families: "g4" is a PowerPC and an S/390 model); false when none
+ * matches. */
+bool anvil_cpu_model_lookup(anvil_arch_t arch, const char *name, anvil_cpu_model_t *cpu);
+
 /* Get default CPU model for an architecture */
 anvil_cpu_model_t anvil_arch_default_cpu(anvil_arch_t arch);
+/* Every feature bit some CPU model running `arch` defines. */
+anvil_cpu_features_t anvil_cpu_arch_feature_mask(anvil_arch_t arch);
 
 /* Get features for a specific CPU model */
 anvil_cpu_features_t anvil_cpu_model_features(anvil_cpu_model_t cpu);
@@ -501,14 +565,34 @@ size_t anvil_type_struct_field_offset(const anvil_type_t *type,
 
 /* Create array type */
 anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t count);
-/* Fixed-width FP vectors use lane-wise arithmetic without reassociation or
- * contraction. Storage needs element alignment; preferred alignment is the
- * vector width. Vector calling conventions are not implicit. */
+/* Fixed-width vectors of 2 to 64 FP or integer (not i1) lanes. Operations
+ * are lane-wise: FP without reassociation or contraction, integers wrapping.
+ * Storage needs element alignment; preferred alignment is the vector width.
+ * Vector calling conventions are not implicit. */
 anvil_type_t *anvil_type_vector(anvil_ctx_t *ctx, anvil_type_t *element, size_t lanes);
 anvil_type_t *anvil_type_vector_element(anvil_type_t *type);
+/* What comparing two `vector`s produces: signed integers of the lane width,
+ * all ones in a lane where the comparison holds and zero elsewhere.  A
+ * select with such a mask picks each lane separately. */
+anvil_type_t *anvil_type_vector_mask(anvil_ctx_t *ctx, anvil_type_t *vector);
 size_t anvil_type_vector_lanes(anvil_type_t *type);
 /* Zero means unsupported; positive values are relative instruction costs. */
+/* Operand shapes a vector operation's cost is asked for. */
+typedef enum {
+    ANVIL_VECTOR_SHAPE_LANES,      /* every operand is a vector */
+    ANVIL_VECTOR_SHAPE_UNIFORM,    /* the last operand is one scalar for every lane (a shift count) */
+    ANVIL_VECTOR_SHAPE_SCALAR,     /* the operation on single values: `type` is a scalar (FMA, FSQRT, MULH) */
+    /* Widening (ACCUM_*): `type` is the result; the last operand has 2, 4
+     * or 8 times its lanes, each 1/2, 1/4 or 1/8 as wide. */
+    ANVIL_VECTOR_SHAPE_WIDEN2,
+    ANVIL_VECTOR_SHAPE_WIDEN4,
+    ANVIL_VECTOR_SHAPE_WIDEN8
+} anvil_vector_shape_t;
+
+/* The target's cost of `operation` on vector `type` (0: no instruction for
+ * it on the configured CPU), in units where a scalar operation costs 1. */
 unsigned anvil_vector_operation_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type);
+unsigned anvil_vector_shape_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
 
 /* Create function type */
 anvil_type_t *anvil_type_func_cc(anvil_ctx_t *ctx, anvil_type_t *ret,
@@ -608,6 +692,12 @@ anvil_value_t *anvil_func_get_value(anvil_func_t *func);
  * arithmetic, but the order of FP exception observations may change.
  * Disabled by default; this does not permit reassociation or contraction. */
 void anvil_func_set_fp_vectorization(anvil_func_t *func, bool enabled);
+/* Permit reordering FP additions (a vectorized sum adds its lanes in
+ * another order, so the rounding differs).  Disabled by default. */
+void anvil_func_set_fp_reassociation(anvil_func_t *func, bool enabled);
+/* Permit contracting a*b + c into one fused multiply-add (one rounding
+ * instead of two).  Disabled by default. */
+void anvil_func_set_fp_contraction(anvil_func_t *func, bool enabled);
 
 /* Get function parameter */
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index);
@@ -642,6 +732,11 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name);
 
 /* Get block name */
 const char *anvil_block_get_name(anvil_block_t *block);
+
+/* Marks code that rarely runs (an error or fallback path).  Only placement
+ * changes: back ends lay cold blocks, and the blocks only they lead to,
+ * after the rest of the function. */
+void anvil_block_set_cold(anvil_block_t *block, bool cold);
 
 /* Check if block has a terminator instruction (ret, br, br_cond, switch) */
 bool anvil_block_has_terminator(anvil_block_t *block);
@@ -703,6 +798,12 @@ anvil_value_t *anvil_const_ptr_cast(anvil_value_t *base, anvil_type_t *ptr_type)
 /* Set global variable initializer */
 bool anvil_global_set_initializer(anvil_value_t *global, anvil_value_t *init);
 
+/* Marks a defined global as never written after initialization (C `const`
+ * objects, literal tables). Targets place it in read-only storage, and
+ * optimizations may read its initializer at compile time. */
+bool anvil_global_set_constant(anvil_value_t *global, bool constant);
+bool anvil_global_is_constant(const anvil_value_t *global);
+
 /* Arithmetic operations */
 anvil_value_t *anvil_build_add(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_sub(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
@@ -711,6 +812,12 @@ anvil_value_t *anvil_build_sdiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_valu
 anvil_value_t *anvil_build_udiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_smod(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_umod(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
+/* The high half of the double-width product of two integers of one type
+ * (unsigned or signed multiplication).  Only where the target prices it
+ * (anvil_vector_shape_cost, ANVIL_VECTOR_SHAPE_SCALAR for scalars): the
+ * optimizer divides by constants with it. */
+anvil_value_t *anvil_build_umulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
+anvil_value_t *anvil_build_smulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_neg(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
 
 /* Bitwise operations */
@@ -786,6 +893,13 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
  * convention are derived solely from callee's func/ptr<func> type.  `result`
  * may be NULL; when supplied it is cleared first and remains NULL for a
  * successful void call. */
+/* As anvil_build_call_checked, with one attribute per argument (NULL: none).
+ * Declared parameters keep their type's attribute (the entry must agree
+ * or be PLAIN); an unnamed (variadic) argument may be ANVIL_PARAM_BYVAL, a
+ * ptr<T> to an aggregate the target passes by value as its ABI says for
+ * unnamed arguments. */
+bool anvil_build_call_attrs(anvil_ctx_t *ctx, anvil_value_t *callee, anvil_value_t **args, const anvil_param_attr_t *attrs,
+                            size_t num_args, const char *name, anvil_value_t **result);
 bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
                                anvil_value_t **args, size_t num_args,
                                const char *name, anvil_value_t **result);
@@ -813,6 +927,50 @@ anvil_value_t *anvil_build_fmul(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_valu
 anvil_value_t *anvil_build_fdiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_fneg(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
 anvil_value_t *anvil_build_fabs(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
+/* A vector of `vector_type` with `scalar` (of its element type) in every
+ * lane.  Like every vector operation, legal only where the backend's
+ * vector_operation_cost accepts it. */
+anvil_value_t *anvil_build_splat(anvil_ctx_t *ctx, anvil_value_t *scalar, anvil_type_t *vector_type, const char *name);
+/* Every lane of `vector` combined by reduction `op` (ANVIL_OP_REDUCE_*)
+ * into one lane-typed value.  REDUCE_OR of a lane mask is nonzero exactly
+ * when some comparison held; REDUCE_FADD adds in an unspecified order (only
+ * code allowed to reassociate FP addition may use it). */
+anvil_value_t *anvil_build_reduce(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *vector, const char *name);
+/* a * b + c with one rounding: FP scalars or vectors of one type.  Only
+ * where the target's operation cost (ANVIL_VECTOR_SHAPE_SCALAR for
+ * scalars) accepts it; the optimizer contracts a*b + c into it only in
+ * functions that permit contraction. */
+anvil_value_t *anvil_build_fma(anvil_ctx_t *ctx, anvil_value_t *a, anvil_value_t *b, anvil_value_t *c, const char *name);
+/* The correctly rounded square root of an FP scalar or vector (NaN for a
+ * negative operand, -0 for -0).  Like FMA, only where the target's operation
+ * cost accepts it (ANVIL_VECTOR_SHAPE_SCALAR for scalars); a front end
+ * whose language routine has further duties (an error report, say) keeps
+ * those around it. */
+anvil_value_t *anvil_build_fsqrt(anvil_ctx_t *ctx, anvil_value_t *value, const char *name);
+/* `acc` plus every lane of `lanes`, zero- (ACCUM_ZEXT) or sign-extended
+ * (ACCUM_SEXT) to acc's lane width: `lanes` is an integer vector of acc's
+ * size with 2, 4 or 8 times its lanes.  Which lanes of `lanes` add into
+ * which lane of acc is the target's choice, so only the sum of all of the
+ * result's lanes is defined: what a reduction needs (a u8 sum into an int
+ * accumulator).  Only where the target's cost (ANVIL_VECTOR_SHAPE_WIDEN2/4/8)
+ * accepts it. */
+anvil_value_t *anvil_build_accumulate(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *acc, anvil_value_t *lanes, const char *name);
+/* lhs op rhs computed exactly and clamped to the integer type's range
+ * (op: ANVIL_OP_ADD_SAT_U/S, SUB_SAT_U/S; unsigned 8-bit 250 + 10 is 255).
+ * Integer scalars or vectors of one type, only where the target prices
+ * the operation; the loop vectorizer forms them from C's clamps of
+ * widened sums. */
+anvil_value_t *anvil_build_saturating(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
+/* value rotated left by amount modulo its width (operands as a shift's).
+ * Only where the target prices it (ANVIL_VECTOR_SHAPE_SCALAR); the
+ * optimizer forms it from (x << k) | (x >> (width - k)). */
+anvil_value_t *anvil_build_rotl(anvil_ctx_t *ctx, anvil_value_t *value, anvil_value_t *amount, const char *name);
+/* The widening shape of `ratio` (2, 4 or 8), and the ratio of a widening
+ * from `narrow` to `wide` (0: none). */
+anvil_vector_shape_t anvil_vector_widen_shape(unsigned ratio);
+unsigned anvil_vector_widening(const anvil_type_t *wide, const anvil_type_t *narrow);
+/* Whether `op` is one of the ANVIL_OP_REDUCE_* operations. */
+bool anvil_op_is_reduction(anvil_op_t op);
 anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx, anvil_fcmp_pred_t predicate,
                                 anvil_value_t *lhs, anvil_value_t *rhs,
                                 const char *name);
@@ -885,11 +1043,19 @@ typedef struct anvil_backend_ops {
     anvil_error_t (*classify_abi_value)(anvil_backend_t *be, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
     anvil_value_t *(*build_va_arg)(anvil_backend_t *be, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name);
     bool (*atomic_is_lock_free)(anvil_backend_t *be, anvil_type_t *type);
-    unsigned (*vector_operation_cost)(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type);
+    unsigned (*vector_operation_cost)(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
     anvil_value_t *(*build_va_copy)(anvil_backend_t *be, anvil_value_t *cursor, const char *name);
     bool (*build_va_copy_into)(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor);
     /* Bit mask of (1u << anvil_param_attr_t) values the target lowers. */
     unsigned param_attr_support;
+    /* Bit mask of (1u << anvil_abi_t) values the target implements; 0 when
+     * the backend does not say (no check). */
+    unsigned abi_support;
+    /* Whether the target, for the current ABI, can produce a relocation
+     * model (STATIC is always available), and the model DEFAULT means
+     * (NULL: STATIC). */
+    bool (*reloc_model_supported)(anvil_backend_t *be, anvil_reloc_model_t model);
+    anvil_reloc_model_t (*default_reloc_model)(anvil_backend_t *be);
 } anvil_backend_ops_t;
 
 /* Register a custom backend */

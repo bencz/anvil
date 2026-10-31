@@ -1,5 +1,6 @@
 #include "st_float_primitives.h"
 #include "float_primitives_internal.h"
+#include "st_fatal.h"
 
 #include <float.h>
 #include <fenv.h>
@@ -298,14 +299,14 @@ st_float_primitive_status_t st_float_primitive_box_bits(
     }
     heap_status = st_heap_object_view(state->heap, value, &view);
     if (heap_status != ST_HEAP_OK) {
-        abort();
+        st_fatal("float primitive: new Float view", st_heap_status_string(heap_status));
     }
     if (view.class_descriptor->class_id != state->class_id ||
         view.shape_descriptor->shape_id != state->shape_id ||
         view.shape_descriptor->fixed_word_count != 1u ||
         view.indexed_length != 0u || view.indexed_capacity != 0u ||
         !view.fixed_words) {
-        abort();
+        st_fatal("float primitive", "new Float has an unexpected class or shape");
     }
     memcpy(view.fixed_words, &ieee_binary64_bits, sizeof(ieee_binary64_bits));
     *result_out = value;

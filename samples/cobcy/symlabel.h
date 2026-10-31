@@ -1,0 +1,19 @@
+// This file is part of cobcy, a COBOL-to-C compiler.
+//
+// Copyright (C) 1995-2008 by Mike Sharov <msharov@users.sourceforge.net>
+// This file is free software, distributed under the MIT License.
+
+#pragma once
+#include "symbase.h"
+
+/// Defines a label symbol
+class CobolLabel : public CobolSymbol {
+public:
+			CobolLabel (void);
+    virtual CobolSymbolType	Kind (void) const override	{ return CS_Label; }
+    void		GenDeclare (ostream& os) const;
+    void		GenJump (ostream& os, const CobolLabel* dest) const;
+    void		GenPrototype (ostream& os) const;
+public:
+    bool		Undeclared;	// For forward references
+};

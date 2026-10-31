@@ -1,4 +1,5 @@
 #include "st_string_primitives.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -322,7 +323,9 @@ static void store_code_point(st_object_view_t *view, size_t index,
     case ST_INDEXED_UINT32:
         ((uint32_t *)view->indexed_elements)[index] = code_point;
         break;
-    default: abort();
+    default:
+        st_fatal_code("string primitive", "unreachable string indexed format kind",
+                      (uint64_t)view->shape_descriptor->indexed_format);
     }
 }
 
@@ -359,11 +362,15 @@ static st_string_primitive_status_t concatenate_strings(
                                    ST_HEADER_IMMUTABLE, &value);
     if (heap_status != ST_HEAP_OK) return map_heap_status(heap_status);
     heap_status = st_heap_object_view(context->heap, value, &output);
-    if (heap_status != ST_HEAP_OK || output.indexed_length != length
+    /* A heap which cannot authenticate its own just-published allocation
+     * has violated the exact-base registry invariant. */
+    if (heap_status != ST_HEAP_OK) {
+        st_fatal("string primitive: new concatenated String view",
+                 st_heap_status_string(heap_status));
+    }
+    if (output.indexed_length != length
             || output.shape_descriptor->shape_id != shape_id) {
-        /* A heap which cannot authenticate its own just-published allocation
-         * has violated the exact-base registry invariant. */
-        abort();
+        st_fatal("string primitive", "new concatenated String has an unexpected shape");
     }
     for (index = 0u; index < left.indexed_length; index++)
         store_code_point(&output, index, load_code_point(&left, index));

@@ -1,0 +1,5 @@
+.o
+config.status
+Config.mk
+config.h
+cobcy.pc

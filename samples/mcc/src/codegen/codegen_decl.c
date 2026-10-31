@@ -84,6 +84,8 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
         return;
     }
     anvil_func_set_fp_vectorization(cg->current_func, cg->mcc_ctx->options.fp_vectorization);
+    anvil_func_set_fp_reassociation(cg->current_func, cg->mcc_ctx->options.fp_reassociation);
+    anvil_func_set_fp_contraction(cg->current_func, cg->mcc_ctx->options.fp_contraction);
     cg->current_func_name = func->data.func_decl.name;  /* For __func__ (C99) */
     cg->current_return_type = func->data.func_decl.func_type;
     cg->current_result_pointer = hidden ? anvil_func_get_param(cg->current_func, 0) : NULL;
@@ -200,6 +202,15 @@ void codegen_func(mcc_codegen_t *cg, mcc_ast_node_t *func)
     cg->current_result_pointer = NULL;
 }
 
+/* A const, non-volatile object (or array of them) is never written after
+ * initialization, so the target may place it in read-only storage. */
+static bool codegen_object_is_readonly(const mcc_type_t *type)
+{
+    while (type && type->kind == TYPE_ARRAY && !(type->qualifiers & QUAL_CONST))
+        type = type->data.array.element;
+    return type && (type->qualifiers & QUAL_CONST) && !(type->qualifiers & QUAL_VOLATILE);
+}
+
 /* Generate code for global variable */
 void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
 {
@@ -242,6 +253,8 @@ void codegen_global_var(mcc_codegen_t *cg, mcc_ast_node_t *var)
         }
         anvil_global_set_initializer(global, constant);
     }
+    if (codegen_object_is_readonly(var->data.var_decl.var_type) && !var->data.var_decl.is_extern)
+        anvil_global_set_constant(global, true);
 }
 
 /* Generate code for any declaration */

@@ -4,6 +4,7 @@
  */
 
 #include "mcc.h"
+#include <anvil/anvil_opt.h>
 #include "platform/host.h"
 
 static void print_version(void)
@@ -26,12 +27,20 @@ static void print_usage(const char *prog)
     printf("                      x86_64_windows (Windows x64, LLP64)\n");
     printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
     printf("  -ffp-vectorize    Allow FP lane packing in O3 (changes exception observation order)\n");
+    printf("  -fassociative-math  Allow reordering FP additions (vectorized FP sums)\n");
+    printf("  -ffp-contract=fast  Allow fusing a*b+c into one multiply-add (one rounding)\n");
+    printf("  -fno-builtin, -ffreestanding  Treat standard library names as ordinary functions\n");
+    printf("  -fno-math-errno   Math routines need not set errno (sqrt becomes one instruction)\n");
+    printf("  -fPIC, -fPIE      Position-independent code for a shared object / executable\n");
+    printf("  -fno-pic          Static code (absolute or PC-relative addresses)\n");
     printf("  -E                Preprocess only\n");
     printf("  -fsyntax-only     Parse and check syntax only\n");
     printf("  -dump-ast         Print AST\n");
     printf("  -dump-sema        Print semantic analysis info (symbol table)\n");
     printf("  -dump-sema-verbose Print detailed semantic analysis (all info)\n");
     printf("  -dump-ir          Dump ANVIL IR (for debugging)\n");
+    printf("  -dump-ir-opt      Dump ANVIL IR after optimization\n");
+    printf("  -mcpu=<cpu>       CPU model (e.g. pentium4, power7, z13); default per architecture\n");
     printf("  -I<path>          Add include path\n");
     printf("  -D<name>[=value]  Define macro\n");
     printf("  -Wall             Enable all warnings\n");
@@ -179,7 +188,11 @@ static mcc_ast_node_t *parse_file(mcc_context_t *ctx, const char *filename,
  * compile_files — previously this block was copy-pasted. */
 static void dump_ir_if_requested(mcc_context_t *ctx, mcc_codegen_t *cg)
 {
-    if (!ctx->options.dump_ir || !cg->anvil_mod) return;
+    if ((!ctx->options.dump_ir && !ctx->options.dump_ir_optimized) || !cg->anvil_mod) return;
+
+    /* The same passes code generation runs; it finds them at a fixpoint. */
+    if (ctx->options.dump_ir_optimized && anvil_module_optimize(cg->anvil_mod) != ANVIL_OK)
+        fprintf(stderr, "Warning: optimizer failed before the IR dump\n");
 
     char ir_filename[512];
     if (ctx->options.output_file) {
@@ -535,25 +548,7 @@ static int compile_files(mcc_context_t *ctx, const char **files, size_t num_file
     }
     
     /* Dump IR if requested */
-    if (ctx->options.dump_ir && cg->anvil_mod) {
-        /* Generate IR dump filename based on output file or default */
-        char ir_filename[512];
-        if (ctx->options.output_file) {
-            snprintf(ir_filename, sizeof(ir_filename), "%s.ir", ctx->options.output_file);
-        } else {
-            snprintf(ir_filename, sizeof(ir_filename), "output.ir");
-        }
-        FILE *ir_file = fopen(ir_filename, "w");
-        if (ir_file) {
-            fprintf(ir_file, "; ANVIL IR Dump\n");
-            fprintf(ir_file, "; Source files: %zu\n\n", num_files);
-            anvil_dump_module(ir_file, cg->anvil_mod);
-            fclose(ir_file);
-            fprintf(stderr, "IR dump written to: %s\n", ir_filename);
-        } else {
-            fprintf(stderr, "Warning: Could not write IR dump to %s\n", ir_filename);
-        }
-    }
+    dump_ir_if_requested(ctx, cg);
     
     /* Get output */
     size_t output_len;
@@ -654,9 +649,40 @@ int main(int argc, char **argv)
             continue;
         }
         
+        if (strcmp(arg, "-fPIC") == 0 || strcmp(arg, "-fpic") == 0 || strcmp(arg, "-fPIE") == 0 || strcmp(arg, "-fpie") == 0 ||
+            strcmp(arg, "-fno-pic") == 0 || strcmp(arg, "-fno-pie") == 0)
+        {
+            opts.reloc_model = strcasecmp(arg, "-fpic") == 0 ? ANVIL_RELOC_PIC : strcasecmp(arg, "-fpie") == 0 ? ANVIL_RELOC_PIE : ANVIL_RELOC_STATIC;
+            continue;
+        }
+
         if (strcmp(arg, "-ffp-vectorize") == 0 || strcmp(arg, "-fno-fp-vectorize") == 0)
         {
             opts.fp_vectorization = strcmp(arg, "-ffp-vectorize") == 0;
+            continue;
+        }
+
+        if (strcmp(arg, "-fassociative-math") == 0 || strcmp(arg, "-fno-associative-math") == 0)
+        {
+            opts.fp_reassociation = strcmp(arg, "-fassociative-math") == 0;
+            continue;
+        }
+
+        if (strcmp(arg, "-ffp-contract=fast") == 0 || strcmp(arg, "-ffp-contract=off") == 0)
+        {
+            opts.fp_contraction = strcmp(arg, "-ffp-contract=fast") == 0;
+            continue;
+        }
+
+        if (strcmp(arg, "-fno-builtin") == 0 || strcmp(arg, "-ffreestanding") == 0 || strcmp(arg, "-fbuiltin") == 0)
+        {
+            opts.no_builtin = strcmp(arg, "-fbuiltin") != 0;
+            continue;
+        }
+
+        if (strcmp(arg, "-fno-math-errno") == 0 || strcmp(arg, "-fmath-errno") == 0)
+        {
+            opts.no_math_errno = strcmp(arg, "-fno-math-errno") == 0;
             continue;
         }
 
@@ -722,6 +748,16 @@ int main(int argc, char **argv)
             continue;
         }
         
+        if (strncmp(arg, "-mcpu=", 6) == 0) {
+            opts.cpu = arg + 6;
+            continue;
+        }
+
+        if (strcmp(arg, "-dump-ir-opt") == 0) {
+            opts.dump_ir_optimized = true;
+            continue;
+        }
+
         if (strcmp(arg, "-dump-ir") == 0) {
             opts.dump_ir = true;
             continue;

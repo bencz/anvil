@@ -133,11 +133,8 @@ static bool prepare_body(inline_plan *plan, anvil_func_t *caller, anvil_func_t *
             size_t index = plan->instruction_count++;
             plan->originals[index] = original;
             plan->copies[index] = copy;
-            copy->fcmp_pred = original->fcmp_pred;
-            copy->call_cc = original->call_cc;
-            copy->memory_access = original->memory_access;
-            copy->atomic = original->atomic;
-            copy->aux_type = original->aux_type;
+            if (!anvil_instr_copy_attributes(copy, original))
+                return false;
             anvil_block_append_prepared(plan->blocks[block], copy);
         }
     }

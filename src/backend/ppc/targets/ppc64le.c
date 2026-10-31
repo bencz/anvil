@@ -8,6 +8,20 @@
 
 #include "../ppc_internal.h"
 
+static const anvil_arch_info_t ppc64le_arch_info = {
+    .arch = ANVIL_ARCH_PPC64LE,
+    .name = "PowerPC 64-bit LE",
+    .ptr_size = 8,
+    .addr_bits = 64,
+    .word_size = 8,
+    .num_gpr = 32,
+    .num_fpr = 32,
+    .endian = ANVIL_ENDIAN_LITTLE,
+    .stack_dir = ANVIL_STACK_DOWN,
+    .has_condition_codes = true,
+    .has_delay_slots = false,
+};
+
 const anvil_ppc_target_desc_t ppc64le_target_desc = {
     .variant = ANVIL_PPC_VARIANT_PPC64LE,
     .arch = ANVIL_ARCH_PPC64LE,
@@ -15,8 +29,6 @@ const anvil_ppc_target_desc_t ppc64le_target_desc = {
     .word_size = 8,
     .little_endian = true,
     .uses_function_descriptors = false,
-    .has_fp_int64_convert = true,
-    .has_fp_unsigned_convert = true,
     .min_frame_size = 32,
     .lr_save_offset = 16,
     .toc_save_offset = 24,
@@ -37,64 +49,12 @@ const anvil_ppc_target_desc_t ppc64le_target_desc = {
     .num_scratch_gpr_regs = sizeof(ppc_scratch_gpr_regs) / sizeof(ppc_scratch_gpr_regs[0]),
     .scratch_fpr_regs = ppc_scratch_fpr_regs,
     .num_scratch_fpr_regs = sizeof(ppc_scratch_fpr_regs) / sizeof(ppc_scratch_fpr_regs[0]),
-    .abi_ops = &ppc_elfv2_abi_ops
+    .abi_ops = &ppc_elfv2_abi_ops,
+    .arch_info = &ppc64le_arch_info
 };
-
-static const anvil_arch_info_t ppc64le_arch_info = {
-    .arch = ANVIL_ARCH_PPC64LE,
-    .name = "PowerPC 64-bit LE",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 32,
-    .num_fpr = 32,
-    .endian = ANVIL_ENDIAN_LITTLE,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false
-};
-
-static anvil_error_t ppc64le_init(anvil_backend_t *be, anvil_ctx_t *ctx)
-{
-    (void)be;
-    (void)ctx;
-    return ANVIL_OK;
-}
-
-static void ppc64le_cleanup(anvil_backend_t *be)
-{
-    (void)be;
-}
-
-static void ppc64le_reset(anvil_backend_t *be)
-{
-    (void)be;
-}
-
-static const anvil_arch_info_t *ppc64le_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &ppc64le_arch_info;
-}
-
-static anvil_error_t ppc64le_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
-{
-    return anvil_ppc_codegen_module(be, mod, ANVIL_PPC_VARIANT_PPC64LE, output, len);
-}
-
-static anvil_error_t ppc64le_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len)
-{
-    return anvil_ppc_codegen_func(be, func, ANVIL_PPC_VARIANT_PPC64LE, output, len);
-}
 
 const anvil_backend_ops_t anvil_backend_ppc64le = {
     .name = "PowerPC 64-bit LE",
     .arch = ANVIL_ARCH_PPC64LE,
-    .init = ppc64le_init,
-    .cleanup = ppc64le_cleanup,
-    .reset = ppc64le_reset,
-    .codegen_module = ppc64le_codegen_module,
-    .codegen_func = ppc64le_codegen_func,
-    .get_arch_info = ppc64le_get_arch_info,
-    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
+    ANVIL_PPC_BACKEND_OPS
 };

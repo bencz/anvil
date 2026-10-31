@@ -310,6 +310,9 @@ anvil_pass_result_t anvil_pass_sccp(anvil_func_t *func)
     if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
         return ANVIL_PASS_RUN_ERROR;
 
+    /* Folded branches leave unreachable blocks and PHI inputs from edges
+     * that no longer exist: removing them is part of this pass's result,
+     * whether or not the pipeline schedules simplify-cfg itself. */
     anvil_pass_result_t cleanup = anvil_pass_simplify_cfg(func);
     if (cleanup == ANVIL_PASS_RUN_ERROR)
         return cleanup;

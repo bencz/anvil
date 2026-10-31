@@ -346,10 +346,11 @@ static void test_arm64_lowers_constants_bitwise_and_mixed_call_abi(void)
                   local_call_result_info->reg_class == ANVIL_MIR_REG_GPR &&
                   !local_call_result_info->has_fixed_reg,
                   "local call result should be allocatable after ABI copy-out");
+            /* The copy is hinted into x0 (and disappears) unless the value
+             * must survive a later call; call clobbers decide that. */
             CHECK(local_call_assignment && !local_call_assignment->spilled &&
-                  local_call_assignment->reg_class == ANVIL_MIR_REG_GPR &&
-                  local_call_assignment->phys_reg != 0,
-                  "local call result should not remain tied to x0");
+                  local_call_assignment->reg_class == ANVIL_MIR_REG_GPR,
+                  "local call result should get a register after the ABI copy-out");
 
                 anvil_mir_func_destroy(mir);
             }
@@ -1390,7 +1391,8 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
         check_contains(asm_text, "\tmov ", "MIR assembly should emit moves");
         check_contains(asm_text, "\tadd ", "MIR assembly should emit add");
         check_contains(asm_text, "\tsub ", "MIR assembly should emit sub");
-        check_contains(asm_text, "\tmul ", "MIR assembly should emit mul");
+        /* Multiplication by a power-of-two constant selects a shift. */
+        CHECK(strstr(asm_text, "\tmul ") || strstr(asm_text, "\tlsl "), "MIR assembly should emit mul");
         check_contains(asm_text, "\tsdiv ", "MIR assembly should emit signed div");
         check_contains(asm_text, "\tudiv ", "MIR assembly should emit unsigned div");
         check_contains(asm_text, "\tmsub ", "MIR assembly should emit mod via msub");
@@ -1403,13 +1405,15 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
         check_contains(asm_text, "\tneg ", "MIR assembly should emit neg");
         check_contains(asm_text, "\tmvn ", "MIR assembly should emit not");
         check_contains(asm_text, "\tcmp ", "MIR assembly should emit cmp");
-        check_contains(asm_text, "\tcset ", "MIR assembly should materialize cmp bool");
+        /* The compare feeds only the branch: it sinks next to it and the
+         * branch tests its flags instead of a materialized boolean. */
+        CHECK(!strstr(asm_text, "\tcset ") && strstr(asm_text, "\tb."), "MIR assembly should branch on the sunk compare's flags");
         check_contains(asm_text, "\tfadd ", "MIR assembly should emit FP add");
         check_contains(asm_text, "\tfsub ", "MIR assembly should emit FP sub");
         check_contains(asm_text, "\tfmul ", "MIR assembly should emit FP mul");
         check_contains(asm_text, "\tfdiv ", "MIR assembly should emit FP div");
         check_contains(asm_text, "\tfneg ", "MIR assembly should emit FP neg");
-        check_contains(asm_text, "\tcbnz ", "MIR assembly should emit conditional branch");
+        CHECK(strstr(asm_text, "\tcbnz ") || strstr(asm_text, "\tcbz ") || strstr(asm_text, "\tb."), "MIR assembly should emit conditional branch");
         check_contains(asm_text, "\tbl callee\n", "MIR assembly should emit direct call");
         check_contains(asm_text, "\tldr ", "MIR assembly should emit load");
         check_contains(asm_text, "\tstr ", "MIR assembly should emit store");

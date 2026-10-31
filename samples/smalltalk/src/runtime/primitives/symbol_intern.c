@@ -1,6 +1,7 @@
 #include "../../platform/runtime.h"
 #include "st_symbol_intern.h"
 #include "st_send_bridge.h"
+#include "st_fatal.h"
 
 #include <stdalign.h>
 #include <stdlib.h>
@@ -351,7 +352,7 @@ void st_symbol_intern_context_destroy(st_symbol_intern_context_t *context)
     if (st_image_runtime_heap(context->image) != NULL
             && !st_image_runtime_root_provider_detach(
                 context->image, &context->root_provider))
-        abort();
+        st_fatal("symbol intern", "cannot detach the root provider during destroy");
     state->magic = 0u;
     release_block(state->allocator, state->slots, state->table_block_size);
     release_block(state->allocator, state->entry_block,
@@ -556,7 +557,9 @@ static void store_code_point(st_object_view_t *view, size_t index,
     case ST_INDEXED_UINT32:
         ((uint32_t *)view->indexed_elements)[index] = code_point;
         return;
-    default: abort();
+    default:
+        st_fatal_code("symbol intern", "unreachable symbol indexed format kind",
+                      (uint64_t)view->shape_descriptor->indexed_format);
     }
 }
 
@@ -761,7 +764,7 @@ st_symbol_intern_status_t st_symbol_intern_batch_prepare_utf8(
     for (size_t index = 0u; index < state->count; index++)
         if (!table_insert(prepared->slots, table_capacity,
                           prepared->hashes, index))
-            abort();
+            st_fatal("symbol intern", "batch table has no free slot for an existing symbol");
     for (size_t index = 0u; index < spelling_count; index++) {
         size_t scalar_count;
         uint32_t maximum;
@@ -784,15 +787,16 @@ st_symbol_intern_status_t st_symbol_intern_batch_prepare_utf8(
             shape_id, scalar_count, scalar_count, ST_HEADER_IMMUTABLE,
             &candidate));
         if (status != ST_SYMBOL_INTERN_OK) goto failure;
-        if (st_heap_object_view(st_image_runtime_heap(context->image),
-                                candidate, &candidate_view) != ST_HEAP_OK)
-            abort();
+        st_heap_status_t view_status = st_heap_object_view(
+            st_image_runtime_heap(context->image), candidate, &candidate_view);
+        if (view_status != ST_HEAP_OK)
+            st_fatal("symbol intern: new batch Symbol view", st_heap_status_string(view_status));
         for (size_t scalar_index = 0u; scalar_index < scalar_count;
              scalar_index++) {
             uint32_t scalar;
             if (!utf8_next((const unsigned char *)spellings[index].bytes,
                            spellings[index].length, &offset, &scalar))
-                abort();
+                st_fatal("symbol intern", "a measured UTF-8 spelling failed to decode");
             store_code_point(&candidate_view, scalar_index, scalar);
         }
         hash = state->hash != NULL
@@ -804,13 +808,14 @@ st_symbol_intern_status_t st_symbol_intern_batch_prepare_utf8(
             table_capacity, &canonical, &exists);
         if (status != ST_SYMBOL_INTERN_OK) goto failure;
         if (!exists) {
-            if (next_count >= entry_capacity) abort();
+            if (next_count >= entry_capacity)
+                st_fatal("symbol intern", "batch entry capacity exhausted");
             canonical = candidate;
             prepared->roots[next_count] = candidate;
             prepared->hashes[next_count] = hash;
             if (!table_insert(prepared->slots, table_capacity,
                               prepared->hashes, next_count))
-                abort();
+                st_fatal("symbol intern", "batch table has no free slot for a new symbol");
             next_count++;
         }
         prepared->results[index] = canonical;
@@ -955,7 +960,7 @@ st_symbol_intern_status_t st_symbol_intern(
         for (size_t index = 0u; index < state->count; index++)
             if (!table_insert(next_slots, next_capacity,
                               next_hashes, index))
-                abort();
+                st_fatal("symbol intern", "grown table has no free slot for an existing symbol");
     }
     shape_id = maximum <= UINT8_MAX ? state->symbol_shapes[0]
         : maximum <= UINT16_MAX ? state->symbol_shapes[1]
@@ -968,12 +973,14 @@ st_symbol_intern_status_t st_symbol_intern(
         status = map_heap_status(heap_status);
         goto failure;
     }
-    if (st_heap_object_view(st_image_runtime_heap(context->image), symbol,
-                            &output) != ST_HEAP_OK
-            || output.class_descriptor->class_id != state->symbol_class_id
+    heap_status = st_heap_object_view(st_image_runtime_heap(context->image), symbol,
+                                      &output);
+    if (heap_status != ST_HEAP_OK)
+        st_fatal("symbol intern: new Symbol view", st_heap_status_string(heap_status));
+    if (output.class_descriptor->class_id != state->symbol_class_id
             || output.shape_descriptor->shape_id != shape_id
             || output.indexed_length != input.indexed_length)
-        abort();
+        st_fatal("symbol intern", "new Symbol has an unexpected class or shape");
     for (size_t index = 0u; index < input.indexed_length; index++)
         store_code_point(&output, index, load_code_point(&input, index));
     st_value_t *roots = grow ? next_roots : state->roots;
@@ -982,7 +989,8 @@ st_symbol_intern_status_t st_symbol_intern(
     size_t capacity = grow ? next_capacity : state->table_capacity;
     roots[state->count] = symbol;
     hashes[state->count] = hash;
-    if (!table_insert(slots, capacity, hashes, state->count)) abort();
+    if (!table_insert(slots, capacity, hashes, state->count))
+        st_fatal("symbol intern", "table has no free slot for a new symbol");
     if (grow) {
         void *old_entries = state->entry_block;
         size_t old_entries_size = state->entry_block_size;

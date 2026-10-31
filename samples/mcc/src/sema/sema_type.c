@@ -34,7 +34,8 @@ static bool expr_names_only_enumerators(mcc_sema_t *sema, mcc_ast_node_t *expr)
         case AST_CAST_EXPR:
             return expr_names_only_enumerators(sema, expr->data.cast_expr.expr);
         case AST_SIZEOF_EXPR:
-            return !expr->data.sizeof_expr.expr_arg;
+            /* A string literal's size is its length plus the terminator. */
+            return !expr->data.sizeof_expr.expr_arg || expr->data.sizeof_expr.expr_arg->kind == AST_STRING_LIT;
         case AST_ALIGNOF_EXPR:
             return !expr->data.alignof_expr.expr_arg;
         default:

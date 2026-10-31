@@ -135,7 +135,7 @@ static void check_target(anvil_arch_t arch, anvil_fcmp_pred_t pred)
         else if (arch == ANVIL_ARCH_PPC32)
             CHECK(strstr(text, "\tbun "), "PPC UNO must test CR unordered");
         else
-            CHECK(strstr(text, "BC    1,"), "zArch UNO must branch on CC3 only");
+            CHECK(strstr(text, "BC    1,") || strstr(text, "BRC   1,"), "zArch UNO must branch on CC3 only");
         if (arch == ANVIL_ARCH_ARM64)
             cross_assemble(text, "aarch64-linux-gnu",
                            "ARM64 FCMP unordered assembly should cross-assemble");

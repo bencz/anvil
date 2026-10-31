@@ -5,12 +5,14 @@
 # natively, i386 through cc -m32, other targets through clang, ld.lld and
 # qemu-user as freestanding Linux programs.  A target is skipped when its
 # toolchain or emulator is missing; any failure fails the run.
+#
+# Usage: run_aggregate_abi.sh <build-dir>
 set -uo pipefail
 
-gen="${BUILD_DIR:-build}/tests/aggregate_abi_codegen"
-cc="${CC:-cc}"
-clang="${CLANG:-clang}"
-lld="${LD_LLD:-ld.lld}"
+gen="${1:-build}/tests/aggregate_abi_codegen"
+cc=cc
+clang=clang
+lld=ld.lld
 tmpdir="$(mktemp -d /tmp/anvil-aggregate-abi.XXXXXX)"
 trap 'rm -rf "$tmpdir"' EXIT
 failed=0
@@ -101,6 +103,6 @@ fi
 emulated aarch64 aarch64-linux-gnu aarch64 "$lld"
 emulated ppc32 powerpc-linux-gnu ppc "$lld"
 # ld.lld does not link the ELFv1 ABI.
-emulated ppc64 powerpc64-linux-gnu ppc64 "${PPC64_LD:-powerpc64-linux-gnu-ld}" -mabi=elfv1
+emulated ppc64 powerpc64-linux-gnu ppc64 powerpc64-linux-gnu-ld -mabi=elfv1
 emulated ppc64le powerpc64le-linux-gnu ppc64le "$lld" -mabi=elfv2
 exit "$failed"

@@ -357,6 +357,18 @@ void anvil_func_set_fp_vectorization(anvil_func_t *func, bool enabled)
         func->fp_vectorization = enabled;
 }
 
+void anvil_func_set_fp_reassociation(anvil_func_t *func, bool enabled)
+{
+    if (func)
+        func->fp_reassociation = enabled;
+}
+
+void anvil_func_set_fp_contraction(anvil_func_t *func, bool enabled)
+{
+    if (func)
+        func->fp_contraction = enabled;
+}
+
 anvil_value_t *anvil_func_get_param(anvil_func_t *func, size_t index)
 {
     if (!func || !func->params || index >= func->num_params) return NULL;
@@ -492,6 +504,12 @@ anvil_block_t *anvil_block_create(anvil_func_t *func, const char *name)
 const char *anvil_block_get_name(anvil_block_t *block)
 {
     return block ? block->name : NULL;
+}
+
+void anvil_block_set_cold(anvil_block_t *block, bool cold)
+{
+    if (block)
+        block->cold = cold;
 }
 
 bool anvil_block_has_terminator(anvil_block_t *block)

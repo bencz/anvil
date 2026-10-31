@@ -648,16 +648,24 @@ bool mcc_type_is_same(mcc_type_t *a, mcc_type_t *b)
 /* Type conversions */
 mcc_type_t *mcc_type_promote(mcc_type_context_t *tctx, mcc_type_t *type)
 {
-    /* Integer promotion: char, short -> int */
+    /* Integer promotion (C11 6.3.1.1): _Bool, char and short, signed or
+     * not, become int, which represents all their values on every MCC
+     * target (int is 32 bits). */
     switch (type->kind) {
+        case TYPE_BOOL:
         case TYPE_CHAR:
         case TYPE_SHORT:
-            return type->is_unsigned ? tctx->type_uint : tctx->type_int;
         case TYPE_ENUM:
             return tctx->type_int;
         default:
             return type;
     }
+}
+
+/* Integer conversion rank (C11 6.3.1.1) of a promoted integer type. */
+static int integer_rank(const mcc_type_t *type)
+{
+    return type->kind == TYPE_LONG_LONG ? 3 : type->kind == TYPE_LONG ? 2 : 1;
 }
 
 mcc_type_t *mcc_type_common(mcc_type_context_t *tctx, mcc_type_t *a, mcc_type_t *b)
@@ -681,28 +689,19 @@ mcc_type_t *mcc_type_common(mcc_type_context_t *tctx, mcc_type_t *a, mcc_type_t 
         return tctx->type_float;
     }
     
-    /* Both are integers — descend by integer rank per C99 §6.3.1.8.
-     * Order: long long > long > int. Signedness propagates upwards only
-     * when the wider type is unsigned or both operands are unsigned. */
-    if (a->kind == TYPE_LONG_LONG || b->kind == TYPE_LONG_LONG) {
-        if (a->is_unsigned || b->is_unsigned) {
-            return tctx->type_ullong;
-        }
-        return tctx->type_llong;
-    }
-
-    if (a->kind == TYPE_LONG || b->kind == TYPE_LONG) {
-        if (a->is_unsigned || b->is_unsigned) {
-            return tctx->type_ulong;
-        }
-        return tctx->type_long;
-    }
-
-    if (a->is_unsigned || b->is_unsigned) {
-        return tctx->type_uint;
-    }
-
-    return tctx->type_int;
+    /* Both are promoted integers (C11 6.3.1.8): the same signedness takes
+     * the higher rank; otherwise the unsigned type when its rank is not
+     * lower, else the signed type when it holds every value of the
+     * unsigned one (it is wider: long long + unsigned, LP64 long +
+     * unsigned), else the unsigned type of the signed one's rank. */
+    if (a->is_unsigned == b->is_unsigned)
+        return integer_rank(a) >= integer_rank(b) ? a : b;
+    mcc_type_t *u = a->is_unsigned ? a : b, *signed_type = a->is_unsigned ? b : a;
+    if (integer_rank(u) >= integer_rank(signed_type))
+        return u;
+    if (mcc_type_sizeof(signed_type) > mcc_type_sizeof(u))
+        return signed_type;
+    return signed_type->kind == TYPE_LONG_LONG ? tctx->type_ullong : tctx->type_ulong;
 }
 
 mcc_type_t *mcc_type_decay(mcc_type_context_t *tctx, mcc_type_t *type)

@@ -987,22 +987,33 @@ static mcc_type_qual_t parse_pointer_qualifiers(mcc_parser_t *p)
 }
 
 /* Parse array suffix: [N] or [] or [*] */
-static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
+/*
+ * Parse every array suffix [..][..]... following a declarator and build the
+ * array type inside out: T x[2][3] is an array of 2 arrays of 3 T.  A
+ * runtime bound makes a VLA (its expression kept for the codegen); [*] is
+ * a VLA of unspecified size; `static` and qualifiers inside the brackets
+ * (parameter declarators) are accepted.  Returns element_type unchanged
+ * when no suffix follows.
+ */
+static mcc_type_t *parse_array_dimensions(mcc_parser_t *p, mcc_type_t *element_type)
 {
-    size_t arr_size = 0;
-    bool is_vla = false;
-    mcc_ast_node_t *length_expr = NULL;
+    size_t dims[32];
+    bool dim_is_vla[32];
+    mcc_ast_node_t *dim_exprs[32];
+    int num_dims = 0;
 
-    if (!parse_check(p, TOK_RBRACKET)) {
-        /* C99: VLA with * */
+    while (parse_match(p, TOK_LBRACKET)) {
+        while (parse_match(p, TOK_STATIC) || parse_match(p, TOK_CONST) ||
+               parse_match(p, TOK_VOLATILE) || parse_match(p, TOK_RESTRICT)) {
+        }
+
+        size_t dim = 0;
+        bool is_vla = false;
+        mcc_ast_node_t *length_expr = NULL;
         if (parse_check(p, TOK_STAR)) {
-            if (!parse_has_vla(p)) {
-                mcc_warning_at(p->ctx, p->peek->location,
-                    "variable length arrays are a C99 extension");
-            }
             parse_advance(p);
             is_vla = true;
-        } else {
+        } else if (!parse_check(p, TOK_RBRACKET)) {
             mcc_ast_node_t *size_expr = parse_constant_expr(p);
             int64_t bound;
             if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
@@ -1010,26 +1021,66 @@ static mcc_type_t *parse_array_suffix(mcc_parser_t *p, mcc_type_t *element_type)
                     mcc_error_at(p->ctx, size_expr->location, "array size is negative");
                     bound = 0;
                 }
-                arr_size = (size_t)bound;
-            } else {
-                /* C99: VLA — keep the expression so the codegen can emit a
-                 * dynamic alloca with the runtime count. */
-                if (!parse_has_vla(p)) {
-                    mcc_warning_at(p->ctx, p->peek->location,
-                        "variable length arrays are a C99 extension");
-                }
+                dim = (size_t)bound;
+            } else if (size_expr) {
+                /* Non-constant bound: a VLA whose count the codegen
+                 * evaluates at run time. */
                 is_vla = true;
                 length_expr = size_expr;
             }
         }
-    }
-    parse_expect(p, TOK_RBRACKET, "]");
+        if (is_vla && !parse_has_vla(p))
+            mcc_warning_at(p->ctx, p->peek->location, "variable length arrays are a C99 extension");
+        parse_expect(p, TOK_RBRACKET, "]");
 
-    mcc_type_t *arr = parse_array_type(p, element_type, arr_size);
-    if (!arr) return NULL;
-    arr->data.array.is_vla = is_vla;
-    arr->data.array.length_expr = length_expr;
-    return arr;
+        if (num_dims >= 32) {
+            mcc_error_at(p->ctx, p->peek->location, "array declarator exceeds 32 dimensions");
+            return NULL;
+        }
+        dims[num_dims] = dim;
+        dim_is_vla[num_dims] = is_vla;
+        dim_exprs[num_dims] = length_expr;
+        num_dims++;
+    }
+
+    mcc_type_t *type = element_type;
+    for (int i = num_dims - 1; i >= 0 && type; i--) {
+        mcc_type_t *arr = parse_array_type(p, type, dims[i]);
+        if (!arr)
+            return NULL;
+        arr->data.array.is_vla = dim_is_vla[i];
+        arr->data.array.length_expr = dim_exprs[i];
+        if (dim_is_vla[i])
+            arr->size = 0;
+        type = arr;
+    }
+    return type;
+}
+
+/* One parameter: its declarator (named or abstract) with the C parameter
+ * adjustments, array of T -> pointer to T and function -> pointer to
+ * function (C11 6.7.6.3p7-8).  The adjusted pointer keeps the inner array
+ * types, VLA bounds included. */
+static mcc_func_param_t *parse_parameter(mcc_parser_t *p, mcc_type_t *base_type)
+{
+    parse_declarator_result_t declarator = parse_declarator(p, base_type, true);
+    mcc_type_t *type = declarator.type;
+    if (!type)
+        return NULL;
+    if (type->kind == TYPE_ARRAY)
+        type = parse_pointer_type(p, type->data.array.element);
+    else if (type->kind == TYPE_FUNCTION)
+        type = parse_pointer_type(p, type);
+    if (!type)
+        return NULL;
+
+    mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+    if (!param)
+        return NULL;
+    param->name = declarator.name;
+    param->type = type;
+    param->next = NULL;
+    return param;
 }
 
 /* Parse function parameter list for abstract declarator */
@@ -1049,26 +1100,15 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
                 /* (void) means no parameters */
                 goto end_params;
             }
-            /* void* or similar - parse as parameter type */
-            mcc_type_t *param_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
-            if (!param_type) return NULL;
-            param_type->kind = TYPE_VOID;
-            param_type = parse_abstract_declarator(p, param_type);
-            
-            mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            /* void *p and the like */
+            mcc_type_t *void_type = mcc_alloc(p->ctx, sizeof(mcc_type_t));
+            if (!void_type) return NULL;
+            void_type->kind = TYPE_VOID;
+            mcc_func_param_t *param = parse_parameter(p, void_type);
             if (!param) return NULL;
-            param->name = NULL;
-            param->type = param_type;
-            param->next = NULL;
             params = param;
             param_tail = param;
             num_params++;
-            if (num_params > PARSE_MAX_PARAMS) {
-                mcc_error_at(p->ctx, p->peek->location,
-                             "function exceeds %d parameters",
-                             PARSE_MAX_PARAMS);
-                return NULL;
-            }
             
             if (!parse_match(p, TOK_COMMA)) {
                 goto end_params;
@@ -1101,86 +1141,8 @@ static mcc_type_t *parse_function_suffix(mcc_parser_t *p, mcc_type_t *return_typ
             /* Parse parameter type */
             mcc_type_t *param_base = parse_type_specifier(p);
             
-            /* Parse declarator to get both type and optional name */
-            const char *param_name = NULL;
-            mcc_type_t *param_type = param_base;
-            
-            /* Check for parameter name (identifier) */
-            if (parse_check(p, TOK_IDENT)) {
-                param_name = mcc_strdup(p->ctx, p->peek->text);
-                parse_advance(p);
-                
-                /* Parse array brackets - collect all dimensions first */
-                size_t array_dims[32];
-                bool dim_is_vla[32];
-                mcc_ast_node_t *dim_exprs[32];
-                int num_dims = 0;
-                
-                while (parse_check(p, TOK_LBRACKET)) {
-                    parse_advance(p);
-                    size_t dim = 0;
-                    bool is_vla = false;
-                    mcc_ast_node_t *length_expr = NULL;
-                    if (!parse_check(p, TOK_RBRACKET)) {
-                        if (parse_check(p, TOK_STAR)) {
-                            parse_advance(p);  /* VLA [*] */
-                            is_vla = true;
-                        } else {
-                            mcc_ast_node_t *size_expr = parse_constant_expr(p);
-                            int64_t bound;
-                            if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
-                                if (bound < 0) {
-                                    mcc_error_at(p->ctx, size_expr->location,
-                                                 "array size is negative");
-                                    bound = 0;
-                                }
-                                dim = (size_t)bound;
-                            } else {
-                                /* A runtime bound such as int m[rows][cols]:
-                                 * the stride of the adjusted pointer. */
-                                is_vla = true;
-                                length_expr = size_expr;
-                            }
-                        }
-                    }
-                    parse_expect(p, TOK_RBRACKET, "]");
-                    if (num_dims >= 32) {
-                        mcc_error_at(p->ctx, p->peek->location,
-                                     "array declarator exceeds 32 dimensions");
-                        return NULL;
-                    }
-                    array_dims[num_dims] = dim;
-                    dim_is_vla[num_dims] = is_vla;
-                    dim_exprs[num_dims] = length_expr;
-                    num_dims++;
-                }
-                
-                if (num_dims > 0) {
-                    /* Build array types from inside out (skip first dimension) */
-                    /* First dimension decays to pointer, rest become array types */
-                    /* e.g., int m[2][3] becomes int (*)[3] */
-                    for (int i = num_dims - 1; i >= 1; i--) {
-                        mcc_type_t *arr = parse_array_type(
-                            p, param_type, array_dims[i]);
-                        if (!arr) return NULL;
-                        arr->data.array.is_vla = dim_is_vla[i];
-                        arr->data.array.length_expr = dim_exprs[i];
-                        if (dim_is_vla[i]) arr->size = 0;
-                        param_type = arr;
-                    }
-                    /* First dimension decays to pointer */
-                    param_type = parse_pointer_type(p, param_type);
-                }
-            } else if (parse_check(p, TOK_STAR)) {
-                /* Pointer without name - use abstract declarator */
-                param_type = parse_abstract_declarator(p, param_base);
-            }
-            
-            mcc_func_param_t *param = mcc_alloc(p->ctx, sizeof(mcc_func_param_t));
+            mcc_func_param_t *param = parse_parameter(p, param_base);
             if (!param) return NULL;
-            param->name = param_name;
-            param->type = param_type;
-            param->next = NULL;
             
             if (!params) params = param;
             if (param_tail) param_tail->next = param;
@@ -1241,8 +1203,6 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
 
 parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_type, bool allow_abstract)
 {
-    parse_declarator_result_t result = { base_type, NULL };
-    
     /* Collect pointer prefixes with their qualifiers */
     typedef struct {
         mcc_type_qual_t quals;
@@ -1258,18 +1218,18 @@ parse_declarator_result_t parse_declarator(mcc_parser_t *p, mcc_type_t *base_typ
         }
     }
     
-    /* Parse direct declarator */
-    result = parse_direct_declarator(p, base_type, allow_abstract);
-    
-    /* Apply pointer prefixes in reverse order (innermost first) */
-    for (int i = ptr_count - 1; i >= 0; i--) {
-        mcc_type_t *ptr = parse_pointer_type(p, result.type);
-        if (!ptr) return (parse_declarator_result_t){ NULL, result.name };
+    /* Pointer prefixes bind looser than the direct declarator's suffixes:
+     * they wrap the base type (the first '*' innermost), and the suffixes
+     * then apply to that, so int *a[4] is an array of pointers. */
+    mcc_type_t *type = base_type;
+    for (int i = 0; i < ptr_count; i++) {
+        mcc_type_t *ptr = parse_pointer_type(p, type);
+        if (!ptr) return (parse_declarator_result_t){ NULL, NULL };
         ptr->qualifiers = ptr_stack[i].quals;
-        result.type = ptr;
+        type = ptr;
     }
-    
-    return result;
+
+    return parse_direct_declarator(p, type, allow_abstract);
 }
 
 /*
@@ -1322,9 +1282,9 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
             mcc_type_t *outer_type = base_type;
             
             /* Parse array suffixes */
-            while (parse_match(p, TOK_LBRACKET)) {
-                outer_type = parse_array_suffix(p, outer_type);
-            }
+            outer_type = parse_array_dimensions(p, outer_type);
+            if (!outer_type)
+                return (parse_declarator_result_t){ NULL, inner.name };
             
             /* Parse function suffix */
             if (parse_match(p, TOK_LPAREN)) {
@@ -1387,64 +1347,10 @@ static parse_declarator_result_t parse_direct_declarator(mcc_parser_t *p, mcc_ty
         mcc_error_at(p->ctx, p->peek->location, "expected identifier");
     }
     
-    /* Parse array and function suffixes */
-    /* For arrays, we need to collect all dimensions first, then build types from inside out */
-    /* e.g., int arr[3][4] means arr is array[3] of array[4] of int */
-    /* So we build: int -> int[4] -> int[3][4] */
-    size_t array_dims[32];
-    mcc_ast_node_t *dim_exprs[32];
-    bool dim_is_vla[32];
-    int num_dims = 0;
-
-    while (1) {
-        if (parse_check(p, TOK_LBRACKET)) {
-            parse_advance(p);
-            size_t dim = 0;
-            mcc_ast_node_t *dim_expr = NULL;
-            bool is_vla = false;
-            if (!parse_check(p, TOK_RBRACKET)) {
-                mcc_ast_node_t *size_expr = parse_constant_expr(p);
-                int64_t bound;
-                if (size_expr && parse_eval_int_constant(p, size_expr, &bound)) {
-                    if (bound < 0) {
-                        mcc_error_at(p->ctx, size_expr->location, "array size is negative");
-                        bound = 0;
-                    }
-                    dim = (size_t)bound;
-                } else if (size_expr) {
-                    /* Non-constant dimension → VLA. */
-                    is_vla = true;
-                    dim_expr = size_expr;
-                }
-            }
-            parse_expect(p, TOK_RBRACKET, "]");
-            if (num_dims >= 32) {
-                mcc_error_at(p->ctx, p->peek->location,
-                             "array declarator exceeds 32 dimensions");
-                return (parse_declarator_result_t){ NULL, result.name };
-            }
-            array_dims[num_dims]  = dim;
-            dim_exprs[num_dims]   = dim_expr;
-            dim_is_vla[num_dims]  = is_vla;
-            num_dims++;
-        } else if (parse_match(p, TOK_LPAREN)) {
-            result.type = parse_function_suffix(p, result.type);
-        } else {
-            break;
-        }
-    }
-
-    /* Build array types from inside out (reverse order). Propagate
-     * is_vla and length_expr so the codegen can emit anvil_build_alloca_dyn. */
-    for (int i = num_dims - 1; i >= 0; i--) {
-        mcc_type_t *arr = parse_array_type(p, result.type, array_dims[i]);
-        if (!arr) return (parse_declarator_result_t){ NULL, result.name };
-        arr->data.array.is_vla = dim_is_vla[i];
-        arr->data.array.length_expr = dim_exprs[i];
-        if (dim_is_vla[i]) arr->size = 0;
-        result.type = arr;
-    }
-
+    /* Function suffixes, then the array dimensions (built inside out). */
+    while (parse_match(p, TOK_LPAREN))
+        result.type = parse_function_suffix(p, result.type);
+    result.type = parse_array_dimensions(p, result.type);
     return result;
 }
 

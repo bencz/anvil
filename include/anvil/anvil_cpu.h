@@ -149,7 +149,10 @@ typedef uint64_t anvil_cpu_features_t;
 #define ANVIL_FEATURE_PPC_POWER9_VEC    (1ULL << 12)  /* POWER9 vector extensions */
 #define ANVIL_FEATURE_PPC_MMA           (1ULL << 13)  /* Matrix-Multiply Assist (POWER10) */
 #define ANVIL_FEATURE_PPC_PCREL         (1ULL << 14)  /* PC-relative addressing (POWER10) */
-/* Room for 49 more PPC features (bits 15-63) */
+#define ANVIL_FEATURE_PPC_64BIT         (1ULL << 15)  /* 64-bit implementation: fcfid, fctidz */
+#define ANVIL_FEATURE_PPC_FPCVT         (1ULL << 16)  /* ISA 2.06 fcfids/fcfidu(s), fctiwuz/fctiduz */
+#define ANVIL_FEATURE_PPC_FSQRT         (1ULL << 17)  /* optional fsqrt/fsqrts (970, POWER3 and later) */
+/* Room for 46 more PPC features (bits 18-63) */
 
 /* ----------------------------------------------------------------------------
  * IBM Mainframe Features (bits 0-63, z/Arch namespace)
@@ -169,6 +172,8 @@ typedef uint64_t anvil_cpu_features_t;
 #define ANVIL_FEATURE_ZARCH_VECTOR_ENH1 (1ULL << 12)  /* Vector enhancements 1 */
 #define ANVIL_FEATURE_ZARCH_VECTOR_ENH2 (1ULL << 13)  /* Vector enhancements 2 */
 #define ANVIL_FEATURE_ZARCH_NNPA        (1ULL << 14)  /* Neural Network Processing Assist */
+#define ANVIL_FEATURE_ZARCH_BFP         (1ULL << 15)  /* IEEE binary floating point (S/390 G5+) */
+#define ANVIL_FEATURE_ZARCH_IMMREL      (1ULL << 16)  /* Relative-and-immediate: AHI/CHI/MHI/LHI, BRC (ESA/390 G1+) */
 /* Room for 49 more z/Arch features (bits 15-63) */
 
 /* ----------------------------------------------------------------------------
@@ -211,7 +216,10 @@ typedef uint64_t anvil_cpu_features_t;
 #define ANVIL_FEATURE_X86_POPCNT        (1ULL << 13)  /* Population count */
 #define ANVIL_FEATURE_X86_LZCNT         (1ULL << 14)  /* Leading zero count */
 #define ANVIL_FEATURE_X86_MOVBE         (1ULL << 15)  /* MOVBE instruction */
-/* Room for 48 more x86 features (bits 16-63) */
+#define ANVIL_FEATURE_X86_CMOV          (1ULL << 16)  /* CMOVcc, FCOMI/FUCOMI (P6 family) */
+#define ANVIL_FEATURE_X86_I486          (1ULL << 17)  /* CMPXCHG, XADD, BSWAP (i486 and later) */
+#define ANVIL_FEATURE_X86_CX8           (1ULL << 18)  /* CMPXCHG8B (Pentium and later) */
+/* Room for 45 more x86 features (bits 19-63) */
 
 /* ============================================================================
  * Feature Helper Macros

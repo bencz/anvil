@@ -77,6 +77,10 @@ typedef struct anvil_instr {
     anvil_block_t **switch_blocks;
     size_t num_switch_cases;
     size_t switch_capacity;
+
+    /* CALL: per-argument attributes (anvil_param_attr_t) when an unnamed
+     * argument carries one; NULL otherwise (see anvil_call_arg_attr). */
+    uint8_t *call_arg_attrs;
     
     /* For struct_gep - stores struct type for offset calculation */
     anvil_type_t *aux_type;
@@ -109,6 +113,7 @@ struct anvil_value {
             anvil_linkage_t linkage;
             anvil_value_t *init;
             bool is_declaration;
+            bool is_constant;   /* never written after initialization */
         } global;
         struct {
             size_t index;
@@ -214,6 +219,12 @@ struct anvil_block {
     size_t num_preds;
     anvil_block_t **succs;
     size_t num_succs;
+
+    /* Header of a loop that already has a vector copy (it now runs the
+     * remaining iterations); the loop vectorizer leaves it alone. */
+    bool vectorized;
+    /* Rarely runs (anvil_block_set_cold). */
+    bool cold;
 };
 
 /* Function structure */
@@ -248,6 +259,8 @@ struct anvil_func {
     unsigned effects;
     bool effects_explicit;
     bool fp_vectorization;
+    bool fp_reassociation;
+    bool fp_contraction;
     struct anvil_cfg *cfg_cache;
 
     /* Open-addressing table of the names of every block created for this
@@ -319,6 +332,7 @@ struct anvil_ctx {
     anvil_syntax_t syntax;
     anvil_fp_format_t fp_format;  /* Floating-point format */
     anvil_abi_t abi;              /* OS ABI / platform variant */
+    anvil_reloc_model_t reloc_model; /* as set; DEFAULT until then */
     anvil_data_layout_t data_layout;
     bool target_configured;
     bool target_frozen;
@@ -392,7 +406,23 @@ struct anvil_ctx {
 void anvil_strbuf_init(anvil_strbuf_t *sb);
 void anvil_strbuf_destroy(anvil_strbuf_t *sb);
 void anvil_strbuf_append(anvil_strbuf_t *sb, const char *str);
-void anvil_strbuf_appendf(anvil_strbuf_t *sb, const char *fmt, ...);
+#if defined(__GNUC__) || defined(__clang__)
+#define ANVIL_PRINTF_LIKE(fmt_index, first_arg) __attribute__((format(printf, fmt_index, first_arg)))
+#else
+#define ANVIL_PRINTF_LIKE(fmt_index, first_arg)
+#endif
+void anvil_strbuf_appendf(anvil_strbuf_t *sb, const char *fmt, ...) ANVIL_PRINTF_LIKE(2, 3);
+
+/* Formats a diagnostic into `error` (when given) and returns false, for
+ * verifiers and legalizers that report through a caller buffer. */
+bool anvil_format_failure(char *error, size_t error_len, const char *fmt, ...) ANVIL_PRINTF_LIKE(3, 4);
+
+/* Whether code must take `symbol`'s address from the global offset table
+ * (and call it through the PLT) under the context's relocation model: in a
+ * shared object every symbol another module could preempt (not internal),
+ * in a position-independent executable every symbol it does not define (or
+ * defines weakly). Globals and functions only; local labels never. */
+bool anvil_symbol_uses_got(anvil_ctx_t *ctx, const anvil_value_t *symbol);
 void anvil_strbuf_append_char(anvil_strbuf_t *sb, char c);
 char *anvil_strbuf_detach(anvil_strbuf_t *sb, size_t *len);
 
@@ -423,6 +453,12 @@ bool anvil_instr_add_operands(anvil_instr_t *instr,
                               size_t count);
 bool anvil_instr_insert(anvil_ctx_t *ctx, anvil_instr_t *instr);
 void anvil_instr_discard_new(anvil_ctx_t *ctx, anvil_instr_t *instr);
+/* Copies an instruction's non-operand attributes (predicate, convention,
+ * memory and atomic info, aux type, call-site argument attributes). */
+bool anvil_instr_copy_attributes(anvil_instr_t *copy, const anvil_instr_t *original);
+/* Attribute of a call's argument `index`: the callee type's for declared
+ * parameters, the call site's for unnamed (variadic) arguments. */
+anvil_param_attr_t anvil_call_arg_attr(const anvil_instr_t *call, const anvil_type_t *fn_type, size_t index);
 void anvil_ir_free_all(anvil_ctx_t *ctx);
 void anvil_func_free_all(anvil_ctx_t *ctx);
 
@@ -442,6 +478,13 @@ bool anvil_types_equal(const anvil_type_t *lhs, const anvil_type_t *rhs);
 bool anvil_sem_binary_types(anvil_op_t op, const anvil_type_t *lhs,
                             const anvil_type_t *rhs,
                             const anvil_type_t *result);
+bool anvil_sem_mask_of(const anvil_type_t *mask, const anvil_type_t *vector);
+bool anvil_sem_reduce_types(anvil_op_t op, const anvil_type_t *vector, const anvil_type_t *result);
+bool anvil_sem_fma_types(const anvil_type_t *a, const anvil_type_t *b, const anvil_type_t *c, const anvil_type_t *result);
+bool anvil_sem_accumulate_types(anvil_op_t op, const anvil_type_t *acc, const anvil_type_t *lanes, const anvil_type_t *result);
+bool anvil_sem_select_types(const anvil_type_t *cond, const anvil_type_t *then_type, const anvil_type_t *else_type,
+                            const anvil_type_t *result);
+bool anvil_sem_shift_types(const anvil_type_t *value, const anvil_type_t *amount, const anvil_type_t *result);
 bool anvil_sem_unary_types(anvil_op_t op, const anvil_type_t *operand,
                            const anvil_type_t *result);
 bool anvil_sem_cmp_types(anvil_op_t op, const anvil_type_t *lhs,
@@ -452,6 +495,11 @@ bool anvil_sem_cast_types(anvil_op_t op, const anvil_type_t *source,
 bool anvil_sem_bool_type(const anvil_type_t *type);
 bool anvil_sem_type_is_sized(const anvil_type_t *type);
 anvil_type_t *anvil_sem_memory_object_type(const anvil_value_t *value);
+/* A data global is a memory object: its value names its storage, so it is
+ * an operand only where an address is read (load/store/atomic pointer, GEP
+ * base).  Its address as a first-class pointer comes from a GEP. */
+bool anvil_sem_operand_is_address(anvil_op_t op, size_t index);
+bool anvil_sem_global_operand_allowed(const anvil_value_t *value, anvil_op_t op, size_t index);
 anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee);
 bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
                       anvil_cc_t *effective);
@@ -487,9 +535,12 @@ void anvil_update_cpu_features(anvil_ctx_t *ctx);
 const void *anvil_cpu_table_find(anvil_cpu_model_t model);
 const char *anvil_cpu_table_info_name(const void *opaque);
 anvil_arch_t anvil_cpu_table_info_arch(const void *opaque);
+/* Whether a model of `model_arch` runs code for `arch` (same architecture,
+ * or a narrower / other-endian mode of the same family). */
+bool anvil_cpu_arch_runs(anvil_arch_t model_arch, anvil_arch_t arch);
 
 /* Error handling */
-void anvil_set_error(anvil_ctx_t *ctx, anvil_error_t err, const char *fmt, ...);
+void anvil_set_error(anvil_ctx_t *ctx, anvil_error_t err, const char *fmt, ...) ANVIL_PRINTF_LIKE(3, 4);
 
 /* ============================================================================
  * Backend registration

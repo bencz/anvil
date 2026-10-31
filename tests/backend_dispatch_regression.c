@@ -26,7 +26,9 @@ static void check(bool condition, anvil_arch_t arch, const char *message)
     }
 }
 
-static void check_result(anvil_error_t error, char *text, size_t length, bool valid, const target_case_t *target, bool has_body)
+/* Module-level directives (addressing modes, ABI version) appear in module
+ * output; a function's own output must still carry its entry sequence. */
+static void check_result(anvil_error_t error, char *text, size_t length, bool valid, const target_case_t *target, bool has_body, bool is_module)
 {
     if (!valid) {
         check(error == ANVIL_ERR_CODEGEN, target->arch, "unsupported configuration must fail codegen");
@@ -39,7 +41,8 @@ static void check_result(anvil_error_t error, char *text, size_t length, bool va
 
             if (has_body) {
                 check(strstr(text, target->entry_marker) != NULL, target->arch, "wrong linkage entry sequence");
-                check(strstr(text, target->mode_marker) != NULL, target->arch, "wrong target mode or ABI version");
+                if (is_module || target->syntax != ANVIL_SYNTAX_HLASM)
+                    check(strstr(text, target->mode_marker) != NULL, target->arch, "wrong target mode or ABI version");
             }
         }
     }
@@ -61,7 +64,9 @@ static void test_target_config(const target_case_t *target, unsigned config)
 
     if (config == 1) {
         anvil_abi_t unsupported = target->abi == ANVIL_ABI_MVS ? ANVIL_ABI_SYSV : ANVIL_ABI_MVS;
-        check(anvil_ctx_set_abi(ctx, unsupported) == ANVIL_OK, target->arch, "configure unsupported ABI before creating IR");
+        /* The public setter rejects an ABI the backend does not implement;
+         * the backend's own rejection is exercised through codegen_ctx. */
+        check(anvil_ctx_set_abi(ctx, unsupported) == ANVIL_ERR_INVALID_ARG, target->arch, "public ABI setter must reject an unimplemented ABI");
         check(anvil_ctx_set_abi(ctx, target->abi) == ANVIL_OK, target->arch, "restore ABI for constructing valid IR");
     }
 
@@ -95,7 +100,7 @@ static void test_target_config(const target_case_t *target, unsigned config)
     char *text = NULL;
     size_t length = 123;
     anvil_error_t error = backend.ops->codegen_module(&backend, mod, &text, &length);
-    check_result(error, text, length, config == 0, target, false);
+    check_result(error, text, length, config == 0, target, false, true);
 
     anvil_type_t *integer = anvil_type_i32(ctx);
     anvil_type_t *params[] = {integer};
@@ -107,7 +112,7 @@ static void test_target_config(const target_case_t *target, unsigned config)
         text = NULL;
         length = 123;
         error = backend.ops->codegen_func(&backend, declaration, &text, &length);
-        check_result(error, text, length, config == 0, target, false);
+        check_result(error, text, length, config == 0, target, false, false);
     }
 
     anvil_func_t *function = anvil_func_create(mod, "probe", signature, ANVIL_LINK_EXTERNAL);
@@ -120,12 +125,12 @@ static void test_target_config(const target_case_t *target, unsigned config)
         text = NULL;
         length = 123;
         error = backend.ops->codegen_func(&backend, function, &text, &length);
-        check_result(error, text, length, config == 0, target, true);
+        check_result(error, text, length, config == 0, target, true, false);
 
         text = NULL;
         length = 123;
         error = backend.ops->codegen_module(&backend, mod, &text, &length);
-        check_result(error, text, length, config == 0, target, true);
+        check_result(error, text, length, config == 0, target, true, true);
     }
 
     anvil_module_destroy(mod);

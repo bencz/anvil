@@ -39,8 +39,8 @@ static size_t count_occurrences(const char *text, const char *needle)
 
 static int hlasm_dynamic_frame_size(const char *text)
 {
-    const char *equ = text ? strstr(text, "_DYN EQU   ") : NULL;
-    return equ ? atoi(equ + strlen("_DYN EQU   ")) : -1;
+    const char *equ = text ? strstr(text, "#DYN EQU   ") : NULL;
+    return equ ? atoi(equ + strlen("#DYN EQU   ")) : -1;
 }
 
 static size_t hlasm_store_offsets(const char *text, const char *opcode,
@@ -144,7 +144,7 @@ static void test_mainframe_descriptors_model_real_variants(void)
           s370->fp_format == ANVIL_FP_HFP &&
           s370->big_endian &&
           !s370->has_64bit_gprs &&
-          !s370->supports_ieee_fp,
+          !(anvil_cpu_model_features(anvil_arch_default_cpu(ANVIL_ARCH_S370)) & ANVIL_FEATURE_ZARCH_BFP),
           "S/370 descriptor should model 24-bit HFP-only MVS linkage");
 
     CHECK(s370_xa->arch == ANVIL_ARCH_S370_XA &&
@@ -161,9 +161,9 @@ static void test_mainframe_descriptors_model_real_variants(void)
           s390->word_size == 4 &&
           s390->ptr_size == 4 &&
           s390->num_fpr == 16 &&
-          s390->supports_ieee_fp &&
-          s390->has_relative_branches,
-          "S/390 descriptor should model 31-bit ESA/390 capabilities");
+          !(anvil_cpu_model_features(ANVIL_CPU_S390_G4) & ANVIL_FEATURE_ZARCH_BFP) &&
+          (anvil_cpu_model_features(ANVIL_CPU_S390_G5) & ANVIL_FEATURE_ZARCH_BFP),
+          "S/390 descriptor should model 31-bit ESA/390; BFP arrives with the G5");
 
     CHECK(zarch->arch == ANVIL_ARCH_ZARCH &&
           zarch->addr_bits == 64 &&
@@ -173,8 +173,9 @@ static void test_mainframe_descriptors_model_real_variants(void)
           zarch->save_area_size == 144 &&
           zarch->big_endian &&
           zarch->has_64bit_gprs &&
-          zarch->supports_ieee_fp &&
-          zarch->supports_dfp,
+          (anvil_cpu_model_features(ANVIL_CPU_ZARCH_Z900) & ANVIL_FEATURE_ZARCH_BFP) &&
+          !(anvil_cpu_model_features(ANVIL_CPU_ZARCH_Z900) & ANVIL_FEATURE_ZARCH_DFP) &&
+          (anvil_cpu_model_features(ANVIL_CPU_ZARCH_Z9) & ANVIL_FEATURE_ZARCH_DFP),
           "z/Architecture descriptor should model s390x/z 64-bit linkage");
 }
 
@@ -285,12 +286,14 @@ static void test_zarch_lowers_and_emits_64bit_hlasm(void)
             if (asm_text) {
                 check_contains(asm_text, "STMG  R14,R12,24(R13)",
                                "z/Architecture prologue should use 64-bit save area");
-                check_contains(asm_text, "LGR   R12,R15",
-                               "z/Architecture prologue should establish 64-bit base register");
+                check_contains(asm_text, "LARL  R12,Z_IADD64#LIT",
+                               "z/Architecture prologue should base R12 on the literal pool");
+                check_contains(asm_text, "Z_IADD64#LIT LTORG",
+                               "z/Architecture literal pool should carry the base label");
                 check_contains(asm_text, "LG    R",
                                "z/Architecture params should be loaded through R1 parameter list");
-                check_contains(asm_text, "AGR   R",
-                               "z/Architecture i64 add should use AGR");
+                check_contains(asm_text, "ALGR  R",
+                               "z/Architecture i64 add should use ALGR (logical: no overflow interrupt)");
                 check_contains(asm_text, "BR    R14",
                                "z/Architecture epilogue should branch to R14");
                 free(asm_text);
@@ -449,8 +452,10 @@ static void test_hlasm_control_text_is_uppercase(void)
         if (asm_text) {
             CHECK(!hlasm_has_lowercase_outside_literals(asm_text),
                   "HLASM control text should be uppercase outside quoted literals");
-            check_contains(asm_text, "MIXED_CASE_ENTRY",
-                           "function labels should be uppercased in HLASM");
+            check_contains(asm_text, "ENTRY MIX@",
+                           "a name longer than an OBJ external keeps a prefix and a hash");
+            check_contains(asm_text, "ALIAS C'mixed_case_entry'",
+                           "a renamed external carries its source spelling as an ALIAS");
             free(asm_text);
         }
     }
@@ -502,6 +507,18 @@ static void test_fp_format_selection_is_target_honest(void)
     if (!ctx) return;
     CHECK(anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754) == ANVIL_ERR_INVALID_ARG,
           "S/370 must reject IEEE floating point selection");
+    anvil_ctx_destroy(ctx);
+
+    /* S/390 binary floating point arrived with the G5. */
+    ctx = new_mainframe_ctx(ANVIL_ARCH_S390);
+    if (!ctx) return;
+    CHECK(anvil_ctx_set_cpu(ctx, ANVIL_CPU_S390_G4) == ANVIL_OK, "S/390 G4 should be selectable");
+    CHECK(anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754) == ANVIL_ERR_INVALID_ARG,
+          "S/390 G4 has no BFP, so IEEE must be rejected");
+    CHECK(anvil_ctx_set_cpu(ctx, ANVIL_CPU_S390_G5) == ANVIL_OK &&
+          anvil_ctx_set_fp_format(ctx, ANVIL_FP_IEEE754) == ANVIL_OK, "S/390 G5 offers IEEE");
+    CHECK(anvil_ctx_set_cpu(ctx, ANVIL_CPU_S390_G4) == ANVIL_ERR_INVALID_ARG && anvil_ctx_get_cpu(ctx) == ANVIL_CPU_S390_G5,
+          "switching to a BFP-less CPU under IEEE must be refused and keep the model");
     anvil_ctx_destroy(ctx);
 }
 
@@ -650,8 +667,10 @@ static void test_mainframe_fp_parameters_use_gpr_address_scratch(void)
         if (asm_text) {
             check_contains(asm_text,
                 variants[v] == ANVIL_MAINFRAME_VARIANT_ZARCH
-                    ? "LG    R0,0(,R1)" : "L     R0,0(,R1)",
-                "FP parameter pointer must be loaded into GPR scratch R0");
+                    ? "LG    R14,0(,R1)" : "L     R14,0(,R1)",
+                "FP parameter pointer must be loaded into GPR scratch R14");
+            CHECK(strstr(asm_text, "(,R0)") == NULL,
+                  "generated HLASM must never use R0 as a base register");
             check_contains(asm_text, "LD    F",
                            "f64 parameter value should be loaded into its FPR");
             CHECK(strstr(asm_text, "(,F") == NULL,
@@ -730,7 +749,10 @@ static void test_s390_call_bundles_layout_f64_and_mark_each_call(void)
 
 static void test_zarch_spilled_call_arguments_preserve_bundle(void)
 {
-    enum { ARG_COUNT = 12 };
+    /* Half the arguments are constants, which the allocator gives up first
+     * (recomputed, not reloaded): the other half alone outnumbers the
+     * registers, so real reloads happen too. */
+    enum { ARG_COUNT = 24 };
     anvil_mir_func_t *mir = anvil_mir_func_create("zarch_spilled_call_bundle");
     CHECK(mir != NULL, "z/Architecture spilled-call MIR should be created");
     if (!mir) return;
@@ -765,7 +787,7 @@ static void test_zarch_spilled_call_arguments_preserve_bundle(void)
     CHECK(anvil_mainframe_regalloc_mir(mir, ANVIL_MAINFRAME_VARIANT_ZARCH),
           "spill reloads interleaved with call arguments must remain legal");
     CHECK(anvil_mir_num_spills(mir) >= ARG_COUNT - 9,
-          "twelve simultaneously-live arguments must exercise real spilling");
+          "simultaneously-live arguments must exercise real spilling");
 
     bool in_bundle = false;
     bool saw_interleaved_reload = false;
@@ -855,13 +877,14 @@ static void test_mainframe_dynamic_alloca_updates_stack_chain(void)
         const char *advance;
     } cases[] = {
         { ANVIL_MAINFRAME_VARIANT_S370, 32, "M     R0,=F'24'",
-          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
+          "N     R", "ST    R11,4(,R1)", "LR    R13,R1" },
         { ANVIL_MAINFRAME_VARIANT_S370_XA, 32, "M     R0,=F'24'",
-          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
+          "N     R", "ST    R11,4(,R1)", "LR    R13,R1" },
         { ANVIL_MAINFRAME_VARIANT_S390, 32, "M     R0,=F'24'",
-          "N     R", "ST    R11,4(,R0)", "LR    R13,R0" },
-        { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, "MSGFI R0,24",
-          "NILL  R", "STG   R11,8(,R0)", "LGR   R13,R0" },
+          "N     R", "ST    R11,4(,R1)", "LR    R13,R1" },
+        /* The default z900 predates MSGFI (general-instructions extension). */
+        { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, "MSG   R0,=FD'24'",
+          "NILL  R", "STG   R11,8(,R1)", "LGR   R13,R1" },
     };
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         anvil_mir_func_t *mir = anvil_mir_func_create("dynamic_alloca");
@@ -899,6 +922,17 @@ static void test_mainframe_dynamic_alloca_updates_stack_chain(void)
             CHECK(strstr(text, "LA    R2,88(,R11)") == NULL,
                   "dynamic alloca must not collapse to the old fixed-address stub");
             free(text);
+        }
+        if (cases[c].variant == ANVIL_MAINFRAME_VARIANT_ZARCH) {
+            /* A z10 has the general-instructions extension. */
+            char *z10 = NULL;
+            size_t z10_len = 0;
+            CHECK(anvil_mainframe_emit_mir_features(mir, cases[c].variant,
+                                                    anvil_cpu_model_features(ANVIL_CPU_ZARCH_Z10),
+                                                    &z10, &z10_len),
+                  "dynamic alloca should emit for a z10");
+            check_contains(z10, "MSGFI R0,24", "a z10 multiplies by the element size with MSGFI");
+            free(z10);
         }
         anvil_mir_func_destroy(mir);
     }
@@ -1101,8 +1135,8 @@ static void test_mainframe_numeric_conversions_use_target_isa(void)
         const char *fpext;
         const char *fptrunc;
     } cases[] = {
-        { ANVIL_MAINFRAME_VARIANT_S370, 32, "=X'4E000000'", "=F'312'", "LDER", "LEDR" },
-        { ANVIL_MAINFRAME_VARIANT_S370_XA, 32, "=X'4E000000'", "=F'312'", "LDER", "LEDR" },
+        { ANVIL_MAINFRAME_VARIANT_S370, 32, "=X'4E000000'", "=F'312'", "SDR ", "LEDR" },
+        { ANVIL_MAINFRAME_VARIANT_S370_XA, 32, "=X'4E000000'", "=F'312'", "SDR ", "LEDR" },
         { ANVIL_MAINFRAME_VARIANT_S390, 32, "CEFR", "CFDR", "LDER", "LEDR" },
         { ANVIL_MAINFRAME_VARIANT_ZARCH, 64, "CEGBR", "CGDBR", "LDEBR", "LEDBR" },
     };
@@ -1414,11 +1448,11 @@ static void test_decimal_types_and_hlasm_constants_are_first_class(void)
         CHECK(asm_text && asm_len > 0,
               "decimal global HLASM output should be non-empty");
         if (asm_text) {
-            check_contains(asm_text, "PACKED_AMT",
-                           "packed decimal global should be emitted with uppercase symbol");
+            check_contains(asm_text, "PAC@",
+                           "packed decimal global should be emitted under its HLASM name");
             check_contains(asm_text, "DC    PL4'-12345'",
                            "packed decimal global should use HLASM packed decimal constant");
-            check_contains(asm_text, "ZONED_CODE",
+            check_contains(asm_text, "ZON@",
                            "zoned decimal global should be emitted with uppercase symbol");
             check_contains(asm_text, "DC    ZL5'67890'",
                            "zoned decimal global should use HLASM zoned decimal constant");
@@ -1428,6 +1462,42 @@ static void test_decimal_types_and_hlasm_constants_are_first_class(void)
 
     anvil_module_destroy(mod);
     anvil_ctx_destroy(ctx);
+}
+
+static void test_mainframe_power_of_two_multiply_shifts(void)
+{
+    anvil_mainframe_variant_t variants[] = {
+        ANVIL_MAINFRAME_VARIANT_S370, ANVIL_MAINFRAME_VARIANT_S390, ANVIL_MAINFRAME_VARIANT_ZARCH,
+    };
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        bool wide = variants[v] == ANVIL_MAINFRAME_VARIANT_ZARCH;
+        anvil_mir_func_t *mir = anvil_mir_func_create("times_eight");
+        anvil_mir_vreg_t addr = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, wide ? 64 : 32);
+        anvil_mir_vreg_t value = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t eight = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t product = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t address_use[] = { addr };
+        anvil_mir_vreg_t mul_uses[] = { value, eight };
+        anvil_mir_vreg_t store_uses[] = { product, addr };
+        CHECK(anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, addr, 1024) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, value, address_use, 1) &&
+              anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, eight, 8) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_MUL, product, mul_uses, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_STORE, ANVIL_MIR_NO_VREG, store_uses, 2) &&
+              anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0),
+              "power-of-two multiply MIR should build");
+        CHECK(anvil_mainframe_regalloc_mir(mir, variants[v]), "power-of-two multiply should allocate");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_mainframe_emit_mir(mir, variants[v], &text, &len), "power-of-two multiply should emit");
+        if (text) {
+            const char *shift = strstr(text, "SLL   R");
+            const char *comma = shift ? strchr(shift, ',') : NULL;
+            CHECK(comma && strncmp(comma, ",3\n", 3) == 0, "x*8 should shift left by 3");
+            free(text);
+        }
+        anvil_mir_func_destroy(mir);
+    }
 }
 
 static void test_mainframe_emits_interleaved_block_ownership_correctly(void)
@@ -1459,15 +1529,125 @@ static void test_mainframe_emits_interleaved_block_ownership_correctly(void)
                                    &text, &len),
           "interleaved mainframe MIR should emit");
     if (text) {
-        const char *branch = strstr(text, "         BNE   MF_INTERLEAVED_THEN");
-        const char *then_label = branch
-            ? strstr(branch + strlen("         BNE   MF_INTERLEAVED_THEN"),
-                     "MF_INTERLEAVED_THEN") : NULL;
-        CHECK(branch && then_label && branch < then_label,
+        /* "then" follows the entry block: the branch takes the inverse
+         * condition to "else" and falls through (relative on S/390). */
+        const char *branch = strstr(text, "         JE    ");
+        const char *line_end = branch ? strchr(branch, '\n') : NULL;
+        const char *target = branch ? strstr(branch, "#B2") : NULL;  /* else */
+        const char *then_label = branch ? strstr(branch, "#B1 DS") : NULL;
+        CHECK(branch && target && target < line_end && then_label && branch < then_label,
               "mainframe emitter must select instructions by block, not a false contiguous range");
         free(text);
     }
     anvil_mir_func_destroy(mir);
+}
+
+static void test_hlasm_names_are_unique_short_and_fit_the_line(void)
+{
+    anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_S390);
+    if (!ctx) return;
+    anvil_module_t *mod = anvil_module_create(ctx, "names");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *fn_type = anvil_type_func(ctx, i32, NULL, 0, false);
+    const char *names[] = { "foo", "FOO", "a_function_name_far_longer_than_any_hlasm_external_allows" };
+    anvil_func_t *fns[3];
+    for (int i = 0; i < 3; i++)
+        fns[i] = anvil_func_create(mod, names[i], fn_type, ANVIL_LINK_EXTERNAL);
+    for (int i = 0; i < 3; i++) {
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fns[i]));
+        anvil_value_t *result = anvil_const_i32(ctx, i);
+        if (i > 0)
+            anvil_build_call_checked(ctx, anvil_func_get_value(fns[i - 1]), NULL, 0, "r", &result);
+        anvil_build_ret(ctx, result);
+    }
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "naming module should generate HLASM");
+    if (text) {
+        check_contains(text, "ENTRY FOO\n", "a plain lowercase name keeps its uppercase spelling");
+        check_contains(text, "ALIAS C'FOO'", "an uppercase source name is renamed, so it cannot collide with foo");
+        check_contains(text, "ALIAS C'a_function_name_far_longer_than_any_hlasm_external_allX\n               ows'",
+                       "a long ALIAS continues in column 16 after a column-72 mark");
+        bool short_lines = true;
+        for (const char *line = text; *line;) {
+            const char *end = strchr(line, '\n');
+            size_t length = end ? (size_t)(end - line) : strlen(line);
+            /* Column 72 holds only a continuation mark. */
+            if (length > 72 || (length == 72 && line[71] == ' '))
+                short_lines = false;
+            line += length + (end ? 1 : 0);
+        }
+        CHECK(short_lines, "HLASM statements must end by column 71");
+        free(text);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+/* A chain of `blocks` compare-and-branch blocks: long enough on S/370 to
+ * outgrow one base register when blocks is large. */
+static char *s370_chain_text(int blocks)
+{
+    anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_S370);
+    if (!ctx) return NULL;
+    anvil_module_t *mod = anvil_module_create(ctx, "s370_long");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *params[] = { i32 };
+    anvil_func_t *fn = anvil_func_create(mod, "chain", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_block_t *done = anvil_block_create(fn, "done");
+    anvil_block_t *current = anvil_func_get_entry(fn);
+    anvil_value_t *value = anvil_func_get_param(fn, 0);
+    for (int i = 0; i < blocks; i++) {
+        anvil_set_insert_point(ctx, current);
+        value = anvil_build_add(ctx, anvil_build_mul(ctx, value, anvil_const_i32(ctx, 3), "m"), anvil_const_i32(ctx, i * 7 + 1), "v");
+        anvil_block_t *next = anvil_block_create(fn, "next");
+        anvil_value_t *hit = anvil_build_cmp_eq(ctx, value, anvil_const_i32(ctx, 123456 + i), "hit");
+        anvil_build_br_cond(ctx, hit, done, next);
+        current = next;
+    }
+    anvil_set_insert_point(ctx, current);
+    anvil_build_br(ctx, done);
+    anvil_set_insert_point(ctx, done);
+    anvil_build_ret(ctx, anvil_const_i32(ctx, 9));
+    char *text = NULL;
+    size_t len = 0;
+    if (anvil_module_codegen(mod, &text, &len) != ANVIL_OK)
+        text = NULL;
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+    return text;
+}
+
+static void test_s370_long_functions_branch_through_the_pool(void)
+{
+    char *small = s370_chain_text(4);
+    CHECK(small && strstr(small, "USING CHAIN,R12") && !strstr(small, "BAL   R12,12(,R15)"),
+          "a short S/370 function keeps its entry-point base");
+    free(small);
+
+    /* 250 blocks: over 4 KB of code, with a literal pool under 4 KB. */
+    char *large = s370_chain_text(250);
+    CHECK(large != NULL, "a long S/370 function should generate");
+    if (large) {
+        check_contains(large, "BAL   R12,12(,R15)\n         DC    AL4(CHAIN#LIT)\n         L     R12,0(,R12)\n         USING CHAIN#LIT,R12",
+                       "a long S/370 function bases R12 on its literal pool");
+        check_contains(large, "CHAIN#LIT LTORG", "the pool carries the base label");
+        check_contains(large, "BCR   8,R15", "conditional branches go through a loaded address");
+        bool based = false;
+        for (const char *line = large; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+            /* Based branches are B<cond> or BC with a label operand. */
+            if (!strncmp(line, "         B", 10) && strncmp(line, "         BCR", 12) && strncmp(line, "         BALR", 13) &&
+                strncmp(line, "         BR ", 12) && strncmp(line, "         BAL ", 13) && strncmp(line, "         BASR", 13))
+                based = true;
+        }
+        CHECK(!based, "no based branch remains in a long S/370 function");
+        free(large);
+    }
+
+    /* A pool past one base register cannot be addressed: refused. */
+    char *too_large = s370_chain_text(1400);
+    CHECK(too_large == NULL, "a literal pool over 4 KB is refused rather than emitted unassemblable");
+    free(too_large);
 }
 
 static void test_mainframe_internal_labels_do_not_truncate(void)
@@ -1495,7 +1675,7 @@ static void test_mainframe_internal_labels_do_not_truncate(void)
         CHECK(anvil_mainframe_emit_mir(mir, ANVIL_MAINFRAME_VARIANT_S390,
                                        &text, &len),
               "95-character mainframe name should emit without truncating internals");
-        CHECK(text && strstr(text, "_CMP_T_0"),
+        CHECK(text && strstr(text, "#CMP_E_0"),
               "long internal compare label suffix must remain intact");
         free(text);
         anvil_mir_func_destroy(mir);
@@ -1547,6 +1727,160 @@ static void test_mainframe_string_literals_preserve_ir_bytes(void)
     anvil_mir_func_destroy(mir);
 }
 
+/* BYVAL arguments travel as the address of a fresh per-call copy and an
+ * SRET function returns its result address in R15 (ANVIL MVS arena). */
+static void test_mainframe_aggregates_by_value(void)
+{
+    const anvil_arch_t arches[] = { ANVIL_ARCH_S390, ANVIL_ARCH_ZARCH };
+    for (size_t a = 0; a < sizeof(arches) / sizeof(arches[0]); a++) {
+        anvil_ctx_t *ctx = new_mainframe_ctx(arches[a]);
+        if (!ctx) continue;
+        CHECK(anvil_ctx_supports_param_attr(ctx, ANVIL_PARAM_BYVAL) && anvil_ctx_supports_param_attr(ctx, ANVIL_PARAM_SRET),
+              "mainframe targets should lower BYVAL/SRET");
+        anvil_module_t *mod = anvil_module_create(ctx, "agg");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *fields[] = { i32, i32, i32 };
+        anvil_type_t *rec = anvil_type_struct(ctx, NULL, fields, 3);
+        anvil_type_t *rec_p = anvil_type_ptr(ctx, rec);
+        anvil_type_t *void_t = anvil_type_void(ctx);
+        anvil_type_t *params[] = { rec_p };
+        anvil_param_attr_t byval[] = { ANVIL_PARAM_BYVAL }, sret[] = { ANVIL_PARAM_SRET };
+
+        anvil_func_t *take = anvil_func_declare(mod, "take", anvil_type_func_attrs(ctx, void_t, params, byval, 1, false, ANVIL_CC_DEFAULT));
+        anvil_func_t *caller = anvil_func_create(mod, "caller", anvil_type_func(ctx, void_t, NULL, 0, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+        anvil_value_t *object = anvil_build_alloca(ctx, rec, "object");
+        anvil_value_t *args[] = { object };
+        anvil_value_t *ignored = NULL;
+        CHECK(anvil_build_call_checked(ctx, anvil_func_get_value(take), args, 1, "", &ignored) && anvil_build_ret_void(ctx),
+              "BYVAL call should build");
+
+        anvil_func_t *make = anvil_func_create(mod, "make", anvil_type_func_attrs(ctx, void_t, params, sret, 1, false, ANVIL_CC_DEFAULT),
+                                               ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(make));
+        anvil_value_t *field = anvil_build_struct_gep(ctx, rec, anvil_func_get_param(make, 0), 1, "field");
+        CHECK(field && anvil_build_store(ctx, anvil_const_i32(ctx, 7), field) && anvil_build_ret_void(ctx),
+              "SRET function should build");
+
+        anvil_mainframe_variant_t variant = arches[a] == ANVIL_ARCH_ZARCH ? ANVIL_MAINFRAME_VARIANT_ZARCH : ANVIL_MAINFRAME_VARIANT_S390;
+        anvil_mir_func_t *mir = anvil_mainframe_lower_func_to_mir(caller, variant);
+        size_t frame_addrs = 0, offset_loads = 0;
+        anvil_mir_vreg_t passed = ANVIL_MIR_NO_VREG, object_addr = ANVIL_MIR_NO_VREG;
+        for (size_t i = 0; mir && i < anvil_mir_num_instrs(mir); i++) {
+            anvil_mir_instr_info_t info;
+            if (!anvil_mir_get_instr_info(mir, i, &info)) continue;
+            if (info.op == ANVIL_MIR_OP_FRAME_ADDR && ++frame_addrs == 1) object_addr = info.def;
+            if (info.op == ANVIL_MIR_OP_LOAD && info.has_imm && info.imm > 0) offset_loads++;
+            if (info.op == ANVIL_MIR_OP_CALL_STACK_ARG) passed = anvil_mir_get_instr_use(mir, i, 0);
+        }
+        CHECK(frame_addrs >= 2 && offset_loads >= 1 && passed != ANVIL_MIR_NO_VREG && passed != object_addr,
+              "a BYVAL argument passes the address of a fresh copy");
+        anvil_mir_func_destroy(mir);
+
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "aggregate module should emit HLASM");
+        const char *make_body = text ? strstr(text, "\nMAKE ") : NULL;
+        check_contains(make_body, arches[a] == ANVIL_ARCH_ZARCH ? "LGR    R15," : "LR    R15,", "an SRET function returns its result address in R15");
+        free(text);
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* 64-bit integers on 31-bit targets: two parameter-list entries per
+ * argument, results in R15 (high) and R0 (low), the multiplication through
+ * the run-time helper. */
+static void test_mainframe_word_pairs(void)
+{
+    const anvil_arch_t arches[] = { ANVIL_ARCH_S370, ANVIL_ARCH_S390 };
+    for (size_t a = 0; a < sizeof(arches) / sizeof(arches[0]); a++) {
+        anvil_ctx_t *ctx = new_mainframe_ctx(arches[a]);
+        if (!ctx) continue;
+        anvil_module_t *mod = anvil_module_create(ctx, "pairs");
+        anvil_type_t *i64 = anvil_type_i64(ctx);
+        anvil_type_t *params[] = { i64, i64 };
+        anvil_func_t *mul = anvil_func_create(mod, "mul64", anvil_type_func(ctx, i64, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(mul));
+        anvil_value_t *product = anvil_build_mul(ctx, anvil_func_get_param(mul, 0), anvil_func_get_param(mul, 1), "product");
+        CHECK(product && anvil_build_ret(ctx, product), "64-bit multiply should build");
+
+        anvil_func_t *caller = anvil_func_create(mod, "twice", anvil_type_func(ctx, i64, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+        anvil_value_t *args[] = { anvil_func_get_param(caller, 0), anvil_const_i64(ctx, 2) };
+        anvil_value_t *result = NULL;
+        CHECK(anvil_build_call_checked(ctx, anvil_func_get_value(mul), args, 2, "result", &result) && result &&
+              anvil_build_ret(ctx, anvil_build_add(ctx, result, anvil_const_i64(ctx, 1), "sum")),
+              "64-bit call should build");
+
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "31-bit module with 64-bit integers should emit HLASM");
+        const char *mul_body = text ? strstr(text, "\nMUL64 ") : NULL;
+        const char *twice_body = text ? strstr(text, "\nTWICE ") : NULL;
+        check_contains(mul_body, "L     R14,12(,R1)", "a 64-bit argument pair takes two parameter-list entries");
+        check_contains(mul_body, "=V(__MULDI3)", "a 64-bit multiply calls the run-time helper");
+        check_contains(mul_body, "LR    R0,", "the low word of a 64-bit result returns in R0");
+        check_contains(mul_body, "LM    R1,R12,24(R13)", "the epilogue keeps R0 for a pair result");
+        check_contains(twice_body, ",R0\n", "a caller reads the low result word from R0");
+        free(text);
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* Immediate operands follow the CPU model: no AHI/CHI on S/370 (literal or
+ * register forms), AHI/CHI from the S/390 relative-and-immediate facility,
+ * NILF/XILF with the z9 extended immediates; a compare feeding a branch
+ * branches on the condition code. */
+static void test_mainframe_immediates_follow_cpu_model(void)
+{
+    static const struct {
+        anvil_arch_t arch;
+        anvil_cpu_model_t cpu;
+        const char *present[3];
+        const char *absent;
+    } cases[] = {
+        { ANVIL_ARCH_S370, ANVIL_CPU_S370_BASE, { "C     ", "=F'100'", "N     " }, "AHI" },
+        { ANVIL_ARCH_S390, ANVIL_CPU_S390_G5, { "CHI   ", "AHI   ", "N     " }, "NILF" },
+        { ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z10, { "CHI   ", "AHI   ", "NILF  " }, "=F'65280'" },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = new_mainframe_ctx(cases[c].arch);
+        if (!ctx) continue;
+        CHECK(anvil_ctx_set_cpu(ctx, cases[c].cpu) == ANVIL_OK, "mainframe CPU model should be selectable");
+        anvil_module_t *mod = anvil_module_create(ctx, "imm");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { i32 };
+        anvil_func_t *fn = anvil_func_create(mod, "imm_pick", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *small = anvil_block_create(fn, "small");
+        anvil_block_t *large = anvil_block_create(fn, "large");
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_value_t *x = anvil_func_get_param(fn, 0);
+        anvil_value_t *less = anvil_build_cmp_lt(ctx, x, anvil_const_i32(ctx, 100), "less");
+        CHECK(less && anvil_build_br_cond(ctx, less, small, large), "branch should build");
+        anvil_set_insert_point(ctx, small);
+        anvil_value_t *sum = anvil_build_add(ctx, x, anvil_const_i32(ctx, 7), "sum");
+        CHECK(sum && anvil_build_ret(ctx, sum), "small path should build");
+        anvil_set_insert_point(ctx, large);
+        anvil_value_t *masked = anvil_build_and(ctx, x, anvil_const_i32(ctx, 0xff00), "masked");
+        CHECK(masked && anvil_build_ret(ctx, masked), "large path should build");
+
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "immediate module should emit HLASM");
+        if (text) {
+            for (size_t p = 0; p < 3; p++)
+                check_contains(text, cases[c].present[p], "the immediate form should match the CPU model");
+            CHECK(strstr(text, cases[c].absent) == NULL, "a facility the CPU model lacks must not be used");
+            CHECK(strstr(text, "LTR") == NULL, "a compare feeding a branch should branch on the condition code");
+        }
+        free(text);
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
     test_mainframe_frame_allocation_separates_nested_calls();
@@ -1571,8 +1905,14 @@ int main(void)
     test_fp_format_selection_is_target_honest();
     test_decimal_types_and_hlasm_constants_are_first_class();
     test_mainframe_emits_interleaved_block_ownership_correctly();
+    test_mainframe_power_of_two_multiply_shifts();
+    test_hlasm_names_are_unique_short_and_fit_the_line();
+    test_s370_long_functions_branch_through_the_pool();
     test_mainframe_internal_labels_do_not_truncate();
     test_mainframe_string_literals_preserve_ir_bytes();
+    test_mainframe_aggregates_by_value();
+    test_mainframe_word_pairs();
+    test_mainframe_immediates_follow_cpu_model();
 
     if (failures != 0) {
         fprintf(stderr, "%d mainframe MachineIR regression checks failed\n", failures);

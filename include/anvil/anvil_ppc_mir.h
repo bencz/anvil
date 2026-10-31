@@ -11,6 +11,7 @@
 
 #include "anvil.h"
 #include "anvil_machine.h"
+#include "anvil_cpu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,10 +30,6 @@ typedef struct {
     unsigned word_size;
     bool little_endian;
     bool uses_function_descriptors;
-    /* fcfid / fctidz: 64-bit integer <-> double conversions. */
-    bool has_fp_int64_convert;
-    /* ISA 2.06 fcfids, fcfidu(s), fctiwuz, fctiduz. */
-    bool has_fp_unsigned_convert;
     unsigned min_frame_size;
     unsigned lr_save_offset;
     unsigned toc_save_offset;
@@ -54,6 +51,7 @@ typedef struct {
     const int *scratch_fpr_regs;
     size_t num_scratch_fpr_regs;
     const struct anvil_ppc_abi_ops *abi_ops;
+    const anvil_arch_info_t *arch_info;
 } anvil_ppc_target_desc_t;
 
 const anvil_ppc_target_desc_t *
@@ -67,10 +65,22 @@ bool anvil_ppc_verify_mir_legal(const anvil_mir_func_t *mir,
                                 size_t error_len);
 bool anvil_ppc_regalloc_mir(anvil_mir_func_t *mir,
                             anvil_ppc_variant_t variant);
+/* As anvil_ppc_regalloc_mir for a CPU with the given ANVIL_FEATURE_PPC_*
+ * set: conversions it performs inline do not end volatile registers. */
+bool anvil_ppc_regalloc_mir_features(anvil_mir_func_t *mir,
+                                     anvil_ppc_variant_t variant,
+                                     anvil_cpu_features_t features);
 bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir,
                         anvil_ppc_variant_t variant,
                         char **output,
                         size_t *len);
+/* As anvil_ppc_emit_mir, for a CPU with the given ANVIL_FEATURE_PPC_* set
+ * (anvil_ppc_emit_mir assumes the variant's default CPU). */
+bool anvil_ppc_emit_mir_features(const anvil_mir_func_t *mir,
+                                 anvil_ppc_variant_t variant,
+                                 anvil_cpu_features_t features,
+                                 char **output,
+                                 size_t *len);
 
 anvil_error_t anvil_ppc_codegen_func(anvil_backend_t *be,
                                      anvil_func_t *func,

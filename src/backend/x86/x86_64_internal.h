@@ -8,9 +8,12 @@
 #ifndef X86_64_INTERNAL_H
 #define X86_64_INTERNAL_H
 
+#include "../common/obj_format.h"
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_x86_64_mir.h"
 #include "../common/aggregate_mir.h"
+#include "../common/ir_lower.h"
+#include "../common/vector_isa.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -41,6 +44,16 @@ typedef struct {
     bool positional_args;
     bool is_darwin;
     bool is_win64;
+    const anvil_obj_format_t *format;
+    /* Position independence: the relocation models the ABI can produce
+     * (bit per anvil_reloc_model_t), the one DEFAULT means, and how a call
+     * names a symbol's PLT entry ("@PLT"; "" when the linker adds stubs). */
+    unsigned reloc_models;
+    anvil_reloc_model_t default_reloc;
+    const char *plt_suffix;
+    /* Callers widen i1/i8/i16 arguments to 32 bits (what Clang-built and
+     * Apple callees assume). */
+    bool caller_extends_narrow_args;
     int shadow_space;
     const int *int_arg_regs;
     int num_int_arg_regs;
@@ -60,9 +73,17 @@ typedef struct {
     int num_scratch_gpr_regs;
     const int *scratch_fpr_regs;
     int num_scratch_fpr_regs;
+    /* Volatile XMM registers neither allocated nor used for spill reloads:
+     * the printer's temporaries.  (Its GPR temporaries are allocatable and
+     * declared per instruction instead.) */
+    int sse_temps[2];
 } anvil_x64_abi_desc_t;
 
 const anvil_x64_abi_desc_t *anvil_x64_get_abi_desc(anvil_abi_t abi);
+
+/* Records on each instruction the GPRs the printer uses as temporaries
+ * printing it (anvil_mir_set_instr_scratch). */
+bool x64_annotate_printer_scratch(anvil_mir_func_t *mir, const anvil_x64_abi_desc_t *desc);
 
 /* Machine placement of a struct or array passed (BYVAL) or returned (SRET)
  * by value under the descriptor's ABI. */
@@ -150,6 +171,11 @@ bool anvil_x64_build_va_copy_into(anvil_backend_t *be, anvil_value_t *destinatio
 anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len);
 
 anvil_error_t x64_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len);
+
+/* SSE vector instructions (x86_64_vector.c). */
+extern const anvil_vector_isa_t x64_vector_isa[];
+extern const size_t x64_vector_isa_count;
+unsigned x64_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
 
 anvil_error_t x64_classify_abi_value(anvil_backend_t *be, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
 

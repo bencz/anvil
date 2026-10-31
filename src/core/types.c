@@ -552,11 +552,12 @@ anvil_type_t *anvil_type_array(anvil_ctx_t *ctx, anvil_type_t *elem, size_t coun
 
 anvil_type_t *anvil_type_vector(anvil_ctx_t *ctx, anvil_type_t *element, size_t lanes)
 {
-    if (!ctx || !ctx->target_configured || !element || element->owner_ctx != ctx || !anvil_type_is_floating(element) ||
-        lanes < 2 || lanes > 16 || (lanes & (lanes - 1)))
+    bool lane_type = element && (anvil_type_is_floating(element) || (anvil_type_is_integer(element) && element->kind != ANVIL_TYPE_I1));
+    if (!ctx || !ctx->target_configured || !element || element->owner_ctx != ctx || !lane_type ||
+        lanes < 2 || lanes > 64 || (lanes & (lanes - 1)))
     {
         if (ctx)
-            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE, "Vector requires 2, 4, 8 or 16 floating-point lanes in the current context");
+            anvil_set_error(ctx, ANVIL_ERR_INVALID_TYPE, "Vector requires 2 to 64 (a power of two) floating-point or integer lanes in the current context");
 
         return NULL;
     }
@@ -575,6 +576,21 @@ anvil_type_t *anvil_type_vector(anvil_ctx_t *ctx, anvil_type_t *element, size_t 
     return type;
 }
 
+anvil_type_t *anvil_type_vector_mask(anvil_ctx_t *ctx, anvil_type_t *vector)
+{
+    if (!ctx || !vector || vector->kind != ANVIL_TYPE_VECTOR)
+        return NULL;
+    anvil_type_t *lane;
+    switch (vector->data.vector.element->size) {
+    case 1: lane = anvil_type_i8(ctx); break;
+    case 2: lane = anvil_type_i16(ctx); break;
+    case 4: lane = anvil_type_i32(ctx); break;
+    case 8: lane = anvil_type_i64(ctx); break;
+    default: return NULL;
+    }
+    return anvil_type_vector(ctx, lane, vector->data.vector.lanes);
+}
+
 anvil_type_t *anvil_type_vector_element(anvil_type_t *type)
 {
     return type && type->kind == ANVIL_TYPE_VECTOR ? type->data.vector.element : NULL;
@@ -585,12 +601,18 @@ size_t anvil_type_vector_lanes(anvil_type_t *type)
     return type && type->kind == ANVIL_TYPE_VECTOR ? type->data.vector.lanes : 0;
 }
 
-unsigned anvil_vector_operation_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type)
+unsigned anvil_vector_shape_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape)
 {
-    if (!ctx || !type || type->owner_ctx != ctx || type->kind != ANVIL_TYPE_VECTOR || !ctx->backend || !ctx->backend->ops->vector_operation_cost)
+    if (!ctx || !type || type->owner_ctx != ctx || (type->kind == ANVIL_TYPE_VECTOR) == (shape == ANVIL_VECTOR_SHAPE_SCALAR) ||
+        !ctx->backend || !ctx->backend->ops->vector_operation_cost)
         return 0;
 
-    return ctx->backend->ops->vector_operation_cost(ctx->backend, operation, type);
+    return ctx->backend->ops->vector_operation_cost(ctx->backend, operation, type, shape);
+}
+
+unsigned anvil_vector_operation_cost(anvil_ctx_t *ctx, anvil_op_t operation, anvil_type_t *type)
+{
+    return anvil_vector_shape_cost(ctx, operation, type, ANVIL_VECTOR_SHAPE_LANES);
 }
 
 bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
@@ -1132,6 +1154,29 @@ bool anvil_sem_type_is_sized(const anvil_type_t *type)
     return true;
 }
 
+/* The lane type of a vector; any other type is its own single lane. */
+static const anvil_type_t *sem_lane_type(const anvil_type_t *type)
+{
+    return type->kind == ANVIL_TYPE_VECTOR ? type->data.vector.element : type;
+}
+
+/* An integer type (or vector of them) that arithmetic accepts: not i1. */
+static bool sem_arithmetic_integer(const anvil_type_t *type)
+{
+    const anvil_type_t *lane = sem_lane_type(type);
+    return anvil_type_is_integer((anvil_type_t *)lane) && lane->kind != ANVIL_TYPE_I1;
+}
+
+bool anvil_sem_shift_types(const anvil_type_t *value, const anvil_type_t *amount, const anvil_type_t *result)
+{
+    /* The amount may have any integer width.  A vector shifts each lane by
+     * the matching lane of a vector amount, or every lane by one scalar. */
+    if (!value || !amount || !result || !anvil_types_equal(value, result) || !sem_arithmetic_integer(value) ||
+        !sem_arithmetic_integer(amount))
+        return false;
+    return amount->kind != ANVIL_TYPE_VECTOR || anvil_types_equal(amount, value);
+}
+
 bool anvil_sem_binary_types(anvil_op_t op, const anvil_type_t *lhs,
                             const anvil_type_t *rhs,
                             const anvil_type_t *result)
@@ -1140,10 +1185,12 @@ bool anvil_sem_binary_types(anvil_op_t op, const anvil_type_t *lhs,
         !anvil_types_equal(lhs, result)) return false;
     switch (op) {
         case ANVIL_OP_ADD: case ANVIL_OP_SUB: case ANVIL_OP_MUL:
-            return anvil_type_is_integer((anvil_type_t *)lhs) &&
-                   lhs->kind != ANVIL_TYPE_I1;
+        case ANVIL_OP_UMULH: case ANVIL_OP_SMULH:
+        case ANVIL_OP_ADD_SAT_U: case ANVIL_OP_ADD_SAT_S:
+        case ANVIL_OP_SUB_SAT_U: case ANVIL_OP_SUB_SAT_S:
+            return sem_arithmetic_integer(lhs);
         case ANVIL_OP_AND: case ANVIL_OP_OR: case ANVIL_OP_XOR:
-            return anvil_type_is_integer((anvil_type_t *)lhs);
+            return anvil_type_is_integer((anvil_type_t *)sem_lane_type(lhs));
         case ANVIL_OP_SDIV: case ANVIL_OP_SMOD:
             return anvil_type_is_integer((anvil_type_t *)lhs) &&
                    lhs->kind != ANVIL_TYPE_I1 && lhs->is_signed;
@@ -1168,31 +1215,88 @@ bool anvil_sem_unary_types(anvil_op_t op, const anvil_type_t *operand,
 {
     if (!operand || !result || !anvil_types_equal(operand, result)) return false;
     if (op == ANVIL_OP_NEG)
-        return anvil_type_is_integer((anvil_type_t *)operand) &&
-               operand->kind != ANVIL_TYPE_I1;
+        return sem_arithmetic_integer(operand);
     if (op == ANVIL_OP_NOT)
-        return anvil_type_is_integer((anvil_type_t *)operand);
-    if (op == ANVIL_OP_FNEG || op == ANVIL_OP_FABS)
-        return anvil_type_is_floating((anvil_type_t *)operand);
+        return anvil_type_is_integer((anvil_type_t *)sem_lane_type(operand));
+    if (op == ANVIL_OP_FNEG || op == ANVIL_OP_FABS || op == ANVIL_OP_FSQRT)
+        return anvil_type_is_floating((anvil_type_t *)sem_lane_type(operand));
     return false;
+}
+
+bool anvil_sem_mask_of(const anvil_type_t *mask, const anvil_type_t *vector)
+{
+    return mask && vector && mask->kind == ANVIL_TYPE_VECTOR && vector->kind == ANVIL_TYPE_VECTOR &&
+           mask->data.vector.lanes == vector->data.vector.lanes && anvil_type_is_integer(mask->data.vector.element) &&
+           mask->data.vector.element->size == vector->data.vector.element->size;
 }
 
 bool anvil_sem_cmp_types(anvil_op_t op, const anvil_type_t *lhs,
                          const anvil_type_t *rhs,
                          const anvil_type_t *result)
 {
+    /* Scalars compare to i1; vectors lane by lane to a lane mask. */
     if (!lhs || !rhs || !result || !anvil_types_equal(lhs, rhs) ||
-        !anvil_sem_bool_type(result)) return false;
+        !(lhs->kind == ANVIL_TYPE_VECTOR ? anvil_sem_mask_of(result, lhs) : anvil_sem_bool_type(result))) return false;
+    const anvil_type_t *lane = sem_lane_type(lhs);
     if (op == ANVIL_OP_FCMP)
-        return anvil_type_is_floating((anvil_type_t *)lhs);
+        return anvil_type_is_floating((anvil_type_t *)lane);
     if (op < ANVIL_OP_CMP_EQ || op > ANVIL_OP_CMP_UGE) return false;
     if (op == ANVIL_OP_CMP_EQ || op == ANVIL_OP_CMP_NE)
-        return anvil_type_is_integer((anvil_type_t *)lhs) ||
-               lhs->kind == ANVIL_TYPE_PTR;
-    if (!anvil_type_is_integer((anvil_type_t *)lhs)) return false;
-    if (lhs->kind == ANVIL_TYPE_I1) return false;
-    if (op >= ANVIL_OP_CMP_ULT) return !lhs->is_signed;
-    return lhs->is_signed;
+        return anvil_type_is_integer((anvil_type_t *)lane) ||
+               lane->kind == ANVIL_TYPE_PTR;
+    if (!anvil_type_is_integer((anvil_type_t *)lane)) return false;
+    if (lane->kind == ANVIL_TYPE_I1) return false;
+    if (op >= ANVIL_OP_CMP_ULT) return !lane->is_signed;
+    return lane->is_signed;
+}
+
+unsigned anvil_vector_widening(const anvil_type_t *wide, const anvil_type_t *narrow)
+{
+    if (!wide || !narrow || wide->kind != ANVIL_TYPE_VECTOR || narrow->kind != ANVIL_TYPE_VECTOR || wide->size != narrow->size ||
+        !anvil_type_is_integer(wide->data.vector.element) || !anvil_type_is_integer(narrow->data.vector.element))
+        return 0;
+    size_t lanes = wide->data.vector.lanes, ratio = lanes ? narrow->data.vector.lanes / lanes : 0;
+    return ratio * lanes == narrow->data.vector.lanes && (ratio == 2 || ratio == 4 || ratio == 8) ? (unsigned)ratio : 0;
+}
+
+anvil_vector_shape_t anvil_vector_widen_shape(unsigned ratio)
+{
+    return ratio == 8 ? ANVIL_VECTOR_SHAPE_WIDEN8 : ratio == 4 ? ANVIL_VECTOR_SHAPE_WIDEN4 : ANVIL_VECTOR_SHAPE_WIDEN2;
+}
+
+bool anvil_sem_accumulate_types(anvil_op_t op, const anvil_type_t *acc, const anvil_type_t *lanes, const anvil_type_t *result)
+{
+    return (op == ANVIL_OP_ACCUM_ZEXT || op == ANVIL_OP_ACCUM_SEXT) && acc && result && anvil_types_equal(acc, result) &&
+           anvil_vector_widening(acc, lanes) != 0;
+}
+
+bool anvil_sem_fma_types(const anvil_type_t *a, const anvil_type_t *b, const anvil_type_t *c, const anvil_type_t *result)
+{
+    if (!a || !anvil_types_equal(a, b) || !anvil_types_equal(a, c) || !anvil_types_equal(a, result))
+        return false;
+    return anvil_type_is_floating((anvil_type_t *)sem_lane_type(a));
+}
+
+bool anvil_op_is_reduction(anvil_op_t op)
+{
+    return op >= ANVIL_OP_REDUCE_OR && op <= ANVIL_OP_REDUCE_FADD;
+}
+
+bool anvil_sem_reduce_types(anvil_op_t op, const anvil_type_t *vector, const anvil_type_t *result)
+{
+    if (!anvil_op_is_reduction(op) || !vector || !result || vector->kind != ANVIL_TYPE_VECTOR ||
+        !anvil_types_equal(result, vector->data.vector.element))
+        return false;
+    anvil_type_t *lane = vector->data.vector.element;
+    return op == ANVIL_OP_REDUCE_FADD ? anvil_type_is_floating(lane) : anvil_type_is_integer(lane);
+}
+
+bool anvil_sem_select_types(const anvil_type_t *cond, const anvil_type_t *then_type, const anvil_type_t *else_type,
+                            const anvil_type_t *result)
+{
+    /* An i1 picks one whole value; a lane mask picks lane by lane. */
+    return cond && then_type && anvil_types_equal(then_type, else_type) && anvil_types_equal(result, then_type) &&
+           (anvil_sem_bool_type(cond) || anvil_sem_mask_of(cond, then_type));
 }
 
 bool anvil_sem_cast_types(anvil_op_t op, const anvil_type_t *source,
@@ -1247,6 +1351,31 @@ anvil_type_t *anvil_sem_memory_object_type(const anvil_value_t *value)
         value->type->kind != ANVIL_TYPE_FUNC) return value->type;
     return value->type->kind == ANVIL_TYPE_PTR
                ? value->type->data.pointee : NULL;
+}
+
+bool anvil_sem_operand_is_address(anvil_op_t op, size_t index)
+{
+    switch (op) {
+    case ANVIL_OP_LOAD:
+    case ANVIL_OP_GEP:
+    case ANVIL_OP_STRUCT_GEP:
+    case ANVIL_OP_ATOMIC_LOAD:
+    case ANVIL_OP_ATOMIC_STORE:
+    case ANVIL_OP_ATOMIC_RMW:
+    case ANVIL_OP_ATOMIC_CMPXCHG:
+        return index == 0;
+    case ANVIL_OP_STORE:
+        return index == 1;
+    default:
+        return false;
+    }
+}
+
+bool anvil_sem_global_operand_allowed(const anvil_value_t *value, anvil_op_t op, size_t index)
+{
+    if (!value || value->kind != ANVIL_VAL_GLOBAL || (value->type && value->type->kind == ANVIL_TYPE_FUNC))
+        return true;
+    return anvil_sem_operand_is_address(op, index);
 }
 
 anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee)

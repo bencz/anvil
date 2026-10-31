@@ -1574,8 +1574,8 @@ static void test_builder_without_insertion_point_is_owned_and_diagnostic(void)
         CHECK(anvil_ctx_get_last_error(ctx) == ANVIL_ERR_INVALID_OP &&
               strstr(anvil_ctx_get_error(ctx), "insertion") != NULL,
               "missing insertion point should set a sticky diagnostic");
-        CHECK(owned_instr_count(ctx) == before + 1,
-              "uninserted instruction must remain in the ownership registry");
+        CHECK(owned_instr_count(ctx) == before,
+              "a builder that cannot insert discards its unfinished instruction");
         CHECK(anvil_func_get_entry(fn)->first == NULL,
               "failed insertion must not mutate the live instruction list");
 
@@ -2108,9 +2108,36 @@ static void test_module_symbol_table_and_redeclarations(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* A data global names its storage: it is an operand only where an address
+ * is read; using it as a value (which would read its address) is rejected. */
+static void test_ir_builder_rejects_global_as_value(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create();
+    CHECK(ctx && anvil_ctx_set_target(ctx, ANVIL_ARCH_X86_64) == ANVIL_OK, "target should be available");
+    if (!ctx)
+        return;
+    anvil_module_t *mod = anvil_module_create(ctx, "globals");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_value_t *g = anvil_module_add_global(mod, "g", i32, ANVIL_LINK_EXTERNAL);
+    anvil_func_t *fn = anvil_func_create(mod, "use_g", anvil_type_func(ctx, i32, NULL, 0, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    CHECK(anvil_build_add(ctx, g, anvil_const_i32(ctx, 1), "bad") == NULL, "a global must not be an arithmetic operand");
+    anvil_value_t *loaded = anvil_build_load(ctx, i32, g, "value");
+    CHECK(loaded != NULL, "loading through a global is its address use");
+    anvil_value_t *sum = anvil_build_add(ctx, loaded, anvil_const_i32(ctx, 1), "sum");
+    CHECK(sum && anvil_build_store(ctx, sum, g), "storing through a global is its address use");
+    CHECK(!anvil_build_store(ctx, g, g), "a global must not be the stored value");
+    CHECK(anvil_build_ret(ctx, sum), "function should terminate");
+    char error[256] = {0};
+    CHECK(anvil_func_verify(fn, error, sizeof(error)), "address uses of a global verify");
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 int main(void)
 {
     test_ir_verifier_accepts_valid_function();
+    test_ir_builder_rejects_global_as_value();
     test_ir_verifier_accepts_external_declaration_with_params();
     test_ir_verifier_rejects_binary_type_mismatch();
     test_ir_verifier_rejects_phi_incoming_from_non_predecessor();

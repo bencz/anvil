@@ -1,4 +1,5 @@
 #include "st_primitive_bridge.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 
@@ -7,16 +8,13 @@ _Noreturn st_value_t st_aot_core_primitive_contract_violation(
     const StFrame *frame)
 {
     (void)intrinsic_id;
-    (void)status;
     (void)frame;
-    abort();
+    st_fatal_code("core primitive contract violation", "status", (uint64_t)status);
 }
 
 _Noreturn st_value_t st_aot_runtime_primitive_contract_violation(
     uint32_t status, uint32_t detail, const StFrame *frame)
 {
-    (void)status;
-    (void)detail;
     (void)frame;
-    abort();
+    st_fatal_code("runtime primitive contract violation", "status", ((uint64_t)status << 32) | detail);
 }

@@ -236,3 +236,92 @@ bool anvil_gnu_emit_constant(anvil_strbuf_t *out, const anvil_type_t *type, cons
     }
     return false;
 }
+
+/* Whether a constant's image holds addresses the loader must relocate. */
+static bool gnu_constant_needs_relocation(const anvil_value_t *value)
+{
+    if (!value)
+        return false;
+    switch (value->kind) {
+    case ANVIL_VAL_CONST_SYMBOL_ADDR:
+    case ANVIL_VAL_CONST_GEP:
+        return true;
+    case ANVIL_VAL_CONST_STRING:
+        return value->type && value->type->kind == ANVIL_TYPE_PTR;
+    case ANVIL_VAL_CONST_ARRAY:
+    case ANVIL_VAL_CONST_STRUCT:
+        for (size_t i = 0; i < value->data.aggregate.num_elements; i++)
+            if (gnu_constant_needs_relocation(value->data.aggregate.elements[i]))
+                return true;
+        return false;
+    default:
+        return false;
+    }
+}
+
+bool anvil_gnu_emit_globals(anvil_strbuf_t *out, const anvil_module_t *mod, const anvil_gnu_globals_config_t *config)
+{
+    if (!out || !mod || !config || !config->format)
+        return false;
+    const anvil_obj_format_t *format = config->format;
+    const char *prefix = config->symbol_prefix ? config->symbol_prefix : "";
+    anvil_gnu_string_pool_t strings;
+    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
+
+    const char *section = NULL;
+    bool ok = true;
+    for (const anvil_global_t *g = mod->globals; ok && g; g = g->next) {
+        const anvil_value_t *global = g->value;
+        if (!global || (global->type && global->type->kind == ANVIL_TYPE_FUNC))
+            continue;
+        if (!global->name || !global->type) {
+            ok = false;
+            break;
+        }
+        char symbol[512];
+        snprintf(symbol, sizeof(symbol), "%s%s", prefix, global->name);
+        if (global->data.global.is_declaration) {
+            anvil_strbuf_appendf(out, "\t.extern %s\n", symbol);
+            continue;
+        }
+        size_t align = config->type_align ? config->type_align(global->type) : anvil_type_align(global->type);
+        if (!align)
+            align = 1;
+        /* COMMON: an uninitialized tentative definition the linker merges. */
+        if (global->data.global.linkage == ANVIL_LINK_COMMON && !global->data.global.init && !global->data.global.is_constant) {
+            unsigned log2 = 0;
+            while (((size_t)1 << log2) < align)
+                log2++;
+            anvil_strbuf_appendf(out, "\t.comm %s, %zu, %zu\n", symbol, global->type->size, format->comm_align_log2 ? (size_t)log2 : align);
+            continue;
+        }
+        const char *wanted = global->data.global.is_constant
+                                 ? (gnu_constant_needs_relocation(global->data.global.init) ? format->relro_section : format->rodata_section)
+                                 : (!global->data.global.init && format->plain_bss ? format->bss_section : format->data_section);
+        if (section != wanted) {
+            anvil_strbuf_append(out, wanted);
+            section = wanted;
+        }
+        anvil_obj_emit_binding(out, format, global->data.global.linkage, symbol);
+        anvil_obj_emit_align(out, align);
+        if (format->symbol_type_size)
+            anvil_strbuf_appendf(out, "\t.type %s, %%object\n", symbol);
+        anvil_strbuf_appendf(out, "%s:\n", symbol);
+        ok = anvil_gnu_emit_constant(out, global->type, global->data.global.init, config->pointer_size, prefix, &strings, config->format_symbol,
+                                     config->format_user);
+        if (ok && format->symbol_type_size)
+            anvil_strbuf_appendf(out, "\t.size %s, %zu\n", symbol, global->type->size);
+    }
+    if (ok && section)
+        anvil_strbuf_append(out, "\n");
+    if (ok) {
+        char string_section[160];
+        snprintf(string_section, sizeof(string_section), "%s", format->cstring_section);
+        size_t length = strlen(string_section);
+        if (length && string_section[length - 1] == '\n')
+            string_section[length - 1] = '\0';
+        ok = anvil_gnu_string_pool_emit(out, &strings, string_section);
+    }
+    anvil_gnu_string_pool_destroy(&strings);
+    return ok && !out->failed;
+}

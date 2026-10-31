@@ -1,0 +1,45 @@
+
+			+-----------------------+
+			|       C O B C Y       |
+			+-----------------------+
+			|      Version 0.5      |
+			+-----------------------+
+
+Cobcy is a free cobol compiler. It compiles cobol code into
+frequently messy, but readable C (confusion is mostly due to long 
+variable names). Turning wrapping off while viewing helps a lot.
+Current capabilities include a lot of basic COBOL, but several features,
+like arrays, strings, and record-record MOVEs are still missing.
+
+=========================================================================
+
+This was a project of mine back in 1996, which is when the last release
+occured. I dug this up recently on uu.net, and decided to put it up to
+some public place. It might make a decent starting point if you want to
+make a COBOL compiler.
+
+I do not want to maintain it; I just cleaned it up a bit to get it to
+compile with current gcc and uSTL releases. So tell me if it crashes,
+but forget about new features.
+
+The "alberto" branch is for work done between 1996 and 1999 by Alberto
+Santini (https://github.com/albertosantini). I ought to merge some of
+that in, when I figure out exactly what he did.
+
+=========================================================================
+
+QuickStart:
+-----------
+you need gcc 4.7 for c++14 support
+    (for cobcy itself, the COBOL is compiled to c99)
+
+the only external dependency is ncurses (plus flex/bison to build)
+
+./configure && make
+compile things using 'cobcy -o program.c program.cob'
+
+There are some tests available in the 'bvt' directory, which can be
+run automatically with 'make check'. See documentation in the docs
+directory for more information about the program. If you have a problem,
+run cobcy with -g flag and send me the output of thus generated program,
+the generated C code, and the test file you used.

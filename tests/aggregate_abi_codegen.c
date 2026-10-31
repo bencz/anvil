@@ -80,6 +80,9 @@ int main(int argc, char **argv)
 
     gen_t g = { anvil_ctx_create_for_target(arch), NULL, NULL, NULL, NULL };
     if (!g.ctx) return fail("cannot create context", NULL);
+    /* The i386 backend lowers floating point to SSE2. */
+    if (arch == ANVIL_ARCH_X86 && anvil_ctx_set_cpu(g.ctx, ANVIL_CPU_X86_PENTIUM4) != ANVIL_OK)
+        return fail("cannot select an SSE2 CPU", g.ctx);
     if (!anvil_ctx_supports_param_attr(g.ctx, ANVIL_PARAM_BYVAL) ||
         !anvil_ctx_supports_param_attr(g.ctx, ANVIL_PARAM_SRET)) {
         printf("aggregate ABI: target %s does not lower BYVAL/SRET yet\n", argv[1]);

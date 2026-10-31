@@ -110,8 +110,8 @@ static void test_x86_64_lowers_integer_add_with_entry_abi_copies(void)
                 CHECK(anvil_x86_64_emit_mir(mir, &asm_text, &asm_len),
                       "integer add MIR should emit x86-64 assembly");
                 if (asm_text) {
-                    check_contains(asm_text, "\tpushq %rbp\n",
-                                   "function should emit a prologue");
+                    /* A leaf with no frame bytes runs on its caller's frame. */
+                    CHECK(!strstr(asm_text, "\tpushq %rbp\n"), "a leaf without frame bytes should omit the prologue");
                     check_contains(asm_text, "\tret\n",
                                    "function should emit a return");
                     free(asm_text);
@@ -308,19 +308,18 @@ static void test_x86_64_lowers_select_to_branch_diamond(void)
                     if (info.op == ANVIL_MIR_OP_SELECT) saw_select = true;
                     if (info.op == ANVIL_MIR_OP_BR_COND) saw_cond_branch = true;
                 }
-                CHECK(!saw_select,
-                      "select must be lowered to a branch, not a MIR SELECT");
-                CHECK(saw_cond_branch,
-                      "select lowering should emit a conditional branch");
-                CHECK(anvil_mir_num_blocks(mir) >= 4,
-                      "select lowering should introduce then/else/join blocks");
+                /* An integer select is one conditional move, no branch. */
+                CHECK(saw_select, "an integer select should lower to a MIR SELECT");
+                CHECK(!saw_cond_branch, "an integer select should not branch");
 
                 CHECK(anvil_x86_64_regalloc_mir(mir),
-                      "select-as-branch MIR should allocate");
+                      "select MIR should allocate");
                 char *asm_text = NULL;
                 size_t asm_len = 0;
                 CHECK(anvil_x86_64_emit_mir(mir, &asm_text, &asm_len),
                       "select MIR should emit x86-64 assembly");
+                CHECK(asm_text && strstr(asm_text, "\tcmov") && !strstr(asm_text, "\tset"),
+                      "the select should be a cmov on the fused compare's flags");
                 free(asm_text);
                 anvil_mir_func_destroy(mir);
             }

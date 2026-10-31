@@ -8,6 +8,8 @@
 #        ./run_exec_tests.sh -Og test.c         # Run single test with -Og
 #        ./run_exec_tests.sh --all-opts         # Run all tests with all optimization levels
 #        ./run_exec_tests.sh --compare-clang    # Compare MCC output size with Clang
+#        ./run_exec_tests.sh --arch=x86 --mcc-flags=-mcpu=pentium4 --target-cflags=-m32
+#                                               # Another target the host runs
 
 set -e
 
@@ -17,6 +19,9 @@ MCC="$MCC_DIR/mcc"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 TIMEOUT_SEC=5
 OPT_LEVEL=""
+MCC_ARCH=""
+MCC_FLAGS=""
+TARGET_CFLAGS=""
 ALL_OPTS=false
 COMPARE_CLANG=false
 
@@ -69,6 +74,18 @@ while [[ $# -gt 0 ]]; do
             COMPARE_CLANG=true
             shift
             ;;
+        --arch=*)
+            MCC_ARCH="${1#--arch=}"
+            shift
+            ;;
+        --mcc-flags=*)
+            MCC_FLAGS="${1#--mcc-flags=}"
+            shift
+            ;;
+        --target-cflags=*)
+            TARGET_CFLAGS="${1#--target-cflags=}"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [options] [test_file.c]"
             echo ""
@@ -76,6 +93,9 @@ while [[ $# -gt 0 ]]; do
             echo "  -O0, -O1, -O2, -O3, -Og  Set optimization level (default: none)"
             echo "  --all-opts               Run tests with all optimization levels"
             echo "  --compare-clang          Compare assembly size with Clang"
+            echo "  --arch=ARCH              MCC target (default: the host)"
+            echo "  --mcc-flags=FLAGS        Extra MCC flags (e.g. -mcpu=pentium4)"
+            echo "  --target-cflags=FLAGS    Reference compiler/link flags for --arch"
             echo "  -h, --help               Show this help"
             exit 0
             ;;
@@ -115,14 +135,17 @@ if ! "$CC" -std=c99 -I"$MCC_DIR/include" -I"$MCC_DIR/../../include" \
 fi
 rm -f "$TARGET_UNIT"
 
-# Detect architecture
-ARCH=$(uname -m)
-case "$ARCH" in
-    x86_64)  MCC_ARCH="x86_64" ;;
-    arm64)   MCC_ARCH="arm64_macos" ;;
-    aarch64) MCC_ARCH="arm64" ;;
-    *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
-esac
+# Target: the host by default.  --arch selects another one the host can
+# run, with --target-cflags for the reference compiler and the link step.
+if [ -z "$MCC_ARCH" ]; then
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  MCC_ARCH="x86_64" ;;
+        arm64)   MCC_ARCH="arm64_macos" ;;
+        aarch64) MCC_ARCH="arm64" ;;
+        *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    esac
+fi
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -169,7 +192,7 @@ run_test() {
 
     # Step 1: Compile with native compiler and run
     # A test the reference compiler cannot build verifies nothing: fail.
-    if ! $CC -std="$std" -o "$native_bin" "$src" -lc 2>/dev/null; then
+    if ! $CC $TARGET_CFLAGS -std="$std" -o "$native_bin" "$src" -lc -lm 2>/dev/null; then
         echo -e "${RED}FAIL${NC} (reference compiler rejected the test)"
         return 1
     fi
@@ -185,7 +208,7 @@ run_test() {
 
     # Step 2: Compile with MCC.  Any diagnostic error or crash fails the
     # test, even if partial assembly was written.
-    local mcc_opts="-arch=$MCC_ARCH -std=$std -I$MCC_DIR/includes"
+    local mcc_opts="-arch=$MCC_ARCH -std=$std -I$MCC_DIR/includes $MCC_FLAGS"
     [ -n "$opt" ] && mcc_opts="$mcc_opts $opt"
     rm -f "$mcc_asm"
     "$MCC" $mcc_opts -o "$mcc_asm" "$src" 2>/dev/null
@@ -201,7 +224,7 @@ run_test() {
     fi
 
     # Step 3: Assemble and link MCC output
-    if ! $CC -o "$mcc_bin" "$mcc_asm" -lc 2>/dev/null; then
+    if ! $CC $TARGET_CFLAGS -o "$mcc_bin" "$mcc_asm" -lc -lm 2>/dev/null; then
         echo -e "${RED}FAIL${NC} (assembly failed)"
         rm -f "$mcc_asm"
         return 1

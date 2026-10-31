@@ -1,4 +1,5 @@
 #include "st_reflection_primitives.h"
+#include "st_fatal.h"
 
 #include "../../platform/runtime.h"
 #include <stdlib.h>
@@ -518,9 +519,11 @@ static void destroy_state(st_reflection_state_t *state)
     }
     allocator = state->allocator;
     if (state->cache_mutex_initialized) {
-        if (st_runtime_platform.mutex_destroy(&state->cache_mutex) != 0)
+        int mutex_error = st_runtime_platform.mutex_destroy(&state->cache_mutex);
+        if (mutex_error != 0)
         {
-            abort();
+            st_fatal_code("reflection primitive", "cannot destroy the method cache mutex",
+                          (uint64_t)mutex_error);
         }
         state->cache_mutex_initialized = false;
     }
@@ -791,7 +794,7 @@ void st_reflection_context_destroy(st_reflection_context_t *context)
         if (st_image_runtime_heap(context->image) != NULL
                 && !st_image_runtime_root_provider_detach(
                     context->image, &context->root_provider))
-            abort();
+            st_fatal("reflection primitive", "cannot detach the root provider during destroy");
         destroy_state(state);
     }
     memset(context, 0, sizeof(*context));
@@ -828,10 +831,13 @@ static st_reflection_primitive_status_t allocate_compiled_method(
         return map_heap_status(heap_status);
     }
     heap_status = st_heap_object_view(state->heap, method, &view);
-    if (heap_status != ST_HEAP_OK || view.fixed_words == NULL
+    if (heap_status != ST_HEAP_OK)
+        st_fatal("reflection primitive: new CompiledMethod view",
+                 st_heap_status_string(heap_status));
+    if (view.fixed_words == NULL
             || view.shape_descriptor->fixed_word_count
                 != ST_COMPILED_METHOD_SLOT_COUNT)
-        abort();
+        st_fatal("reflection primitive", "new CompiledMethod has an unexpected shape");
 
     st_value_t *slots = view.fixed_words;
     slots[ST_COMPILED_METHOD_SELECTOR_SLOT] = selector;
@@ -871,6 +877,16 @@ static bool compiled_method_matches(
     }
     header = st_object_header_load(&view.object->header);
     return (st_object_header_flags(header) & ST_HEADER_IMMUTABLE) != 0u;
+}
+
+static void unlock_method_cache(st_reflection_state_t *state)
+{
+    int mutex_error = st_runtime_platform.mutex_unlock(&state->cache_mutex);
+    if (mutex_error != 0)
+    {
+        st_fatal_code("reflection primitive", "cannot unlock the method cache mutex",
+                      (uint64_t)mutex_error);
+    }
 }
 
 st_reflection_primitive_status_t st_reflection_lookup_selector(
@@ -922,17 +938,11 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         state->lookup, class_id, selector_id, &lookup_result);
     if (lookup_status == ST_LOOKUP_NOT_FOUND) {
         *result_out = st_value_nil();
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_OK;
     }
     if (lookup_status != ST_LOOKUP_FOUND) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_ERR_LOOKUP;
     }
     if (lookup_result.binding == NULL
@@ -942,20 +952,14 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
                 != lookup_result.defining_class_id
             || lookup_result.defining_class_id == 0u
             || lookup_result.defining_class_id > state->class_count) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
     }
     cache = method_cache_lookup(
         state->method_cache, state->method_cache_capacity,
         lookup_result.entry);
     if (cache == NULL || cache->root_index >= state->method_count) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
     }
     if (cache->binding == lookup_result.binding) {
@@ -963,36 +967,24 @@ st_reflection_primitive_status_t st_reflection_lookup_selector(
         if (!compiled_method_matches(
                 state, method, selector, lookup_result.defining_class_id,
                 lookup_result.binding->descriptor->arity)) {
-            if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-            {
-                abort();
-            }
+            unlock_method_cache(state);
             return ST_REFLECTION_PRIMITIVE_ERR_BAD_OBJECT;
         }
         *result_out = method;
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_OK;
     }
     st_reflection_primitive_status_t status = allocate_compiled_method(
         state, selector, lookup_result.defining_class_id,
         lookup_result.binding->descriptor->arity, &method);
     if (status != ST_REFLECTION_PRIMITIVE_OK) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return status;
     }
     state->method_roots[cache->root_index] = method;
     cache->binding = lookup_result.binding;
     *result_out = method;
-    if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-    {
-        abort();
-    }
+    unlock_method_cache(state);
     return ST_REFLECTION_PRIMITIVE_OK;
 }
 
@@ -1018,10 +1010,7 @@ st_reflection_primitive_status_t st_reflection_compiled_method_for_entry(
         state->method_cache, state->method_cache_capacity, entry);
     if (cache == NULL || cache->root_index >= state->method_count
             || cache->binding != st_method_entry_load(entry)) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_ERR_INVALID_DESCRIPTOR;
     }
     method = state->method_roots[cache->root_index];
@@ -1030,17 +1019,11 @@ st_reflection_primitive_status_t st_reflection_compiled_method_for_entry(
             state, method,
             state->selector_symbols[descriptor->selector_id - 1u],
             descriptor->owner_class_id, descriptor->arity)) {
-        if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-        {
-            abort();
-        }
+        unlock_method_cache(state);
         return ST_REFLECTION_PRIMITIVE_ERR_BAD_OBJECT;
     }
     *result_out = method;
-    if (st_runtime_platform.mutex_unlock(&state->cache_mutex) != 0)
-    {
-        abort();
-    }
+    unlock_method_cache(state);
     return ST_REFLECTION_PRIMITIVE_OK;
 }
 

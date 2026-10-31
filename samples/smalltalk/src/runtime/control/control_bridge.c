@@ -1,4 +1,5 @@
 #include "st_control_bridge.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 
@@ -46,10 +47,13 @@ st_control_status_t st_aot_control_scope_enter(
             st_control_leave_result_t ignored;
             st_control_status_t rollback = st_control_scope_leave(
                 control, scope, st_value_nil(), &ignored);
-            if (rollback != ST_CONTROL_OK) abort();
+            if (rollback != ST_CONTROL_OK)
+                st_fatal("control bridge: rollback of a failed control scope failed",
+                         st_control_status_string(rollback));
             return status;
         }
-        if (home == NULL || frame->home != home) abort();
+        if (home == NULL || frame->home != home)
+            st_fatal("control bridge", "established home is not installed in the frame");
     }
     return ST_CONTROL_OK;
 }
@@ -103,6 +107,5 @@ _Noreturn st_value_t st_aot_control_contract_violation(
     st_control_status_t status, StFrame *frame)
 {
     (void)frame;
-    (void)status;
-    abort();
+    st_fatal("control contract violation", st_control_status_string(status));
 }

@@ -1,4 +1,5 @@
 #include "../fiber.h"
+#include "st_fatal.h"
 
 #include <windows.h>
 #include <errno.h>
@@ -17,7 +18,7 @@ static VOID WINAPI enter_fiber(void *argument)
     st_native_fiber_t *fiber = argument;
 
     fiber->entry(fiber->argument);
-    abort();
+    st_fatal("windows fiber", "a fiber entry returned");
 }
 
 static st_native_fiber_t *capture(void)

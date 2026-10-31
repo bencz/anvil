@@ -916,41 +916,52 @@ static void test_dce_preserves_may_trap_and_memory_operations(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* The empty block on one edge goes away and the PHI names its predecessor;
+ * the other edge loads (which may not be speculated), so neither block
+ * merging nor if-conversion removes the PHI. */
 static void test_simplify_cfg_rewrites_phi_from_empty_block_to_predecessor(void)
 {
     anvil_ctx_t *ctx = new_ctx();
     if (!ctx) return;
 
+    anvil_type_t *params[] = { anvil_type_i1(ctx), anvil_type_ptr(ctx, anvil_type_i32(ctx)) };
     anvil_module_t *mod = NULL;
     anvil_func_t *fn = new_i32_func(ctx, &mod, "opt_phi_cfg", "phi_cfg",
-                                    NULL, 0);
+                                    params, 2);
     if (fn) {
         anvil_block_t *entry = anvil_func_get_entry(fn);
         anvil_block_t *empty = anvil_block_create(fn, "empty");
+        anvil_block_t *work = anvil_block_create(fn, "work");
         anvil_block_t *merge = anvil_block_create(fn, "merge");
-        CHECK(entry != NULL && empty != NULL && merge != NULL,
+        CHECK(entry != NULL && empty != NULL && work != NULL && merge != NULL,
               "CFG test blocks should be created");
 
         anvil_set_insert_point(ctx, entry);
-        anvil_build_br(ctx, empty);
+        anvil_build_br_cond(ctx, anvil_func_get_param(fn, 0), empty, work);
 
         anvil_set_insert_point(ctx, empty);
+        anvil_build_br(ctx, merge);
+
+        anvil_set_insert_point(ctx, work);
+        anvil_value_t *sum = anvil_build_load(ctx, anvil_type_i32(ctx), anvil_func_get_param(fn, 1), "loaded");
         anvil_build_br(ctx, merge);
 
         anvil_set_insert_point(ctx, merge);
         anvil_value_t *phi = anvil_build_phi(ctx, anvil_type_i32(ctx), "p");
         anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 7), empty);
+        anvil_phi_add_incoming(phi, sum, work);
         anvil_build_ret(ctx, phi);
 
         bool changed = anvil_pass_simplify_cfg(fn);
         CHECK(changed, "CFG simplification should remove the empty block");
-        CHECK(entry->last && entry->last->op == ANVIL_OP_BR &&
+        CHECK(!func_has_block(fn, empty) && entry->last && entry->last->op == ANVIL_OP_BR_COND &&
               entry->last->true_block == merge,
               "entry should branch directly to merge");
-        CHECK(phi->data.instr->num_phi_incoming == 1,
-              "PHI should still have one incoming edge");
+        CHECK(phi->data.instr->num_phi_incoming == 2,
+              "PHI should keep both incoming edges");
         CHECK(phi->data.instr->phi_blocks[0] == entry,
               "PHI incoming edge should be rewritten from empty block to entry");
+        check_module_valid(mod, "empty-block removal should leave valid IR");
     }
 
     anvil_module_destroy(mod);
@@ -1133,15 +1144,17 @@ static void test_simplify_cfg_unreachable_removal_updates_live_phi(void)
     anvil_ctx_destroy(ctx);
 }
 
-static void test_simplify_cfg_avoids_phi_edge_collision_on_empty_bypass(void)
+/* br_cond p, empty, join with join's PHI fed by both edges: the branch over
+ * an empty side becomes a select, keeping which edge chose which value. */
+static void test_simplify_cfg_folds_empty_two_way_branch_into_select(void)
 {
     anvil_ctx_t *ctx = new_ctx();
     if (!ctx) return;
 
     anvil_type_t *params[] = { anvil_type_i1(ctx) };
     anvil_module_t *mod = NULL;
-    anvil_func_t *fn = new_i32_func(ctx, &mod, "opt_phi_edge_collision",
-                                    "phi_edge_collision", params, 1);
+    anvil_func_t *fn = new_i32_func(ctx, &mod, "opt_two_way_select",
+                                    "two_way_select", params, 1);
     if (fn) {
         anvil_block_t *entry = anvil_func_get_entry(fn);
         anvil_block_t *empty = anvil_block_create(fn, "empty");
@@ -1160,12 +1173,64 @@ static void test_simplify_cfg_avoids_phi_edge_collision_on_empty_bypass(void)
         anvil_build_ret(ctx, phi);
 
         bool changed = anvil_pass_simplify_cfg(fn);
-        CHECK(!changed,
-              "empty-block bypass must stop when it would collapse PHI edges");
+        anvil_instr_t *select = NULL;
+        for (anvil_block_t *block = fn->blocks; block; block = block->next)
+            for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
+                if (instr->op == ANVIL_OP_SELECT)
+                    select = instr;
+        CHECK(changed && !func_has_block(fn, empty), "a branch over an empty side should fold");
+        CHECK(select && select->operands[0] == anvil_func_get_param(fn, 0) &&
+              select->operands[1]->data.i == 22 && select->operands[2]->data.i == 11,
+              "the select must take the true edge's value when the condition holds");
+        check_module_valid(mod, "folded two-way branch should leave valid IR");
+    }
+
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+/* With a third predecessor of the join the branch cannot fold; removing the
+ * empty block would then collapse two PHI edges into one. */
+static void test_simplify_cfg_avoids_phi_edge_collision_on_empty_bypass(void)
+{
+    anvil_ctx_t *ctx = new_ctx();
+    if (!ctx) return;
+
+    anvil_type_t *params[] = { anvil_type_i1(ctx), anvil_type_i1(ctx) };
+    anvil_module_t *mod = NULL;
+    anvil_func_t *fn = new_i32_func(ctx, &mod, "opt_phi_edge_collision",
+                                    "phi_edge_collision", params, 2);
+    if (fn) {
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_block_t *test = anvil_block_create(fn, "test");
+        anvil_block_t *other = anvil_block_create(fn, "other");
+        anvil_block_t *empty = anvil_block_create(fn, "empty");
+        anvil_block_t *join = anvil_block_create(fn, "join");
+
+        anvil_set_insert_point(ctx, entry);
+        anvil_build_br_cond(ctx, anvil_func_get_param(fn, 1), test, other);
+
+        anvil_set_insert_point(ctx, test);
+        anvil_build_br_cond(ctx, anvil_func_get_param(fn, 0), empty, join);
+
+        anvil_set_insert_point(ctx, other);
+        anvil_build_br(ctx, join);
+
+        anvil_set_insert_point(ctx, empty);
+        anvil_build_br(ctx, join);
+
+        anvil_set_insert_point(ctx, join);
+        anvil_value_t *phi = anvil_build_phi(ctx, anvil_type_i32(ctx), "p");
+        anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 11), test);
+        anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 22), empty);
+        anvil_phi_add_incoming(phi, anvil_const_i32(ctx, 33), other);
+        anvil_build_ret(ctx, phi);
+
+        (void)anvil_pass_simplify_cfg(fn);
         CHECK(func_has_block(fn, empty),
               "edge-collision empty block must remain as an edge discriminator");
-        CHECK(phi->data.instr->num_phi_incoming == 2,
-              "edge-collision PHI must retain both semantic inputs");
+        CHECK(phi->data.instr->num_phi_incoming == 3,
+              "edge-collision PHI must retain every semantic input");
         check_module_valid(mod, "refused empty bypass should leave valid IR");
     }
 
@@ -1260,9 +1325,12 @@ static void test_simplify_cfg_phi_expansion_is_transactional_on_oom(void)
 
         CHECK(anvil_pass_simplify_cfg(fn) == ANVIL_PASS_RUN_CHANGED,
               "CFG simplification should be retryable after PHI allocation OOM");
-        CHECK(!func_has_block(fn, empty) &&
-              phi->data.instr->num_phi_incoming == 2,
-              "successful retry must expand PHI to both unique predecessors");
+        /* Both predecessors give 17: the retry expands the PHI and then
+         * folds the two-way branch, leaving the constant returned. */
+        anvil_instr_t *ret = anvil_func_get_entry(fn)->last;
+        CHECK(!func_has_block(fn, empty) && ret && ret->op == ANVIL_OP_RET &&
+              ret->operands[0]->kind == ANVIL_VAL_CONST_INT && ret->operands[0]->data.i == 17,
+              "successful retry must finish the simplification");
         check_module_valid(mod,
                            "retry after transactional PHI OOM must remain valid");
     }
@@ -1615,6 +1683,7 @@ int main(void)
     test_simplify_cfg_preserves_switch_successors_as_reachable();
     test_simplify_cfg_merge_rewrites_downstream_phi_predecessor();
     test_simplify_cfg_unreachable_removal_updates_live_phi();
+    test_simplify_cfg_folds_empty_two_way_branch_into_select();
     test_simplify_cfg_avoids_phi_edge_collision_on_empty_bypass();
     test_simplify_cfg_treats_duplicate_edges_as_one_predecessor();
     test_simplify_cfg_phi_expansion_is_transactional_on_oom();

@@ -1,4 +1,5 @@
-/* Speculate only nontrapping integer operations into loop preheaders. */
+/* Speculate only nontrapping integer and address operations into loop
+ * preheaders. */
 #include "anvil/anvil_analysis.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
@@ -14,6 +15,8 @@ static bool safe_to_speculate(anvil_op_t op)
         case ANVIL_OP_ADD:
         case ANVIL_OP_SUB:
         case ANVIL_OP_MUL:
+        case ANVIL_OP_UMULH:
+        case ANVIL_OP_SMULH:
         case ANVIL_OP_AND:
         case ANVIL_OP_OR:
         case ANVIL_OP_XOR:
@@ -30,6 +33,9 @@ static bool safe_to_speculate(anvil_op_t op)
         case ANVIL_OP_TRUNC:
         case ANVIL_OP_ZEXT:
         case ANVIL_OP_SEXT:
+        /* Address arithmetic: no memory access, cannot trap. */
+        case ANVIL_OP_GEP:
+        case ANVIL_OP_STRUCT_GEP:
             return true;
         default:
             return false;

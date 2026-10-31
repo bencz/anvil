@@ -1,10 +1,22 @@
 #include "ppc_internal.h"
+#include "../common/parallel_move.h"
 
-static const char *ppc_gpr_names[] = {"%r0",  "%r1",  "%r2",  "%r3",  "%r4",  "%r5",  "%r6",  "%r7",  "%r8",  "%r9",  "%r10", "%r11", "%r12", "%r13", "%r14", "%r15",
+const char *const ppc_gpr_names[32] = {"%r0",  "%r1",  "%r2",  "%r3",  "%r4",  "%r5",  "%r6",  "%r7",  "%r8",  "%r9",  "%r10", "%r11", "%r12", "%r13", "%r14", "%r15",
                                       "%r16", "%r17", "%r18", "%r19", "%r20", "%r21", "%r22", "%r23", "%r24", "%r25", "%r26", "%r27", "%r28", "%r29", "%r30", "%r31"};
 
-static const char *ppc_fpr_names[] = {"%f0",  "%f1",  "%f2",  "%f3",  "%f4",  "%f5",  "%f6",  "%f7",  "%f8",  "%f9",  "%f10", "%f11", "%f12", "%f13", "%f14", "%f15",
+const char *const ppc_fpr_names[32] = {"%f0",  "%f1",  "%f2",  "%f3",  "%f4",  "%f5",  "%f6",  "%f7",  "%f8",  "%f9",  "%f10", "%f11", "%f12", "%f13", "%f14", "%f15",
                                       "%f16", "%f17", "%f18", "%f19", "%f20", "%f21", "%f22", "%f23", "%f24", "%f25", "%f26", "%f27", "%f28", "%f29", "%f30", "%f31"};
+
+/* The 64 VSX registers: vs0-vs31 widen the FPRs, vs32-vs63 are the
+ * AltiVec registers v0-v31 (the vector register class). */
+static const char *const ppc_vsr_names[64] = {"%vs0", "%vs1", "%vs2", "%vs3", "%vs4", "%vs5", "%vs6", "%vs7", "%vs8", "%vs9", "%vs10", "%vs11", "%vs12", "%vs13", "%vs14", "%vs15", "%vs16", "%vs17", "%vs18", "%vs19", "%vs20", "%vs21", "%vs22", "%vs23", "%vs24", "%vs25", "%vs26", "%vs27", "%vs28", "%vs29", "%vs30", "%vs31", "%vs32", "%vs33", "%vs34", "%vs35", "%vs36", "%vs37", "%vs38", "%vs39", "%vs40", "%vs41", "%vs42", "%vs43", "%vs44", "%vs45", "%vs46", "%vs47", "%vs48", "%vs49", "%vs50", "%vs51", "%vs52", "%vs53", "%vs54", "%vs55", "%vs56", "%vs57", "%vs58", "%vs59", "%vs60", "%vs61", "%vs62", "%vs63"};
+static const char *const ppc_vr_names[32] = {"%v0", "%v1", "%v2", "%v3", "%v4", "%v5", "%v6", "%v7", "%v8", "%v9", "%v10", "%v11", "%v12", "%v13", "%v14", "%v15", "%v16", "%v17", "%v18", "%v19", "%v20", "%v21", "%v22", "%v23", "%v24", "%v25", "%v26", "%v27", "%v28", "%v29", "%v30", "%v31"};
+
+/* A vector-class register as a VSX instruction names it. */
+static const char *ppc_vector_vsr(int vr)
+{
+    return ppc_vsr_names[32 + vr];
+}
 
 static int align_int(int value, int align)
 {
@@ -19,16 +31,8 @@ static int ppc_mir_size_bytes(uint16_t size_bits)
     if (size <= 0)
         return 8;
     if (size > 8)
-        return 8;
+        return size > 16 ? 8 : 16;
     return size;
-}
-
-static int ppc_mir_slot_size_bytes(uint16_t size_bits)
-{
-    if (size_bits == 0)
-        return 8;
-    int size = (int)((size_bits + 7) / 8);
-    return size > 0 ? size : 8;
 }
 
 static bool ppc_is_64(const ppc_mir_emit_t *emit)
@@ -70,7 +74,11 @@ static const char *ppc_reg_name(ppc_mir_emit_t *emit, anvil_mir_vreg_t vreg)
     const anvil_regalloc_assignment_t *assignment = ppc_assignment_checked(emit, vreg);
     if (!info || !assignment)
         return "?";
-    return info->reg_class == ANVIL_MIR_REG_FPR ? ppc_fpr_names[assignment->phys_reg] : ppc_gpr_names[assignment->phys_reg];
+    if (info->reg_class == ANVIL_MIR_REG_VECTOR)
+        return ppc_vector_vsr(assignment->phys_reg);
+    if (info->reg_class == ANVIL_MIR_REG_FPR)
+        return ppc_fpr_names[assignment->phys_reg];
+    return ppc_gpr_names[assignment->phys_reg];
 }
 
 static bool ppc_offset_fits_dform(int64_t offset)
@@ -118,15 +126,44 @@ static void ppc_emit_load_imm(ppc_mir_emit_t *emit, int reg, int64_t imm)
     }
 }
 
-static void ppc_emit_addi_large(ppc_mir_emit_t *emit, int dst, int base, int64_t offset)
+/* DS-form instructions encode displacement/4. */
+static bool ppc_op_is_ds_form(const char *op)
+{
+    return strcmp(op, "ld") == 0 || strcmp(op, "std") == 0 || strcmp(op, "lwa") == 0;
+}
+
+/* `op reg, offset(base)`: D/DS form when the displacement fits, otherwise
+ * the indexed form with the offset in r0 (r0 is never allocated, and as the
+ * index operand it is an ordinary register).  `base` must not be r0. */
+/* VSX vector loads and stores have only the indexed form. */
+static bool ppc_op_is_x_only(const char *op)
+{
+    return strncmp(op, "lxv", 3) == 0 || strncmp(op, "stxv", 4) == 0;
+}
+
+void ppc_emit_mem_access(ppc_mir_emit_t *emit, const char *op, const char *reg, const char *base, int64_t offset)
+{
+    if (ppc_op_is_x_only(op) && offset == 0) {
+        anvil_strbuf_appendf(&emit->code, "\t%sx %s, 0, %s\n", op, reg, base);
+        return;
+    }
+    if (!ppc_op_is_x_only(op) && ppc_offset_fits_dform(offset) && (!ppc_op_is_ds_form(op) || (offset & 3) == 0)) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %lld(%s)\n", op, reg, (long long)offset, base);
+        return;
+    }
+    ppc_emit_load_imm(emit, 0, offset);
+    anvil_strbuf_appendf(&emit->code, "\t%sx %s, %s, %%r0\n", op, reg, base);
+}
+
+void ppc_emit_addi_large(ppc_mir_emit_t *emit, int dst, int base, int64_t offset)
 {
     if (ppc_offset_fits_dform(offset)) {
         anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %lld\n", ppc_gpr_names[dst], ppc_gpr_names[base], (long long)offset);
         return;
     }
 
-    ppc_emit_load_imm(emit, 11, offset);
-    anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %%r11\n", ppc_gpr_names[dst], ppc_gpr_names[base]);
+    ppc_emit_load_imm(emit, 0, offset);
+    anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %%r0\n", ppc_gpr_names[dst], ppc_gpr_names[base]);
 }
 
 static void ppc_emit_local_access(ppc_mir_emit_t *emit, const char *op, const char *reg, int offset)
@@ -136,15 +173,7 @@ static void ppc_emit_local_access(ppc_mir_emit_t *emit, const char *op, const ch
         return;
     }
 
-    int64_t dform = -(int64_t)offset;
-    if (ppc_offset_fits_dform(dform)) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %lld(%%r31)\n", op, reg, (long long)dform);
-        return;
-    }
-
-    ppc_emit_load_imm(emit, 11, dform);
-    anvil_strbuf_append(&emit->code, "\tadd %r11, %r31, %r11\n");
-    anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%%r11)\n", op, reg);
+    ppc_emit_mem_access(emit, op, reg, "%r31", -(int64_t)offset);
 }
 
 static void ppc_emit_sp_access(ppc_mir_emit_t *emit, const char *op, const char *reg, int offset)
@@ -154,14 +183,7 @@ static void ppc_emit_sp_access(ppc_mir_emit_t *emit, const char *op, const char 
         return;
     }
 
-    if (ppc_offset_fits_dform(offset)) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %d(%%r1)\n", op, reg, offset);
-        return;
-    }
-
-    ppc_emit_load_imm(emit, 11, offset);
-    anvil_strbuf_append(&emit->code, "\tadd %r11, %r1, %r11\n");
-    anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%%r11)\n", op, reg);
+    ppc_emit_mem_access(emit, op, reg, "%r1", offset);
 }
 
 static void ppc_emit_incoming_stack_access(ppc_mir_emit_t *emit, const char *op, const char *reg, int offset)
@@ -171,18 +193,13 @@ static void ppc_emit_incoming_stack_access(ppc_mir_emit_t *emit, const char *op,
         return;
     }
 
-    if (ppc_offset_fits_dform(offset)) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %d(%%r31)\n", op, reg, offset);
-        return;
-    }
-
-    ppc_emit_load_imm(emit, 11, offset);
-    anvil_strbuf_append(&emit->code, "\tadd %r11, %r31, %r11\n");
-    anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%%r11)\n", op, reg);
+    ppc_emit_mem_access(emit, op, reg, "%r31", offset);
 }
 
 static const char *ppc_load_op(const anvil_ppc_target_desc_t *desc, anvil_mir_reg_class_t reg_class, int size, bool is_signed)
 {
+    if (reg_class == ANVIL_MIR_REG_VECTOR)
+        return "lxvd2";
     if (reg_class == ANVIL_MIR_REG_FPR)
         return size <= 4 ? "lfs" : "lfd";
     if (is_signed) {
@@ -212,6 +229,8 @@ static const char *ppc_load_op(const anvil_ppc_target_desc_t *desc, anvil_mir_re
 static const char *ppc_store_op(const anvil_ppc_target_desc_t *desc, anvil_mir_reg_class_t reg_class, int size)
 {
     (void)desc;
+    if (reg_class == ANVIL_MIR_REG_VECTOR)
+        return "stxvd2";
     if (reg_class == ANVIL_MIR_REG_FPR)
         return size <= 4 ? "stfs" : "stfd";
     switch (size) {
@@ -237,14 +256,7 @@ static void ppc_emit_sign_extend_loaded_byte(ppc_mir_emit_t *emit, const anvil_m
 
 static void ppc_emit_base_offset_access(ppc_mir_emit_t *emit, const char *op, const char *reg, const char *base, int64_t offset)
 {
-    if (ppc_offset_fits_dform(offset)) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %lld(%s)\n", op, reg, (long long)offset, base);
-        return;
-    }
-
-    ppc_emit_load_imm(emit, 11, offset);
-    anvil_strbuf_appendf(&emit->code, "\tadd %%r11, %s, %%r11\n", base);
-    anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%%r11)\n", op, reg);
+    ppc_emit_mem_access(emit, op, reg, base, offset);
 }
 
 static bool ppc_emit_label(ppc_mir_emit_t *emit, anvil_mir_block_t block)
@@ -267,21 +279,24 @@ static bool ppc_emit_branch_target(ppc_mir_emit_t *emit, anvil_mir_block_t block
     return true;
 }
 
-/* Integer <-> floating conversions the target performs inline; the rest
- * call a run-time helper. */
-static bool ppc_conversion_is_native(const anvil_ppc_target_desc_t *desc, anvil_mir_opcode_t op, uint16_t int_bits, bool single)
+/* Integer <-> floating conversions the CPU performs inline (64-bit
+ * implementations: fcfid/fctidz; ISA 2.06: the unsigned and single forms);
+ * the rest call a run-time helper. */
+static bool ppc_conversion_is_native(anvil_cpu_features_t features, anvil_mir_opcode_t op, uint16_t int_bits, bool single)
 {
     bool wide = int_bits > 32;
+    bool int64 = (features & ANVIL_FEATURE_PPC_64BIT) != 0;
+    bool fpcvt = (features & ANVIL_FEATURE_PPC_FPCVT) != 0;
     switch (op) {
     case ANVIL_MIR_OP_FPTOSI:
-        return !wide || desc->has_fp_int64_convert;
+        return !wide || int64;
     case ANVIL_MIR_OP_FPTOUI:
-        return desc->has_fp_unsigned_convert || (!wide && desc->has_fp_int64_convert);
+        return fpcvt || (!wide && int64);
     case ANVIL_MIR_OP_SITOFP:
         /* fcfid then frsp would round twice for a wide integer. */
-        return !wide || (desc->has_fp_int64_convert && (!single || desc->has_fp_unsigned_convert));
+        return !wide || (int64 && (!single || fpcvt));
     case ANVIL_MIR_OP_UITOFP:
-        return !wide || desc->has_fp_unsigned_convert;
+        return !wide || fpcvt;
     default:
         return false;
     }
@@ -310,40 +325,29 @@ static bool ppc_conversion_native_at(const ppc_mir_emit_t *emit, size_t index, c
 {
     uint16_t int_bits;
     bool single;
-    return ppc_conversion_shape(emit->mir, index, info, &int_bits, &single) && ppc_conversion_is_native(emit->desc, info->op, int_bits, single);
+    return ppc_conversion_shape(emit->mir, index, info, &int_bits, &single) && ppc_conversion_is_native(emit->features, info->op, int_bits, single);
 }
 
-static bool ppc_instr_has_call(const ppc_mir_emit_t *emit)
+bool ppc_conversion_calls_helper(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, anvil_cpu_features_t features)
+{
+    uint16_t int_bits;
+    bool single;
+    return ppc_is_conversion(info->op) &&
+           !(ppc_conversion_shape(mir, index, info, &int_bits, &single) && ppc_conversion_is_native(features, info->op, int_bits, single));
+}
+
+/* What the printer itself adds that needs a frame record beyond
+ * anvil_mir_needs_frame_record: calls to conversion helpers, and the
+ * bcl/mflr of 32-bit position-independent addresses (they change LR). */
+static bool ppc_printer_needs_frame_record(const ppc_mir_emit_t *emit)
 {
     for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
         anvil_mir_instr_info_t info;
         if (!anvil_mir_get_instr_info(emit->mir, i, &info))
             return true;
-        if (info.op == ANVIL_MIR_OP_CALL || (ppc_is_conversion(info.op) && !ppc_conversion_native_at(emit, i, &info)))
+        if (ppc_is_conversion(info.op) && !ppc_conversion_native_at(emit, i, &info))
             return true;
-    }
-    return false;
-}
-
-static bool ppc_instr_has_dynamic_alloca(const anvil_mir_func_t *mir)
-{
-    for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(mir, i, &info))
-            return true;
-        if (info.op == ANVIL_MIR_OP_DYN_ALLOCA)
-            return true;
-    }
-    return false;
-}
-
-static bool ppc_instr_has_incoming_stack_arg(const anvil_mir_func_t *mir)
-{
-    for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(mir, i, &info))
-            return true;
-        if (info.op == ANVIL_MIR_OP_INCOMING_STACK_ARG)
+        if (info.op == ANVIL_MIR_OP_SYMBOL_ADDR && emit->reloc != ANVIL_RELOC_STATIC && !ppc_is_64(emit))
             return true;
     }
     return false;
@@ -459,18 +463,9 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
             return false;
     }
 
-    for (size_t i = 0; i < emit->num_frame_slot_offsets; i++) {
-        anvil_mir_frame_slot_info_t slot;
-        if (!anvil_mir_get_frame_slot_info(emit->mir, (int)i, &slot)) {
-            return false;
-        }
-        int align = slot.align_bytes ? slot.align_bytes : word;
-        if (align > 16)
-            align = 16;
-        offset = align_int(offset, align);
-        offset += ppc_mir_slot_size_bytes(slot.size_bits);
-        emit->frame_slot_offsets[i] = offset;
-    }
+    /* The ABIs keep the stack 16-byte aligned. */
+    if (!anvil_mir_layout_frame_slots(emit->mir, offset, (uint32_t)word, 16, true, emit->frame_slot_offsets, &offset))
+        return false;
 
     emit->num_spill_offsets = anvil_mir_num_spills(emit->mir);
     if (emit->num_spill_offsets > 0) {
@@ -500,7 +495,9 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
     if (needed < outgoing_end)
         return false;
 
-    emit->has_frame = needed > word || emit->outgoing_size > 0 || ppc_instr_has_call(emit) || ppc_instr_has_dynamic_alloca(emit->mir) || ppc_instr_has_incoming_stack_arg(emit->mir) ||
+    /* Own bytes beyond r31's slot (the linkage area of outgoing_end only
+     * matters to a function that calls). */
+    emit->has_frame = offset > word || emit->outgoing_size > 0 || anvil_mir_needs_frame_record(emit->mir) || ppc_printer_needs_frame_record(emit) ||
                       ppc_instr_needs_fp_scratch(emit);
     if (!emit->has_frame) {
         emit->frame_size = 0;
@@ -529,46 +526,56 @@ static void ppc_emit_frame_adjust(ppc_mir_emit_t *emit, const char *op, int fram
 static void ppc_emit_prologue(ppc_mir_emit_t *emit)
 {
     emit->desc->abi_ops->emit_function_header(emit);
+    /* DWARF numbers: r0-r31 0-31, f0-f31 32-63, LR 65. The CFA is the
+     * caller's SP, which r12 and then r31 hold once the frame exists. */
+    anvil_strbuf_append(&emit->code, "\t.cfi_startproc\n");
     if (!emit->has_frame)
         return;
 
     anvil_strbuf_append(&emit->code, "\tmflr %r0\n");
     anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %u(%%r1)\n", ppc_store_word_op(emit), emit->desc->lr_save_offset);
-    if (emit->desc->uses_function_descriptors && emit->desc->toc_save_offset > 0) {
-        anvil_strbuf_appendf(&emit->code, "\tstd %%r2, %u(%%r1)\n", emit->desc->toc_save_offset);
-    }
+    anvil_strbuf_appendf(&emit->code, "\t.cfi_offset 65, %u\n", emit->desc->lr_save_offset);
 
+    /* r12 (dead at entry once the TOC is set) keeps the old SP, so r31 is
+     * saved inside the new frame with a short displacement for any frame
+     * size, and nothing is stored below the stack pointer. */
+    anvil_strbuf_append(&emit->code, "\tmr %r12, %r1\n\t.cfi_def_cfa_register 12\n");
     ppc_emit_frame_adjust(emit, "-", emit->frame_size);
-
-    int r31_offset = emit->frame_size - emit->gpr_save_offsets[31];
-    anvil_strbuf_appendf(&emit->code, "\t%s %%r31, %d(%%r1)\n", ppc_store_word_op(emit), r31_offset);
-    ppc_emit_addi_large(emit, 31, 1, emit->frame_size);
+    ppc_emit_mem_access(emit, ppc_store_word_op(emit), "%r31", "%r12", -(int64_t)emit->gpr_save_offsets[31]);
+    anvil_strbuf_appendf(&emit->code, "\t.cfi_offset 31, %d\n", -emit->gpr_save_offsets[31]);
+    anvil_strbuf_append(&emit->code, "\tmr %r31, %r12\n\t.cfi_def_cfa_register 31\n");
 
     for (int reg = 14; reg <= 30; reg++) {
         if (emit->gpr_save_offsets[reg] >= 0) {
             ppc_emit_local_access(emit, ppc_store_word_op(emit), ppc_gpr_names[reg], emit->gpr_save_offsets[reg]);
+            anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %d, %d\n", reg, -emit->gpr_save_offsets[reg]);
         }
     }
     for (int reg = 14; reg <= 31; reg++) {
         if (emit->fpr_save_offsets[reg] >= 0) {
             ppc_emit_local_access(emit, "stfd", ppc_fpr_names[reg], emit->fpr_save_offsets[reg]);
+            anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %d, %d\n", 32 + reg, -emit->fpr_save_offsets[reg]);
+        }
+    }
+
+    /* A variadic callee homes its argument registers for va_arg before
+     * anything can overwrite them. */
+    for (size_t index = 0; index < anvil_mir_num_instrs(emit->mir); index++) {
+        anvil_mir_instr_info_t info;
+        if (anvil_mir_get_instr_info(emit->mir, index, &info) && info.op == ANVIL_MIR_OP_VA_START) {
+            if (!emit->desc->abi_ops->emit_va_register_save)
+                emit->failed = true;
+            else
+                emit->desc->abi_ops->emit_va_register_save(emit, &info);
+            break;
         }
     }
 }
 
-static void ppc_emit_stack_restore(ppc_mir_emit_t *emit)
-{
-    if (emit->frame_size <= 32767) {
-        anvil_strbuf_appendf(&emit->code, "\taddi %%r1, %%r1, %d\n", emit->frame_size);
-        return;
-    }
-
-    ppc_emit_load_imm(emit, 11, emit->frame_size);
-    anvil_strbuf_append(&emit->code, "\tadd %r1, %r1, %r11\n");
-}
-
 static void ppc_emit_epilogue(ppc_mir_emit_t *emit)
 {
+    if (emit->has_frame)
+        anvil_strbuf_append(&emit->code, "\t.cfi_remember_state\n");
     if (emit->has_frame) {
         for (int reg = 14; reg <= 31; reg++) {
             if (emit->fpr_save_offsets[reg] >= 0) {
@@ -581,19 +588,17 @@ static void ppc_emit_epilogue(ppc_mir_emit_t *emit)
             }
         }
 
-        if (emit->desc->uses_function_descriptors && emit->desc->toc_save_offset > 0) {
-            anvil_strbuf_appendf(&emit->code, "\tld %%r2, %u(%%r31)\n", emit->desc->toc_save_offset);
-        }
         anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %u(%%r31)\n", ppc_load_word_op(emit), emit->desc->lr_save_offset);
-        anvil_strbuf_append(&emit->code, "\tmtlr %r0\n");
-        if (ppc_instr_has_dynamic_alloca(emit->mir)) {
-            anvil_strbuf_append(&emit->code, "\tmr %r1, %r31\n");
-        } else {
-            ppc_emit_stack_restore(emit);
-        }
-        anvil_strbuf_appendf(&emit->code, "\t%s %%r31, -%u(%%r1)\n", ppc_load_word_op(emit), emit->desc->word_size);
+        anvil_strbuf_append(&emit->code, "\tmtlr %r0\n\t.cfi_restore 65\n");
+        /* r31 holds the caller's SP: reload r31 while the frame is still
+         * allocated, then release it (also after dynamic allocation). */
+        anvil_strbuf_append(&emit->code, "\tmr %r12, %r31\n\t.cfi_def_cfa_register 12\n");
+        ppc_emit_mem_access(emit, ppc_load_word_op(emit), "%r31", "%r12", -(int64_t)emit->gpr_save_offsets[31]);
+        anvil_strbuf_append(&emit->code, "\t.cfi_restore 31\n\tmr %r1, %r12\n\t.cfi_def_cfa_register 1\n");
     }
     anvil_strbuf_append(&emit->code, "\tblr\n");
+    if (emit->has_frame)
+        anvil_strbuf_append(&emit->code, "\t.cfi_restore_state\n");
 }
 
 static bool ppc_get_uses2(const anvil_mir_func_t *mir, size_t instr_index, anvil_mir_vreg_t *lhs, anvil_mir_vreg_t *rhs)
@@ -628,6 +633,14 @@ static void ppc_emit_copy(ppc_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_
         anvil_strbuf_appendf(&emit->code, "\tfmr %s, %s\n", dst_reg, src_reg);
         return;
     }
+    if (dst_info->reg_class == ANVIL_MIR_REG_VECTOR || src_info->reg_class == ANVIL_MIR_REG_VECTOR) {
+        if (dst_info->reg_class != src_info->reg_class) {
+            emit->failed = true;
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\txxlor %s, %s, %s\n", dst_reg, src_reg, src_reg);
+        return;
+    }
 
     if (!emit->has_frame || emit->fp_const_scratch_offset < 0) {
         emit->failed = true;
@@ -649,6 +662,88 @@ static void ppc_emit_copy(ppc_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_
     }
 
     emit->failed = true;
+}
+
+/* Immediate operand forms (D-form arithmetic, logical and compare
+ * instructions, rotate-and-mask shifts). */
+static bool ppc_operand_wide(const ppc_mir_emit_t *emit, anvil_mir_vreg_t vreg)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, vreg);
+    return ppc_is_64(emit) && info && info->size_bits > 32;
+}
+
+static int64_t ppc_imm_in_width(int64_t value, bool wide)
+{
+    return wide ? value : (int64_t)(int32_t)value;
+}
+
+static bool ppc_simm16(int64_t value)
+{
+    return value >= -32768 && value <= 32767;
+}
+
+static bool ppc_uimm16(int64_t value)
+{
+    return value >= 0 && value <= 65535;
+}
+
+static int ppc_pow2_shift(int64_t value, bool wide)
+{
+    if (value <= 0 || (value & (value - 1)) != 0)
+        return -1;
+    int shift = 0;
+    while ((INT64_C(1) << shift) != value)
+        shift++;
+    return shift < (wide ? 64 : 32) ? shift : -1;
+}
+
+/* Mirrors the forms chosen by ppc_emit_binary and ppc_emit_cmp. */
+static bool ppc_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
+{
+    const ppc_mir_emit_t *emit = ctx;
+    const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(emit->mir, info->def) : NULL;
+    if (!def || def->reg_class != ANVIL_MIR_REG_GPR || info->num_uses != 2 || use != 1)
+        return false;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, index, 0);
+    bool wide = ppc_operand_wide(emit, lhs);
+    int64_t v = ppc_imm_in_width(value, wide);
+    switch (info->op) {
+    case ANVIL_MIR_OP_ADD:
+        return ppc_simm16(v);
+    case ANVIL_MIR_OP_SUB:
+        return v != INT64_MIN && ppc_simm16(-v);
+    case ANVIL_MIR_OP_MUL:
+        return ppc_pow2_shift(v, wide) >= 0 || ppc_simm16(v);
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+        return ppc_uimm16(v);
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+        return true;
+    case ANVIL_MIR_OP_SCALAR:
+        return info->ir_op == ANVIL_OP_ROTL;
+    default: {
+        const anvil_mir_vreg_info_t *lhs_info = anvil_mir_get_vreg_info(emit->mir, lhs);
+        if (!anvil_mir_isel_is_compare(info->op) || !lhs_info || lhs_info->reg_class != ANVIL_MIR_REG_GPR)
+            return false;
+        bool unsigned_cmp = info->op == ANVIL_MIR_OP_CMP_ULT || info->op == ANVIL_MIR_OP_CMP_ULE || info->op == ANVIL_MIR_OP_CMP_UGT ||
+                            info->op == ANVIL_MIR_OP_CMP_UGE;
+        return unsigned_cmp ? ppc_uimm16(v) : ppc_simm16(v);
+    }
+    }
+}
+
+static bool ppc_rhs_immediate(const ppc_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info, int64_t *out)
+{
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, index, 0);
+    anvil_mir_vreg_t rhs = anvil_mir_get_instr_use(emit->mir, index, 1);
+    int64_t value;
+    if (!anvil_mir_isel_constant(&emit->isel, rhs, &value) || !ppc_takes_immediate((void *)emit, index, info, 1, value))
+        return false;
+    *out = ppc_imm_in_width(value, ppc_operand_wide(emit, lhs));
+    return true;
 }
 
 static void ppc_emit_binary(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -699,6 +794,50 @@ static void ppc_emit_binary(ppc_mir_emit_t *emit, size_t instr_index, const anvi
     }
 
     bool wide = ppc_is_64(emit) && def_info->size_bits > 32;
+    int64_t imm;
+    const anvil_regalloc_assignment_t *base = ppc_assignment_checked(emit, lhs);
+    if (base && ppc_rhs_immediate(emit, instr_index, info, &imm)) {
+        bool operand_wide = ppc_operand_wide(emit, lhs);
+        int bits = operand_wide ? 64 : 32;
+        switch (info->op) {
+        case ANVIL_MIR_OP_ADD:
+        case ANVIL_MIR_OP_SUB:
+            /* addi reads register 0 as the literal zero. */
+            if (base->phys_reg == 0)
+                break;
+            anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %lld\n", dst, a, (long long)(info->op == ANVIL_MIR_OP_ADD ? imm : -imm));
+            return;
+        case ANVIL_MIR_OP_MUL: {
+            int shift = ppc_pow2_shift(imm, operand_wide);
+            if (shift >= 0)
+                anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %d\n", operand_wide ? "sldi" : "slwi", dst, a, shift);
+            else
+                anvil_strbuf_appendf(&emit->code, "\tmulli %s, %s, %lld\n", dst, a, (long long)imm);
+            return;
+        }
+        case ANVIL_MIR_OP_AND:
+            /* andi. also records CR0, which carries nothing here. */
+            anvil_strbuf_appendf(&emit->code, "\tandi. %s, %s, %lld\n", dst, a, (long long)imm);
+            return;
+        case ANVIL_MIR_OP_OR:
+            anvil_strbuf_appendf(&emit->code, "\tori %s, %s, %lld\n", dst, a, (long long)imm);
+            return;
+        case ANVIL_MIR_OP_XOR:
+            anvil_strbuf_appendf(&emit->code, "\txori %s, %s, %lld\n", dst, a, (long long)imm);
+            return;
+        case ANVIL_MIR_OP_SHL:
+        case ANVIL_MIR_OP_SHR:
+        case ANVIL_MIR_OP_SAR: {
+            int count = (int)(imm & (bits - 1));
+            const char *op = info->op == ANVIL_MIR_OP_SHL ? (operand_wide ? "sldi" : "slwi")
+                           : info->op == ANVIL_MIR_OP_SHR ? (operand_wide ? "srdi" : "srwi") : (operand_wide ? "sradi" : "srawi");
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %d\n", op, dst, a, count);
+            return;
+        }
+        default:
+            break;
+        }
+    }
     switch (info->op) {
     case ANVIL_MIR_OP_ADD:
         anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %s\n", dst, a, b);
@@ -717,14 +856,16 @@ static void ppc_emit_binary(ppc_mir_emit_t *emit, size_t instr_index, const anvi
         anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s\n", wide ? "divdu" : "divwu", dst, a, b);
         break;
     case ANVIL_MIR_OP_SMOD:
-        anvil_strbuf_appendf(&emit->code, "\t%s %%r11, %s, %s\n", wide ? "divd" : "divw", a, b);
-        anvil_strbuf_appendf(&emit->code, "\t%s %%r11, %%r11, %s\n", wide ? "mulld" : "mullw", b);
-        anvil_strbuf_appendf(&emit->code, "\tsubf %s, %%r11, %s\n", dst, a);
+        /* r0: the operands may sit in the spill scratch registers. */
+        anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %s, %s\n", wide ? "divd" : "divw", a, b);
+        anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %%r0, %s\n", wide ? "mulld" : "mullw", b);
+        anvil_strbuf_appendf(&emit->code, "\tsubf %s, %%r0, %s\n", dst, a);
         break;
     case ANVIL_MIR_OP_UMOD:
-        anvil_strbuf_appendf(&emit->code, "\t%s %%r11, %s, %s\n", wide ? "divdu" : "divwu", a, b);
-        anvil_strbuf_appendf(&emit->code, "\t%s %%r11, %%r11, %s\n", wide ? "mulld" : "mullw", b);
-        anvil_strbuf_appendf(&emit->code, "\tsubf %s, %%r11, %s\n", dst, a);
+        /* r0: the operands may sit in the spill scratch registers. */
+        anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %s, %s\n", wide ? "divdu" : "divwu", a, b);
+        anvil_strbuf_appendf(&emit->code, "\t%s %%r0, %%r0, %s\n", wide ? "mulld" : "mullw", b);
+        anvil_strbuf_appendf(&emit->code, "\tsubf %s, %%r0, %s\n", dst, a);
         break;
     case ANVIL_MIR_OP_AND:
         anvil_strbuf_appendf(&emit->code, "\tand %s, %s, %s\n", dst, a, b);
@@ -775,6 +916,20 @@ static const char *ppc_cmp_branch(anvil_mir_opcode_t op)
     }
 }
 
+/* The CR0 bit a compare's condition reads (LT 0, GT 1, EQ 2), and whether
+ * the condition is that bit clear. */
+static void ppc_cmp_select_bit(anvil_mir_opcode_t op, int *bit, bool *negated)
+{
+    switch (op) {
+    case ANVIL_MIR_OP_CMP_LT: case ANVIL_MIR_OP_CMP_ULT: *bit = 0; *negated = false; break;
+    case ANVIL_MIR_OP_CMP_GE: case ANVIL_MIR_OP_CMP_UGE: *bit = 0; *negated = true; break;
+    case ANVIL_MIR_OP_CMP_GT: case ANVIL_MIR_OP_CMP_UGT: *bit = 1; *negated = false; break;
+    case ANVIL_MIR_OP_CMP_LE: case ANVIL_MIR_OP_CMP_ULE: *bit = 1; *negated = true; break;
+    case ANVIL_MIR_OP_CMP_EQ: *bit = 2; *negated = false; break;
+    default: *bit = 2; *negated = true; break;
+    }
+}
+
 static bool ppc_cmp_is_unsigned(anvil_mir_opcode_t op)
 {
     return op == ANVIL_MIR_OP_CMP_ULT || op == ANVIL_MIR_OP_CMP_ULE || op == ANVIL_MIR_OP_CMP_UGT || op == ANVIL_MIR_OP_CMP_UGE;
@@ -801,7 +956,21 @@ static void ppc_emit_cmp(ppc_mir_emit_t *emit, size_t instr_index, const anvil_m
     } else {
         bool wide = ppc_is_64(emit) && lhs_info->size_bits > 32;
         bool unsigned_cmp = ppc_cmp_is_unsigned(info->op);
-        anvil_strbuf_appendf(&emit->code, "\t%s 0, %s, %s\n", unsigned_cmp ? (wide ? "cmpld" : "cmplw") : (wide ? "cmpd" : "cmpw"), a, b);
+        const char *op = unsigned_cmp ? (wide ? "cmpld" : "cmplw") : (wide ? "cmpd" : "cmpw");
+        int64_t imm;
+        if (ppc_rhs_immediate(emit, instr_index, info, &imm))
+            anvil_strbuf_appendf(&emit->code, "\t%si 0, %s, %lld\n", op, a, (long long)imm);
+        else
+            anvil_strbuf_appendf(&emit->code, "\t%s 0, %s, %s\n", op, a, b);
+        if (anvil_mir_isel_feeds_next_branch(&emit->isel, instr_index, info)) {
+            emit->fused_branch = ppc_cmp_branch(info->op);
+            return;
+        }
+        /* A select on the flags: isel, or a branch on the CR bit. */
+        if (anvil_mir_isel_feeds_next_select(&emit->isel, instr_index, info)) {
+            ppc_cmp_select_bit(info->op, &emit->fused_select_bit, &emit->fused_select_negated);
+            return;
+        }
     }
 
     size_t id = emit->label_counter++;
@@ -869,6 +1038,39 @@ static void ppc_emit_cmp(ppc_mir_emit_t *emit, size_t instr_index, const anvil_m
     anvil_strbuf_appendf(&emit->code, ".L%s_cmp_true_%zu:\n", anvil_mir_func_name(emit->mir), id);
     anvil_strbuf_appendf(&emit->code, "\tli %s, 1\n", dst);
     anvil_strbuf_appendf(&emit->code, ".L%s_cmp_done_%zu:\n", anvil_mir_func_name(emit->mir), id);
+}
+
+static const char *ppc_inverse_branch(const char *branch)
+{
+    static const char *const pairs[][2] = {{"beq", "bne"}, {"blt", "bge"}, {"ble", "bgt"}};
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
+        if (strcmp(branch, pairs[i][0]) == 0)
+            return pairs[i][1];
+        if (strcmp(branch, pairs[i][1]) == 0)
+            return pairs[i][0];
+    }
+    return NULL;
+}
+
+/* Conditional branch on CR0 (`taken`, e.g. "blt"); a target that is the next
+ * block falls through. */
+static void ppc_emit_cond_branch(ppc_mir_emit_t *emit, const char *taken, anvil_mir_block_t true_block, anvil_mir_block_t false_block)
+{
+    const char *inverse = ppc_inverse_branch(taken);
+    if (true_block == emit->block + 1 && inverse) {
+        anvil_strbuf_appendf(&emit->code, "\t%s ", inverse);
+        emit->failed |= !ppc_emit_branch_target(emit, false_block);
+        anvil_strbuf_append(&emit->code, "\n");
+        return;
+    }
+    anvil_strbuf_appendf(&emit->code, "\t%s ", taken);
+    emit->failed |= !ppc_emit_branch_target(emit, true_block);
+    anvil_strbuf_append(&emit->code, "\n");
+    if (false_block != emit->block + 1) {
+        anvil_strbuf_append(&emit->code, "\tb ");
+        emit->failed |= !ppc_emit_branch_target(emit, false_block);
+        anvil_strbuf_append(&emit->code, "\n");
+    }
 }
 
 static void ppc_emit_unary(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1015,8 +1217,264 @@ static void ppc_emit_mov(ppc_mir_emit_t *emit, const anvil_mir_instr_info_t *inf
         ppc_emit_mov_fpr_imm(emit, info, def_info, dst);
         return;
     }
+    if (!anvil_mir_isel_materialize(&emit->isel, info->def))
+        return;
 
     ppc_emit_load_imm(emit, assignment->phys_reg, info->imm);
+}
+
+/* A vector register as `mnemonic` names it: VSX instructions ('x...')
+ * address all 64 VSX registers, AltiVec ones ('v...') the AltiVec file. */
+static const char *ppc_vector_operand(const char *mnemonic, int vr)
+{
+    return mnemonic[0] == 'x' ? ppc_vector_vsr(vr) : ppc_vr_names[vr];
+}
+
+/* Broadcast of a scalar.  An FPR holds doubleword 0 of its VSR in double
+ * format: f64 lanes take that doubleword twice, f32 lanes convert it to
+ * single (words 0 and 2) and splat word 0.  A GPR moves into v0 (word 1 or
+ * doubleword 0, big-endian element numbering on both endiannesses) and
+ * splats from there. */
+static void ppc_emit_vector_splat(ppc_mir_emit_t *emit, const anvil_vector_isa_t *isa, const anvil_mir_instr_info_t *info,
+                                  anvil_mir_vreg_t scalar)
+{
+    const anvil_regalloc_assignment_t *d = ppc_assignment_checked(emit, info->def);
+    const anvil_regalloc_assignment_t *s = ppc_assignment_checked(emit, scalar);
+    const anvil_mir_vreg_info_t *source = ppc_vreg_info_checked(emit, scalar);
+    if (!d || !s || !source)
+        return;
+    const char *dst = ppc_vector_operand(isa->mnemonic, d->phys_reg);
+    if (source->reg_class == ANVIL_MIR_REG_FPR) {
+        const char *from = ppc_vsr_names[s->phys_reg];
+        if (info->imm == 64) {
+            anvil_strbuf_appendf(&emit->code, "\txxpermdi %s, %s, %s, 0\n", dst, from, from);
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\txvcvdpsp %s, %s\n", dst, from);
+        anvil_strbuf_appendf(&emit->code, "\txxspltw %s, %s, 0\n", dst, dst);
+        return;
+    }
+    const char *temp = ppc_vector_operand(isa->mnemonic, PPC_VECTOR_TEMP);
+    const char *gpr = ppc_gpr_names[s->phys_reg];
+    anvil_strbuf_appendf(&emit->code, "\t%s %s, %s\n", info->imm == 64 ? "mtvsrd" : "mtvsrwz", ppc_vector_vsr(PPC_VECTOR_TEMP), gpr);
+    switch (info->imm) {
+    case 64:
+        anvil_strbuf_appendf(&emit->code, "\txxpermdi %s, %s, %s, 0\n", dst, temp, temp);
+        break;
+    case 32:
+        anvil_strbuf_appendf(&emit->code, "\txxspltw %s, %s, 1\n", dst, temp);
+        break;
+    default:
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %d\n", isa->mnemonic, dst, temp, info->imm == 16 ? 3 : 7);
+        break;
+    }
+}
+
+/* dst = op(a, b) on vector registers, named as `op` addresses them. */
+static void ppc_vector_three(ppc_mir_emit_t *emit, const char *op, int dst, int a, int b)
+{
+    anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s\n", op, ppc_vector_operand(op, dst), ppc_vector_operand(op, a),
+                         ppc_vector_operand(op, b));
+}
+
+static void ppc_vector_not(ppc_mir_emit_t *emit, int reg)
+{
+    ppc_vector_three(emit, "xxlnor", reg, reg, reg);
+}
+
+/* Integer compares: equality and greater-than only, swapped for <, and
+ * complemented for != (of ==), >= (of <) and <= (of >). */
+static void ppc_vector_int_compare(ppc_mir_emit_t *emit, const anvil_vector_isa_t *isa, anvil_op_t op, int dst, int a, int b)
+{
+    bool swap = op == ANVIL_OP_CMP_LT || op == ANVIL_OP_CMP_ULT || op == ANVIL_OP_CMP_GE || op == ANVIL_OP_CMP_UGE;
+    ppc_vector_three(emit, isa->mnemonic, dst, swap ? b : a, swap ? a : b);
+    if (op == ANVIL_OP_CMP_NE || op == ANVIL_OP_CMP_GE || op == ANVIL_OP_CMP_LE || op == ANVIL_OP_CMP_UGE || op == ANVIL_OP_CMP_ULE)
+        ppc_vector_not(emit, dst);
+}
+
+/* FP compares from the ordered xvcmpeq/xvcmpge/xvcmpgt (false on NaN), as
+ * on every IEEE vector unit: an unordered predicate complements the
+ * opposite ordered one; ord is a >= b or b > a, one is a > b or b > a. */
+static void ppc_vector_fcmp(ppc_mir_emit_t *emit, const anvil_mir_instr_info_t *info, int dst, int a, int b)
+{
+    const char *sfx = info->imm == 32 ? "sp" : "dp";
+    char eq[16], ge[16], gt[16];
+    snprintf(eq, sizeof(eq), "xvcmpeq%s", sfx);
+    snprintf(ge, sizeof(ge), "xvcmpge%s", sfx);
+    snprintf(gt, sizeof(gt), "xvcmpgt%s", sfx);
+    switch (info->fcmp_pred) {
+    case ANVIL_FCMP_OEQ: ppc_vector_three(emit, eq, dst, a, b); return;
+    case ANVIL_FCMP_OGT: ppc_vector_three(emit, gt, dst, a, b); return;
+    case ANVIL_FCMP_OGE: ppc_vector_three(emit, ge, dst, a, b); return;
+    case ANVIL_FCMP_OLT: ppc_vector_three(emit, gt, dst, b, a); return;
+    case ANVIL_FCMP_OLE: ppc_vector_three(emit, ge, dst, b, a); return;
+    case ANVIL_FCMP_UNE: ppc_vector_three(emit, eq, dst, a, b); ppc_vector_not(emit, dst); return;
+    case ANVIL_FCMP_ULE: ppc_vector_three(emit, gt, dst, a, b); ppc_vector_not(emit, dst); return;
+    case ANVIL_FCMP_ULT: ppc_vector_three(emit, ge, dst, a, b); ppc_vector_not(emit, dst); return;
+    case ANVIL_FCMP_UGE: ppc_vector_three(emit, gt, dst, b, a); ppc_vector_not(emit, dst); return;
+    case ANVIL_FCMP_UGT: ppc_vector_three(emit, ge, dst, b, a); ppc_vector_not(emit, dst); return;
+    case ANVIL_FCMP_ORD:
+    case ANVIL_FCMP_UNO:
+    case ANVIL_FCMP_ONE:
+    case ANVIL_FCMP_UEQ: {
+        bool ordered = info->fcmp_pred == ANVIL_FCMP_ORD || info->fcmp_pred == ANVIL_FCMP_UNO;
+        ppc_vector_three(emit, ordered ? ge : gt, PPC_VECTOR_TEMP, a, b);
+        ppc_vector_three(emit, gt, dst, b, a);
+        ppc_vector_three(emit, "xxlor", dst, dst, PPC_VECTOR_TEMP);
+        if (info->fcmp_pred == ANVIL_FCMP_UNO || info->fcmp_pred == ANVIL_FCMP_UEQ)
+            ppc_vector_not(emit, dst);
+        return;
+    }
+    case ANVIL_FCMP_FALSE:
+    case ANVIL_FCMP_TRUE:
+        ppc_vector_three(emit, info->fcmp_pred == ANVIL_FCMP_TRUE ? "vcmpequb" : "xxlxor", dst, dst, dst);
+        return;
+    }
+    emit->failed = true;
+}
+
+/* A reduction: the whole vector rotated and combined with the table's lane
+ * operation (doublewords swapped, then rotations by 4, 2 and 1 bytes down
+ * to the lane width) in v0/v1, so every lane holds the result; the first
+ * doubleword then moves to the result register.  A lane mask's OR needs
+ * only the doubleword fold: x | -x has the sign bit exactly when x != 0. */
+static void ppc_emit_vector_reduce(ppc_mir_emit_t *emit, size_t instr_index, const anvil_vector_isa_t *isa, const anvil_mir_instr_info_t *info,
+                                   anvil_mir_vreg_t source)
+{
+    const anvil_regalloc_assignment_t *vector = ppc_assignment_checked(emit, source);
+    const anvil_regalloc_assignment_t *result = ppc_assignment_checked(emit, info->def);
+    const anvil_mir_vreg_info_t *result_info = ppc_vreg_info_checked(emit, info->def);
+    if (!vector || !result || !result_info)
+        return;
+    const char *m = isa->mnemonic;
+    int t = PPC_VECTOR_TEMP, t2 = PPC_VECTOR_TEMP2, v = vector->phys_reg;
+    anvil_strbuf_appendf(&emit->code, "\txxpermdi %s, %s, %s, 2\n", ppc_vector_vsr(t), ppc_vector_vsr(v), ppc_vector_vsr(v));
+    ppc_vector_three(emit, m, t, t, v);
+    bool mask = info->ir_op == ANVIL_OP_REDUCE_OR && anvil_vector_mir_is_mask(emit->mir, instr_index, source);
+    for (int64_t bytes = 4; !mask && bytes >= info->imm / 8; bytes /= 2) {
+        anvil_strbuf_appendf(&emit->code, "\tvsldoi %s, %s, %s, %lld\n", ppc_vr_names[t2], ppc_vr_names[t], ppc_vr_names[t], (long long)bytes);
+        ppc_vector_three(emit, m, t, t, t2);
+    }
+    if (result_info->reg_class == ANVIL_MIR_REG_FPR) {
+        /* An FPR is the first doubleword, in double format. */
+        if (info->imm == 64)
+            anvil_strbuf_appendf(&emit->code, "\txxlor %s, %s, %s\n", ppc_vsr_names[result->phys_reg], ppc_vector_vsr(t), ppc_vector_vsr(t));
+        else
+            anvil_strbuf_appendf(&emit->code, "\txscvspdpn %s, %s\n", ppc_vsr_names[result->phys_reg], ppc_vector_vsr(t));
+        return;
+    }
+    const char *dst = ppc_gpr_names[result->phys_reg];
+    anvil_strbuf_appendf(&emit->code, "\tmfvsrd %s, %s\n", dst, ppc_vector_vsr(t));
+    if (mask)
+        anvil_strbuf_appendf(&emit->code, "\tneg %%r0, %s\n\tor %%r0, %%r0, %s\n\tsradi %s, %%r0, 63\n", dst, dst, dst);
+}
+
+/* A scalar operation the table prices: fmadd(s) d, a, b, c; fsqrt(s) d, a. */
+static void ppc_emit_scalar(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+{
+    const anvil_vector_isa_t *isa =
+        anvil_vector_isa_for_mir(ppc_vector_isa, ppc_vector_isa_count(emit->desc), emit->mir, instr_index, info, anvil_mir_func_cpu_features(emit->mir));
+    const char *names[4] = {NULL};
+    for (size_t operand = 0; isa && operand <= info->num_uses && operand < 4; operand++) {
+        anvil_mir_vreg_t vreg = operand ? anvil_mir_get_instr_use(emit->mir, instr_index, operand - 1) : info->def;
+        names[operand] = vreg == ANVIL_MIR_NO_VREG ? NULL : ppc_reg_name(emit, vreg);
+    }
+    int64_t count;
+    if (isa && info->ir_op == ANVIL_OP_ROTL && names[0] && names[1] &&
+        anvil_mir_isel_constant(&emit->isel, anvil_mir_get_instr_use(emit->mir, instr_index, 1), &count)) {
+        /* rotlwi/rotldi: the table's mnemonic with an immediate count. */
+        anvil_strbuf_appendf(&emit->code, "\t%si %s, %s, %d\n", isa->mnemonic, names[0], names[1], (int)(count & (info->imm - 1)));
+        return;
+    }
+    if (!isa || info->num_uses > 3 || !anvil_vector_isa_print(&emit->code, isa->mnemonic, names, info->num_uses + 1))
+        emit->failed = true;
+}
+
+/* A lane-wise operation, as the VSX/AltiVec table names it for this CPU. */
+static void ppc_emit_vector(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+{
+    const anvil_vector_isa_t *isa =
+        anvil_vector_isa_for_mir(ppc_vector_isa, ppc_vector_isa_count(emit->desc), emit->mir, instr_index, info, anvil_mir_func_cpu_features(emit->mir));
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
+    if (!isa || lhs == ANVIL_MIR_NO_VREG) {
+        emit->failed = true;
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_SPLAT) {
+        ppc_emit_vector_splat(emit, isa, info, lhs);
+        return;
+    }
+    if (anvil_op_is_reduction(info->ir_op)) {
+        ppc_emit_vector_reduce(emit, instr_index, isa, info, lhs);
+        return;
+    }
+    anvil_mir_vreg_t rhs = info->num_uses > 1 ? anvil_mir_get_instr_use(emit->mir, instr_index, 1) : ANVIL_MIR_NO_VREG;
+    const anvil_regalloc_assignment_t *d = ppc_assignment_checked(emit, info->def);
+    const anvil_regalloc_assignment_t *a = ppc_assignment_checked(emit, lhs);
+    const anvil_regalloc_assignment_t *b = rhs == ANVIL_MIR_NO_VREG ? NULL : ppc_assignment_checked(emit, rhs);
+    const char *m = isa->mnemonic;
+    if (d && a && info->num_uses == 1) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s\n", m, ppc_vector_operand(m, d->phys_reg), ppc_vector_operand(m, a->phys_reg));
+        return;
+    }
+    if (!d || !a || !b) {
+        emit->failed = true;
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_SELECT) {
+        /* xxsel picks its second source where the mask is set. */
+        anvil_mir_vreg_t other = anvil_mir_get_instr_use(emit->mir, instr_index, 2);
+        const anvil_regalloc_assignment_t *c = other == ANVIL_MIR_NO_VREG ? NULL : ppc_assignment_checked(emit, other);
+        if (!c) {
+            emit->failed = true;
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\txxsel %s, %s, %s, %s\n", ppc_vector_vsr(d->phys_reg), ppc_vector_vsr(c->phys_reg),
+                             ppc_vector_vsr(b->phys_reg), ppc_vector_vsr(a->phys_reg));
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_FCMP) {
+        ppc_vector_fcmp(emit, info, d->phys_reg, a->phys_reg, b->phys_reg);
+        return;
+    }
+    if (info->widening) {
+        /* The group sums of b (added to zero), then into a. */
+        ppc_vector_three(emit, "vxor", PPC_VECTOR_TEMP, PPC_VECTOR_TEMP, PPC_VECTOR_TEMP);
+        ppc_vector_three(emit, m, PPC_VECTOR_TEMP, b->phys_reg, PPC_VECTOR_TEMP);
+        ppc_vector_three(emit, "vadduwm", d->phys_reg, a->phys_reg, PPC_VECTOR_TEMP);
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_FMA) {
+        /* xvmadda accumulates into its target: c goes there first, through
+         * v0 when the target holds a or b. */
+        anvil_mir_vreg_t addend = anvil_mir_get_instr_use(emit->mir, instr_index, 2);
+        const anvil_regalloc_assignment_t *c = addend == ANVIL_MIR_NO_VREG ? NULL : ppc_assignment_checked(emit, addend);
+        if (!c) {
+            emit->failed = true;
+            return;
+        }
+        int work = d->phys_reg == c->phys_reg || (d->phys_reg != a->phys_reg && d->phys_reg != b->phys_reg) ? d->phys_reg : PPC_VECTOR_TEMP;
+        if (work != c->phys_reg)
+            ppc_vector_three(emit, "xxlor", work, c->phys_reg, c->phys_reg);
+        ppc_vector_three(emit, m, work, a->phys_reg, b->phys_reg);
+        if (work != d->phys_reg)
+            ppc_vector_three(emit, "xxlor", d->phys_reg, work, work);
+        return;
+    }
+    if (info->ir_op >= ANVIL_OP_CMP_EQ && info->ir_op <= ANVIL_OP_CMP_UGE) {
+        ppc_vector_int_compare(emit, isa, info->ir_op, d->phys_reg, a->phys_reg, b->phys_reg);
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_MUL && info->imm == 16) {
+        /* vmladduhm multiplies and adds a third vector: zero. */
+        anvil_strbuf_appendf(&emit->code, "\tvxor %s, %s, %s\n", ppc_vr_names[PPC_VECTOR_TEMP], ppc_vr_names[PPC_VECTOR_TEMP],
+                             ppc_vr_names[PPC_VECTOR_TEMP]);
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s, %s\n", m, ppc_vr_names[d->phys_reg], ppc_vr_names[a->phys_reg],
+                             ppc_vr_names[b->phys_reg], ppc_vr_names[PPC_VECTOR_TEMP]);
+        return;
+    }
+    anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s\n", m, ppc_vector_operand(m, d->phys_reg), ppc_vector_operand(m, a->phys_reg),
+                         ppc_vector_operand(m, b->phys_reg));
 }
 
 static void ppc_emit_symbol_addr(ppc_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
@@ -1029,27 +1487,21 @@ static void ppc_emit_symbol_addr(ppc_mir_emit_t *emit, const anvil_mir_instr_inf
     const anvil_regalloc_assignment_t *assignment = ppc_assignment_checked(emit, info->def);
     if (!assignment)
         return;
-    const char *dst = ppc_gpr_names[assignment->phys_reg];
+    emit->desc->abi_ops->emit_symbol_address(emit, ppc_gpr_names[assignment->phys_reg], info->symbol, info->has_imm ? info->imm : 0,
+                                             info->symbol_got);
+}
 
-    if (ppc_is_64(emit)) {
-        anvil_strbuf_appendf(&emit->code, "\taddis %s, %%r2, %s", dst, info->symbol);
-        if (info->has_imm && info->imm != 0)
-            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
-        anvil_strbuf_append(&emit->code, "@toc@ha\n");
-        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s", dst, dst, info->symbol);
-        if (info->has_imm && info->imm != 0)
-            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
-        anvil_strbuf_append(&emit->code, "@toc@l\n");
-    } else {
-        anvil_strbuf_appendf(&emit->code, "\tlis %s, %s", dst, info->symbol);
-        if (info->has_imm && info->imm != 0)
-            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
-        anvil_strbuf_append(&emit->code, "@ha\n");
-        anvil_strbuf_appendf(&emit->code, "\taddi %s, %s, %s", dst, dst, info->symbol);
-        if (info->has_imm && info->imm != 0)
-            anvil_strbuf_appendf(&emit->code, "%+lld", (long long)info->imm);
-        anvil_strbuf_append(&emit->code, "@l\n");
+/* The X-form of a D-form access: `opx reg, base, index`. */
+static void ppc_emit_indexed_access(ppc_mir_emit_t *emit, size_t instr_index, size_t index_use, const char *op, const char *reg,
+                                    const char *base)
+{
+    anvil_mir_vreg_t index = anvil_mir_get_instr_use(emit->mir, instr_index, index_use);
+    const char *index_name = index == ANVIL_MIR_NO_VREG ? NULL : ppc_reg_name(emit, index);
+    if (!index_name || emit->failed) {
+        emit->failed = true;
+        return;
     }
+    anvil_strbuf_appendf(&emit->code, "\t%sx %s, %s, %s\n", op, reg, base, index_name);
 }
 
 static void ppc_emit_load(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1068,7 +1520,10 @@ static void ppc_emit_load(ppc_mir_emit_t *emit, size_t instr_index, const anvil_
 
     int size = ppc_mir_size_bytes(def_info->size_bits);
     const char *op = ppc_load_op(emit->desc, def_info->reg_class, size, def_info->is_signed);
-    ppc_emit_base_offset_access(emit, op, dst, base, info->has_imm ? info->imm : 0);
+    if (info->index_scale)
+        ppc_emit_indexed_access(emit, instr_index, 1, op, dst, base);
+    else
+        ppc_emit_base_offset_access(emit, op, dst, base, info->has_imm ? info->imm : 0);
     ppc_emit_sign_extend_loaded_byte(emit, def_info, dst, size);
 }
 
@@ -1094,7 +1549,10 @@ static void ppc_emit_store(ppc_mir_emit_t *emit, size_t instr_index)
     }
 
     int size = ppc_mir_size_bytes(value_info->size_bits);
-    ppc_emit_base_offset_access(emit, ppc_store_op(emit->desc, value_info->reg_class, size), src, base, offset);
+    if (info.index_scale)
+        ppc_emit_indexed_access(emit, instr_index, 2, ppc_store_op(emit->desc, value_info->reg_class, size), src, base);
+    else
+        ppc_emit_base_offset_access(emit, ppc_store_op(emit->desc, value_info->reg_class, size), src, base, offset);
 }
 
 static void ppc_emit_incoming_stack_arg(ppc_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
@@ -1136,6 +1594,13 @@ static void ppc_emit_gpr_extend(ppc_mir_emit_t *emit, size_t instr_index, const 
 
     int src_size = ppc_mir_size_bytes(src_info->size_bits);
     int dst_size = ppc_mir_size_bytes(dst_info->size_bits);
+    /* A narrow load of the same signedness already extended the value to
+     * the whole register (ppc_emit_load: lbz+extsb, lha, lhz, lwa, lwz). */
+    if (src_size < (int)emit->desc->word_size && src_info->is_signed == sign_extend && anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD) {
+        if (strcmp(dst, s) != 0)
+            anvil_strbuf_appendf(&emit->code, "\tmr %s, %s\n", dst, s);
+        return;
+    }
     if (sign_extend) {
         if (src_size <= 1) {
             anvil_strbuf_appendf(&emit->code, "\textsb %s, %s\n", dst, s);
@@ -1186,7 +1651,8 @@ static void ppc_emit_extend_to_r0(ppc_mir_emit_t *emit, const char *source, uint
 static void ppc_emit_native_conversion(ppc_mir_emit_t *emit, anvil_mir_opcode_t op, const char *dst, const char *source,
                                        const anvil_mir_vreg_info_t *dst_info, const anvil_mir_vreg_info_t *src_info)
 {
-    const anvil_ppc_target_desc_t *desc = emit->desc;
+    bool int64 = (emit->features & ANVIL_FEATURE_PPC_64BIT) != 0;
+    bool fpcvt = (emit->features & ANVIL_FEATURE_PPC_FPCVT) != 0;
     int slot = emit->fp_const_scratch_offset;
     if (!emit->has_frame || slot < 0) {
         emit->failed = true;
@@ -1196,7 +1662,7 @@ static void ppc_emit_native_conversion(ppc_mir_emit_t *emit, anvil_mir_opcode_t 
     if (op == ANVIL_MIR_OP_FPTOSI || op == ANVIL_MIR_OP_FPTOUI) {
         bool is_unsigned = op == ANVIL_MIR_OP_FPTOUI;
         bool wide = dst_info->size_bits > 32;
-        const char *convert = is_unsigned ? (desc->has_fp_unsigned_convert ? (wide ? "fctiduz" : "fctiwuz") : "fctidz") : (wide ? "fctidz" : "fctiwz");
+        const char *convert = is_unsigned ? (fpcvt ? (wide ? "fctiduz" : "fctiwuz") : "fctidz") : (wide ? "fctidz" : "fctiwz");
         anvil_strbuf_appendf(&emit->code, "\t%s %%f0, %s\n", convert, source);
         ppc_emit_local_access(emit, "stfd", "%f0", slot);
         if (wide) {
@@ -1216,7 +1682,7 @@ static void ppc_emit_native_conversion(ppc_mir_emit_t *emit, anvil_mir_opcode_t 
 
     bool is_unsigned = op == ANVIL_MIR_OP_UITOFP;
     bool single = dst_info->size_bits <= 32;
-    if (desc->has_fp_int64_convert) {
+    if (int64) {
         if (src_info->size_bits > 32) {
             ppc_emit_local_access(emit, ppc_store_word_op(emit), source, slot);
         } else {
@@ -1226,9 +1692,9 @@ static void ppc_emit_native_conversion(ppc_mir_emit_t *emit, anvil_mir_opcode_t 
         ppc_emit_local_access(emit, "lfd", "%f0", slot);
         /* A narrow integer always fits fcfid's signed doubleword. */
         bool unsigned_form = is_unsigned && src_info->size_bits > 32;
-        const char *convert = single && desc->has_fp_unsigned_convert ? (unsigned_form ? "fcfidus" : "fcfids") : (unsigned_form ? "fcfidu" : "fcfid");
+        const char *convert = single && fpcvt ? (unsigned_form ? "fcfidus" : "fcfids") : (unsigned_form ? "fcfidu" : "fcfid");
         anvil_strbuf_appendf(&emit->code, "\t%s %s, %%f0\n", convert, dst);
-        if (single && !desc->has_fp_unsigned_convert)
+        if (single && !fpcvt)
             anvil_strbuf_appendf(&emit->code, "\tfrsp %s, %s\n", dst, dst);
         return;
     }
@@ -1304,7 +1770,7 @@ static void ppc_emit_cast(ppc_mir_emit_t *emit, size_t instr_index, const anvil_
         } else {
             helper = src_info->size_bits <= 32 ? (dst_info->size_bits == 32 ? "__floatsisf" : "__floatsidf") : (dst_info->size_bits == 32 ? "__floatdisf" : "__floatdidf");
         }
-        emit->desc->abi_ops->emit_direct_call(emit, helper);
+        emit->desc->abi_ops->emit_direct_call(emit, helper, emit->reloc != ANVIL_RELOC_STATIC);
         if (strcmp(dst, "%f1") != 0) {
             anvil_strbuf_appendf(&emit->code, "\tfmr %s, %%f1\n", dst);
         }
@@ -1322,7 +1788,7 @@ static void ppc_emit_cast(ppc_mir_emit_t *emit, size_t instr_index, const anvil_
         } else {
             helper = dst_info->size_bits <= 32 ? (src_info->size_bits == 32 ? "__fixsfsi" : "__fixdfsi") : (src_info->size_bits == 32 ? "__fixsfdi" : "__fixdfdi");
         }
-        emit->desc->abi_ops->emit_direct_call(emit, helper);
+        emit->desc->abi_ops->emit_direct_call(emit, helper, emit->reloc != ANVIL_RELOC_STATIC);
 
         if (dst_info->size_bits <= 8) {
             anvil_strbuf_appendf(&emit->code, is_unsigned ? "\trlwinm %s, %%r3, 0, 24, 31\n" : "\textsb %s, %%r3\n", dst);
@@ -1363,6 +1829,39 @@ static void ppc_emit_select(ppc_mir_emit_t *emit, size_t instr_index, const anvi
     const char *cond_reg = ppc_reg_name(emit, cond);
     if (!def_info || emit->failed)
         return;
+
+    /* isel rD, rA, rB, bit picks rA when the CR0 bit is set (rA = r0 reads
+     * as zero, so that order falls back to the branches). */
+    int bit = emit->fused_select_bit;
+    bool negated = emit->fused_select_negated, fused = bit >= 0;
+    emit->fused_select_bit = -1;
+    if (!fused) {
+        bit = 2;          /* EQ after comparing the boolean with zero */
+        negated = true;
+    }
+    if ((emit->features & ANVIL_FEATURE_PPC_ISEL) && def_info->reg_class == ANVIL_MIR_REG_GPR) {
+        anvil_mir_vreg_t first = negated ? else_v : then_v, second = negated ? then_v : else_v;
+        if (ppc_assignment_checked(emit, first) && ppc_assignment_checked(emit, first)->phys_reg != 0) {
+            if (!fused)
+                anvil_strbuf_appendf(&emit->code, "\tcmpwi 0, %s, 0\n", cond_reg);
+            anvil_strbuf_appendf(&emit->code, "\tisel %s, %s, %s, %d\n", ppc_reg_name(emit, info->def), ppc_reg_name(emit, first),
+                                 ppc_reg_name(emit, second), bit);
+            return;
+        }
+    }
+    if (fused) {
+        /* The fused compare left no boolean: branch on its bit. */
+        size_t id = emit->label_counter++;
+        /* To the else value when the condition fails: the bit clear
+         * (bc 4), or set for a negated condition (bc 12). */
+        anvil_strbuf_appendf(&emit->code, "\tbc %d, %d, .L%s_select_else_%zu\n", negated ? 12 : 4, bit, anvil_mir_func_name(emit->mir), id);
+        ppc_emit_copy(emit, info->def, then_v);
+        anvil_strbuf_appendf(&emit->code, "\tb .L%s_select_done_%zu\n", anvil_mir_func_name(emit->mir), id);
+        anvil_strbuf_appendf(&emit->code, ".L%s_select_else_%zu:\n", anvil_mir_func_name(emit->mir), id);
+        ppc_emit_copy(emit, info->def, else_v);
+        anvil_strbuf_appendf(&emit->code, ".L%s_select_done_%zu:\n", anvil_mir_func_name(emit->mir), id);
+        return;
+    }
 
     size_t id = emit->label_counter++;
     anvil_strbuf_appendf(&emit->code, "\tcmpwi 0, %s, 0\n", cond_reg);
@@ -1485,9 +1984,147 @@ static void ppc_emit_indirect_call(ppc_mir_emit_t *emit, size_t instr_index, con
     emit->desc->abi_ops->emit_indirect_call(emit, target_reg);
 }
 
+static void ppc_parallel_move_reg(void *user, int dst, int src)
+{
+    ppc_mir_emit_t *emit = user;
+    anvil_strbuf_appendf(&emit->code, "\tmr %s, %s\n", ppc_gpr_names[dst], ppc_gpr_names[src]);
+}
+
+/* Atomics as reservation loops (lwarx/stwcx., ldarx/stdcx. on 64-bit).
+ * 8/16-bit read-modify-writes work on the containing aligned word through
+ * a shifted mask, which needs no lbarx/lharx. Temporaries: r0, r5-r10,
+ * with the operands staged in r3, r4, r11 (all declared clobbered). */
+static void ppc_emit_atomic(ppc_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_memory_order_t order = info->atomic.order;
+    bool acquire = order == ANVIL_ORDER_ACQUIRE || order == ANVIL_ORDER_ACQ_REL || order == ANVIL_ORDER_SEQ_CST;
+    bool release = order == ANVIL_ORDER_RELEASE || order == ANVIL_ORDER_ACQ_REL || order == ANVIL_ORDER_SEQ_CST;
+    const char *leading = order == ANVIL_ORDER_SEQ_CST ? "\tsync\n" : (release ? "\tlwsync\n" : "");
+
+    if (info->ir_op == ANVIL_OP_ATOMIC_FENCE) {
+        if (order != ANVIL_ORDER_RELAXED)
+            anvil_strbuf_append(&emit->code, order == ANVIL_ORDER_SEQ_CST ? "\tsync\n" : "\tlwsync\n");
+        return;
+    }
+
+    anvil_mir_vreg_t value = info->def != ANVIL_MIR_NO_VREG ? info->def : anvil_mir_get_instr_use(emit->mir, index, 1);
+    const anvil_mir_vreg_info_t *type = ppc_vreg_info_checked(emit, value);
+    if (!type || emit->failed)
+        return;
+    /* Operands are staged in r3, r4 and r11, clear of the loop's
+     * temporaries, as one parallel move (they may sit anywhere). */
+    static const int staging[3] = {3, 4, 11};
+    static const anvil_parallel_move_ops_t moves = {ppc_parallel_move_reg, NULL, 0};
+    const char *operand_names[3] = {NULL, NULL, NULL};
+    int sources[3];
+    size_t count = info->num_uses < 3 ? info->num_uses : 3;
+    for (size_t operand = 0; operand < count; operand++) {
+        const anvil_regalloc_assignment_t *assignment = ppc_assignment_checked(emit, anvil_mir_get_instr_use(emit->mir, index, operand));
+        if (!assignment)
+            return;
+        sources[operand] = assignment->phys_reg;
+        operand_names[operand] = ppc_gpr_names[staging[operand]];
+    }
+    if (!anvil_parallel_move(&moves, emit, staging, sources, count)) {
+        emit->failed = true;
+        return;
+    }
+
+    const char *address = operand_names[0];
+    unsigned bits = type->size_bits;
+    const char *prefix = ".L";
+    const char *function = anvil_mir_func_name(emit->mir);
+    if (info->ir_op == ANVIL_OP_ATOMIC_LOAD || info->ir_op == ANVIL_OP_ATOMIC_STORE) {
+        bool load = info->ir_op == ANVIL_OP_ATOMIC_LOAD;
+        const char *op = bits == 8 ? (load ? "lbz" : "stb") : bits == 16 ? (load ? "lhz" : "sth") : bits == 32 ? (load ? "lwz" : "stw") : (load ? "ld" : "std");
+        anvil_strbuf_append(&emit->code, load ? (order == ANVIL_ORDER_SEQ_CST ? "\tsync\n" : "") : leading);
+        if (load) {
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%s)\n", op, ppc_reg_name(emit, info->def), address);
+            if (acquire)
+                anvil_strbuf_append(&emit->code, "\tlwsync\n");
+        } else {
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, 0(%s)\n", op, operand_names[1], address);
+        }
+        return;
+    }
+
+    bool compare = info->ir_op == ANVIL_OP_ATOMIC_CMPXCHG;
+    anvil_atomic_rmw_t rmw = info->atomic.rmw;
+    anvil_strbuf_append(&emit->code, leading);
+    if (bits >= 32) {
+        bool wide = bits == 64;
+        const char *larx = wide ? "ldarx" : "lwarx";
+        const char *stcx = wide ? "stdcx." : "stwcx.";
+        const char *update = operand_names[1];
+        anvil_strbuf_appendf(&emit->code, "%s%s_atomic_%zu_retry:\n\t%s %%r7, 0, %s\n", prefix, function, index, larx, address);
+        if (compare) {
+            anvil_strbuf_appendf(&emit->code, "\t%s %%r7, %s\n\tbne- %s%s_atomic_%zu_done\n", wide ? "cmpd" : "cmpw", operand_names[1], prefix, function, index);
+            update = operand_names[2];
+        } else if (rmw != ANVIL_ATOMIC_EXCHANGE) {
+            if (rmw == ANVIL_ATOMIC_SUB)
+                anvil_strbuf_appendf(&emit->code, "\tsubf %%r8, %s, %%r7\n", operand_names[1]);
+            else
+                anvil_strbuf_appendf(&emit->code, "\t%s %%r8, %%r7, %s\n",
+                                     rmw == ANVIL_ATOMIC_ADD ? "add" : rmw == ANVIL_ATOMIC_AND ? "and" : rmw == ANVIL_ATOMIC_OR ? "or" : "xor", operand_names[1]);
+            update = "%r8";
+        }
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, 0, %s\n\tbne- %s%s_atomic_%zu_retry\n%s%s_atomic_%zu_done:\n", stcx, update, address, prefix,
+                             function, index, prefix, function, index);
+        if (acquire)
+            anvil_strbuf_append(&emit->code, "\tisync\n");
+        anvil_strbuf_appendf(&emit->code, "\tmr %s, %%r7\n", ppc_reg_name(emit, info->def));
+        return;
+    }
+
+    /* r10: field shift, r9: aligned word address, r0: field mask. */
+    anvil_strbuf_appendf(&emit->code, "\trlwinm %%r10, %s, 3, 27, %d\n", address, bits == 8 ? 28 : 27);
+    if (!emit->desc->little_endian)
+        anvil_strbuf_appendf(&emit->code, "\txori %%r10, %%r10, %d\n", bits == 8 ? 24 : 16);
+    if (ppc_is_64(emit))
+        anvil_strbuf_appendf(&emit->code, "\trldicr %%r9, %s, 0, 61\n", address);
+    else
+        anvil_strbuf_appendf(&emit->code, "\trlwinm %%r9, %s, 0, 0, 29\n", address);
+    anvil_strbuf_appendf(&emit->code, "\tli %%r0, -1\n\trlwinm %%r0, %%r0, 0, %d, 31\n\tslw %%r0, %%r0, %%r10\n", bits == 8 ? 24 : 16);
+    /* r8: the operand (CMPXCHG: expected) in field position, r6: desired. */
+    anvil_strbuf_appendf(&emit->code, "\tslw %%r8, %s, %%r10\n\tand %%r8, %%r8, %%r0\n", operand_names[1]);
+    if (compare)
+        anvil_strbuf_appendf(&emit->code, "\tslw %%r6, %s, %%r10\n\tand %%r6, %%r6, %%r0\n", operand_names[2]);
+
+    anvil_strbuf_appendf(&emit->code, "%s%s_atomic_%zu_retry:\n\tlwarx %%r7, 0, %%r9\n", prefix, function, index);
+    if (compare) {
+        anvil_strbuf_appendf(&emit->code, "\tand %%r5, %%r7, %%r0\n\tcmpw %%r5, %%r8\n\tbne- %s%s_atomic_%zu_done\n", prefix, function, index);
+        anvil_strbuf_append(&emit->code, "\tandc %r5, %r7, %r0\n\tor %r5, %r5, %r6\n");
+    } else {
+        switch (rmw) {
+        case ANVIL_ATOMIC_EXCHANGE:
+            anvil_strbuf_append(&emit->code, "\tandc %r5, %r7, %r0\n\tor %r5, %r5, %r8\n");
+            break;
+        case ANVIL_ATOMIC_ADD:
+        case ANVIL_ATOMIC_SUB:
+            anvil_strbuf_append(&emit->code, rmw == ANVIL_ATOMIC_ADD ? "\tadd %r5, %r7, %r8\n" : "\tsubf %r5, %r8, %r7\n");
+            anvil_strbuf_append(&emit->code, "\tand %r5, %r5, %r0\n\tandc %r6, %r7, %r0\n\tor %r5, %r5, %r6\n");
+            break;
+        case ANVIL_ATOMIC_AND:
+            anvil_strbuf_append(&emit->code, "\torc %r5, %r8, %r0\n\tand %r5, %r7, %r5\n");
+            break;
+        default:
+            anvil_strbuf_appendf(&emit->code, "\t%s %%r5, %%r7, %%r8\n", rmw == ANVIL_ATOMIC_OR ? "or" : "xor");
+            break;
+        }
+    }
+    anvil_strbuf_appendf(&emit->code, "\tstwcx. %%r5, 0, %%r9\n\tbne- %s%s_atomic_%zu_retry\n%s%s_atomic_%zu_done:\n", prefix, function, index, prefix,
+                         function, index);
+    if (acquire)
+        anvil_strbuf_append(&emit->code, "\tisync\n");
+    anvil_strbuf_appendf(&emit->code, "\tand %%r7, %%r7, %%r0\n\tsrw %s, %%r7, %%r10\n", ppc_reg_name(emit, info->def));
+}
+
 static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     switch (info->op) {
+    case ANVIL_MIR_OP_ATOMIC:
+        ppc_emit_atomic(emit, instr_index, info);
+        return;
     case ANVIL_MIR_OP_MOV:
         ppc_emit_mov(emit, info);
         break;
@@ -1500,6 +2137,12 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
         ppc_emit_copy(emit, info->def, src);
         break;
     }
+    case ANVIL_MIR_OP_VECTOR:
+        ppc_emit_vector(emit, instr_index, info);
+        break;
+    case ANVIL_MIR_OP_SCALAR:
+        ppc_emit_scalar(emit, instr_index, info);
+        break;
     case ANVIL_MIR_OP_ADD:
     case ANVIL_MIR_OP_SUB:
     case ANVIL_MIR_OP_MUL:
@@ -1563,6 +2206,14 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
     case ANVIL_MIR_OP_FRAME_ADDR:
         ppc_emit_frame_addr(emit, info);
         break;
+    case ANVIL_MIR_OP_VA_START: {
+        const anvil_regalloc_assignment_t *assignment = ppc_assignment_checked(emit, info->def);
+        if (!assignment || !emit->desc->abi_ops->emit_va_start)
+            emit->failed = true;
+        else
+            emit->desc->abi_ops->emit_va_start(emit, assignment->phys_reg, info);
+        break;
+    }
     case ANVIL_MIR_OP_DYN_ALLOCA:
         ppc_emit_dyn_alloca(emit, instr_index, info);
         break;
@@ -1573,7 +2224,7 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
         if (info->has_imm && emit->desc->abi_ops->emit_variadic_call_setup)
             emit->desc->abi_ops->emit_variadic_call_setup(emit, info->imm != 0);
         if (info->symbol && info->symbol[0]) {
-            emit->desc->abi_ops->emit_direct_call(emit, info->symbol);
+            emit->desc->abi_ops->emit_direct_call(emit, info->symbol, info->symbol_got);
         } else {
             ppc_emit_indirect_call(emit, instr_index, info);
         }
@@ -1582,6 +2233,8 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
         ppc_emit_call_stack_arg(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_BR:
+        if (info->true_block == emit->block + 1)
+            break;
         anvil_strbuf_append(&emit->code, "\tb ");
         if (!ppc_emit_branch_target(emit, info->true_block)) {
             emit->failed = true;
@@ -1595,21 +2248,16 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
             emit->failed = true;
             break;
         }
-        const char *cond_reg = ppc_reg_name(emit, cond);
-        if (emit->failed)
-            break;
-        anvil_strbuf_appendf(&emit->code, "\tcmpwi 0, %s, 0\n", cond_reg);
-        anvil_strbuf_append(&emit->code, "\tbne ");
-        if (!ppc_emit_branch_target(emit, info->true_block)) {
-            emit->failed = true;
-            break;
+        const char *taken = emit->fused_branch;
+        emit->fused_branch = NULL;
+        if (!taken) {
+            const char *cond_reg = ppc_reg_name(emit, cond);
+            if (emit->failed)
+                break;
+            anvil_strbuf_appendf(&emit->code, "\tcmpwi 0, %s, 0\n", cond_reg);
+            taken = "bne";
         }
-        anvil_strbuf_append(&emit->code, "\n\tb ");
-        if (!ppc_emit_branch_target(emit, info->false_block)) {
-            emit->failed = true;
-            break;
-        }
-        anvil_strbuf_append(&emit->code, "\n");
+        ppc_emit_cond_branch(emit, taken, info->true_block, info->false_block);
         break;
     }
     case ANVIL_MIR_OP_RET:
@@ -1688,6 +2336,21 @@ static void ppc_emit_string_literals(ppc_mir_emit_t *emit)
 
 bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant, char **output, size_t *len)
 {
+    const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
+    if (!desc)
+        return false;
+    return anvil_ppc_emit_mir_features(mir, variant, anvil_cpu_model_features(anvil_arch_default_cpu(desc->arch)), output, len);
+}
+
+bool anvil_ppc_emit_mir_features(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant, anvil_cpu_features_t features,
+                                 char **output, size_t *len)
+{
+    return ppc_emit_mir_reloc(mir, variant, features, ANVIL_RELOC_STATIC, output, len);
+}
+
+bool ppc_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant, anvil_cpu_features_t features,
+                        anvil_reloc_model_t reloc, char **output, size_t *len)
+{
     if (!output)
         return false;
     *output = NULL;
@@ -1703,23 +2366,34 @@ bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant
     ppc_mir_emit_t emit;
     memset(&emit, 0, sizeof(emit));
     emit.desc = desc;
+    emit.features = features;
+    emit.reloc = reloc == ANVIL_RELOC_DEFAULT ? ANVIL_RELOC_STATIC : reloc;
+    emit.fused_select_bit = -1;
     emit.mir = mir;
     anvil_strbuf_init(&emit.code);
 
-    if (!ppc_prepare_frame(&emit)) {
+    if (!ppc_prepare_frame(&emit) || !anvil_mir_isel_facts_build(&emit.isel, mir, ppc_takes_immediate, &emit)) {
         anvil_strbuf_destroy(&emit.code);
         free(emit.spill_offsets);
         free(emit.frame_slot_offsets);
+        anvil_mir_isel_facts_destroy(&emit.isel);
         return false;
     }
 
     ppc_emit_prologue(&emit);
 
+    /* Loop headers start aligned (padding outside the loop is cheap). */
+    bool *loop_headers = calloc(anvil_mir_num_blocks(mir) ? anvil_mir_num_blocks(mir) : 1, sizeof(*loop_headers));
+    if (!loop_headers || !anvil_mir_loop_header_blocks(mir, loop_headers))
+        emit.failed = true;
     for (size_t b = 0; b < anvil_mir_num_blocks(mir) && !emit.code.failed; b++) {
+        if (loop_headers && loop_headers[b])
+            anvil_strbuf_append(&emit.code, "\t.p2align 4\n");
         if (!ppc_emit_label(&emit, (anvil_mir_block_t)b)) {
             emit.failed = true;
             break;
         }
+        emit.block = (anvil_mir_block_t)b;
 
         for (size_t instr_index = 0; instr_index < anvil_mir_num_instrs(mir); instr_index++) {
             anvil_mir_instr_info_t instr;
@@ -1736,11 +2410,14 @@ bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant
         if (emit.failed || emit.code.failed)
             break;
     }
+    free(loop_headers);
 
+    anvil_strbuf_append(&emit.code, "\t.cfi_endproc\n");
     ppc_emit_string_literals(&emit);
 
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);
+    anvil_mir_isel_facts_destroy(&emit.isel);
 
     if (emit.failed || emit.code.failed) {
         anvil_strbuf_destroy(&emit.code);

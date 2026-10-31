@@ -31,7 +31,7 @@ static const anvil_arch_info_t arm64_arch_info = {
     .endian = ANVIL_ENDIAN_LITTLE,
     .stack_dir = ANVIL_STACK_DOWN,
     .has_condition_codes = true,
-    .has_delay_slots = false
+    .has_delay_slots = false,
 };
 
 /* ============================================================================
@@ -91,8 +91,7 @@ static anvil_error_t arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
     if (!be || !func) return ANVIL_ERR_INVALID_ARG;
     if (func->is_declaration) return ANVIL_OK;
 
-    if (!be->ctx ||
-        (be->ctx->abi != ANVIL_ABI_SYSV && be->ctx->abi != ANVIL_ABI_DARWIN)) {
+    if (!arm64_backend_abi(be)) {
         if (be->ctx) {
             anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
                             "ARM64 MachineIR codegen supports SysV and Darwin ABIs");
@@ -135,74 +134,24 @@ static anvil_error_t arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
  * Global Variables
  * ============================================================================ */
 
+static size_t arm64_global_align(const anvil_type_t *type)
+{
+    int align = arm64_type_align((anvil_type_t *)type);
+    return align > 0 ? (size_t)align : 1;
+}
+
 static bool arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
 {
-    if (mod->num_globals == 0) return true;
-    
-    const char *prefix = arm64_symbol_prefix(be);
-    
-    /* Count actual globals (skip function declarations) */
-    int actual_globals = 0;
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
-        actual_globals++;
-    }
-    if (actual_globals == 0) return true;
-
-    anvil_gnu_string_pool_t strings;
-    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
-    
-    anvil_strbuf_append(&be->data, "\t.data\n");
-    
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) continue;
-        
-        anvil_value_t *global = g->value;
-        if (!global || !global->name || !global->type) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-        if (global->data.global.is_declaration) {
-            anvil_strbuf_appendf(&be->data, "\t.extern %s%s\n", prefix,
-                                 global->name);
-            continue;
-        }
-        if (global->data.global.linkage == ANVIL_LINK_EXTERNAL ||
-            global->data.global.linkage == ANVIL_LINK_COMMON) {
-            anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix,
-                                 global->name);
-        } else if (global->data.global.linkage == ANVIL_LINK_WEAK) {
-            anvil_strbuf_appendf(&be->data, "\t.weak %s%s\n", prefix,
-                                 global->name);
-        }
-        
-        int align = g->value->type ? arm64_type_align(g->value->type) : 8;
-        
-        if (arm64_is_darwin(be)) {
-            int p2align = (align <= 1) ? 0 : (align <= 2) ? 1 : (align <= 4) ? 2 : 3;
-            anvil_strbuf_appendf(&be->data, "\t.p2align %d\n", p2align);
-        } else {
-            anvil_strbuf_appendf(&be->data, "\t.align %d\n", align);
-        }
-        
-        anvil_strbuf_appendf(&be->data, "%s%s:\n", prefix, g->value->name);
-        
-        if (!anvil_gnu_emit_constant(&be->data, global->type,
-                                     global->data.global.init, 8, prefix,
-                                     &strings, NULL, NULL)) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-    }
-    
-    anvil_strbuf_append(&be->data, "\n");
-    const char *string_section = arm64_is_darwin(be)
-        ? "\t.section __TEXT,__cstring,cstring_literals"
-        : "\t.section .rodata";
-    bool ok = anvil_gnu_string_pool_emit(&be->data, &strings,
-                                          string_section);
-    anvil_gnu_string_pool_destroy(&strings);
-    return ok && !be->data.failed;
+    const arm64_abi_desc_t *abi = arm64_backend_abi(be);
+    if (!abi)
+        return false;
+    anvil_gnu_globals_config_t config = {
+        .format = abi->format,
+        .symbol_prefix = abi->symbol_prefix,
+        .pointer_size = 8,
+        .type_align = arm64_global_align,
+    };
+    return anvil_gnu_emit_globals(&be->data, mod, &config);
 }
 
 /* ============================================================================
@@ -211,13 +160,10 @@ static bool arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
 
 static void arm64_emit_strings(arm64_backend_t *be)
 {
-    if (be->num_strings == 0) return;
-    
-    if (arm64_is_darwin(be)) {
-        anvil_strbuf_append(&be->data, "\t.section __TEXT,__cstring,cstring_literals\n");
-    } else {
-        anvil_strbuf_append(&be->data, "\t.section .rodata\n");
-    }
+    const arm64_abi_desc_t *abi = arm64_backend_abi(be);
+    if (be->num_strings == 0 || !abi) return;
+
+    anvil_strbuf_appendf(&be->data, "%s\n", abi->cstring_section);
     
     for (size_t i = 0; i < be->num_strings; i++) {
         arm64_string_entry_t *entry = &be->strings[i];
@@ -259,16 +205,12 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     anvil_strbuf_init(&priv->data);
     priv->num_strings = 0;
     
-    /* Emit header */
-    if (arm64_is_darwin(priv)) {
-        anvil_strbuf_append(&priv->code, "// Generated by ANVIL for ARM64 (AArch64) - macOS\n");
-        anvil_strbuf_append(&priv->code, "\t.build_version macos, 11, 0\n");
-        anvil_strbuf_append(&priv->code, "\t.section __TEXT,__text,regular,pure_instructions\n\n");
-    } else {
-        anvil_strbuf_append(&priv->code, "// Generated by ANVIL for ARM64 (AArch64) - Linux\n");
-        anvil_strbuf_append(&priv->code, "\t.arch armv8-a\n");
-        anvil_strbuf_append(&priv->code, "\t.text\n\n");
+    const arm64_abi_desc_t *abi = arm64_backend_abi(priv);
+    if (!abi) {
+        anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "ARM64 supports the Linux (SysV) and Darwin ABIs");
+        return ANVIL_ERR_CODEGEN;
     }
+    anvil_strbuf_append(&priv->code, abi->module_header);
     
     /* Emit functions (prepare_ir already called by anvil_module_codegen) */
     for (anvil_func_t *func = mod->funcs; func; func = func->next) {
@@ -286,28 +228,7 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     if (priv->code.failed || priv->data.failed) return ANVIL_ERR_NOMEM;
     
     /* Combine output */
-    anvil_strbuf_t result;
-    anvil_strbuf_init(&result);
-    if (result.failed) return ANVIL_ERR_NOMEM;
-    char *code_str = anvil_strbuf_detach(&priv->code, NULL);
-    char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (!code_str || !data_str) {
-        free(code_str);
-        free(data_str);
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-    anvil_strbuf_append(&result, code_str);
-    anvil_strbuf_append(&result, data_str);
-    free(code_str);
-    free(data_str);
-    if (result.failed) {
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-    
-    *output = anvil_strbuf_detach(&result, len);
-    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+    return anvil_obj_finish_module(&priv->code, &priv->data, abi->format, output, len);
 }
 
 static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
@@ -334,10 +255,49 @@ static anvil_error_t arm64_codegen_func(anvil_backend_t *be, anvil_func_t *func,
  * Backend Registration
  * ============================================================================ */
 
+/* va_arg / va_copy follow the context's ABI. */
+static const arm64_abi_desc_t *arm64_va_abi(anvil_backend_t *be)
+{
+    const arm64_abi_desc_t *abi = be->ctx ? arm64_get_abi_desc(be->ctx->abi) : NULL;
+    if (!abi && be->ctx)
+        anvil_set_error(be->ctx, ANVIL_ERR_INVALID_TYPE, "ARM64 variadic arguments need the Linux or Darwin ABI");
+    return abi;
+}
+
+static anvil_value_t *arm64_build_va_arg(anvil_backend_t *be, anvil_value_t *storage, anvil_type_t *type, const char *name)
+{
+    const arm64_abi_desc_t *abi = arm64_va_abi(be);
+    return abi ? abi->build_va_arg(be, storage, type, name) : NULL;
+}
+
+static anvil_value_t *arm64_build_va_copy(anvil_backend_t *be, anvil_value_t *cursor, const char *name)
+{
+    const arm64_abi_desc_t *abi = arm64_va_abi(be);
+    return abi ? abi->build_va_copy(be, cursor, name) : NULL;
+}
+
+static bool arm64_build_va_copy_into(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor)
+{
+    const arm64_abi_desc_t *abi = arm64_va_abi(be);
+    return abi && abi->build_va_copy_into(be, destination, cursor);
+}
+
 static bool arm64_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
 {
     (void)be;
     return anvil_atomic_type_valid(type);
+}
+
+static bool arm64_reloc_model_supported(anvil_backend_t *be, anvil_reloc_model_t model)
+{
+    const arm64_abi_desc_t *abi = arm64_backend_abi(be->priv);
+    return abi && (abi->reloc_models & (1u << model));
+}
+
+static anvil_reloc_model_t arm64_default_reloc_model(anvil_backend_t *be)
+{
+    const arm64_abi_desc_t *abi = arm64_backend_abi(be->priv);
+    return abi ? abi->default_reloc : ANVIL_RELOC_STATIC;
 }
 
 const anvil_backend_ops_t anvil_backend_arm64 = {
@@ -350,8 +310,12 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .codegen_func = arm64_codegen_func,
     .get_arch_info = arm64_get_arch_info,
     .atomic_is_lock_free = arm64_atomic_is_lock_free,
-    .build_va_arg = anvil_arm64_build_va_arg,
-    .build_va_copy = anvil_arm64_build_va_copy,
-    .build_va_copy_into = anvil_arm64_build_va_copy_into,
-    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
+    .build_va_arg = arm64_build_va_arg,
+    .build_va_copy = arm64_build_va_copy,
+    .build_va_copy_into = arm64_build_va_copy_into,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
+    .abi_support = (1u << ANVIL_ABI_SYSV) | (1u << ANVIL_ABI_DARWIN),
+    .reloc_model_supported = arm64_reloc_model_supported,
+    .vector_operation_cost = arm64_vector_operation_cost,
+    .default_reloc_model = arm64_default_reloc_model
 };

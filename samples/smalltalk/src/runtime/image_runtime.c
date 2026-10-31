@@ -1,6 +1,7 @@
 #include "../platform/runtime.h"
 #include "st_image_runtime.h"
 #include "st_send_bridge.h"
+#include "st_fatal.h"
 
 #include <stdalign.h>
 #include <stdlib.h>
@@ -403,7 +404,8 @@ void st_image_runtime_destroy(st_image_runtime_t *runtime)
         return;
     }
     if (state->root_provider_count != 0u) {
-        abort();
+        st_fatal_code("image runtime", "destroyed while root providers are attached",
+                              (uint64_t)state->root_provider_count);
     }
     state->magic = 0u;
     deallocate_block(state->allocator, state->bitmap_block,
@@ -611,9 +613,8 @@ st_image_runtime_status_t st_image_runtime_literal_load(
 _Noreturn st_value_t st_aot_image_runtime_contract_violation(
     st_image_runtime_status_t status, const StFrame *frame)
 {
-    (void)status;
     (void)frame;
-    abort();
+    st_fatal("image runtime contract violation", st_image_runtime_status_string(status));
 }
 
 static st_image_runtime_status_t publish_allocated(

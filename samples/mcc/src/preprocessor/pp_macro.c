@@ -108,37 +108,39 @@ mcc_token_t *pp_stringify_tokens(mcc_preprocessor_t *pp, mcc_token_t *tokens)
         }
     }
     len++; /* Null terminator */
-    
+
+    /* `buf` is the literal as written (quoted, with \ before each " and \
+     * of a string or character literal); `value` is what it denotes: the
+     * tokens' own spelling. */
     char *buf = mcc_alloc(pp->ctx, len);
-    if (!buf) return NULL;
-    char *p = buf;
+    char *value = mcc_alloc(pp->ctx, len);
+    if (!buf || !value) return NULL;
+    char *p = buf, *v = value;
     *p++ = '"';
-    
+
     for (mcc_token_t *t = tokens; t; t = t->next) {
-        if (t != tokens && t->has_space) *p++ = ' ';
+        if (t != tokens && t->has_space) *p++ = *v++ = ' ';
         const char *text = stringify_get_token_text(t);
         if (text) {
-            if (t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT) {
-                for (const char *s = text; *s; s++) {
-                    if (*s == '"' || *s == '\\') *p++ = '\\';
-                    *p++ = *s;
-                }
-            } else {
-                while (*text) *p++ = *text++;
+            bool literal = t->type == TOK_STRING_LIT || t->type == TOK_CHAR_LIT;
+            for (const char *s = text; *s; s++) {
+                if (literal && (*s == '"' || *s == '\\')) *p++ = '\\';
+                *p++ = *v++ = *s;
             }
         }
     }
     *p++ = '"';
     *p = '\0';
-    
+    *v = '\0';
+
     mcc_token_t *result = mcc_token_create(pp->ctx);
     if (!result) return NULL;
     result->type = TOK_STRING_LIT;
-    result->text = buf + 1; /* Skip opening quote for value */
-    result->text_len = p - buf - 2;
+    result->text = value;
+    result->text_len = (size_t)(v - value);
     result->raw_text = buf; /* Full string with quotes */
-    result->literal.string_val.value = buf + 1;
-    result->literal.string_val.length = p - buf - 2;
+    result->literal.string_val.value = value;
+    result->literal.string_val.length = (size_t)(v - value);
     return result;
 }
 

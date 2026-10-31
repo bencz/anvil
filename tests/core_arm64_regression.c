@@ -378,15 +378,14 @@ static void test_arm64_routes_fp_instruction_results_through_mir(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lfp_two_live_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lfp_two_live_entry:\n") != NULL,
               "supported ARM64 FP function should be emitted through MIR");
         CHECK(strstr(asm_text, "\tfadd ") != NULL,
               "ARM64 MIR FP function should emit fadd");
         CHECK(strstr(asm_text, "\tfmul ") != NULL,
               "ARM64 MIR FP function should emit fmul");
-        CHECK(strstr(asm_text, "\tstr d") != NULL &&
-              strstr(asm_text, "\tldr d") != NULL,
-              "ARM64 MIR FP function should preserve used callee-saved FPRs");
+        CHECK(strstr(asm_text, "\tstr d") == NULL && strstr(asm_text, "\tstp x29") == NULL,
+              "an ARM64 FP leaf keeps its values in caller-saved FPRs and needs no frame");
         free(asm_text);
     }
 
@@ -422,7 +421,7 @@ static void test_arm64_dynamic_alloca_restores_sp_from_frame_pointer(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Ldyn_alloca_probe_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Ldyn_alloca_probe_entry:\n") != NULL,
               "dynamic alloca should be emitted through MIR");
         CHECK(strstr(asm_text, "\tsub sp, sp, x") != NULL,
               "dynamic alloca should subtract runtime size from sp");
@@ -472,7 +471,7 @@ static void test_arm64_emits_stack_arguments_after_x7(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lcall10_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lcall10_entry:\n") != NULL,
               "ARM64 stack-argument call should be emitted through MIR");
         CHECK(strstr(asm_text, "[sp, #0]\n") != NULL,
               "ARM64 should store argument 8 at the outgoing stack area");
@@ -519,12 +518,13 @@ static void test_arm64_fp_call_uses_fp_registers_and_spills_d0_result(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lfp_call_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lfp_call_entry:\n") != NULL,
               "ARM64 FP call should be emitted through MIR");
         CHECK(strstr(asm_text, "\tfmov d0,") != NULL,
               "ARM64 MIR should copy f64 call arguments into d0");
-        CHECK(strstr(asm_text, "\tbl _fp_ext\n\tfmov d") != NULL,
-              "ARM64 MIR should copy f64 call results out of d0 immediately after the call");
+        CHECK(strstr(asm_text, "\tfmov d8, d0\n") != NULL && strstr(asm_text, "\tstr d8") != NULL &&
+              strstr(asm_text, "\tbl _fp_ext\n\tfadd d0, d0, d8\n") != NULL,
+              "an f64 live across a call stays in a saved callee-saved FPR; the result is used from d0");
         free(asm_text);
     }
 
@@ -560,12 +560,10 @@ static void test_arm64_module_codegen_routes_supported_leaf_function_through_mir
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_leaf_add_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_leaf_add_entry:\n") != NULL,
               "supported ARM64 function should be emitted through the MIR path");
-        CHECK(strstr(asm_text, "\tmov x19, x0\n") != NULL ||
-              strstr(asm_text, "\tmov x20, x0\n") != NULL ||
-              strstr(asm_text, "\tmov x21, x0\n") != NULL,
-              "MIR codegen should copy incoming x0 into an allocatable callee-saved register");
+        CHECK(strstr(asm_text, "\tadd x0, x0, x1\n") != NULL && strstr(asm_text, "\tstp x29") == NULL,
+              "an ARM64 leaf computes in its argument registers and needs no frame");
         free(asm_text);
     }
 
@@ -607,10 +605,10 @@ static void test_arm64_module_codegen_routes_register_call_function_through_mir(
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_call_preserves_arg_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_call_preserves_arg_entry:\n") != NULL,
               "register-only ARM64 call function should be emitted through MIR");
-        CHECK(strstr(asm_text, "\tbl mir_callee1\n\tmov x") != NULL,
-              "MIR call result should be copied out of x0 immediately after bl");
+        CHECK(strstr(asm_text, "\tmov x19, x0\n") != NULL && strstr(asm_text, "\tbl mir_callee1\n\tadd x0, x0, x19\n") != NULL,
+              "an argument live across a call stays in a callee-saved register; the result is used from x0");
         CHECK(contains_after(asm_text, "\tbl mir_callee1\n", "\tadd "),
               "MIR call caller should still use the preserved original argument after call");
         free(asm_text);
@@ -667,15 +665,15 @@ static void test_arm64_module_codegen_routes_cfg_phi_function_through_mir(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_phi_codegen_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_phi_codegen_entry:\n") != NULL,
               "CFG/PHI ARM64 function should be emitted through MIR");
-        CHECK(strstr(asm_text, ".Lmir_phi_codegen_then:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_phi_codegen_then:\n") != NULL,
               "MIR CFG codegen should emit then label");
-        CHECK(strstr(asm_text, ".Lmir_phi_codegen_else:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_phi_codegen_else:\n") != NULL,
               "MIR CFG codegen should emit else label");
-        CHECK(strstr(asm_text, ".Lmir_phi_codegen_merge:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_phi_codegen_merge:\n") != NULL,
               "MIR CFG codegen should emit merge label");
-        CHECK(strstr(asm_text, "\tcbnz ") != NULL,
+        CHECK(strstr(asm_text, "\tcbnz ") != NULL || strstr(asm_text, "\tcbz ") != NULL || strstr(asm_text, "\tb.") != NULL,
               "MIR CFG codegen should emit conditional branch");
         free(asm_text);
     }
@@ -722,7 +720,7 @@ static void test_arm64_module_codegen_routes_stack_argument_calls_through_mir(vo
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_stack_arg_call_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_stack_arg_call_entry:\n") != NULL,
               "stack-argument ARM64 call should be emitted through MIR");
         CHECK(strstr(asm_text, "\tstr x") != NULL &&
               strstr(asm_text, "[sp, #0]\n") != NULL &&
@@ -785,13 +783,13 @@ static void test_arm64_module_codegen_loads_incoming_stack_arguments_through_mir
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_incoming_stack_sum_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_incoming_stack_sum_entry:\n") != NULL,
               "incoming stack integer function should be emitted through MIR");
         CHECK(strstr(asm_text, "\tldr x") != NULL &&
               strstr(asm_text, "[x29, #16]\n") != NULL &&
               strstr(asm_text, "[x29, #24]\n") != NULL,
               "incoming integer stack args should load from x29-positive ABI slots");
-        CHECK(strstr(asm_text, ".Lmir_incoming_stack_fp_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_incoming_stack_fp_entry:\n") != NULL,
               "incoming stack FP function should be emitted through MIR");
         CHECK(strstr(asm_text, "\tldr d") != NULL &&
               strstr(asm_text, "[x29, #16]\n") != NULL,
@@ -850,9 +848,10 @@ static void test_arm64_module_codegen_routes_memory_cast_select_function_through
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_memory_cast_select_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_memory_cast_select_entry:\n") != NULL,
               "memory/cast/select ARM64 function should be emitted through MIR");
-        CHECK(strstr(asm_text, "\tmul ") != NULL,
+        /* A power-of-two element size scales with a shift. */
+        CHECK(strstr(asm_text, "\tmul ") != NULL || strstr(asm_text, "\tlsl ") != NULL || strstr(asm_text, ", lsl #") != NULL,
               "GEP lowering should scale the runtime index before pointer addition");
         CHECK(strstr(asm_text, "\tstr x") != NULL &&
               strstr(asm_text, "\tldr x") != NULL,
@@ -903,7 +902,7 @@ static void test_arm64_module_codegen_folds_constant_gep_into_load_store_offsets
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_const_gep_offsets_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_const_gep_offsets_entry:\n") != NULL,
               "constant GEP offset function should be emitted through MIR");
         CHECK(strstr(asm_text, "\tmul ") == NULL,
               "constant GEP offset should not emit runtime scaling");
@@ -974,7 +973,7 @@ static void test_arm64_module_codegen_materializes_global_and_string_addresses(v
         CHECK(strstr(asm_text, "mir_global_seed:\n") != NULL &&
               strstr(asm_text, "\t.quad 0x29\n") != NULL,
               "ARM64 module codegen should still emit global data");
-        CHECK(strstr(asm_text, ".Lstr_mir_const_string_0:\n") != NULL &&
+        CHECK(strstr(asm_text, "Lstr_mir_const_string_0:\n") != NULL &&
               strstr(asm_text, "\t.asciz \"anvil-mir\"\n") != NULL,
               "ARM64 MIR should emit string literal data for const string operands");
         CHECK(strstr(asm_text, ":lo12:.Lstr_mir_const_string_0") != NULL,
@@ -1145,7 +1144,7 @@ static void test_arm64_darwin_module_codegen_routes_supported_leaf_function_thro
               "Darwin MIR codegen should emit underscore-prefixed function label");
         CHECK(strstr(asm_text, "\t.type mir_darwin_leaf") == NULL,
               "Darwin MIR codegen should not emit ELF type directive");
-        CHECK(strstr(asm_text, ".Lmir_darwin_leaf_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_darwin_leaf_entry:\n") != NULL,
               "supported Darwin ARM64 function should be emitted through MIR");
         free(asm_text);
     }
@@ -1190,7 +1189,7 @@ static void test_arm64_darwin_variadic_calls_route_through_mir(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Ldarwin_variadic_call_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Ldarwin_variadic_call_entry:\n") != NULL,
               "Darwin variadic call should be emitted through MIR");
         CHECK(strstr(asm_text, "[sp, #0]\n") != NULL &&
               strstr(asm_text, "[sp, #8]\n") != NULL,
@@ -1251,15 +1250,16 @@ static void test_arm64_module_codegen_lowers_switch_through_mir(void)
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lswitch_pick_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lswitch_pick_entry:\n") != NULL,
               "ARM64 switch function should be emitted through MIR");
         CHECK(strstr(asm_text, "\tcmp ") != NULL,
               "ARM64 switch lowering should compare the selector against cases");
-        CHECK(strstr(asm_text, "\tcbnz ") != NULL,
+        /* A case compare feeds its branch directly (b.eq/b.ne). */
+        CHECK(strstr(asm_text, "\tcbnz ") != NULL || strstr(asm_text, "\tb.") != NULL,
               "ARM64 switch lowering should branch conditionally per case");
-        CHECK(strstr(asm_text, ".Lswitch_pick_case0:\n") != NULL &&
-              strstr(asm_text, ".Lswitch_pick_case1:\n") != NULL &&
-              strstr(asm_text, ".Lswitch_pick_default:\n") != NULL,
+        CHECK(strstr(asm_text, "Lswitch_pick_case0:\n") != NULL &&
+              strstr(asm_text, "Lswitch_pick_case1:\n") != NULL &&
+              strstr(asm_text, "Lswitch_pick_default:\n") != NULL,
               "ARM64 switch lowering should preserve case/default labels");
         free(asm_text);
     }
@@ -1319,7 +1319,7 @@ static void test_arm64_module_codegen_lowers_function_pointer_indirect_call(void
 
     char *asm_text = codegen_or_fail(mod);
     if (asm_text) {
-        CHECK(strstr(asm_text, ".Lmir_func_ptr_call_entry:\n") != NULL,
+        CHECK(strstr(asm_text, "Lmir_func_ptr_call_entry:\n") != NULL,
               "function pointer caller should be emitted through MIR");
         CHECK(strstr(asm_text, "mir_fp_add_i32") != NULL,
               "function value should be materialized as a symbol address");

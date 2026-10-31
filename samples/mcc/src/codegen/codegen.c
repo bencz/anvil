@@ -100,6 +100,27 @@ bool mcc_codegen_set_target(mcc_codegen_t *cg, mcc_arch_t arch)
         return false;
     }
 
+    /* How code reaches symbols (shared object, PIE or static). */
+    if (cg->mcc_ctx->options.reloc_model &&
+        anvil_ctx_set_reloc_model(cg->anvil_ctx, (anvil_reloc_model_t)cg->mcc_ctx->options.reloc_model) != ANVIL_OK) {
+        mcc_error(cg->mcc_ctx, "cannot produce the requested position-independence: %s", anvil_ctx_get_error(cg->anvil_ctx));
+        return false;
+    }
+
+    /* The CPU model decides which instructions the backend may use. */
+    const char *cpu_name = cg->mcc_ctx->options.cpu;
+    if (cpu_name) {
+        anvil_cpu_model_t cpu;
+        if (!anvil_cpu_model_lookup(target, cpu_name, &cpu)) {
+            mcc_error(cg->mcc_ctx, "unknown CPU model '%s' for %s", cpu_name, mcc_arch_name(arch));
+            return false;
+        }
+        if (anvil_ctx_set_cpu(cg->anvil_ctx, cpu) != ANVIL_OK) {
+            mcc_error(cg->mcc_ctx, "cannot use CPU model '%s': %s", cpu_name, anvil_ctx_get_error(cg->anvil_ctx));
+            return false;
+        }
+    }
+
     return true;
 }
 

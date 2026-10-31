@@ -43,7 +43,7 @@ anvil_value_t *codegen_load_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_va
         if (!access.is_volatile)
             return pointer;
 
-        anvil_value_t *copy = anvil_build_alloca(cg->anvil_ctx, codegen_type(cg, type), "volatile.object");
+        anvil_value_t *copy = codegen_entry_alloca(cg, codegen_type(cg, type), "volatile.object");
         return codegen_copy_object(cg, type, pointer, copy, &access) ? copy : NULL;
     }
 
@@ -102,6 +102,72 @@ static mcc_type_t *codegen_callee_function_type(mcc_ast_node_t *func_expr)
         type = codegen_unwrap_type(type->data.pointer.pointee);
     }
     return type && type->kind == TYPE_FUNCTION ? type : NULL;
+}
+
+/* A call of a standard library routine whose computation is an ANVIL
+ * operation: the names are reserved (C11 7.1.3), so unless builtins are off
+ * the call may run as that operation, where the target has it.  C asks
+ * sqrt to report a domain error through errno (math_errhandling): only a
+ * NaN result can come from one, and that rare case still calls the library.
+ * False when `expr` is not such a call; *result is NULL on error. */
+static bool codegen_math_routine(mcc_codegen_t *cg, mcc_ast_node_t *expr, anvil_value_t **result)
+{
+    static const struct {
+        const char *name;
+        mcc_type_kind_t type;
+        anvil_op_t operation;
+    } routines[] = {
+        {"sqrt", TYPE_DOUBLE, ANVIL_OP_FSQRT},
+        {"sqrtf", TYPE_FLOAT, ANVIL_OP_FSQRT},
+    };
+    mcc_ast_node_t *callee = expr->data.call_expr.func;
+    const mcc_symbol_t *symbol = callee && callee->kind == AST_IDENT_EXPR ? callee->data.ident_expr.symbol : NULL;
+    mcc_type_t *function = codegen_callee_function_type(callee);
+    if (cg->mcc_ctx->options.no_builtin || !symbol || symbol->kind != SYM_FUNC || !function || expr->data.call_expr.num_args != 1 ||
+        function->data.function.num_params != 1 || function->data.function.is_variadic)
+        return false;
+    mcc_type_t *returned = codegen_unwrap_type(function->data.function.return_type);
+    mcc_type_t *parameter = codegen_unwrap_type(function->data.function.params->type);
+    size_t routine = 0;
+    while (routine < sizeof(routines) / sizeof(routines[0]) &&
+           (strcmp(routines[routine].name, symbol->name) != 0 || !returned || returned->kind != routines[routine].type ||
+            !parameter || parameter->kind != routines[routine].type))
+        routine++;
+    if (routine == sizeof(routines) / sizeof(routines[0]))
+        return false;
+    anvil_type_t *type = codegen_type(cg, returned);
+    if (!type || !anvil_vector_shape_cost(cg->anvil_ctx, routines[routine].operation, type, ANVIL_VECTOR_SHAPE_SCALAR))
+        return false;
+
+    mcc_ast_node_t *argument_node = expr->data.call_expr.args[0];
+    anvil_value_t *argument = codegen_convert_value(cg, codegen_expr(cg, argument_node), argument_node->type, parameter, "math.arg");
+    anvil_value_t *value = argument ? anvil_build_fsqrt(cg->anvil_ctx, argument, "math.value") : NULL;
+    *result = value;
+    if (!value || cg->mcc_ctx->options.no_math_errno)
+        return true;
+
+    int id = cg->label_counter++;
+    char library_name[32], end_name[32];
+    snprintf(library_name, sizeof(library_name), "math%d.library", id);
+    snprintf(end_name, sizeof(end_name), "math%d.end", id);
+    anvil_block_t *library = anvil_block_create(cg->current_func, library_name);
+    anvil_block_t *end = anvil_block_create(cg->current_func, end_name);
+    anvil_block_set_cold(library, true);
+    anvil_value_t *slot = codegen_entry_alloca(cg, type, "math.result");
+    anvil_value_t *nan = anvil_build_fcmp(cg->anvil_ctx, ANVIL_FCMP_UNO, value, value, "math.nan");
+    anvil_value_t *routine_address = codegen_expr(cg, callee);
+    anvil_value_t *library_value = NULL;
+    *result = NULL;
+    if (!library || !end || !slot || !nan || !routine_address || !anvil_build_store(cg->anvil_ctx, value, slot) ||
+        !anvil_build_br_cond(cg->anvil_ctx, nan, library, end))
+        return true;
+    codegen_set_current_block(cg, library);
+    if (!anvil_build_call_checked(cg->anvil_ctx, routine_address, &argument, 1, "math.call", &library_value) ||
+        !anvil_build_store(cg->anvil_ctx, library_value, slot) || !anvil_build_br(cg->anvil_ctx, end))
+        return true;
+    codegen_set_current_block(cg, end);
+    *result = anvil_build_load(cg->anvil_ctx, type, slot, "math.result");
+    return true;
 }
 
 static anvil_value_t *codegen_record_address(mcc_codegen_t *cg, mcc_ast_node_t *object)
@@ -657,7 +723,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             if (op == BINOP_AND || op == BINOP_OR) {
                 /* Use a temporary variable instead of PHI (simpler codegen) */
                 anvil_type_t *i32_type = anvil_type_i32(cg->anvil_ctx);
-                anvil_value_t *result_ptr = anvil_build_alloca(cg->anvil_ctx, i32_type, "land.result");
+                anvil_value_t *result_ptr = codegen_entry_alloca(cg, i32_type, "land.result");
                 
                 anvil_value_t *lhs = codegen_expr(cg, expr->data.binary_expr.lhs);
                 
@@ -1029,7 +1095,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             /* Use a temporary variable instead of PHI (simpler codegen) */
             anvil_type_t *type = codegen_type(cg, expr->type);
             if (!type) return NULL;
-            anvil_value_t *result_ptr = anvil_build_alloca(cg->anvil_ctx, type, "ternary.result");
+            anvil_value_t *result_ptr = codegen_entry_alloca(cg, type, "ternary.result");
             
             anvil_value_t *cond = codegen_expr(cg, expr->data.ternary_expr.cond);
             
@@ -1131,7 +1197,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     {
                         anvil_type_t *cursor_type = anvil_type_ptr(cg->anvil_ctx, anvil_type_i8(cg->anvil_ctx));
                         anvil_value_t *cursor = anvil_build_bitcast(cg->anvil_ctx, storage, cursor_type, "va.native.cursor");
-                        storage = anvil_build_alloca(cg->anvil_ctx, cursor_type, "va.cursor.reference");
+                        storage = codegen_entry_alloca(cg, cursor_type, "va.cursor.reference");
                         if (!anvil_build_store(cg->anvil_ctx, cursor, storage))
                             return NULL;
                     }
@@ -1148,6 +1214,10 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 }
             }
 
+            anvil_value_t *routine_result;
+            if (codegen_math_routine(cg, expr, &routine_result))
+                return routine_result;
+
             anvil_value_t *func = codegen_expr(cg, expr->data.call_expr.func);
             mcc_type_t *callee_type =
                 codegen_callee_function_type(expr->data.call_expr.func);
@@ -1160,6 +1230,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             
             size_t num_args = expr->data.call_expr.num_args;
             anvil_value_t **args = NULL;
+            anvil_param_attr_t *attrs = NULL;
             mcc_func_param_t *param = callee_type ? callee_type->data.function.params : NULL;
             if (num_args + hidden > 0) {
                 if (num_args >= SIZE_MAX / sizeof(anvil_value_t *)) {
@@ -1167,8 +1238,11 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     return NULL;
                 }
                 args = mcc_alloc_array(cg->mcc_ctx, num_args + hidden, sizeof(*args));
-                if (!args)
+                attrs = mcc_alloc_array(cg->mcc_ctx, num_args + hidden, sizeof(*attrs));
+                if (!args || !attrs)
                     return NULL;
+                for (size_t k = 0; k < num_args + hidden; k++)
+                    attrs[k] = ANVIL_PARAM_PLAIN;
 
                 if (hidden)
                 {
@@ -1178,6 +1252,7 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                 for (size_t i = 0; i < num_args; i++) {
                     mcc_ast_node_t *arg_node = expr->data.call_expr.args[i];
                     mcc_type_t *target_type = NULL;
+                    bool unnamed = !param;
                     if (param) {
                         target_type = param->type;
                         param = param->next;
@@ -1191,6 +1266,10 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 
                         anvil_value_t *object = codegen_expr(cg, arg_node);
                         args[i + hidden] = codegen_abi_pack(cg, target_type, object, &plan);
+                        /* An unnamed record is passed by value as the target's
+                         * variadic convention says. */
+                        if (unnamed && codegen_abi_uses_param_attrs(cg))
+                            attrs[i + hidden] = ANVIL_PARAM_BYVAL;
                     } else {
                         args[i + hidden] = codegen_expr(cg, arg_node);
                         args[i + hidden] = codegen_convert_value(cg, args[i + hidden], arg_node->type,
@@ -1200,8 +1279,8 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
             }
             
             anvil_value_t *result = NULL;
-            if (!anvil_build_call_checked(cg->anvil_ctx, func, args,
-                                          num_args + hidden, "call", &result)) {
+            if (!anvil_build_call_attrs(cg->anvil_ctx, func, args, attrs,
+                                        num_args + hidden, "call", &result)) {
                 return NULL;
             }
             if (hidden)

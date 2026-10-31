@@ -48,8 +48,11 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
     ANVIL_PASS_DEAD_STORE,
     ANVIL_PASS_LOAD_ELIM,
     ANVIL_PASS_SIMPLIFY_CFG,       /* 6. Clean up CFG after the rewrites */
+    ANVIL_PASS_TAIL_RECURSION,     /* recursive returns become loops LICM sees */
     ANVIL_PASS_LICM,
     ANVIL_PASS_UNROLL,
+    ANVIL_PASS_LOOP_VECTORIZE,
+    ANVIL_PASS_LOOP_STRENGTH,      /* after vectorization: it keeps i-indexed lanes */
     ANVIL_PASS_INLINE,
     ANVIL_PASS_VECTORIZE,
     ANVIL_PASS_DCE,                /* 7. DCE mops up everything NOP'd above */
@@ -61,8 +64,8 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
  *   O0 (NONE)       - No optimizations
  *   Og (DEBUG)      - Debug-friendly: copy_prop, store_load_prop (minimal IR cleanup)
  *   O1 (BASIC)      - Scalar SSA promotion, constant folding, DCE and Og passes
- *   O2 (STANDARD)   - O1 + SROA, SCCP, GVN, known bits, CFG, arithmetic and memory passes
- *   O3 (AGGRESSIVE) - O2 + LICM, bounded unrolling, leaf inlining and explicitly enabled SLP
+ *   O2 (STANDARD)   - O1 + SROA, SCCP, GVN, known bits, CFG, arithmetic and memory passes, LICM
+ *   O3 (AGGRESSIVE) - O2 + bounded unrolling, leaf inlining and explicitly enabled SLP
  */
 static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
@@ -152,9 +155,9 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
         .id = ANVIL_PASS_LICM,
         .name = "licm",
-        .description = "Hoist nontrapping integer loop invariants",
+        .description = "Hoist nontrapping integer and address loop invariants",
         .run = anvil_pass_licm,
-        .min_level = ANVIL_OPT_AGGRESSIVE,
+        .min_level = ANVIL_OPT_STANDARD,
     },
     {
         .id = ANVIL_PASS_SCCP,
@@ -190,6 +193,27 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .description = "Pack independent memory streams using target vector costs",
         .run = anvil_pass_vectorize,
         .min_level = ANVIL_OPT_AGGRESSIVE,
+    },
+    {
+        .id = ANVIL_PASS_LOOP_VECTORIZE,
+        .name = "loop-vectorize",
+        .description = "Vector copies of counted unit-stride loops, using target vector costs",
+        .run = anvil_pass_loop_vectorize,
+        .min_level = ANVIL_OPT_AGGRESSIVE,
+    },
+    {
+        .id = ANVIL_PASS_LOOP_STRENGTH,
+        .name = "loop-strength",
+        .description = "Pointer streams for strided loop addresses",
+        .run = anvil_pass_loop_strength,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_TAIL_RECURSION,
+        .name = "tail-recursion",
+        .description = "Recursive returns as loops, with an accumulator",
+        .run = anvil_pass_tail_recursion,
+        .min_level = ANVIL_OPT_STANDARD,
     }
 };
 

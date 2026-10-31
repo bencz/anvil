@@ -172,3 +172,119 @@ fail:
     anvil_loop_analysis_destroy(analysis);
     return false;
 }
+
+typedef struct {
+    const anvil_opt_cfg_t *cfg;
+    const anvil_loop_analysis_t *loops;
+    size_t *loop_of_header;    /* block -> loop it heads, or SIZE_MAX */
+    bool *placed;
+    bool *deferred;            /* cold, or dominated by a cold block */
+    size_t *order;
+    size_t count;
+} layout_state_t;
+
+/* The smallest loop containing `block`, or SIZE_MAX. */
+static size_t innermost_loop(const anvil_loop_analysis_t *loops, size_t block)
+{
+    size_t best = SIZE_MAX;
+    for (size_t loop = 0; loop < loops->count; loop++)
+    {
+        if (anvil_loop_contains(loops, loop, block) && (best == SIZE_MAX || loops->loops[loop].member_count < loops->loops[best].member_count))
+            best = loop;
+    }
+    return best;
+}
+
+/* Places, in reverse postorder, the unplaced blocks of `loop` (every block
+ * for SIZE_MAX); reaching the header of a nested loop places that whole
+ * loop first.  Deferred blocks follow the rest of their innermost loop
+ * (off the fall-through path, but within the loop's extent, so the values
+ * they use do not stay live to the end of the function); those in no loop
+ * wait for the end of the function. */
+static void place_region(layout_state_t *state, size_t loop)
+{
+    const anvil_opt_cfg_t *cfg = state->cfg;
+    for (size_t rank = 0; rank < cfg->reachable_count; rank++)
+    {
+        size_t block = cfg->rpo[rank];
+        if (state->placed[block] || state->deferred[block] || (loop != SIZE_MAX && !anvil_loop_contains(state->loops, loop, block)))
+            continue;
+        size_t nested = state->loop_of_header[block];
+        if (nested != SIZE_MAX && nested != loop)
+        {
+            place_region(state, nested);
+            continue;
+        }
+        state->placed[block] = true;
+        state->order[state->count++] = block;
+    }
+    for (size_t rank = 0; loop != SIZE_MAX && rank < cfg->reachable_count; rank++)
+    {
+        size_t block = cfg->rpo[rank];
+        if (state->deferred[block] && !state->placed[block] && innermost_loop(state->loops, block) == loop)
+        {
+            state->placed[block] = true;
+            state->order[state->count++] = block;
+        }
+    }
+}
+
+bool anvil_opt_cfg_loop_layout(const anvil_opt_cfg_t *cfg, size_t *order)
+{
+    if (!cfg || !order || !cfg->count)
+        return false;
+
+    anvil_loop_analysis_t loops;
+    if (!anvil_loop_analysis_build(cfg, &loops))
+        return false;
+    anvil_ctx_t *ctx = cfg->blocks[cfg->entry]->parent->owner_ctx;
+    layout_state_t state = {
+        .cfg = cfg,
+        .loops = &loops,
+        .loop_of_header = anvil_ctx_calloc(ctx, cfg->count, sizeof(*state.loop_of_header)),
+        .placed = anvil_ctx_calloc(ctx, cfg->count, sizeof(*state.placed)),
+        .deferred = anvil_ctx_calloc(ctx, cfg->count, sizeof(*state.deferred)),
+        .order = order,
+    };
+    bool ok = state.loop_of_header && state.placed && state.deferred;
+    if (ok)
+    {
+        for (size_t block = 0; block < cfg->count; block++)
+            state.loop_of_header[block] = SIZE_MAX;
+        for (size_t loop = 0; loop < loops.count; loop++)
+            state.loop_of_header[loops.loops[loop].header] = loop;
+        /* RPO visits a block's immediate dominator first. */
+        for (size_t rank = 0; rank < cfg->reachable_count; rank++)
+        {
+            size_t block = cfg->rpo[rank], idom = cfg->idom[block];
+            state.deferred[block] = block != cfg->entry &&
+                                    (cfg->blocks[block]->cold || (idom != SIZE_MAX && idom != block && state.deferred[idom]));
+        }
+        place_region(&state, SIZE_MAX);
+        /* Cold code outside loops, in reverse postorder (its dominators
+         * placed first). */
+        for (size_t rank = 0; rank < cfg->reachable_count; rank++)
+        {
+            size_t block = cfg->rpo[rank];
+            if (state.deferred[block] && !state.placed[block])
+                order[state.count++] = block;
+        }
+        /* Unreachable blocks keep their place after the reachable ones. */
+        for (size_t rank = cfg->reachable_count; rank < cfg->count; rank++)
+            order[state.count++] = cfg->rpo[rank];
+    }
+    free(state.loop_of_header);
+    free(state.placed);
+    free(state.deferred);
+    anvil_loop_analysis_destroy(&loops);
+    return ok;
+}
+
+bool anvil_opt_cfg_build_layout(anvil_opt_cfg_t *cfg)
+{
+    if (!cfg || !cfg->count)
+        return false;
+    free(cfg->layout);
+    cfg->layout = anvil_ctx_calloc(cfg->blocks[cfg->entry]->parent->owner_ctx, cfg->count, sizeof(*cfg->layout));
+    return cfg->layout && anvil_opt_cfg_loop_layout(cfg, cfg->layout);
+}

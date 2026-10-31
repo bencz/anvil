@@ -17,7 +17,7 @@ static const anvil_arch_info_t x64_arch_info = {
     .endian = ANVIL_ENDIAN_LITTLE,
     .stack_dir = ANVIL_STACK_DOWN,
     .has_condition_codes = true,
-    .has_delay_slots = false
+    .has_delay_slots = false,
 };
 
 static anvil_error_t x64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
@@ -70,23 +70,16 @@ static bool x64_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
     return anvil_atomic_type_valid(type);
 }
 
-static unsigned x64_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type)
+static bool x64_reloc_model_supported(anvil_backend_t *be, anvil_reloc_model_t model)
 {
-    if (type->kind != ANVIL_TYPE_VECTOR || type->size != 16 || !anvil_ctx_has_feature(be->ctx, ANVIL_FEATURE_X86_SSE2))
-        return 0;
+    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
+    return desc && (desc->reloc_models & (1u << model));
+}
 
-    switch (operation) {
-    case ANVIL_OP_LOAD:
-    case ANVIL_OP_STORE:
-    case ANVIL_OP_FADD:
-    case ANVIL_OP_FSUB:
-    case ANVIL_OP_FMUL:
-        return 1;
-    case ANVIL_OP_FDIV:
-        return 4;
-    default:
-        return 0;
-    }
+static anvil_reloc_model_t x64_default_reloc_model(anvil_backend_t *be)
+{
+    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
+    return desc ? desc->default_reloc : ANVIL_RELOC_STATIC;
 }
 
 const anvil_backend_ops_t anvil_backend_x86_64 = {
@@ -104,5 +97,8 @@ const anvil_backend_ops_t anvil_backend_x86_64 = {
     .build_va_copy_into = anvil_x64_build_va_copy_into,
     .atomic_is_lock_free = x64_atomic_is_lock_free,
     .vector_operation_cost = x64_vector_operation_cost,
-    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET)
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
+    .abi_support = (1u << ANVIL_ABI_SYSV) | (1u << ANVIL_ABI_DARWIN) | (1u << ANVIL_ABI_WIN64),
+    .reloc_model_supported = x64_reloc_model_supported,
+    .default_reloc_model = x64_default_reloc_model,
 };

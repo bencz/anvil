@@ -224,7 +224,8 @@ anvil_pass_result_t anvil_pass_vectorize(anvil_func_t *func)
 {
     if (!func || !func->parent)
         return ANVIL_PASS_RUN_ERROR;
-    if (!func->fp_vectorization || !func->owner_ctx->backend->ops->vector_operation_cost)
+    const anvil_backend_t *backend = func->owner_ctx ? func->owner_ctx->backend : NULL;
+    if (!func->fp_vectorization || !backend || !backend->ops || !backend->ops->vector_operation_cost)
         return ANVIL_PASS_RUN_UNCHANGED;
 
     anvil_def_use_t uses;

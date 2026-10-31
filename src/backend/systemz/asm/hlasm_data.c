@@ -97,7 +97,7 @@ static bool systemz_emit_global_strings(anvil_strbuf_t *out, const systemz_globa
  * 24-bit (short) or 56-bit (long) fraction 0.F, rounded to nearest.  HFP
  * data is emitted as exact hex so it never depends on the assembler's
  * decimal conversion. */
-static bool systemz_hfp_bits(double value, size_t size, uint64_t *bits)
+bool systemz_hfp_bits(double value, size_t size, uint64_t *bits)
 {
     unsigned fraction_bits = size == 4 ? 24 : 56;
     if (value == 0.0) { *bits = 0; return true; }
@@ -188,8 +188,8 @@ static bool systemz_emit_global_initializer(anvil_strbuf_t *out, anvil_type_t *t
     case ANVIL_VAL_CONST_GEP: {
         if (type->kind != ANVIL_TYPE_PTR || type->size != pointer_size || !init->data.reloc.symbol || !init->data.reloc.symbol->name)
             return false;
-        char upper[96];
-        systemz_uppercase(upper, init->data.reloc.symbol->name, sizeof(upper));
+        char upper[16];
+        systemz_symbol_name(upper, sizeof(upper), init->data.reloc.symbol->name);
         anvil_strbuf_appendf(out, "DC    %s(%s", pointer_size == 8 ? "AD" : "A", upper);
         if (init->data.reloc.addend > 0)
             anvil_strbuf_appendf(out, "+%lld", (long long)init->data.reloc.addend);
@@ -262,10 +262,10 @@ bool systemz_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, anvil_fp_for
             free(strings.entries);
             return false;
         }
-        char upper[96];
-        systemz_uppercase(upper, g->value->name, sizeof(upper));
+        char upper[16];
+        systemz_symbol_name(upper, sizeof(upper), g->value->name);
         if (g->value->data.global.is_declaration) {
-            anvil_strbuf_appendf(out, "         EXTRN %s\n", upper);
+            systemz_emit_external(out, "EXTRN", g->value->name);
             continue;
         }
         if (g->value->data.global.linkage == ANVIL_LINK_WEAK) {
@@ -273,7 +273,7 @@ bool systemz_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, anvil_fp_for
             return false;
         }
         if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL || g->value->data.global.linkage == ANVIL_LINK_COMMON)
-            anvil_strbuf_appendf(out, "         ENTRY %s\n", upper);
+            systemz_emit_external(out, "ENTRY", g->value->name);
 
         /* DC X/C data carries no implicit alignment: align every global to
          * its type, then define the label at that location. */

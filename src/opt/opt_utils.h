@@ -55,6 +55,58 @@ static inline bool anvil_opt_erase_instr(anvil_instr_t *instr)
     return true;
 }
 
+/* Links a detached instruction into `position`'s block just before it. */
+static inline void anvil_opt_insert_before(anvil_instr_t *position, anvil_instr_t *instr)
+{
+    anvil_block_t *block = position->parent;
+    instr->parent = block;
+    instr->owner_module = block->owner_module;
+    if (instr->result)
+        instr->result->owner_module = block->owner_module;
+    instr->prev = position->prev;
+    instr->next = position;
+    if (position->prev)
+        position->prev->next = instr;
+    else
+        block->first = instr;
+    position->prev = instr;
+}
+
+/* The comparison that holds exactly where `op` (with `pred` for FCMP)
+ * does not; false for an opcode that is not a comparison. */
+static inline bool anvil_opt_inverse_compare(anvil_op_t op, anvil_fcmp_pred_t pred, anvil_op_t *inverse_op, anvil_fcmp_pred_t *inverse_pred)
+{
+    static const anvil_fcmp_pred_t fcmp_inverse[] = {
+        [ANVIL_FCMP_FALSE] = ANVIL_FCMP_TRUE, [ANVIL_FCMP_OEQ] = ANVIL_FCMP_UNE, [ANVIL_FCMP_OGT] = ANVIL_FCMP_ULE,
+        [ANVIL_FCMP_OGE] = ANVIL_FCMP_ULT,    [ANVIL_FCMP_OLT] = ANVIL_FCMP_UGE, [ANVIL_FCMP_OLE] = ANVIL_FCMP_UGT,
+        [ANVIL_FCMP_ONE] = ANVIL_FCMP_UEQ,    [ANVIL_FCMP_ORD] = ANVIL_FCMP_UNO, [ANVIL_FCMP_UEQ] = ANVIL_FCMP_ONE,
+        [ANVIL_FCMP_UGT] = ANVIL_FCMP_OLE,    [ANVIL_FCMP_UGE] = ANVIL_FCMP_OLT, [ANVIL_FCMP_ULT] = ANVIL_FCMP_OGE,
+        [ANVIL_FCMP_ULE] = ANVIL_FCMP_OGT,    [ANVIL_FCMP_UNE] = ANVIL_FCMP_OEQ, [ANVIL_FCMP_UNO] = ANVIL_FCMP_ORD,
+        [ANVIL_FCMP_TRUE] = ANVIL_FCMP_FALSE,
+    };
+    *inverse_pred = pred;
+    switch (op) {
+    case ANVIL_OP_CMP_EQ: *inverse_op = ANVIL_OP_CMP_NE; return true;
+    case ANVIL_OP_CMP_NE: *inverse_op = ANVIL_OP_CMP_EQ; return true;
+    case ANVIL_OP_CMP_LT: *inverse_op = ANVIL_OP_CMP_GE; return true;
+    case ANVIL_OP_CMP_GE: *inverse_op = ANVIL_OP_CMP_LT; return true;
+    case ANVIL_OP_CMP_LE: *inverse_op = ANVIL_OP_CMP_GT; return true;
+    case ANVIL_OP_CMP_GT: *inverse_op = ANVIL_OP_CMP_LE; return true;
+    case ANVIL_OP_CMP_ULT: *inverse_op = ANVIL_OP_CMP_UGE; return true;
+    case ANVIL_OP_CMP_UGE: *inverse_op = ANVIL_OP_CMP_ULT; return true;
+    case ANVIL_OP_CMP_ULE: *inverse_op = ANVIL_OP_CMP_UGT; return true;
+    case ANVIL_OP_CMP_UGT: *inverse_op = ANVIL_OP_CMP_ULE; return true;
+    case ANVIL_OP_FCMP:
+        if ((unsigned)pred > (unsigned)ANVIL_FCMP_TRUE)
+            return false;
+        *inverse_op = op;
+        *inverse_pred = fcmp_inverse[pred];
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Constant queries
  * ------------------------------------------------------------------------- */
@@ -131,6 +183,27 @@ static inline bool anvil_opt_same_pointer(const anvil_value_t *p1, const anvil_v
         if (p1->data.instr == p2->data.instr) return true;
     }
     return false;
+}
+
+/* The high half of the 2*bits-bit product of a and b (their low `bits`,
+ * bits <= 64; signed or unsigned): what UMULH/SMULH compute. */
+static inline uint64_t anvil_opt_mul_high(uint64_t a, uint64_t b, unsigned bits, bool is_signed)
+{
+    uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    if (bits <= 32) {
+        uint64_t sign = UINT64_C(1) << (bits - 1);
+        int64_t x = is_signed ? (int64_t)(((a & mask) ^ sign) - sign) : (int64_t)(a & mask);
+        int64_t y = is_signed ? (int64_t)(((b & mask) ^ sign) - sign) : (int64_t)(b & mask);
+        return (uint64_t)((x * y) >> bits) & mask;
+    }
+    uint64_t al = a & 0xffffffffu, ah = a >> 32, bl = b & 0xffffffffu, bh = b >> 32;
+    uint64_t low = al * bl, middle1 = ah * bl, middle2 = al * bh;
+    uint64_t carry = ((low >> 32) + (middle1 & 0xffffffffu) + (middle2 & 0xffffffffu)) >> 32;
+    uint64_t high = ah * bh + (middle1 >> 32) + (middle2 >> 32) + carry;
+    /* A negative operand contributes -2^64 times the other one. */
+    if (is_signed)
+        high -= ((int64_t)a < 0 ? b : 0) + ((int64_t)b < 0 ? a : 0);
+    return high;
 }
 
 /* ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ static const anvil_arch_info_t x86_arch_info = {
     .endian = ANVIL_ENDIAN_LITTLE,
     .stack_dir = ANVIL_STACK_DOWN,
     .has_condition_codes = true,
-    .has_delay_slots = false
+    .has_delay_slots = false,
 };
 
 static anvil_error_t x86_init(anvil_backend_t *be, anvil_ctx_t *ctx)
@@ -58,6 +58,21 @@ static const anvil_arch_info_t *x86_get_arch_info(anvil_backend_t *be)
     return &x86_arch_info;
 }
 
+/* Words and smaller, with CMPXCHG/XADD (i486 and later). 64-bit atomics
+ * would need CMPXCHG8B sequences, which the lowering does not produce. */
+static bool x86_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
+{
+    return anvil_atomic_type_valid(type) && type->size <= 4 && anvil_ctx_has_feature(be->ctx, ANVIL_FEATURE_X86_I486);
+}
+
+/* Position independence where the object format has GOT relocations
+ * (the GOT pointer comes from call/pop). */
+static bool x86_reloc_model_supported(anvil_backend_t *be, anvil_reloc_model_t model)
+{
+    const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
+    return plat && plat->format->got_relocations && (model == ANVIL_RELOC_PIE || model == ANVIL_RELOC_PIC);
+}
+
 const anvil_backend_ops_t anvil_backend_x86 = {
     .name = "x86",
     .arch = ANVIL_ARCH_X86,
@@ -66,5 +81,13 @@ const anvil_backend_ops_t anvil_backend_x86 = {
     .reset = x86_reset,
     .codegen_module = x86_codegen_module,
     .codegen_func = x86_codegen_func,
-    .get_arch_info = x86_get_arch_info
+    .get_arch_info = x86_get_arch_info,
+    .build_va_arg = anvil_x86_build_va_arg,
+    .build_va_copy = anvil_x86_build_va_copy,
+    .build_va_copy_into = anvil_x86_build_va_copy_into,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
+    .atomic_is_lock_free = x86_atomic_is_lock_free,
+    .reloc_model_supported = x86_reloc_model_supported,
+    .vector_operation_cost = x86_scalar_operation_cost,
+    .abi_support = (1u << ANVIL_ABI_SYSV) | (1u << ANVIL_ABI_DARWIN) | (1u << ANVIL_ABI_WIN64)
 };

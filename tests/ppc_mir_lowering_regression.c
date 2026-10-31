@@ -584,6 +584,130 @@ static void test_ppc32_splits_i64_locals_into_word_pairs(void)
     anvil_ctx_destroy(ctx);
 }
 
+static void test_ppc_atomics_use_reservation_loops(void)
+{
+    anvil_arch_t arches[] = { ANVIL_ARCH_PPC32, ANVIL_ARCH_PPC64, ANVIL_ARCH_PPC64LE };
+    for (size_t a = 0; a < 3; a++) {
+        anvil_ctx_t *ctx = new_ppc_ctx(arches[a]);
+        if (!ctx) continue;
+        anvil_module_t *mod = anvil_module_create(ctx, "ppc_atomics");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *i8 = anvil_type_i8(ctx);
+        anvil_type_t *params[] = { anvil_type_ptr(ctx, i32), anvil_type_ptr(ctx, i8) };
+        anvil_func_t *fn = anvil_func_create(mod, "ppc_atomics", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_memory_order_t sc = ANVIL_ORDER_SEQ_CST;
+        anvil_value_t *add = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_ADD, anvil_func_get_param(fn, 0), anvil_const_i32(ctx, 1), sc, "add");
+        anvil_value_t *cas = anvil_build_atomic_cmpxchg(ctx, anvil_func_get_param(fn, 1), anvil_const_i8(ctx, 1), anvil_const_i8(ctx, 2), sc, sc, "cas");
+        anvil_build_atomic_fence(ctx, ANVIL_ORDER_ACQ_REL);
+        anvil_build_ret(ctx, anvil_build_add(ctx, add, anvil_build_zext(ctx, cas, i32, "z"), "r"));
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "PowerPC atomics should generate code");
+        if (text) {
+            check_contains(text, "lwarx", "PowerPC atomics use load-reserve");
+            check_contains(text, "stwcx.", "PowerPC atomics use store-conditional");
+            check_contains(text, "isync", "seq_cst read-modify-write ends with an acquire barrier");
+            check_contains(text, "lwsync", "acq_rel fence uses lwsync");
+            check_contains(text, "slw %r0, %r0, %r10", "byte compare-exchange works on the containing word");
+            free(text);
+        }
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+static void test_ppc_variadic_callees_home_argument_registers(void)
+{
+    struct { anvil_arch_t arch; const char *homing; } cases[] = {
+        { ANVIL_ARCH_PPC32, "stfd %f8" },        /* register save area */
+        { ANVIL_ARCH_PPC64, "std %r4, 56(%r31)" },  /* parameter save area, word 1 */
+        { ANVIL_ARCH_PPC64LE, "std %r4, 40(%r31)" },
+    };
+    for (size_t c = 0; c < 3; c++) {
+        anvil_ctx_t *ctx = new_ppc_ctx(cases[c].arch);
+        if (!ctx) continue;
+        anvil_module_t *mod = anvil_module_create(ctx, "ppc_variadic");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *named[] = { i32 };
+        anvil_func_t *fn = anvil_func_create(mod, "first_unnamed", anvil_type_func(ctx, i32, named, 1, true), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_type_t *cursor = anvil_type_ptr(ctx, anvil_type_i8(ctx));
+        anvil_value_t *storage = anvil_build_alloca(ctx, cursor, "ap");
+        anvil_build_store(ctx, anvil_build_va_start(ctx, "start"), storage);
+        anvil_value_t *slot = anvil_build_va_arg(ctx, storage, i32, "slot");
+        CHECK(slot != NULL, "PowerPC va_arg should build");
+        if (slot)
+            anvil_build_ret(ctx, anvil_build_load(ctx, i32, slot, "value"));
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "PowerPC variadic callee should generate code");
+        if (text) {
+            check_contains(text, cases[c].homing, "variadic callee homes its argument registers");
+            free(text);
+        }
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+static void test_ppc64le_hfa_splits_between_fprs_and_memory(void)
+{
+    anvil_ctx_t *ctx = new_ppc_ctx(ANVIL_ARCH_PPC64LE);
+    if (!ctx) return;
+    anvil_module_t *mod = anvil_module_create(ctx, "ppc_hfa_split");
+    anvil_type_t *f64 = anvil_type_f64(ctx);
+    anvil_type_t *fields[] = { f64, f64, f64, f64 };
+    anvil_type_t *quad = anvil_type_struct(ctx, "quad", fields, 4);
+    anvil_type_t *params[12];
+    anvil_param_attr_t attrs[12] = { 0 };
+    for (int i = 0; i < 11; i++) params[i] = f64;
+    params[11] = anvil_type_ptr(ctx, quad);
+    attrs[11] = ANVIL_PARAM_BYVAL;
+    anvil_func_t *take = anvil_func_declare(mod, "take", anvil_type_func_attrs(ctx, f64, params, attrs, 12, false, ANVIL_CC_SYSV));
+    anvil_type_t *caller_params[] = { anvil_type_ptr(ctx, quad) };
+    anvil_func_t *give = anvil_func_create(mod, "give", anvil_type_func(ctx, f64, caller_params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(give));
+    anvil_value_t *args[12];
+    for (int i = 0; i < 11; i++) args[i] = anvil_const_f64(ctx, 0.0);
+    args[11] = anvil_func_get_param(give, 0);
+    anvil_value_t *result = NULL;
+    CHECK(anvil_build_call_checked(ctx, anvil_func_get_value(take), args, 12, "r", &result) && anvil_build_ret(ctx, result),
+          "HFA call should build");
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "HFA call should generate code");
+    if (text) {
+        /* f1-f11 hold the scalars, f12/f13 the first two members; the
+         * last two take parameter doublewords 13 and 14 (32 + 8*13). */
+        check_contains(text, "136(%r1)", "third HFA member goes to its parameter doubleword");
+        check_contains(text, "144(%r1)", "fourth HFA member goes to its parameter doubleword");
+        free(text);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_ppc32_returns_i64_constants(void)
+{
+    anvil_ctx_t *ctx = new_ppc_ctx(ANVIL_ARCH_PPC32);
+    if (!ctx) return;
+    anvil_module_t *mod = anvil_module_create(ctx, "ppc32_i64_constant_return");
+    anvil_type_t *i64 = anvil_type_i64(ctx);
+    anvil_func_t *fn = anvil_func_create(mod, "wide_constant", anvil_type_func(ctx, i64, NULL, 0, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_build_ret(ctx, anvil_const_i64(ctx, INT64_C(0x1122334455667788)));
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "ppc32 should return an i64 constant in r3:r4");
+    if (text) {
+        check_contains(text, "4386", "the high word (0x11223344) reaches r3");
+        free(text);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_ppc_module_codegen_routes_through_shared_mir_path(void)
 {
     struct {
@@ -1107,7 +1231,11 @@ static void test_ppc_single_precision_ops_and_dynamic_alloca_backchain(void)
                      desc->min_frame_size);
             check_contains(text, payload_offset,
                            "dynamic allocation result must skip the backchain prefix");
-            check_contains(text, "\tmr %r1, %r31\n",
+            /* SP comes back from the frame pointer (via r12, so r31 is
+             * reloaded while the frame is still allocated). */
+            check_contains(text, "\tmr %r12, %r31\n",
+                           "dynamic-allocation epilogue must restore SP from stable frame pointer");
+            check_contains(text, "\tmr %r1, %r12\n",
                            "dynamic-allocation epilogue must restore SP from stable frame pointer");
             check_not_contains(text, "\tsubf %r1, %r11, %r1\n",
                                "dynamic allocation must not update SP without a backchain");
@@ -1150,7 +1278,12 @@ static void test_ppc_emits_interleaved_block_ownership_correctly(void)
           "interleaved PPC MIR should emit");
     if (text) {
         const char *entry_label = strstr(text, ".Lppc_interleaved_entry:");
+        /* "then" follows the entry block: the branch may take the inverse
+         * condition to "else" and fall through. */
         const char *branch = entry_label ? strstr(entry_label, "\tbne ") : NULL;
+        const char *inverse = entry_label ? strstr(entry_label, "\tbeq ") : NULL;
+        if (!branch || (inverse && inverse < branch))
+            branch = inverse;
         const char *then_label = strstr(text, ".Lppc_interleaved_then:");
         CHECK(entry_label && branch && then_label &&
               entry_label < branch && branch < then_label,
@@ -1211,6 +1344,10 @@ int main(void)
     test_ppc64le_emits_indirect_call_through_ctr();
     test_ppc32_splits_i64_locals_into_word_pairs();
     test_ppc_module_codegen_routes_through_shared_mir_path();
+    test_ppc_atomics_use_reservation_loops();
+    test_ppc_variadic_callees_home_argument_registers();
+    test_ppc64le_hfa_splits_between_fprs_and_memory();
+    test_ppc32_returns_i64_constants();
     test_ppc_numeric_casts_have_typed_lowering();
     test_ppc_numeric_boundary_expectations_are_ieee_exact();
     test_ppc_rejects_malformed_numeric_cast();

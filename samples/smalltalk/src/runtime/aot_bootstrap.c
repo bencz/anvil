@@ -1,4 +1,5 @@
 #include "st_aot_bootstrap.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -731,7 +732,8 @@ static st_aot_bootstrap_status_t build_spellings(
         spellings[output++] = (st_symbol_utf8_t) { text, strlen(text) };
     }
     if (output != state->symbol_count) {
-        abort();
+        st_fatal_code("aot bootstrap", "symbol spelling count differs from the planned count",
+                      (uint64_t)output);
     }
     *spellings_out = spellings;
     return ST_AOT_BOOTSTRAP_OK;
@@ -934,7 +936,8 @@ static st_aot_bootstrap_status_t fill_managed_graph(
             }
         }
         if (output != subclass_count) {
-            abort();
+            st_fatal_code("aot bootstrap", "subclass count differs from the planned count",
+                          (uint64_t)output);
         }
         st_value_t *ivars = ivar_view.indexed_elements;
         for (size_t slot = 0u; slot < entity->instance_slot_count; slot++) {
@@ -1184,7 +1187,7 @@ failure:
     if (provider_attached
             && !st_image_runtime_root_provider_detach(
                 options->image, &context->root_provider)) {
-        abort();
+        st_fatal("aot bootstrap", "cannot detach the root provider after a failed initialization");
     }
     st_symbol_intern_batch_destroy(&symbol_batch);
     destroy_state(state);
@@ -1204,7 +1207,7 @@ void st_aot_bootstrap_context_destroy(st_aot_bootstrap_context_t *context)
     if (st_image_runtime_heap(context->image) != NULL
             && !st_image_runtime_root_provider_detach(
                 context->image, &context->root_provider)) {
-        abort();
+        st_fatal("aot bootstrap", "cannot detach the root provider during destroy");
     }
     memset(context, 0, sizeof(*context));
     destroy_state(state);

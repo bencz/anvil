@@ -457,6 +457,133 @@ static void test_sub_spilled_operands_stay_distinct(void)
     anvil_ctx_destroy(ctx);
 }
 
+static void test_fastcall_register_args_move_in_parallel(void)
+{
+    anvil_ctx_t *ctx = new_x86_ctx();
+    if (!ctx) return;
+
+    anvil_module_t *mod = anvil_module_create(ctx, "x86_fastcall_parallel");
+    CHECK(mod != NULL, "module should be created for fastcall parallel moves");
+    if (mod) {
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *pair[] = { i32, i32 };
+        anvil_type_t *callee_type = anvil_type_func_cc(ctx, i32, pair, 2, false, ANVIL_CC_FASTCALL);
+        anvil_func_t *callee = anvil_func_declare(mod, "fast_pair", callee_type);
+        anvil_type_t *params[] = { i32 };
+        anvil_type_t *fn_type = anvil_type_func(ctx, i32, params, 1, false);
+        anvil_func_t *fn = anvil_func_create(mod, "fastcall_spiller", fn_type, ANVIL_LINK_EXTERNAL);
+        CHECK(callee && fn, "fastcall parallel functions should be created");
+        if (callee && fn) {
+            anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+            anvil_value_t *a = anvil_func_get_param(fn, 0);
+            anvil_value_t *live[8];
+            for (int i = 0; i < 8; i++)
+                live[i] = anvil_build_add(ctx, a, anvil_const_i32(ctx, i + 1), "live");
+
+            /* Spilled arguments reload into EAX, ECX, EDX in order; both
+             * argument orders must survive the moves into ECX/EDX. */
+            anvil_value_t *forward[] = { live[6], live[7] };
+            anvil_value_t *backward[] = { live[7], live[6] };
+            anvil_value_t *r1 = NULL, *r2 = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee), forward, 2, "r1", &r1);
+            anvil_build_call_checked(ctx, anvil_func_get_value(callee), backward, 2, "r2", &r2);
+            anvil_value_t *acc = anvil_build_add(ctx, anvil_build_mul(ctx, r1, anvil_const_i32(ctx, 3), "r1x3"), r2, "acc");
+            for (int i = 0; i < 8; i++)
+                acc = anvil_build_add(ctx, acc, live[i], "acc");
+            anvil_build_ret(ctx, acc);
+
+            char *asm_text = emit_func(fn);
+            CHECK(asm_text != NULL, "fastcall parallel moves should emit assembly");
+            if (asm_text) {
+                static const char driver[] =
+                    "__attribute__((fastcall)) int fast_pair(int x, int y) { return x * 1000 + y; }\n"
+                    "extern int fastcall_spiller(int);\n"
+                    "int main(void){ return fastcall_spiller(10) == 69187 ? 0 : 1; }\n";
+                int rc = assemble_link_run(asm_text, driver, "fastcall register arguments should move in parallel");
+                if (rc >= 0)
+                    CHECK(rc == 0, "fastcall register arguments must not overwrite each other");
+                free(asm_text);
+            }
+        }
+    }
+
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_atomics_execute_on_i486(void)
+{
+    anvil_ctx_t *ctx = new_x86_ctx();
+    if (!ctx) return;
+    CHECK(anvil_ctx_set_cpu(ctx, ANVIL_CPU_X86_I486) == ANVIL_OK, "i486 CPU model should be selectable");
+    anvil_module_t *mod = anvil_module_create(ctx, "x86_atomics");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *i8 = anvil_type_i8(ctx);
+    anvil_type_t *params[] = { anvil_type_ptr(ctx, i32), anvil_type_ptr(ctx, i8) };
+    anvil_func_t *fn = anvil_func_create(mod, "atomics", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_value_t *word = anvil_func_get_param(fn, 0);
+    anvil_value_t *byte = anvil_func_get_param(fn, 1);
+    anvil_memory_order_t sc = ANVIL_ORDER_SEQ_CST;
+
+    /* *word starts at 10, *byte at 0x0f. */
+    anvil_value_t *add = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_ADD, word, anvil_const_i32(ctx, 5), sc, "add");   /* 10 -> 15 */
+    anvil_value_t *sub = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_SUB, word, anvil_const_i32(ctx, 3), sc, "sub");   /* 15 -> 12 */
+    anvil_value_t *orv = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_OR, word, anvil_const_i32(ctx, 0x100), sc, "or"); /* 12 -> 0x10c */
+    anvil_value_t *xch = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_EXCHANGE, word, anvil_const_i32(ctx, 40), sc, "xchg"); /* 0x10c -> 40 */
+    anvil_value_t *hit = anvil_build_atomic_cmpxchg(ctx, word, anvil_const_i32(ctx, 40), anvil_const_i32(ctx, 41), sc, sc, "hit");
+    anvil_value_t *miss = anvil_build_atomic_cmpxchg(ctx, word, anvil_const_i32(ctx, 7), anvil_const_i32(ctx, 99), sc, sc, "miss");
+    anvil_value_t *band = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_AND, byte, anvil_const_i8(ctx, 0x3c), sc, "band"); /* 0x0f -> 0x0c */
+    anvil_value_t *bxor = anvil_build_atomic_rmw(ctx, ANVIL_ATOMIC_XOR, byte, anvil_const_i8(ctx, 0x01), sc, "bxor"); /* 0x0c -> 0x0d */
+    CHECK(anvil_build_atomic_fence(ctx, sc), "fence should build");
+    anvil_build_atomic_store(ctx, anvil_const_i32(ctx, 1000), word, sc);
+    anvil_value_t *now = anvil_build_atomic_load(ctx, word, sc, "now");
+
+    /* now + add + sub + orv + xch + hit + miss + band + bxor */
+    anvil_value_t *acc = anvil_build_add(ctx, now, add, "a1");
+    acc = anvil_build_add(ctx, acc, sub, "a2");
+    acc = anvil_build_add(ctx, acc, orv, "a3");
+    acc = anvil_build_add(ctx, acc, xch, "a4");
+    acc = anvil_build_add(ctx, acc, hit, "a5");
+    acc = anvil_build_add(ctx, acc, miss, "a6");
+    acc = anvil_build_add(ctx, acc, anvil_build_zext(ctx, band, i32, "b1"), "a7");
+    acc = anvil_build_add(ctx, acc, anvil_build_zext(ctx, bxor, i32, "b2"), "a8");
+    anvil_build_ret(ctx, acc);
+
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "i486 atomics should generate code");
+    if (text) {
+        check_contains(text, "lock cmpxchg", "i486 compare-exchange should use lock cmpxchg");
+        check_contains(text, "lock xadd", "i486 fetch-add should use lock xadd");
+        check_contains(text, "lock orl $0, (%esp)", "a seq_cst fence without SSE2 uses a locked or");
+        /* 1000 + 10 + 15 + 12 + 0x10c + 40 + 41 + 0x0f + 0x0c = 1413 */
+        static const char driver[] =
+            "extern int atomics(int *, unsigned char *);\n"
+            "int main(void){ int w = 10; unsigned char b = 0x0f;\n"
+            "  int r = atomics(&w, &b);\n"
+            "  return (r == 1413 && w == 1000 && b == 0x0d) ? 0 : 1; }\n";
+        int rc = assemble_link_run(text, driver, "i486 atomics should execute");
+        if (rc >= 0)
+            CHECK(rc == 0, "i486 atomics must return the previous values and update memory");
+        free(text);
+    }
+    anvil_module_destroy(mod);
+
+    /* The i386 model has neither CMPXCHG nor XADD. */
+    CHECK(anvil_ctx_set_cpu(ctx, ANVIL_CPU_X86_I386) == ANVIL_OK, "i386 CPU model should be selectable");
+    CHECK(!anvil_atomic_is_lock_free(ctx, i32), "i386 has no lock-free compare-exchange");
+    mod = anvil_module_create(ctx, "x86_atomics_386");
+    fn = anvil_func_create(mod, "cas386", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_build_ret(ctx, anvil_build_atomic_cmpxchg(ctx, anvil_func_get_param(fn, 0), anvil_const_i32(ctx, 1), anvil_const_i32(ctx, 2), sc, sc, "cas"));
+    text = NULL;
+    CHECK(anvil_module_codegen(mod, &text, &len) != ANVIL_OK, "i386 compare-exchange must be rejected");
+    free(text);
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_fp_add_returns_via_st0(void)
 {
     anvil_ctx_t *ctx = new_x86_ctx();
@@ -727,6 +854,121 @@ static void test_calling_conventions_and_platforms(void)
     }
 }
 
+static char *emit_func_abi(anvil_func_t *fn, anvil_abi_t abi)
+{
+    anvil_mir_func_t *mir = anvil_x86_lower_func_to_mir(fn);
+    char *text = NULL;
+    size_t len = 0;
+    if (mir && anvil_x86_regalloc_mir(mir))
+        anvil_x86_emit_mir_abi(mir, fn, abi, ANVIL_SYNTAX_GAS, &text, &len);
+    anvil_mir_func_destroy(mir);
+    return text;
+}
+
+static void test_coff_decoration_matches_between_caller_and_callee(void)
+{
+    anvil_cc_t ccs[] = { ANVIL_CC_STDCALL, ANVIL_CC_FASTCALL };
+    const char *expected[] = { "_take@16", "@take@16" };
+    for (size_t c = 0; c < 2; c++) {
+        anvil_ctx_t *ctx = new_x86_ctx();
+        if (!ctx) return;
+        anvil_ctx_set_abi(ctx, ANVIL_ABI_WIN64);
+        anvil_module_t *mod = anvil_module_create(ctx, "x86_coff_decor");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *fields[] = { i32, i32, i32 };
+        anvil_type_t *triple = anvil_type_struct(ctx, "triple", fields, 3);
+        anvil_type_t *params[] = { anvil_type_ptr(ctx, triple), i32 };
+        anvil_param_attr_t attrs[] = { ANVIL_PARAM_BYVAL, ANVIL_PARAM_PLAIN };
+        anvil_type_t *take_type = anvil_type_func_attrs(ctx, i32, params, attrs, 2, false, ccs[c]);
+        anvil_func_t *take = anvil_func_create(mod, "take", take_type, ANVIL_LINK_EXTERNAL);
+        anvil_type_t *caller_params[] = { anvil_type_ptr(ctx, triple) };
+        anvil_func_t *caller = anvil_func_create(mod, "give", anvil_type_func(ctx, i32, caller_params, 1, false), ANVIL_LINK_EXTERNAL);
+        CHECK(take && caller, "COFF decoration functions should be created");
+        if (take && caller) {
+            anvil_set_insert_point(ctx, anvil_func_get_entry(take));
+            anvil_build_ret(ctx, anvil_func_get_param(take, 1));
+            anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+            anvil_value_t *args[] = { anvil_func_get_param(caller, 0), anvil_const_i32(ctx, 5) };
+            anvil_value_t *result = NULL;
+            anvil_build_call_checked(ctx, anvil_func_get_value(take), args, 2, "r", &result);
+            anvil_build_ret(ctx, result);
+
+            /* 12-byte by-value struct + one word: the callee pops 16 bytes,
+             * so both sides must agree on @16. */
+            char *callee_text = emit_func_abi(take, ANVIL_ABI_WIN64);
+            char *caller_text = emit_func_abi(caller, ANVIL_ABI_WIN64);
+            check_contains(callee_text, expected[c], "COFF callee decoration should count the by-value struct bytes");
+            check_contains(caller_text, expected[c], "COFF caller decoration should match the callee");
+            free(callee_text);
+            free(caller_text);
+        }
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+static void test_module_unwind_and_stack_directives(void)
+{
+    anvil_abi_t abis[] = { ANVIL_ABI_SYSV, ANVIL_ABI_WIN64 };
+    for (size_t p = 0; p < 2; p++) {
+        anvil_ctx_t *ctx = new_x86_ctx();
+        if (!ctx) return;
+        anvil_ctx_set_abi(ctx, abis[p]);
+        anvil_module_t *mod = anvil_module_create(ctx, "x86_unwind");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { i32 };
+        anvil_func_t *fn = anvil_func_create(mod, "unwind_me", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_build_ret(ctx, anvil_build_add(ctx, anvil_func_get_param(fn, 0), anvil_const_i32(ctx, 1), "r"));
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "unwind module should generate code");
+        if (text) {
+            bool elf = abis[p] == ANVIL_ABI_SYSV;
+            CHECK((strstr(text, ".cfi_startproc") != NULL) == elf && (strstr(text, ".cfi_endproc") != NULL) == elf,
+                  "ELF functions carry DWARF CFI; COFF ones do not");
+            CHECK((strstr(text, ".note.GNU-stack") != NULL) == elf, "ELF modules mark the stack non-executable");
+            if (elf)
+                assemble_check(text, "CFI module should assemble with as --32");
+            free(text);
+        }
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+static void test_constant_and_common_globals_use_their_sections(void)
+{
+    anvil_ctx_t *ctx = new_x86_ctx();
+    if (!ctx) return;
+    anvil_module_t *mod = anvil_module_create(ctx, "x86_sections");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_value_t *table = anvil_module_add_global(mod, "ro_table", i32, ANVIL_LINK_EXTERNAL);
+    anvil_value_t *pointer = anvil_module_add_global(mod, "ro_pointer", anvil_type_ptr(ctx, i32), ANVIL_LINK_EXTERNAL);
+    anvil_value_t *common = anvil_module_add_global(mod, "tentative", i32, ANVIL_LINK_COMMON);
+    CHECK(table && pointer && common, "section globals should be created");
+    CHECK(anvil_global_set_initializer(table, anvil_const_i32(ctx, 7)) && anvil_global_set_constant(table, true) &&
+          anvil_global_set_initializer(pointer, anvil_const_symbol_addr(table)) &&
+          anvil_global_set_constant(pointer, true) && anvil_global_is_constant(table) && !anvil_global_is_constant(common),
+          "globals should accept the constant attribute");
+    anvil_value_t *declared = anvil_module_add_extern(mod, "elsewhere", i32);
+    CHECK(declared && !anvil_global_set_constant(declared, true), "a declaration cannot be marked constant");
+    char *text = NULL;
+    size_t len = 0;
+    CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "section module should generate code");
+    if (text) {
+        const char *rodata = strstr(text, ".section .rodata\n");
+        const char *relro = strstr(text, ".section .data.rel.ro");
+        CHECK(rodata && strstr(rodata, "ro_table:"), "a constant without relocations goes to .rodata");
+        CHECK(relro && strstr(relro, "ro_pointer:"), "a constant holding an address goes to .data.rel.ro");
+        check_contains(text, ".comm tentative, 4, 4", "an uninitialized COMMON global is a .comm symbol");
+        assemble_check(text, "section module should assemble with as --32");
+        free(text);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_setcc_boolean_in_esi_edi(void)
 {
     anvil_ctx_t *ctx = new_x86_ctx();
@@ -760,10 +1002,10 @@ static void test_setcc_boolean_in_esi_edi(void)
                       "32-bit emitter must not produce %spl");
                 CHECK(strstr(asm_text, "%bpl") == NULL,
                       "32-bit emitter must not produce %bpl");
-                check_contains(asm_text, "setg",
-                               "setcc boolean must materialize its predicate");
-                check_contains(asm_text, "movzbl",
-                               "setcc boolean must be normalized to zero or one");
+                /* The compare feeds the select's branch: it branches on the
+                 * flags instead of materializing a boolean. */
+                CHECK(strstr(asm_text, "\tjg ") != NULL || strstr(asm_text, "\tjle ") != NULL,
+                      "the compare must branch on its flags");
                 assemble_check(asm_text,
                                "setcc-derived boolean asm should assemble with as --32");
                 free(asm_text);
@@ -784,8 +1026,9 @@ static void test_byte_compare_fixed_eax_result_survives_scratch_restore(void)
     anvil_mir_vreg_t rhs = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
     anvil_mir_vreg_t dst = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 8);
     anvil_mir_vreg_t uses[] = { lhs, rhs };
-    CHECK(anvil_mir_set_fixed_reg(mir, lhs, 6) &&
-          anvil_mir_set_fixed_reg(mir, rhs, 7) &&
+    /* Bytes live only in registers with a byte form (EBX, ECX here). */
+    CHECK(anvil_mir_set_fixed_reg(mir, lhs, 3) &&
+          anvil_mir_set_fixed_reg(mir, rhs, 1) &&
           anvil_mir_set_fixed_reg(mir, dst, 0) &&
           anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, lhs, 2) &&
           anvil_mir_add_instr_imm(mir, ANVIL_MIR_OP_MOV, rhs, 1) &&
@@ -801,10 +1044,8 @@ static void test_byte_compare_fixed_eax_result_survives_scratch_restore(void)
     CHECK(anvil_x86_emit_mir(mir, &text, &len),
           "fixed-EAX compare should emit");
     if (text) {
-        const char *pop = strstr(text, "\tpopl %eax\n");
-        const char *load = pop ? strstr(pop, "\tmovzbl") : NULL;
-        CHECK(pop && load && pop < load,
-              "saved EAX must be restored before loading the boolean result into EAX");
+        CHECK(strstr(text, "\tcmpb $1, %bl\n") != NULL && strstr(text, "\tsetg %al\n") != NULL,
+              "the byte compare must use the byte registers directly and set EAX's byte");
         assemble_check(text, "fixed-EAX byte compare should assemble with as --32");
         free(text);
     }
@@ -1000,17 +1241,68 @@ static void test_small_struct_return_pair(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* The CPU model picks the floating-point unit: SSE2 registers on the
+ * Pentium 4, the x87 FPU before it (FUCOMIP from the P6 on, FNSTSW/SAHF
+ * earlier), with the stack empty between instructions. */
+static void test_fp_unit_follows_cpu_model(void)
+{
+    static const struct {
+        anvil_cpu_model_t cpu;
+        const char *present;
+        const char *absent;
+        const char *compare;
+    } cases[] = {
+        { ANVIL_CPU_X86_I486, "fldl", "xmm", "fnstsw %ax" },
+        { ANVIL_CPU_X86_PENTIUM_PRO, "fldl", "xmm", "fucomip" },
+        { ANVIL_CPU_X86_PENTIUM4, "xmm", "fucom", "ucomisd" },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = new_x86_ctx();
+        if (!ctx) return;
+        CHECK(anvil_ctx_set_cpu(ctx, cases[c].cpu) == ANVIL_OK, "i386 CPU model should be selectable");
+        anvil_module_t *mod = anvil_module_create(ctx, "fp_unit");
+        anvil_type_t *f64 = anvil_type_f64(ctx);
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { f64, i32 };
+        anvil_func_t *fn = anvil_func_create(mod, "fp_mix", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_value_t *x = anvil_func_get_param(fn, 0);
+        anvil_value_t *sum = anvil_build_fadd(ctx, x, anvil_build_sitofp(ctx, anvil_func_get_param(fn, 1), f64, "n"), "sum");
+        anvil_value_t *less = anvil_build_fcmp(ctx, ANVIL_FCMP_OLT, sum, x, "less");
+        anvil_value_t *pick = anvil_build_select(ctx, less, anvil_build_fneg(ctx, sum, "neg"), sum, "pick");
+        CHECK(anvil_build_ret(ctx, anvil_build_fptosi(ctx, pick, i32, "result")), "FP function should build");
+
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "FP function should emit for every i386 CPU model");
+        if (text) {
+            check_contains(text, cases[c].present, "the FP unit should match the CPU model");
+            CHECK(strstr(text, cases[c].absent) == NULL, "the other FP unit's instructions must not appear");
+            check_contains(text, cases[c].compare, "the FP compare should match the CPU model");
+            assemble_check(text, "FP code should assemble for every i386 CPU model");
+        }
+        free(text);
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
     test_cdecl_stack_args_add_ret();
     test_assemble_control_and_memory();
     test_calling_conventions_and_platforms();
+    test_coff_decoration_matches_between_caller_and_callee();
+    test_module_unwind_and_stack_directives();
+    test_constant_and_common_globals_use_their_sections();
     test_cmp_predicates_setcc();
     test_shifts_use_cl();
     test_div_mod_eax_edx();
     test_select_to_branch_diamond();
     test_regalloc_spill_forcing();
     test_sub_spilled_operands_stay_distinct();
+    test_fastcall_register_args_move_in_parallel();
+    test_atomics_execute_on_i486();
     test_fp_add_returns_via_st0();
     test_i64_pair_load_store_cmp();
     test_i64_load_store_pair_offsets();
@@ -1019,6 +1311,7 @@ int main(void)
     test_i8_byte_ops_no_high_byte_regs();
     test_local_array_i8_store_address();
     test_small_struct_return_pair();
+    test_fp_unit_follows_cpu_model();
 
     if (failures) {
         fprintf(stderr, "%d x86 MIR lowering test(s) failed\n", failures);

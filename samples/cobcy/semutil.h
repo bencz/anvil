@@ -1,0 +1,54 @@
+// This file is part of cobcy, a COBOL-to-C compiler.
+//
+// Copyright (C) 1995-2008 by Mike Sharov <msharov@users.sourceforge.net>
+// This file is free software, distributed under the MIT License.
+
+#pragma once
+#include "semtypes.h"
+#include "symbase.h"
+
+// printf-style formatting into a std::string (replaces uSTL string::(v)format)
+string vstringf (const char* fmt, va_list args) __attribute__((__format__(__printf__, 1, 0)));
+string stringf (const char* fmt, ...) __attribute__((__format__(__printf__, 1, 2)));
+
+void WriteError (const char* fmt, ...) noexcept __attribute__((__format__(__printf__, 1, 2)));
+void WriteWarning (const char* fmt, ...) noexcept __attribute__((__format__(__printf__, 1, 2)));
+void NIY (const char* str);
+void GenComment (ostream& os, const char* fmt, ...) __attribute__((__format__(__printf__, 2, 3)));
+bool ErrorOccured (void);
+void PrintConstant (const StackEntry& entry, ostream& os);
+void PrintIdentifier (const char* id, ostream& os);
+void GenIndent (void);
+StackEntry PopIdentifier (void);
+vector<StackEntry> PopStatement (void);
+void Push (StackEntryKind kind);
+#ifndef NDEBUG
+void PrintStackEntry (const StackEntry& se);
+void PrintStack (void);
+#define	DTRACE(...)	if (g_Config.GenDebug) cerr << stringf (__VA_ARGS__)
+#else
+#define DTRACE(...)	do {} while(false)
+#endif
+
+namespace {
+
+static inline bool IsInSet (char c, const char* s)
+{
+    return strchr (s, c);
+}
+
+} // namespace
+
+template <typename Sym>
+const Sym* LookupIdentifier (const string& id)
+{
+    const auto sym = g_Symbols.find (id);
+    if (!sym)
+	return nullptr;
+    auto rv = dynamic_cast<const Sym*>(sym);
+    if (!rv) {
+	::WriteError ("identifier '%s' is of a different type", id.c_str());
+	return nullptr;
+    }
+    return rv;
+}

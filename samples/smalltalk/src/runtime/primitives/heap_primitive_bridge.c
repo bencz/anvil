@@ -1,4 +1,5 @@
 #include "st_heap_primitive_bridge.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 
@@ -24,7 +25,6 @@ _Noreturn st_value_t st_aot_heap_primitive_contract_violation(
     const StFrame *frame)
 {
     (void)intrinsic_id;
-    (void)status;
     (void)frame;
-    abort();
+    st_fatal("heap primitive contract violation", st_heap_primitive_status_string(status));
 }

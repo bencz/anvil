@@ -6,9 +6,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A builder that fails before inserting drops its unfinished instruction at
+ * once; nothing half-built ever reaches a block. */
+static anvil_value_t *builder_discard(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    anvil_instr_discard_new(ctx, instr);
+    return NULL;
+}
+
+static bool builder_insert(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    if (anvil_instr_insert(ctx, instr))
+        return true;
+    anvil_instr_discard_new(ctx, instr);
+    return false;
+}
+
 static anvil_value_t *finish_value(anvil_ctx_t *ctx, anvil_instr_t *instr)
 {
-    if (!instr || !anvil_instr_insert(ctx, instr)) return NULL;
+    if (!instr || !builder_insert(ctx, instr)) return NULL;
     return instr->result;
 }
 
@@ -90,11 +106,8 @@ static anvil_value_t *build_binop(anvil_ctx_t *ctx, anvil_op_t op,
     }
     
     bool sem_ok = (op == ANVIL_OP_SHL || op == ANVIL_OP_SHR ||
-                   op == ANVIL_OP_SAR)
-        ? (anvil_type_is_integer(lhs->type) &&
-           lhs->type->kind != ANVIL_TYPE_I1 &&
-           anvil_type_is_integer(rhs->type) &&
-           rhs->type->kind != ANVIL_TYPE_I1)
+                   op == ANVIL_OP_SAR || op == ANVIL_OP_ROTL)
+        ? anvil_sem_shift_types(lhs->type, rhs->type, lhs->type)
         : anvil_sem_binary_types(op, lhs->type, rhs->type, lhs->type);
     if (!sem_ok) {
         builder_invalid(ctx, "Binary opcode/operand types are incompatible");
@@ -104,7 +117,7 @@ static anvil_value_t *build_binop(anvil_ctx_t *ctx, anvil_op_t op,
     if (!instr) return NULL;
     
     anvil_value_t *operands[] = { lhs, rhs };
-    if (!add_operands(instr, operands, 2)) return NULL;
+    if (!add_operands(instr, operands, 2)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }
 
@@ -125,7 +138,7 @@ static anvil_value_t *build_unop(anvil_ctx_t *ctx, anvil_op_t op,
     anvil_instr_t *instr = anvil_instr_create(ctx, op, val->type, name);
     if (!instr) return NULL;
     
-    if (!anvil_instr_add_operand(instr, val)) return NULL;
+    if (!anvil_instr_add_operand(instr, val)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }
 
@@ -139,16 +152,18 @@ static anvil_value_t *build_cmp(anvil_ctx_t *ctx, anvil_op_t op,
         return NULL;
     }
 
-    if (!anvil_sem_cmp_types(op, lhs->type, rhs->type, ctx->type_i1)) {
+    /* Scalars compare to the first-class i1 boolean; vectors to a lane
+     * mask. */
+    anvil_type_t *result = lhs->type->kind == ANVIL_TYPE_VECTOR ? anvil_type_vector_mask(ctx, lhs->type) : ctx->type_i1;
+    if (!result || !anvil_sem_cmp_types(op, lhs->type, rhs->type, result)) {
         builder_invalid(ctx, "Comparison opcode/operand types are incompatible");
         return NULL;
     }
-    /* Comparison result is the first-class i1 boolean type. */
-    anvil_instr_t *instr = anvil_instr_create(ctx, op, ctx->type_i1, name);
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, result, name);
     if (!instr) return NULL;
 
     anvil_value_t *operands[] = { lhs, rhs };
-    if (!add_operands(instr, operands, 2)) return NULL;
+    if (!add_operands(instr, operands, 2)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }
 
@@ -170,7 +185,7 @@ static anvil_value_t *build_cast(anvil_ctx_t *ctx, anvil_op_t op,
     anvil_instr_t *instr = anvil_instr_create(ctx, op, type, name);
     if (!instr) return NULL;
 
-    if (!anvil_instr_add_operand(instr, val)) return NULL;
+    if (!anvil_instr_add_operand(instr, val)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }
 
@@ -188,6 +203,25 @@ anvil_value_t *anvil_build_sub(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value
 anvil_value_t *anvil_build_mul(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
 {
     return build_binop(ctx, ANVIL_OP_MUL, lhs, rhs, name);
+}
+
+anvil_value_t *anvil_build_umulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
+{
+    return build_binop(ctx, ANVIL_OP_UMULH, lhs, rhs, name);
+}
+
+anvil_value_t *anvil_build_smulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
+{
+    return build_binop(ctx, ANVIL_OP_SMULH, lhs, rhs, name);
+}
+
+anvil_value_t *anvil_build_saturating(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
+{
+    if (op != ANVIL_OP_ADD_SAT_U && op != ANVIL_OP_ADD_SAT_S && op != ANVIL_OP_SUB_SAT_U && op != ANVIL_OP_SUB_SAT_S) {
+        builder_invalid(ctx, "Saturating arithmetic needs a saturating operation");
+        return NULL;
+    }
+    return build_binop(ctx, op, lhs, rhs, name);
 }
 
 anvil_value_t *anvil_build_sdiv(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name)
@@ -239,6 +273,11 @@ anvil_value_t *anvil_build_not(anvil_ctx_t *ctx, anvil_value_t *val, const char 
 anvil_value_t *anvil_build_shl(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *amt, const char *name)
 {
     return build_binop(ctx, ANVIL_OP_SHL, val, amt, name);
+}
+
+anvil_value_t *anvil_build_rotl(anvil_ctx_t *ctx, anvil_value_t *value, anvil_value_t *amount, const char *name)
+{
+    return build_binop(ctx, ANVIL_OP_ROTL, value, amount, name);
 }
 
 anvil_value_t *anvil_build_shr(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *amt, const char *name)
@@ -377,8 +416,8 @@ anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
     if (!ctx || !type || type->owner_ctx != ctx ||
         !anvil_sem_type_is_sized(type) ||
         !builder_value_is_usable(ctx, count) ||
-        !anvil_type_is_integer(count->type)) {
-        builder_invalid(ctx, "Dynamic alloca requires a type and count");
+        !anvil_type_is_integer(count->type) || count->type->kind == ANVIL_TYPE_I1) {
+        builder_invalid(ctx, "Dynamic alloca requires a type and a non-boolean integer count");
         return NULL;
     }
 
@@ -386,7 +425,7 @@ anvil_value_t *anvil_build_alloca_dyn(anvil_ctx_t *ctx, anvil_type_t *type,
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_ALLOCA, ptr_type, name);
     if (!instr) return NULL;
 
-    if (!anvil_instr_add_operand(instr, count)) return NULL;
+    if (!anvil_instr_add_operand(instr, count)) return builder_discard(ctx, instr);
     /* aux_type carries the element type so the backend knows element size. */
     instr->aux_type = type;
     return finish_value(ctx, instr);
@@ -434,11 +473,13 @@ static anvil_instr_t *build_atomic(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_
 
     bool has_result = op != ANVIL_OP_ATOMIC_STORE && op != ANVIL_OP_ATOMIC_FENCE;
     anvil_instr_t *instr = anvil_instr_create(ctx, op, has_result ? object : ctx->type_void, name);
-    if (!instr || !anvil_instr_add_operands(instr, operands, count))
+    if (!instr)
         return NULL;
+    if (!anvil_instr_add_operands(instr, operands, count))
+        { builder_discard(ctx, instr); return NULL; }
 
     instr->atomic = info;
-    if (!anvil_instr_insert(ctx, instr))
+    if (!builder_insert(ctx, instr))
         return NULL;
 
     return instr;
@@ -511,6 +552,10 @@ anvil_value_t *anvil_build_load_ex(anvil_ctx_t *ctx, anvil_type_t *type, anvil_v
         builder_invalid(ctx, "Load builder requires a type and pointer");
         return NULL;
     }
+    if (!anvil_sem_type_is_sized(type) || type->kind == ANVIL_TYPE_FUNC || type->kind == ANVIL_TYPE_VOID) {
+        builder_invalid(ctx, "Load requires a sized first-class object type");
+        return NULL;
+    }
     
     if (!valid_memory_access(ctx, type, access))
         return NULL;
@@ -521,7 +566,7 @@ anvil_value_t *anvil_build_load_ex(anvil_ctx_t *ctx, anvil_type_t *type, anvil_v
     if (access)
         instr->memory_access = *access;
     
-    if (!anvil_instr_add_operand(instr, ptr)) return NULL;
+    if (!anvil_instr_add_operand(instr, ptr)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }
 
@@ -538,6 +583,10 @@ bool anvil_build_store_ex(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *p
         builder_invalid(ctx, "Store builder requires a value and pointer");
         return false;
     }
+    if (!anvil_sem_type_is_sized(val->type) || val->type->kind == ANVIL_TYPE_FUNC || val->type->kind == ANVIL_TYPE_VOID) {
+        builder_invalid(ctx, "Store requires a sized first-class object type");
+        return false;
+    }
     
     if (!valid_memory_access(ctx, val->type, access))
         return false;
@@ -549,8 +598,8 @@ bool anvil_build_store_ex(anvil_ctx_t *ctx, anvil_value_t *val, anvil_value_t *p
         instr->memory_access = *access;
     
     anvil_value_t *operands[] = { val, ptr };
-    if (!add_operands(instr, operands, 2)) return false;
-    return anvil_instr_insert(ctx, instr);
+    if (!add_operands(instr, operands, 2)) return builder_discard(ctx, instr) != NULL;
+    return builder_insert(ctx, instr);
 }
 
 anvil_value_t *anvil_build_gep(anvil_ctx_t *ctx, anvil_type_t *type, anvil_value_t *ptr,
@@ -636,7 +685,7 @@ anvil_value_t *anvil_build_struct_gep(anvil_ctx_t *ctx, anvil_type_t *struct_typ
     anvil_value_t *idx_val = anvil_const_i32(ctx, (int32_t)field_idx);
     if (!idx_val) return NULL;
     anvil_value_t *operands[] = { ptr, idx_val };
-    if (!add_operands(instr, operands, 2)) return NULL;
+    if (!add_operands(instr, operands, 2)) return builder_discard(ctx, instr);
     
     /* Store struct type reference for offset calculation */
     instr->aux_type = struct_type;
@@ -656,7 +705,7 @@ bool anvil_build_br(anvil_ctx_t *ctx, anvil_block_t *dest)
     if (!instr) return false;
     
     instr->true_block = dest;
-    return anvil_instr_insert(ctx, instr);
+    return builder_insert(ctx, instr);
 }
 
 bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
@@ -673,10 +722,10 @@ bool anvil_build_br_cond(anvil_ctx_t *ctx, anvil_value_t *cond,
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_BR_COND, ctx->type_void, NULL);
     if (!instr) return false;
     
-    if (!anvil_instr_add_operand(instr, cond)) return false;
+    if (!anvil_instr_add_operand(instr, cond)) return builder_discard(ctx, instr) != NULL;
     instr->true_block = then_block;
     instr->false_block = else_block;
-    return anvil_instr_insert(ctx, instr);
+    return builder_insert(ctx, instr);
 }
 
 anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
@@ -694,9 +743,9 @@ anvil_instr_t *anvil_build_switch(anvil_ctx_t *ctx, anvil_value_t *value,
                                               ctx->type_void, NULL);
     if (!instr) return NULL;
 
-    if (!anvil_instr_add_operand(instr, value)) return NULL;
+    if (!anvil_instr_add_operand(instr, value)) { builder_discard(ctx, instr); return NULL; }
     instr->true_block = default_block;
-    if (!anvil_instr_insert(ctx, instr)) return NULL;
+    if (!builder_insert(ctx, instr)) return NULL;
     return instr;
 }
 
@@ -720,7 +769,9 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
         !builder_value_is_usable(owner, case_value) ||
         case_value->kind != ANVIL_VAL_CONST_INT ||
         !anvil_types_equal(case_value->type, selector->type) ||
-        !builder_target_is_current_func(owner, dest)) {
+        /* The switch's own function, wherever the builder points now. */
+        !switch_instr->parent->parent || dest->parent != switch_instr->parent->parent ||
+        dest->owner_module != switch_instr->parent->owner_module) {
         builder_invalid(owner, "Switch case must be a same-type integer constant and same-function target");
         return false;
     }
@@ -794,9 +845,24 @@ bool anvil_switch_add_case(anvil_instr_t *switch_instr,
     return true;
 }
 
+static bool build_call(anvil_ctx_t *ctx, anvil_value_t *callee, anvil_value_t **args, const anvil_param_attr_t *attrs, size_t num_args,
+                       const char *name, anvil_value_t **result);
+
 bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
                                anvil_value_t **args, size_t num_args,
                                const char *name, anvil_value_t **result)
+{
+    return build_call(ctx, callee, args, NULL, num_args, name, result);
+}
+
+bool anvil_build_call_attrs(anvil_ctx_t *ctx, anvil_value_t *callee, anvil_value_t **args, const anvil_param_attr_t *attrs,
+                            size_t num_args, const char *name, anvil_value_t **result)
+{
+    return build_call(ctx, callee, args, attrs, num_args, name, result);
+}
+
+static bool build_call(anvil_ctx_t *ctx, anvil_value_t *callee, anvil_value_t **args, const anvil_param_attr_t *attrs, size_t num_args,
+                       const char *name, anvil_value_t **result)
 {
     if (result) *result = NULL;
     if (!ctx || !builder_value_is_usable(ctx, callee)) {
@@ -840,10 +906,46 @@ bool anvil_build_call_checked(anvil_ctx_t *ctx, anvil_value_t *callee,
             return false;
         }
     }
+    /* Call-site attributes: a declared parameter keeps its type's (the
+     * entry must agree or be PLAIN); an unnamed argument may be BYVAL, a
+     * ptr<T> to an aggregate passed by value. */
+    bool unnamed_attrs = false;
+    for (size_t i = 0; attrs && i < num_args; i++) {
+        if (i < fn_type->data.func.num_params) {
+            if (attrs[i] != ANVIL_PARAM_PLAIN && attrs[i] != anvil_type_func_param_attr(fn_type, i)) {
+                builder_invalid(ctx, "A call-site attribute contradicts the declared parameter's");
+                return false;
+            }
+            continue;
+        }
+        if (attrs[i] == ANVIL_PARAM_PLAIN)
+            continue;
+        anvil_type_t *pointee = args[i]->type->kind == ANVIL_TYPE_PTR ? args[i]->type->data.pointee : NULL;
+        if (attrs[i] != ANVIL_PARAM_BYVAL || !pointee || !anvil_sem_type_is_sized(pointee) ||
+            (pointee->kind != ANVIL_TYPE_STRUCT && pointee->kind != ANVIL_TYPE_ARRAY)) {
+            builder_invalid(ctx, "An unnamed argument may only be BYVAL, a pointer to a sized aggregate");
+            return false;
+        }
+        if (!anvil_ctx_supports_param_attr(ctx, ANVIL_PARAM_BYVAL)) {
+            builder_invalid(ctx, "The target does not pass aggregates by value");
+            return false;
+        }
+        unnamed_attrs = true;
+    }
+
     anvil_type_t *ret_type = fn_type->data.func.ret;
     anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_CALL, ret_type, name);
     if (!instr) return false;
     instr->call_cc = effective_cc;
+    if (unnamed_attrs) {
+        instr->call_arg_attrs = calloc(num_args, 1);
+        if (!instr->call_arg_attrs) {
+            anvil_instr_discard_new(ctx, instr);
+            return false;
+        }
+        for (size_t i = 0; i < num_args; i++)
+            instr->call_arg_attrs[i] = (uint8_t)anvil_call_arg_attr(NULL, fn_type, i) | (uint8_t)(i >= fn_type->data.func.num_params ? attrs[i] : 0);
+    }
     if (!anvil_instr_reserve_operands(instr, num_args + 1) ||
         !anvil_instr_add_operand(instr, callee) ||
         !add_operands(instr, args, num_args) ||
@@ -875,9 +977,9 @@ bool anvil_build_ret(anvil_ctx_t *ctx, anvil_value_t *val)
     if (!instr) return false;
     
     if (val) {
-        if (!anvil_instr_add_operand(instr, val)) return false;
+        if (!anvil_instr_add_operand(instr, val)) return builder_discard(ctx, instr) != NULL;
     }
-    return anvil_instr_insert(ctx, instr);
+    return builder_insert(ctx, instr);
 }
 
 bool anvil_build_ret_void(anvil_ctx_t *ctx)
@@ -977,6 +1079,72 @@ anvil_value_t *anvil_build_fabs(anvil_ctx_t *ctx, anvil_value_t *val, const char
     return build_unop(ctx, ANVIL_OP_FABS, val, name);
 }
 
+anvil_value_t *anvil_build_fsqrt(anvil_ctx_t *ctx, anvil_value_t *val, const char *name)
+{
+    return build_unop(ctx, ANVIL_OP_FSQRT, val, name);
+}
+
+anvil_value_t *anvil_build_fma(anvil_ctx_t *ctx, anvil_value_t *a, anvil_value_t *b, anvil_value_t *c, const char *name)
+{
+    if (!ctx || !builder_value_is_usable(ctx, a) || !builder_value_is_usable(ctx, b) || !builder_value_is_usable(ctx, c) ||
+        !anvil_sem_fma_types(a->type, b->type, c->type, a->type)) {
+        builder_invalid(ctx, "FMA needs three FP values of one type");
+        return NULL;
+    }
+    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_FMA, a->type, name);
+    if (!instr)
+        return NULL;
+    anvil_value_t *operands[] = {a, b, c};
+    if (!add_operands(instr, operands, 3))
+        return builder_discard(ctx, instr);
+    return finish_value(ctx, instr);
+}
+
+anvil_value_t *anvil_build_accumulate(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *acc, anvil_value_t *lanes, const char *name)
+{
+    if (!ctx || !builder_value_is_usable(ctx, acc) || !builder_value_is_usable(ctx, lanes) ||
+        !anvil_sem_accumulate_types(op, acc->type, lanes->type, acc->type)) {
+        builder_invalid(ctx, "Accumulation needs a vector and a narrower one of its size");
+        return NULL;
+    }
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, acc->type, name);
+    if (!instr)
+        return NULL;
+    anvil_value_t *operands[] = {acc, lanes};
+    if (!add_operands(instr, operands, 2))
+        return builder_discard(ctx, instr);
+    return finish_value(ctx, instr);
+}
+
+anvil_value_t *anvil_build_reduce(anvil_ctx_t *ctx, anvil_op_t op, anvil_value_t *vector, const char *name)
+{
+    if (!ctx || !builder_value_is_usable(ctx, vector) || !anvil_sem_reduce_types(op, vector->type, anvil_type_vector_element(vector->type))) {
+        builder_invalid(ctx, "Reduction needs a vector its operation accepts");
+        return NULL;
+    }
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, vector->type->data.vector.element, name);
+    if (!instr)
+        return NULL;
+    if (!anvil_instr_add_operand(instr, vector))
+        return builder_discard(ctx, instr);
+    return finish_value(ctx, instr);
+}
+
+anvil_value_t *anvil_build_splat(anvil_ctx_t *ctx, anvil_value_t *scalar, anvil_type_t *vector_type, const char *name)
+{
+    if (!ctx || !builder_value_is_usable(ctx, scalar) || !vector_type || vector_type->kind != ANVIL_TYPE_VECTOR ||
+        !anvil_types_equal(scalar->type, vector_type->data.vector.element)) {
+        builder_invalid(ctx, "Splat needs a scalar of the vector's element type");
+        return NULL;
+    }
+    anvil_instr_t *instr = anvil_instr_create(ctx, ANVIL_OP_SPLAT, vector_type, name);
+    if (!instr)
+        return NULL;
+    if (!anvil_instr_add_operand(instr, scalar))
+        return builder_discard(ctx, instr);
+    return finish_value(ctx, instr);
+}
+
 anvil_value_t *anvil_build_fcmp(anvil_ctx_t *ctx,
                                  anvil_fcmp_pred_t predicate,
                                  anvil_value_t *lhs, anvil_value_t *rhs,
@@ -1023,6 +1191,10 @@ bool anvil_phi_add_incoming(anvil_value_t *phi, anvil_value_t *val, anvil_block_
         !instr->parent || !instr->parent->parent ||
         instr->num_operands != instr->num_phi_incoming) return false;
     anvil_func_t *func = instr->parent->parent;
+    if (!anvil_sem_global_operand_allowed(val, ANVIL_OP_PHI, 0)) {
+        builder_invalid(phi->owner_ctx, "A global names its storage: take its address with a GEP");
+        return false;
+    }
     if (val->owner_ctx != instr->owner_ctx ||
         val->type->owner_ctx != instr->owner_ctx ||
         !anvil_types_equal(val->type, phi->type) ||
@@ -1120,8 +1292,7 @@ anvil_value_t *anvil_build_select(anvil_ctx_t *ctx, anvil_value_t *cond,
     if (!ctx || !builder_value_is_usable(ctx, cond) ||
         !builder_value_is_usable(ctx, then_val) ||
         !builder_value_is_usable(ctx, else_val) ||
-        !anvil_sem_bool_type(cond->type) ||
-        !anvil_types_equal(then_val->type, else_val->type)) {
+        !anvil_sem_select_types(cond->type, then_val->type, else_val->type, then_val->type)) {
         builder_invalid(ctx, "Select builder requires condition and alternatives");
         return NULL;
     }
@@ -1130,6 +1301,6 @@ anvil_value_t *anvil_build_select(anvil_ctx_t *ctx, anvil_value_t *cond,
     if (!instr) return NULL;
     
     anvil_value_t *operands[] = { cond, then_val, else_val };
-    if (!add_operands(instr, operands, 3)) return NULL;
+    if (!add_operands(instr, operands, 3)) return builder_discard(ctx, instr);
     return finish_value(ctx, instr);
 }

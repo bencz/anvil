@@ -23,9 +23,6 @@ const anvil_mainframe_target_desc_t s390_target_desc = {
     .fp_format = ANVIL_FP_HFP,
     .big_endian = true,
     .has_64bit_gprs = false,
-    .supports_ieee_fp = true,
-    .supports_dfp = false,
-    .has_relative_branches = true,
     .param_list_reg = 1,
     .return_addr_reg = 14,
     .return_gpr = 15,
@@ -57,7 +54,7 @@ static const anvil_arch_info_t s390_arch_info = {
     .fp_format = ANVIL_FP_HFP,
     .abi = ANVIL_ABI_MVS,
     .has_condition_codes = true,
-    .has_delay_slots = false
+    .has_delay_slots = false,
 };
 
 static anvil_error_t s390_init(anvil_backend_t *be, anvil_ctx_t *ctx)
@@ -101,5 +98,10 @@ const anvil_backend_ops_t anvil_backend_s390 = {
     .reset = s390_reset,
     .codegen_module = s390_codegen_module,
     .codegen_func = s390_codegen_func,
-    .get_arch_info = s390_get_arch_info
+    .get_arch_info = s390_get_arch_info,
+    .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
+    .abi_support = (1u << ANVIL_ABI_MVS),
+    .build_va_arg = anvil_systemz_build_va_arg,
+    .build_va_copy = anvil_systemz_build_va_copy,
+    .build_va_copy_into = anvil_systemz_build_va_copy_into,
 };

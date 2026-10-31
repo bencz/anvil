@@ -46,6 +46,29 @@ bool anvil_mir_verify_clobbers(const anvil_mir_func_t *func, char *error, size_t
         for (size_t index = last[block]; index != SIZE_MAX; index = previous[index])
         {
             const anvil_mir_instr_t *instr = &func->instrs[index];
+            /* Printer scratch holds no value live across the instruction,
+             * nor its operands or result. */
+            bool has_scratch = false;
+            for (size_t reg_class = 0; reg_class < ANVIL_MIR_REG_CLASS_COUNT; reg_class++)
+                has_scratch |= instr->scratch[reg_class] != 0;
+            for (size_t value = 0; has_scratch && value < func->num_vregs; value++)
+            {
+                bool touched = (live[value / 64] >> (value % 64) & 1) || instr->def == value;
+                for (size_t operand = 0; operand < instr->num_uses && !touched; operand++)
+                    touched = instr->uses[operand] == value;
+                const anvil_regalloc_assignment_t *assignment = &func->assignments[value];
+                if (!touched || assignment->spilled || assignment->phys_reg < 0 || assignment->phys_reg >= 64)
+                    continue;
+                if (instr->scratch[func->vregs[value].reg_class] >> assignment->phys_reg & 1)
+                {
+                    if (error && error_len)
+                        snprintf(error, error_len, "instruction %zu uses register %d holding vreg %zu as scratch", index, assignment->phys_reg, value);
+
+                    valid = false;
+                    goto done;
+                }
+            }
+
             if (instr->def != ANVIL_MIR_NO_VREG)
                 live[instr->def / 64] &= ~(UINT64_C(1) << (instr->def % 64));
 

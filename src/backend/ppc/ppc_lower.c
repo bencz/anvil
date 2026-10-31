@@ -1,4 +1,6 @@
 #include "ppc_internal.h"
+#include "../common/narrow_mir.h"
+#include "../common/wide_mir.h"
 
 typedef struct {
     anvil_value_t *value;
@@ -59,6 +61,8 @@ typedef struct {
     bool sret_in_regs;
     ppc_agg_plan_t sret_plan;
     anvil_mir_vreg_t sret_object;
+    /* Argument state after the named parameters (variadic callees). */
+    ppc_arg_state_t named_args;
 } ppc_mir_lower_t;
 
 static void ppc_lower_free(ppc_mir_lower_t *lower)
@@ -101,6 +105,8 @@ static bool ppc_ensure_i64_pair(ppc_mir_lower_t *lower, anvil_value_t *value, an
 
 static anvil_mir_reg_class_t ppc_reg_class_for_type(anvil_type_t *type)
 {
+    if (type && type->kind == ANVIL_TYPE_VECTOR)
+        return ANVIL_MIR_REG_VECTOR;
     return ppc_type_is_fp(type) ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR;
 }
 
@@ -119,14 +125,10 @@ static uint16_t ppc_bits_for_type(const anvil_ppc_target_desc_t *desc, anvil_typ
     return (uint16_t)(size * 8);
 }
 
-static uint16_t ppc_slot_bits_for_type(const anvil_ppc_target_desc_t *desc, anvil_type_t *type)
+static size_t ppc_slot_bytes_for_type(const anvil_ppc_target_desc_t *desc, anvil_type_t *type)
 {
     size_t size = type ? anvil_type_size(type) : desc->word_size;
-    if (size == 0)
-        size = desc->word_size;
-    if (size > UINT16_MAX / 8)
-        size = UINT16_MAX / 8;
-    return (uint16_t)(size * 8);
+    return size ? size : desc->word_size;
 }
 
 static uint16_t ppc_align_for_type(const anvil_ppc_target_desc_t *desc, anvil_type_t *type)
@@ -143,6 +145,9 @@ static uint16_t ppc_align_for_type(const anvil_ppc_target_desc_t *desc, anvil_ty
 
 static anvil_mir_vreg_t ppc_add_vreg_for_type(ppc_mir_lower_t *lower, anvil_type_t *type)
 {
+    /* Vectors live in VSX registers, only where the CPU has them. */
+    if (type && type->kind == ANVIL_TYPE_VECTOR && !anvil_vector_operation_cost(lower->func->owner_ctx, ANVIL_OP_LOAD, type))
+        return ANVIL_MIR_NO_VREG;
     return anvil_mir_add_vreg_typed(lower->mir, ppc_reg_class_for_type(type), ppc_bits_for_type(lower->desc, type), ppc_type_is_signed(type));
 }
 
@@ -399,12 +404,7 @@ static bool create_mir_blocks(ppc_mir_lower_t *lower)
 
     size_t index = 0;
     for (anvil_block_t *block = lower->func->blocks; block; block = block->next) {
-        anvil_mir_block_t mir_block;
-        if (index == 0) {
-            mir_block = anvil_mir_current_block(lower->mir);
-        } else {
-            mir_block = anvil_mir_add_block(lower->mir, block->name);
-        }
+        anvil_mir_block_t mir_block = anvil_mir_block_for(lower->mir, block, index == 0);
         if (mir_block == ANVIL_MIR_NO_BLOCK)
             return false;
 
@@ -455,6 +455,15 @@ static size_t ppc_image_words(const ppc_mir_lower_t *lower, const ppc_agg_plan_t
     return (plan->size + lower->desc->word_size - 1) / lower->desc->word_size;
 }
 
+/* Leading members of a homogeneous floating aggregate that still get FPRs:
+ * ELFv2 passes as many as fit, the rest in the doublewords of the image
+ * from the first member left over (GPRs, then the stack). */
+static unsigned ppc_hfa_parts_in_fprs(const ppc_mir_lower_t *lower, const ppc_agg_plan_t *plan, const ppc_arg_state_t *state)
+{
+    size_t left = state->fpr < lower->desc->num_fpr_arg_regs ? lower->desc->num_fpr_arg_regs - state->fpr : 0;
+    return plan->num_parts < left ? plan->num_parts : (unsigned)left;
+}
+
 /* An incoming argument as an ordinary virtual register.  Narrow integers in
  * memory are read as their whole (right-justified) word. */
 static anvil_mir_vreg_t ppc_incoming_value(ppc_mir_lower_t *lower, ppc_arg_loc_t loc, anvil_mir_reg_class_t cls, uint16_t bits, bool is_signed)
@@ -487,25 +496,29 @@ static bool lower_incoming_aggregate(ppc_mir_lower_t *lower, const ppc_agg_plan_
 {
     const anvil_ppc_target_desc_t *desc = lower->desc;
     anvil_agg_target_t target = ppc_agg_target(lower);
+    size_t first_word = 0;
     if (plan->placement == PPC_AGG_REGS) {
-        if (state->fpr + plan->num_parts <= desc->num_fpr_arg_regs) {
-            for (unsigned part = 0; part < plan->num_parts; part++) {
-                const anvil_agg_part_t *p = &plan->parts[part];
-                ppc_arg_loc_t loc = {desc->fpr_arg_regs[state->fpr++], 0};
-                anvil_mir_vreg_t value = ppc_incoming_value(lower, loc, ANVIL_MIR_REG_FPR, anvil_agg_part_bits(p, target), false);
-                if (value == ANVIL_MIR_NO_VREG || !anvil_agg_store_part(lower->mir, p, value, object, target))
-                    return false;
-            }
+        unsigned in_fprs = ppc_hfa_parts_in_fprs(lower, plan, state);
+        for (unsigned part = 0; part < in_fprs; part++) {
+            const anvil_agg_part_t *p = &plan->parts[part];
+            ppc_arg_loc_t loc = {desc->fpr_arg_regs[state->fpr++], 0};
+            anvil_mir_vreg_t value = ppc_incoming_value(lower, loc, ANVIL_MIR_REG_FPR, anvil_agg_part_bits(p, target), false);
+            if (value == ANVIL_MIR_NO_VREG || !anvil_agg_store_part(lower->mir, p, value, object, target))
+                return false;
+        }
+        if (in_fprs == plan->num_parts) {
             state->stack += (int64_t)ppc_image_words(lower, plan) * 8;
             return true;
         }
-        /* Without enough FPRs the image travels like any other aggregate. */
+        /* The members past the last FPR arrive in their own doublewords. */
         state->fpr = desc->num_fpr_arg_regs;
+        first_word = plan->parts[in_fprs].offset / desc->word_size;
+        state->stack += (int64_t)first_word * 8;
     }
 
-    if (plan->align >= 16)
+    if (plan->align >= 16 && first_word == 0)
         state->stack = (state->stack + 15) & ~INT64_C(15);
-    for (size_t index = 0; index < ppc_image_words(lower, plan); index++) {
+    for (size_t index = first_word; index < ppc_image_words(lower, plan); index++) {
         anvil_agg_part_t part = ppc_image_part(lower, plan, index);
         anvil_mir_vreg_t value = ppc_incoming_value(lower, ppc_assign_word(lower, state), ANVIL_MIR_REG_GPR, (uint16_t)(target.word * 8), false);
         if (value == ANVIL_MIR_NO_VREG || !anvil_agg_store_part(lower->mir, &part, value, object, target))
@@ -571,8 +584,15 @@ static bool lower_params(ppc_mir_lower_t *lower)
             return false;
     }
 
+    lower->named_args = state;
     return true;
 }
+
+static bool ppc_lower_wide_binary(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op);
+static bool ppc_ensure_wide(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t *pair);
+static bool ppc_wide_put(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t pair);
+static bool ppc_value_is_unsigned_wide(anvil_value_t *value);
+static anvil_wide_target_t ppc_wide_target(ppc_mir_lower_t *lower);
 
 static bool prepare_phi_results(ppc_mir_lower_t *lower)
 {
@@ -583,6 +603,12 @@ static bool prepare_phi_results(ppc_mir_lower_t *lower)
             if (!instr->result)
                 return false;
 
+            if (ppc_needs_i64_pair(lower, instr->result->type)) {
+                anvil_wide_pair_t pair;
+                if (!anvil_wide_new(lower->mir, ppc_value_is_unsigned_wide(instr->result), &pair) || !ppc_wide_put(lower, instr->result, pair))
+                    return false;
+                continue;
+            }
             anvil_mir_vreg_t vreg = ppc_add_vreg_for_type(lower, instr->result->type);
             if (vreg == ANVIL_MIR_NO_VREG)
                 return false;
@@ -657,7 +683,24 @@ static anvil_mir_vreg_t lower_const_value(ppc_mir_lower_t *lower, anvil_value_t 
     return vreg;
 }
 
-static anvil_mir_vreg_t lower_symbol_address(ppc_mir_lower_t *lower, const char *symbol)
+/* The last instruction names `source` (a global or function, or NULL for
+ * a run-time helper): through the GOT when the relocation model requires
+ * (helpers whenever the code is position-independent). */
+static bool ppc_mark_symbol_access(ppc_mir_lower_t *lower, const anvil_value_t *source)
+{
+    anvil_ctx_t *ctx = lower->func->parent ? lower->func->parent->ctx : NULL;
+    bool got = source ? anvil_symbol_uses_got(ctx, source) : false;
+    return !got || anvil_mir_set_instr_symbol_got(lower->mir, anvil_mir_num_instrs(lower->mir) - 1, true);
+}
+
+static bool ppc_mark_helper_call(ppc_mir_lower_t *lower)
+{
+    anvil_ctx_t *ctx = lower->func->parent ? lower->func->parent->ctx : NULL;
+    return anvil_ctx_get_reloc_model(ctx) == ANVIL_RELOC_STATIC ||
+           anvil_mir_set_instr_symbol_got(lower->mir, anvil_mir_num_instrs(lower->mir) - 1, true);
+}
+
+static anvil_mir_vreg_t lower_symbol_address(ppc_mir_lower_t *lower, const char *symbol, const anvil_value_t *source)
 {
     if (!symbol || !symbol[0])
         return ANVIL_MIR_NO_VREG;
@@ -666,7 +709,7 @@ static anvil_mir_vreg_t lower_symbol_address(ppc_mir_lower_t *lower, const char 
     if (vreg == ANVIL_MIR_NO_VREG)
         return ANVIL_MIR_NO_VREG;
 
-    if (!anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol)) {
+    if (!anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol) || !ppc_mark_symbol_access(lower, source)) {
         return ANVIL_MIR_NO_VREG;
     }
     return vreg;
@@ -678,7 +721,8 @@ static anvil_mir_vreg_t lower_reloc_address(ppc_mir_lower_t *lower, anvil_value_
     if (!symbol || !symbol[0])
         return ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, (uint16_t)(lower->desc->word_size * 8), false);
-    if (vreg == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_symbol_imm(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol, value->data.reloc.addend))
+    if (vreg == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_symbol_imm(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol, value->data.reloc.addend) ||
+        !ppc_mark_symbol_access(lower, value->data.reloc.symbol))
         return ANVIL_MIR_NO_VREG;
     return vreg;
 }
@@ -689,7 +733,7 @@ static anvil_mir_vreg_t lower_string_address(ppc_mir_lower_t *lower, anvil_value
     if (anvil_mir_add_string_literal(lower->mir, value->data.str, &label) < 0 || !label) {
         return ANVIL_MIR_NO_VREG;
     }
-    return lower_symbol_address(lower, label);
+    return lower_symbol_address(lower, label, NULL);
 }
 
 static anvil_mir_vreg_t lower_value(ppc_mir_lower_t *lower, anvil_value_t *value)
@@ -725,11 +769,11 @@ static anvil_mir_vreg_t lower_value(ppc_mir_lower_t *lower, anvil_value_t *value
         return lower_reloc_address(lower, value);
     case ANVIL_VAL_FUNC:
         if (value->data.func && value->data.func->name) {
-            return lower_symbol_address(lower, value->data.func->name);
+            return lower_symbol_address(lower, value->data.func->name, value);
         }
-        return lower_symbol_address(lower, value->name);
+        return lower_symbol_address(lower, value->name, value);
     case ANVIL_VAL_GLOBAL:
-        return lower_symbol_address(lower, value->name);
+        return lower_symbol_address(lower, value->name, value);
     default:
         return ANVIL_MIR_NO_VREG;
     }
@@ -966,7 +1010,7 @@ static bool add_return_copy(ppc_mir_lower_t *lower, anvil_value_t *value)
     if (ppc_needs_i64_pair(lower, value->type)) {
         anvil_mir_vreg_t hi = ANVIL_MIR_NO_VREG;
         anvil_mir_vreg_t lo = ANVIL_MIR_NO_VREG;
-        if (!wide_pair_get(lower, value, &hi, &lo, NULL))
+        if (!ppc_ensure_i64_pair(lower, value, &hi, &lo, NULL))
             return false;
         const anvil_mir_vreg_info_t *hi_info = anvil_mir_get_vreg_info(lower->mir, hi);
         if (!hi_info)
@@ -987,7 +1031,18 @@ static bool add_return_copy(ppc_mir_lower_t *lower, anvil_value_t *value)
     if (src == ANVIL_MIR_NO_VREG)
         return false;
 
-    anvil_mir_vreg_t ret = ppc_add_vreg_for_type(lower, value->type);
+    /* The ABI has the callee extend narrow integer results. */
+    unsigned extend_bits = lower->desc->abi_ops->result_extend_bits;
+    const anvil_mir_vreg_info_t *src_info = anvil_mir_get_vreg_info(lower->mir, src);
+    bool extend = !ppc_type_is_fp(value->type) && src_info && src_info->reg_class == ANVIL_MIR_REG_GPR && src_info->size_bits < extend_bits;
+    if (extend) {
+        src = anvil_mir_extend_gpr(lower->mir, src, (uint16_t)extend_bits, value->type->is_signed && value->type->kind != ANVIL_TYPE_I1);
+        if (src == ANVIL_MIR_NO_VREG)
+            return false;
+    }
+
+    anvil_mir_vreg_t ret = extend ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, (uint16_t)extend_bits, value->type->is_signed)
+                                  : ppc_add_vreg_for_type(lower, value->type);
     if (ret == ANVIL_MIR_NO_VREG)
         return false;
     if (!anvil_mir_set_fixed_reg(lower->mir, ret, ppc_type_is_fp(value->type) ? lower->desc->fpr_return_reg : lower->desc->gpr_return_reg)) {
@@ -1049,8 +1104,11 @@ static bool lower_phi_copies_for_edge(ppc_mir_lower_t *lower, anvil_block_t *src
         if (!phi->result)
             goto fail;
 
-        anvil_mir_vreg_t phi_vreg = map_get(lower, phi->result);
-        if (phi_vreg == ANVIL_MIR_NO_VREG)
+        bool wide = ppc_needs_i64_pair(lower, phi->result->type);
+        anvil_wide_pair_t phi_pair = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
+        anvil_mir_vreg_t phi_vreg = ANVIL_MIR_NO_VREG;
+        if (wide ? !wide_pair_get(lower, phi->result, &phi_pair.hi, &phi_pair.lo, NULL)
+                 : (phi_vreg = map_get(lower, phi->result)) == ANVIL_MIR_NO_VREG)
             goto fail;
 
         bool found = false;
@@ -1059,6 +1117,16 @@ static bool lower_phi_copies_for_edge(ppc_mir_lower_t *lower, anvil_block_t *src
                 if (i >= phi->num_operands || !phi->operands[i])
                     goto fail;
 
+                if (wide) {
+                    /* Both words move as part of the same parallel copy. */
+                    anvil_wide_pair_t incoming;
+                    if (!ppc_ensure_wide(lower, phi->operands[i], &incoming) ||
+                        !append_phi_edge_copy(&copies, &num_copies, &cap_copies, phi_pair.hi, incoming.hi) ||
+                        !append_phi_edge_copy(&copies, &num_copies, &cap_copies, phi_pair.lo, incoming.lo))
+                        goto fail;
+                    found = true;
+                    break;
+                }
                 anvil_mir_vreg_t incoming = lower_value(lower, phi->operands[i]);
                 if (incoming == ANVIL_MIR_NO_VREG)
                     goto fail;
@@ -1208,28 +1276,32 @@ static bool lower_outgoing_aggregate(ppc_mir_lower_t *lower, const ppc_agg_plan_
 {
     const anvil_ppc_target_desc_t *desc = lower->desc;
     anvil_agg_target_t target = ppc_agg_target(lower);
+    size_t first_word = 0;
     if (plan->placement == PPC_AGG_REGS) {
-        if (state->fpr + plan->num_parts <= desc->num_fpr_arg_regs) {
-            anvil_mir_vreg_t values[8];
-            for (unsigned part = 0; part < plan->num_parts; part++) {
-                values[part] = anvil_agg_load_part(lower->mir, &plan->parts[part], src, target);
-                if (values[part] == ANVIL_MIR_NO_VREG)
-                    return false;
-            }
-            for (unsigned part = 0; part < plan->num_parts; part++) {
-                ppc_arg_loc_t loc = {desc->fpr_arg_regs[state->fpr++], 0};
-                if (!ppc_outgoing_value(lower, loc, values[part], args))
-                    return false;
-            }
+        unsigned in_fprs = ppc_hfa_parts_in_fprs(lower, plan, state);
+        anvil_mir_vreg_t values[8];
+        for (unsigned part = 0; part < in_fprs; part++) {
+            values[part] = anvil_agg_load_part(lower->mir, &plan->parts[part], src, target);
+            if (values[part] == ANVIL_MIR_NO_VREG)
+                return false;
+        }
+        for (unsigned part = 0; part < in_fprs; part++) {
+            ppc_arg_loc_t loc = {desc->fpr_arg_regs[state->fpr++], 0};
+            if (!ppc_outgoing_value(lower, loc, values[part], args))
+                return false;
+        }
+        if (in_fprs == plan->num_parts) {
             state->stack += (int64_t)ppc_image_words(lower, plan) * 8;
             return true;
         }
         state->fpr = desc->num_fpr_arg_regs;
+        first_word = plan->parts[in_fprs].offset / desc->word_size;
+        state->stack += (int64_t)first_word * 8;
     }
 
-    if (plan->align >= 16)
+    if (plan->align >= 16 && first_word == 0)
         state->stack = (state->stack + 15) & ~INT64_C(15);
-    for (size_t index = 0; index < ppc_image_words(lower, plan); index++) {
+    for (size_t index = first_word; index < ppc_image_words(lower, plan); index++) {
         anvil_agg_part_t part = ppc_image_part(lower, plan, index);
         anvil_mir_vreg_t value = anvil_agg_load_part(lower->mir, &part, src, target);
         if (value == ANVIL_MIR_NO_VREG || !ppc_outgoing_value(lower, ppc_assign_word(lower, state), value, args))
@@ -1285,7 +1357,7 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         if (src == ANVIL_MIR_NO_VREG)
             return false;
 
-        anvil_param_attr_t attr = anvil_type_func_param_attr(fn_type, i);
+        anvil_param_attr_t attr = anvil_call_arg_attr(instr, fn_type, i);
         if (attr != ANVIL_PARAM_PLAIN) {
             ppc_agg_plan_t plan;
             if (!desc->abi_ops->classify_aggregate(arg->type->data.pointee, attr == ANVIL_PARAM_SRET, &plan))
@@ -1297,6 +1369,10 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
                 sret_object = src;
                 continue;
             }
+            /* Unnamed floating aggregates travel like unnamed floating
+             * scalars: as their image in the parameter words. */
+            if (plan.placement == PPC_AGG_REGS && variadic && i >= num_named && desc->abi_ops->unnamed_fp_in_gprs)
+                plan.placement = PPC_AGG_IMAGE;
             if (plan.placement == PPC_AGG_REGS || plan.placement == PPC_AGG_IMAGE) {
                 if (!lower_outgoing_aggregate(lower, &plan, src, &state, &args))
                     return false;
@@ -1374,7 +1450,8 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 
     /* For variadic callees the immediate records whether FPRs carry
      * arguments, for the ABI's variadic call setup. */
-    if (!anvil_mir_add_call(lower->mir, call_def, args.uses, args.num_uses, symbol, instr->call_cc, variadic, args.fp_in_regs ? 1 : 0))
+    if (!anvil_mir_add_call(lower->mir, call_def, args.uses, args.num_uses, symbol, instr->call_cc, variadic, args.fp_in_regs ? 1 : 0) ||
+        (symbol && !ppc_mark_symbol_access(lower, callee)))
         return false;
 
     if (sret_in_regs) {
@@ -1528,7 +1605,7 @@ static bool lower_alloca(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         return false;
 
     if (instr->num_operands == 0) {
-        int slot = anvil_mir_add_frame_slot(lower->mir, ppc_slot_bits_for_type(lower->desc, element_type), ppc_align_for_type(lower->desc, element_type));
+        int slot = anvil_mir_add_frame_slot(lower->mir, ppc_slot_bytes_for_type(lower->desc, element_type), ppc_align_for_type(lower->desc, element_type));
         if (slot < 0)
             return false;
         if (!anvil_mir_add_frame_addr(lower->mir, ptr, slot))
@@ -1682,82 +1759,55 @@ static bool lower_struct_gep(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 
 static bool ppc_ensure_i64_pair(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *hi, anvil_mir_vreg_t *lo, bool *is_unsigned);
 
-static bool ppc_lower_i64_pair_to_fp(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
-{
-    anvil_mir_vreg_t hi = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t lo = ANVIL_MIR_NO_VREG;
-    if (!ppc_ensure_i64_pair(lower, instr->operands[0], &hi, &lo, NULL)) {
-        return false;
-    }
-
-    bool is_unsigned = mir_op == ANVIL_MIR_OP_UITOFP;
-    uint16_t dst_bits = ppc_bits_for_type(lower->desc, instr->result->type);
-    anvil_mir_vreg_t arg_hi = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 32, !is_unsigned);
-    anvil_mir_vreg_t arg_lo = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 32, false);
-    anvil_mir_vreg_t call_result = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_FPR, dst_bits, false);
-    anvil_mir_vreg_t local_result = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_FPR, dst_bits, false);
-    if (arg_hi == ANVIL_MIR_NO_VREG || arg_lo == ANVIL_MIR_NO_VREG || call_result == ANVIL_MIR_NO_VREG || local_result == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, arg_hi, 3) ||
-        !anvil_mir_set_fixed_reg(lower->mir, arg_lo, 4) || !anvil_mir_set_fixed_reg(lower->mir, call_result, 1)) {
-        return false;
-    }
-    anvil_mir_vreg_t hi_uses[] = {hi};
-    anvil_mir_vreg_t lo_uses[] = {lo};
-    anvil_mir_vreg_t call_uses[] = {arg_hi, arg_lo};
-    anvil_mir_vreg_t result_uses[] = {call_result};
-    const char *helper = is_unsigned ? (dst_bits == 32 ? "__floatundisf" : "__floatundidf") : (dst_bits == 32 ? "__floatdisf" : "__floatdidf");
-    return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, arg_hi, hi_uses, 1) && anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, arg_lo, lo_uses, 1) &&
-           anvil_mir_add_call(lower->mir, call_result, call_uses, 2, helper, ANVIL_CC_SYSV, false, 0) && anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, local_result, result_uses, 1) &&
-           map_put(lower, instr->result, local_result);
-}
-
-static bool ppc_lower_fp_to_i64_pair(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
-{
-    anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
-    if (src == ANVIL_MIR_NO_VREG)
-        return false;
-    bool is_unsigned = mir_op == ANVIL_MIR_OP_FPTOUI;
-    const anvil_mir_vreg_info_t *src_info = anvil_mir_get_vreg_info(lower->mir, src);
-    if (!src_info || src_info->reg_class != ANVIL_MIR_REG_FPR)
-        return false;
-    anvil_mir_vreg_t arg = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_FPR, src_info->size_bits, false);
-    anvil_mir_vreg_t ret_hi = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 32, !is_unsigned);
-    anvil_mir_vreg_t ret_lo = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 32, false);
-    if (arg == ANVIL_MIR_NO_VREG || ret_hi == ANVIL_MIR_NO_VREG || ret_lo == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, arg, 1) || !anvil_mir_set_fixed_reg(lower->mir, ret_hi, 3) ||
-        !anvil_mir_set_fixed_reg(lower->mir, ret_lo, 4)) {
-        return false;
-    }
-    anvil_mir_vreg_t arg_copy_uses[] = {src};
-    anvil_mir_vreg_t call_uses[] = {arg};
-    const char *helper;
-    if (is_unsigned) {
-        helper = src_info->size_bits == 32 ? "__fixunssfdi" : "__fixunsdfdi";
-    } else {
-        helper = src_info->size_bits == 32 ? "__fixsfdi" : "__fixdfdi";
-    }
-    return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, arg, arg_copy_uses, 1) && anvil_mir_add_call(lower->mir, ret_hi, call_uses, 1, helper, ANVIL_CC_SYSV, false, 0) &&
-           anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT, ret_lo, NULL, 0) && wide_pair_put(lower, instr->result, ret_hi, ret_lo, is_unsigned);
-}
-
 static bool lower_cast(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
 {
     if (instr->num_operands != 1 || !instr->result)
         return false;
-    if (ppc_needs_i64_pair(lower, instr->operands[0]->type) && (mir_op == ANVIL_MIR_OP_SITOFP || mir_op == ANVIL_MIR_OP_UITOFP)) {
-        return ppc_lower_i64_pair_to_fp(lower, instr, mir_op);
+    /* A pointer reinterpreted as another pointer is the same value. */
+    if (anvil_cast_keeps_value(instr)) {
+        anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
+        return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
     }
-    if (ppc_needs_i64_pair(lower, instr->result->type)) {
-        if (mir_op == ANVIL_MIR_OP_FPTOSI || mir_op == ANVIL_MIR_OP_FPTOUI) {
-            return ppc_lower_fp_to_i64_pair(lower, instr, mir_op);
+    bool dst_pair = ppc_needs_i64_pair(lower, instr->result->type);
+    bool src_pair = ppc_needs_i64_pair(lower, instr->operands[0]->type);
+    anvil_wide_target_t target = ppc_wide_target(lower);
+    if (dst_pair && src_pair) {
+        if (mir_op != ANVIL_MIR_OP_BITCAST)
+            return false;
+        return ppc_lower_i64_bitcast_pair(lower, instr);
+    }
+    if (dst_pair) {
+        /* To 64 bits: extension (pointers zero-extend) or FP conversion. */
+        anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
+        anvil_wide_pair_t out;
+        bool ok = src != ANVIL_MIR_NO_VREG &&
+                  (mir_op == ANVIL_MIR_OP_FPTOSI || mir_op == ANVIL_MIR_OP_FPTOUI
+                       ? anvil_wide_from_fp(lower->mir, &target, src, mir_op == ANVIL_MIR_OP_FPTOUI, &out)
+                       : anvil_wide_extend(lower->mir, src, mir_op == ANVIL_MIR_OP_SEXT, ppc_value_is_unsigned_wide(instr->result), &out));
+        return ok && ppc_wide_put(lower, instr->result, out);
+    }
+    if (src_pair) {
+        /* From 64 bits: the low word (truncation, pointers) or FP. */
+        anvil_wide_pair_t a;
+        anvil_mir_vreg_t result;
+        if (!ppc_ensure_wide(lower, instr->operands[0], &a))
+            return false;
+        if (mir_op == ANVIL_MIR_OP_SITOFP || mir_op == ANVIL_MIR_OP_UITOFP) {
+            if (!anvil_wide_to_fp(lower->mir, &target, a, mir_op == ANVIL_MIR_OP_UITOFP, ppc_bits_for_type(lower->desc, instr->result->type), &result))
+                return false;
+        } else {
+            result = anvil_wide_truncate(lower->mir, a, ppc_bits_for_type(lower->desc, instr->result->type), ppc_type_is_signed(instr->result->type));
         }
-        if (mir_op == ANVIL_MIR_OP_BITCAST) {
-            return ppc_lower_i64_bitcast_pair(lower, instr);
-        }
-        return false;
+        return result != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, result);
     }
 
     anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
     anvil_mir_vreg_t def = ppc_add_vreg_for_type(lower, instr->result->type);
     if (src == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
+        return false;
+    /* Narrow integers convert from their extended value. */
+    src = anvil_mir_int_to_fp_source(lower->mir, mir_op, src, 32);
+    if (src == ANVIL_MIR_NO_VREG)
         return false;
 
     if (instr->result->type->kind == ANVIL_TYPE_I1 && instr->operands[0]->type->kind != ANVIL_TYPE_I1) {
@@ -1810,6 +1860,20 @@ static bool lower_select(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands != 3 || !instr->result)
         return false;
+    if (ppc_needs_i64_pair(lower, instr->result->type)) {
+        /* One select per word. */
+        anvil_wide_pair_t then_pair, else_pair, out;
+        anvil_mir_vreg_t cond = lower_value(lower, instr->operands[0]);
+        if (cond == ANVIL_MIR_NO_VREG || !ppc_ensure_wide(lower, instr->operands[1], &then_pair) ||
+            !ppc_ensure_wide(lower, instr->operands[2], &else_pair) ||
+            !anvil_wide_new(lower->mir, ppc_value_is_unsigned_wide(instr->result), &out))
+            return false;
+        anvil_mir_vreg_t hi_uses[] = {cond, then_pair.hi, else_pair.hi};
+        anvil_mir_vreg_t lo_uses[] = {cond, then_pair.lo, else_pair.lo};
+        return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, out.hi, hi_uses, 3) &&
+               anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, out.lo, lo_uses, 3) &&
+               ppc_wide_put(lower, instr->result, out);
+    }
     anvil_mir_vreg_t cond = lower_value(lower, instr->operands[0]);
     anvil_mir_vreg_t then_v = lower_value(lower, instr->operands[1]);
     anvil_mir_vreg_t else_v = lower_value(lower, instr->operands[2]);
@@ -1875,43 +1939,110 @@ static anvil_mir_vreg_t ppc_add_bool_vreg(ppc_mir_lower_t *lower)
     return anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false);
 }
 
-static bool ppc_lower_i64_const_pair(ppc_mir_lower_t *lower, anvil_value_t *value)
-{
-    anvil_mir_vreg_t existing_hi = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t existing_lo = ANVIL_MIR_NO_VREG;
-    if (wide_pair_get(lower, value, &existing_hi, &existing_lo, NULL)) {
-        return true;
-    }
-
-    int64_t imm = 0;
-    if (!ppc_get_const_int(value, &imm))
-        return false;
-
-    uint64_t bits = (uint64_t)imm;
-    int32_t hi_imm = (int32_t)(bits >> 32);
-    int32_t lo_imm = (int32_t)(bits & 0xffffffffu);
-    bool is_unsigned = value->type && value->type->kind == ANVIL_TYPE_U64;
-
-    anvil_mir_vreg_t hi = ppc_add_i32_vreg(lower, !is_unsigned);
-    anvil_mir_vreg_t lo = ppc_add_i32_vreg(lower, false);
-    if (hi == ANVIL_MIR_NO_VREG || lo == ANVIL_MIR_NO_VREG)
-        return false;
-
-    if (!anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, hi, (int64_t)hi_imm) || !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, lo, (int64_t)lo_imm)) {
-        return false;
-    }
-
-    return wide_const_put(lower, value, imm) && wide_pair_put(lower, value, hi, lo, is_unsigned);
-}
-
 static bool ppc_ensure_i64_pair(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *hi, anvil_mir_vreg_t *lo, bool *is_unsigned)
 {
-    if (wide_pair_get(lower, value, hi, lo, is_unsigned))
+    int64_t imm = 0;
+    if (value && ppc_get_wide_const_value(lower, value, &imm)) {
+        /* Materialized at each use: a constant may be used in blocks the
+         * first use does not dominate. */
+        bool value_unsigned = value->type && value->type->kind == ANVIL_TYPE_U64;
+        anvil_wide_pair_t pair;
+        if (!anvil_wide_constant(lower->mir, imm, value_unsigned, &pair))
+            return false;
+        *hi = pair.hi;
+        *lo = pair.lo;
+        if (is_unsigned)
+            *is_unsigned = value_unsigned;
         return true;
-    if (value && value->kind == ANVIL_VAL_CONST_INT && ppc_lower_i64_const_pair(lower, value)) {
-        return wide_pair_get(lower, value, hi, lo, is_unsigned);
     }
-    return false;
+    return wide_pair_get(lower, value, hi, lo, is_unsigned);
+}
+
+static bool ppc_ensure_wide(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t *pair)
+{
+    return ppc_ensure_i64_pair(lower, value, &pair->hi, &pair->lo, NULL);
+}
+
+static bool ppc_wide_put(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t pair)
+{
+    return wide_pair_put(lower, value, pair.hi, pair.lo, value->type && value->type->kind == ANVIL_TYPE_U64);
+}
+
+static bool ppc_value_is_unsigned_wide(anvil_value_t *value)
+{
+    return value && value->type && value->type->kind == ANVIL_TYPE_U64;
+}
+
+/* Run-time helpers for 64-bit arithmetic, called with the C convention:
+ * arguments where the ABI module assigns them, a 64-bit result in r3:r4 and
+ * a floating one in f1. */
+static bool ppc_wide_call_helper(void *ctx, const char *name, const anvil_wide_pair_t *args, size_t num_args,
+                                 anvil_wide_pair_t result)
+{
+    ppc_mir_lower_t *lower = ctx;
+    const anvil_ppc_target_desc_t *desc = lower->desc;
+    ppc_arg_state_t state = {0, 0, 0};
+    anvil_mir_vreg_t uses[8];
+    size_t num_uses = 0;
+    for (size_t i = 0; i < num_args; i++) {
+        anvil_mir_vreg_t values[2] = {args[i].hi, args[i].lo};
+        ppc_arg_loc_t locs[2];
+        size_t count = 1;
+        const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(lower->mir, args[i].lo);
+        if (!info)
+            return false;
+        if (args[i].hi != ANVIL_MIR_NO_VREG) {
+            int lo_reg = -1;
+            if (!desc->abi_ops->assign_pair)
+                return false;
+            locs[0] = desc->abi_ops->assign_pair(desc, &state, &lo_reg);
+            locs[1] = (ppc_arg_loc_t){lo_reg, locs[0].offset + 4};
+            count = 2;
+        } else {
+            values[0] = args[i].lo;
+            locs[0] = info->reg_class == ANVIL_MIR_REG_FPR ? desc->abi_ops->assign_fpr(desc, &state, info->size_bits == 32)
+                                                           : desc->abi_ops->assign_word(desc, &state);
+        }
+        for (size_t w = 0; w < count; w++) {
+            const anvil_mir_vreg_info_t *winfo = anvil_mir_get_vreg_info(lower->mir, values[w]);
+            if (!winfo || locs[w].reg < 0 || num_uses >= 8)
+                return false;
+            anvil_mir_vreg_t fixed = anvil_mir_add_vreg_typed(lower->mir, winfo->reg_class, winfo->size_bits, winfo->is_signed);
+            anvil_mir_vreg_t copy_uses[] = {values[w]};
+            if (fixed == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, fixed, locs[w].reg) ||
+                !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed, copy_uses, 1))
+                return false;
+            uses[num_uses++] = fixed;
+        }
+    }
+
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(lower->mir, result.lo);
+    if (!info)
+        return false;
+    bool fp = info->reg_class == ANVIL_MIR_REG_FPR;
+    anvil_mir_vreg_t first = result.hi != ANVIL_MIR_NO_VREG ? result.hi : result.lo;
+    const anvil_mir_vreg_info_t *first_info = anvil_mir_get_vreg_info(lower->mir, first);
+    anvil_mir_vreg_t ret_first = anvil_mir_add_vreg_typed(lower->mir, first_info->reg_class, first_info->size_bits, first_info->is_signed);
+    if (ret_first == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, ret_first, fp ? desc->fpr_return_reg : desc->gpr_return_reg) ||
+        !anvil_mir_add_call(lower->mir, ret_first, uses, num_uses, name, ANVIL_CC_SYSV, false, 0) || !ppc_mark_helper_call(lower))
+        return false;
+    anvil_mir_vreg_t ret_lo = ANVIL_MIR_NO_VREG;
+    if (result.hi != ANVIL_MIR_NO_VREG) {
+        ret_lo = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 32, false);
+        if (ret_lo == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, ret_lo, desc->gpr_return_reg + 1) ||
+            !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT, ret_lo, NULL, 0))
+            return false;
+    }
+    anvil_mir_vreg_t first_uses[] = {ret_first};
+    if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, first, first_uses, 1))
+        return false;
+    anvil_mir_vreg_t lo_uses[] = {ret_lo};
+    return result.hi == ANVIL_MIR_NO_VREG || anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, result.lo, lo_uses, 1);
+}
+
+static anvil_wide_target_t ppc_wide_target(ppc_mir_lower_t *lower)
+{
+    return (anvil_wide_target_t){ppc_wide_call_helper, lower};
 }
 
 static bool ppc_lower_load_i64_pair(ppc_mir_lower_t *lower, anvil_instr_t *instr)
@@ -2014,82 +2145,41 @@ static bool ppc_lower_i64_bitcast_pair(ppc_mir_lower_t *lower, anvil_instr_t *in
     return wide_pair_put(lower, instr->result, hi, lo, is_unsigned);
 }
 
-static bool ppc_add_pair_cmp(ppc_mir_lower_t *lower, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
+/* 64-bit binary operation through the shared wide-integer legalizer. */
+static bool ppc_lower_wide_binary(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
 {
-    anvil_mir_vreg_t uses[] = {lhs, rhs};
-    return anvil_mir_add_instr(lower->mir, op, def, uses, 2);
-}
-
-static bool ppc_lower_i64_cmp_pair(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t op)
-{
-    if (!instr->result || instr->num_operands != 2)
+    if (!instr->result)
         return false;
-
-    anvil_mir_vreg_t lhi = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t llo = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t rhi = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t rlo = ANVIL_MIR_NO_VREG;
-    if (!ppc_ensure_i64_pair(lower, instr->operands[0], &lhi, &llo, NULL) || !ppc_ensure_i64_pair(lower, instr->operands[1], &rhi, &rlo, NULL)) {
+    anvil_wide_pair_t a, b, out;
+    bool shift = instr->op == ANVIL_OP_SHL || instr->op == ANVIL_OP_SHR || instr->op == ANVIL_OP_SAR;
+    if (!ppc_ensure_wide(lower, instr->operands[0], &a))
+        return false;
+    if (shift && !ppc_needs_i64_pair(lower, instr->operands[1]->type)) {
+        /* A shift count may be narrower than the shifted value. */
+        b.hi = ANVIL_MIR_NO_VREG;
+        b.lo = lower_widen_gpr_to_word(lower, lower_value(lower, instr->operands[1]), false);
+        if (b.lo == ANVIL_MIR_NO_VREG)
+            return false;
+    } else if (!ppc_ensure_wide(lower, instr->operands[1], &b)) {
         return false;
     }
-
-    anvil_mir_vreg_t result = ppc_add_bool_vreg(lower);
-    if (result == ANVIL_MIR_NO_VREG)
-        return false;
-
-    if (op == ANVIL_MIR_OP_CMP_EQ || op == ANVIL_MIR_OP_CMP_NE) {
-        anvil_mir_vreg_t hi_cmp = ppc_add_bool_vreg(lower);
-        anvil_mir_vreg_t lo_cmp = ppc_add_bool_vreg(lower);
-        if (hi_cmp == ANVIL_MIR_NO_VREG || lo_cmp == ANVIL_MIR_NO_VREG) {
-            return false;
-        }
-        if (!ppc_add_pair_cmp(lower, op, hi_cmp, lhi, rhi) || !ppc_add_pair_cmp(lower, op, lo_cmp, llo, rlo)) {
-            return false;
-        }
-
-        anvil_mir_vreg_t uses[] = {hi_cmp, lo_cmp};
-        anvil_mir_opcode_t join = op == ANVIL_MIR_OP_CMP_EQ ? ANVIL_MIR_OP_AND : ANVIL_MIR_OP_OR;
-        if (!anvil_mir_add_instr(lower->mir, join, result, uses, 2)) {
-            return false;
-        }
-        return map_put(lower, instr->result, result);
+    if (mir_op_is_compare(mir_op)) {
+        anvil_mir_vreg_t result = ppc_add_bool_vreg(lower);
+        return result != ANVIL_MIR_NO_VREG && anvil_wide_compare(lower->mir, mir_op, a, b, result) &&
+               map_put(lower, instr->result, result);
     }
 
-    bool unsigned_cmp = op == ANVIL_MIR_OP_CMP_ULT || op == ANVIL_MIR_OP_CMP_ULE || op == ANVIL_MIR_OP_CMP_UGT || op == ANVIL_MIR_OP_CMP_UGE;
-    bool less = op == ANVIL_MIR_OP_CMP_LT || op == ANVIL_MIR_OP_CMP_LE || op == ANVIL_MIR_OP_CMP_ULT || op == ANVIL_MIR_OP_CMP_ULE;
-    bool equal_ok = op == ANVIL_MIR_OP_CMP_LE || op == ANVIL_MIR_OP_CMP_GE || op == ANVIL_MIR_OP_CMP_ULE || op == ANVIL_MIR_OP_CMP_UGE;
-
-    anvil_mir_opcode_t hi_rel;
-    anvil_mir_opcode_t lo_rel;
-    if (less) {
-        hi_rel = unsigned_cmp ? ANVIL_MIR_OP_CMP_ULT : ANVIL_MIR_OP_CMP_LT;
-        lo_rel = equal_ok ? ANVIL_MIR_OP_CMP_ULE : ANVIL_MIR_OP_CMP_ULT;
+    anvil_wide_target_t target = ppc_wide_target(lower);
+    bool is_unsigned = ppc_value_is_unsigned_wide(instr->result);
+    bool ok;
+    if (shift) {
+        int64_t count = 0;
+        bool known = ppc_get_const_int(instr->operands[1], &count);
+        ok = anvil_wide_shift(lower->mir, &target, instr->op, a, b.lo, known, count, is_unsigned, &out);
     } else {
-        hi_rel = unsigned_cmp ? ANVIL_MIR_OP_CMP_UGT : ANVIL_MIR_OP_CMP_GT;
-        lo_rel = equal_ok ? ANVIL_MIR_OP_CMP_UGE : ANVIL_MIR_OP_CMP_UGT;
+        ok = anvil_wide_binary(lower->mir, &target, instr->op, a, b, is_unsigned, &out);
     }
-
-    anvil_mir_vreg_t hi_cmp = ppc_add_bool_vreg(lower);
-    anvil_mir_vreg_t hi_eq = ppc_add_bool_vreg(lower);
-    anvil_mir_vreg_t lo_cmp = ppc_add_bool_vreg(lower);
-    anvil_mir_vreg_t eq_and_lo = ppc_add_bool_vreg(lower);
-    if (hi_cmp == ANVIL_MIR_NO_VREG || hi_eq == ANVIL_MIR_NO_VREG || lo_cmp == ANVIL_MIR_NO_VREG || eq_and_lo == ANVIL_MIR_NO_VREG) {
-        return false;
-    }
-
-    if (!ppc_add_pair_cmp(lower, hi_rel, hi_cmp, lhi, rhi) || !ppc_add_pair_cmp(lower, ANVIL_MIR_OP_CMP_EQ, hi_eq, lhi, rhi) || !ppc_add_pair_cmp(lower, lo_rel, lo_cmp, llo, rlo)) {
-        return false;
-    }
-
-    anvil_mir_vreg_t and_uses[] = {hi_eq, lo_cmp};
-    if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, eq_and_lo, and_uses, 2)) {
-        return false;
-    }
-    anvil_mir_vreg_t or_uses[] = {hi_cmp, eq_and_lo};
-    if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_OR, result, or_uses, 2)) {
-        return false;
-    }
-    return map_put(lower, instr->result, result);
+    return ok && ppc_wide_put(lower, instr->result, out);
 }
 
 static bool lower_switch(ppc_mir_lower_t *lower, anvil_instr_t *instr)
@@ -2176,11 +2266,21 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     if (instr->op == ANVIL_OP_PHI)
         return true;
 
+    /* Vector arithmetic and broadcasts, and the scalar operations the
+     * target's table prices (FMA, FSQRT), where the target has them. */
+    anvil_vector_mir_form_t vector;
+    if (anvil_vector_mir_form(lower->func->owner_ctx, instr, &vector)) {
+        anvil_mir_vreg_t uses[ANVIL_VECTOR_MAX_USES] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
+        for (size_t operand = 0; operand < vector.num_uses; operand++)
+            uses[operand] = lower_value(lower, instr->operands[operand]);
+        anvil_mir_vreg_t def = vector.supported ? ppc_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
+        return anvil_vector_mir_emit(lower->mir, &vector, def, uses) && map_put(lower, instr->result, def);
+    }
+
     anvil_mir_opcode_t mir_op;
     if (instr->num_operands == 2 && map_binop(instr->op, &mir_op)) {
-        if (ppc_needs_i64_pair(lower, instr->operands[0]->type) && ppc_needs_i64_pair(lower, instr->operands[1]->type) && mir_op_is_compare(mir_op)) {
-            return ppc_lower_i64_cmp_pair(lower, instr, mir_op);
-        }
+        if (ppc_needs_i64_pair(lower, instr->operands[0]->type) || (instr->result && ppc_needs_i64_pair(lower, instr->result->type)))
+            return ppc_lower_wide_binary(lower, instr, mir_op);
 
         anvil_mir_vreg_t lhs = lower_value(lower, instr->operands[0]);
         anvil_mir_vreg_t rhs = lower_value(lower, instr->operands[1]);
@@ -2193,7 +2293,8 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         }
 
         anvil_mir_vreg_t uses[] = {lhs, rhs};
-        bool added = mir_op == ANVIL_MIR_OP_FCMP ? anvil_mir_add_instr_imm_uses(lower->mir, mir_op, def, uses, 2, instr->fcmp_pred) : anvil_mir_add_instr(lower->mir, mir_op, def, uses, 2);
+        bool added = mir_op == ANVIL_MIR_OP_FCMP ? anvil_mir_add_instr_imm_uses(lower->mir, mir_op, def, uses, 2, instr->fcmp_pred)
+                                                 : anvil_mir_add_binary_extending(lower->mir, mir_op, def, lhs, rhs, 32);
         if (!added) {
             return false;
         }
@@ -2202,17 +2303,13 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 
     if (instr->num_operands == 1 && map_unop(instr->op, &mir_op)) {
         if (instr->result && ppc_needs_i64_pair(lower, instr->result->type)) {
-            int64_t imm = 0;
-            if (!ppc_get_wide_const_value(lower, instr->operands[0], &imm)) {
+            anvil_wide_pair_t a, out;
+            bool is_unsigned = ppc_value_is_unsigned_wide(instr->result);
+            if (!ppc_ensure_wide(lower, instr->operands[0], &a))
                 return false;
-            }
-            if (instr->op == ANVIL_OP_NEG) {
-                return wide_const_put(lower, instr->result, (int64_t)(0 - (uint64_t)imm));
-            }
-            if (instr->op == ANVIL_OP_NOT) {
-                return wide_const_put(lower, instr->result, ~imm);
-            }
-            return false;
+            bool ok = instr->op == ANVIL_OP_NEG ? anvil_wide_neg(lower->mir, a, is_unsigned, &out)
+                    : instr->op == ANVIL_OP_NOT ? anvil_wide_not(lower->mir, a, is_unsigned, &out) : false;
+            return ok && ppc_wide_put(lower, instr->result, out);
         }
 
         anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
@@ -2231,6 +2328,42 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     }
 
     switch (instr->op) {
+    case ANVIL_OP_ATOMIC_LOAD:
+    case ANVIL_OP_ATOMIC_STORE:
+    case ANVIL_OP_ATOMIC_RMW:
+    case ANVIL_OP_ATOMIC_CMPXCHG:
+    case ANVIL_OP_ATOMIC_FENCE: {
+        anvil_mir_vreg_t uses[3];
+        for (size_t operand = 0; operand < instr->num_operands && operand < 3; operand++) {
+            if (ppc_needs_i64_pair(lower, instr->operands[operand]->type)) {
+                if (lower->func->parent && lower->func->parent->ctx)
+                    anvil_set_error(lower->func->parent->ctx, ANVIL_ERR_CODEGEN, "32-bit PowerPC atomics on 64-bit values are not supported");
+                return false;
+            }
+            uses[operand] = lower_value(lower, instr->operands[operand]);
+            if (uses[operand] == ANVIL_MIR_NO_VREG)
+                return false;
+        }
+
+        anvil_mir_vreg_t def = instr->result ? ppc_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
+        if ((instr->result && def == ANVIL_MIR_NO_VREG) || instr->num_operands > 3 ||
+            !anvil_mir_add_atomic(lower->mir, instr->op, def, uses, instr->num_operands, &instr->atomic))
+            return false;
+
+        /* r0 and r5-r10 are the reservation loop's temporaries, r3/r4 stage
+         * the operands (r11 too, a spill scratch register). */
+        uint64_t temporaries = UINT64_C(1) | (UINT64_C(0xff) << 3);
+        if (!anvil_mir_set_instr_clobbers(lower->mir, anvil_mir_num_instrs(lower->mir) - 1, ANVIL_MIR_REG_GPR, temporaries))
+            return false;
+        return !instr->result || map_put(lower, instr->result, def);
+    }
+    case ANVIL_OP_VA_START: {
+        if (!instr->result || !lower->func->type->data.func.variadic || !lower->desc->abi_ops->add_va_start)
+            return false;
+        anvil_mir_vreg_t def = ppc_add_vreg_for_type(lower, instr->result->type);
+        return def != ANVIL_MIR_NO_VREG && lower->desc->abi_ops->add_va_start(lower->mir, def, &lower->named_args) &&
+               map_put(lower, instr->result, def);
+    }
     case ANVIL_OP_ALLOCA:
         return lower_alloca(lower, instr);
     case ANVIL_OP_GEP:
@@ -2395,6 +2528,8 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func, anvil_ppc_vari
     lower.desc = desc;
     lower.func = func;
     lower.mir = anvil_mir_func_create(func->name);
+    anvil_mir_func_set_linkage(lower.mir, func->linkage);
+    anvil_mir_func_set_cpu_features(lower.mir, anvil_ctx_get_cpu_features(func->owner_ctx));
     if (!lower.mir)
         return NULL;
 
@@ -2404,7 +2539,7 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func, anvil_ppc_vari
         return NULL;
     }
 
-    if (!create_mir_blocks(&lower) || !lower_params(&lower) || !prepare_phi_results(&lower)) {
+    if (!anvil_opt_cfg_build_layout(&cfg) || !create_mir_blocks(&lower) || !lower_params(&lower) || !prepare_phi_results(&lower)) {
         anvil_opt_cfg_destroy(&cfg);
         anvil_mir_func_destroy(lower.mir);
         ppc_lower_free(&lower);
@@ -2412,7 +2547,7 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func, anvil_ppc_vari
     }
 
     for (size_t rank = 0; rank < cfg.count; rank++) {
-        anvil_block_t *block = cfg.blocks[cfg.rpo[rank]];
+        anvil_block_t *block = cfg.blocks[cfg.layout[rank]];
         anvil_mir_block_t mir_block = block_get(&lower, block);
         if (mir_block == ANVIL_MIR_NO_BLOCK || !anvil_mir_set_current_block(lower.mir, mir_block)) {
             anvil_opt_cfg_destroy(&cfg);

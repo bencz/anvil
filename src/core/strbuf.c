@@ -139,3 +139,14 @@ char *anvil_strbuf_detach(anvil_strbuf_t *sb, size_t *len)
     
     return data;
 }
+
+bool anvil_format_failure(char *error, size_t error_len, const char *fmt, ...)
+{
+    if (error && error_len > 0) {
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(error, error_len, fmt, args);
+        va_end(args);
+    }
+    return false;
+}

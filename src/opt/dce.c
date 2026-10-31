@@ -103,6 +103,8 @@ static bool has_side_effects(const anvil_instr_t *instr)
         case ANVIL_OP_FMUL:
         case ANVIL_OP_FDIV:
         case ANVIL_OP_FCMP:
+        case ANVIL_OP_FMA:
+        case ANVIL_OP_FSQRT:
             return true;
         default:
             return false;

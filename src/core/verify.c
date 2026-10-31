@@ -9,17 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool verify_fail(char *error, size_t error_len, const char *fmt, ...)
-{
-    if (error && error_len > 0) {
-        va_list args;
-        va_start(args, fmt);
-        vsnprintf(error, error_len, fmt, args);
-        va_end(args);
-    }
-    return false;
-}
-
 static const char *func_name(const anvil_func_t *func)
 {
     return (func && func->name) ? func->name : "<anon>";
@@ -130,18 +119,18 @@ static bool verify_value_ref(const anvil_module_t *mod,
                              size_t error_len)
 {
     if (!value) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s references a null value",
                            func_name(func));
     }
     if (!value->type) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s references a value without type",
                            func_name(func));
     }
     if (!mod || value->owner_ctx != mod->ctx ||
         value->type->owner_ctx != mod->ctx) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s references a value from another context",
                            func_name(func));
     }
@@ -162,35 +151,35 @@ static bool verify_value_ref(const anvil_module_t *mod,
                                                               mod);
                 if (dag == ANVIL_CONST_DAG_VALID) return true;
                 if (dag == ANVIL_CONST_DAG_NOMEM)
-                    return verify_fail(error, error_len,
+                    return anvil_format_failure(error, error_len,
                                        "out of memory validating a constant DAG in function %s",
                                        func_name(func));
             }
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s references a malformed constant DAG",
                                func_name(func));
 
         case ANVIL_VAL_GLOBAL:
             if (module_has_global_value(mod, value)) return true;
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s references a global outside its module",
                                func_name(func));
 
         case ANVIL_VAL_FUNC:
             if (module_has_func_value(mod, value)) return true;
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s references a function outside its module",
                                func_name(func));
 
         case ANVIL_VAL_PARAM:
             if (func_has_param_value(func, value)) return true;
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s references a parameter outside the function",
                                func_name(func));
 
         case ANVIL_VAL_INSTR:
             if (func_has_instr_result(func, value)) return true;
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s references an instruction result outside the function",
                                func_name(func));
 
@@ -198,7 +187,7 @@ static bool verify_value_ref(const anvil_module_t *mod,
             break;
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "function %s references an unsupported value kind",
                        func_name(func));
 }
@@ -336,20 +325,20 @@ static bool verify_cfg_build(const anvil_func_t *func,
     size_t num_blocks = 0;
     for (const anvil_block_t *block = func->blocks; block; block = block->next) {
         if (num_blocks == SIZE_MAX) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s has too many basic blocks",
                                func_name(func));
         }
         num_blocks++;
     }
     if (num_blocks == 0) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has no basic blocks",
                            func_name(func));
     }
 
     if (num_blocks > SIZE_MAX - 63) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "CFG analysis size overflow in function %s",
                            func_name(func));
     }
@@ -357,7 +346,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
     if (size_mul_overflows(num_blocks, sizeof(*cfg->blocks)) ||
         size_mul_overflows(num_blocks, words) ||
         size_mul_overflows(num_blocks * words, sizeof(*cfg->preds))) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "CFG analysis size overflow in function %s",
                            func_name(func));
     }
@@ -372,7 +361,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
                                       sizeof(*cfg->reachable));
     if (!cfg->blocks || !cfg->preds || !cfg->doms || !cfg->reachable) {
         verify_cfg_destroy(cfg);
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "out of memory while analyzing CFG of function %s",
                            func_name(func));
     }
@@ -402,7 +391,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
     size_t entry_index = verify_cfg_block_index(cfg, func->entry);
     if (entry_index == SIZE_MAX) {
         verify_cfg_destroy(cfg);
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s entry block is not in the CFG",
                            func_name(func));
     }
@@ -429,7 +418,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
         if (!cfg->reachable[i]) {
             const char *unreachable_name = block_name(cfg->blocks[i]);
             verify_cfg_destroy(cfg);
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "block %s in function %s is unreachable from the entry block",
                                unreachable_name, func_name(func));
         }
@@ -450,7 +439,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
     uint64_t *next_dom = anvil_ctx_malloc(ctx, words * sizeof(*next_dom));
     if (!next_dom) {
         verify_cfg_destroy(cfg);
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "out of memory while computing dominators for function %s",
                            func_name(func));
     }
@@ -481,7 +470,7 @@ static bool verify_cfg_build(const anvil_func_t *func,
             if (!saw_pred) {
                 free(next_dom);
                 verify_cfg_destroy(cfg);
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "reachable block %s in function %s has no predecessor",
                                    block_name(cfg->blocks[block]), func_name(func));
             }
@@ -543,12 +532,12 @@ static bool verify_ssa_use(const anvil_func_t *func,
     const anvil_instr_t *definition = value->data.instr;
     if (definition->parent == use->parent) {
         if (instr_precedes(definition, use)) return true;
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "instruction result in block %s of function %s is used before its definition",
                            block_name(use->parent), func_name(func));
     }
     if (verify_cfg_dominates(cfg, definition->parent, use->parent)) return true;
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "instruction result from block %s does not dominate its use in block %s of function %s",
                        block_name(definition->parent), block_name(use->parent),
                        func_name(func));
@@ -584,7 +573,7 @@ static bool verify_phi_value_dominates_edge(const anvil_func_t *func,
         return true;
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "PHI in block %s of function %s has a value from block %s that does not dominate incoming edge from %s",
                        block_name(phi->parent), func_name(func),
                        block_name(definition->parent), block_name(pred));
@@ -637,7 +626,7 @@ static bool verify_same_type_operands(const anvil_module_t *mod,
                                       size_t error_len)
 {
     if (instr->num_operands != 2 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "%s in function %s must have two operands and a result",
                            kind, func_name(func));
     }
@@ -650,7 +639,7 @@ static bool verify_same_type_operands(const anvil_module_t *mod,
     }
     if (!type_equal(lhs->type, rhs->type) ||
         !type_equal(instr->result->type, lhs->type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "%s in function %s has operand type mismatch",
                            kind, func_name(func));
     }
@@ -673,7 +662,7 @@ static bool verify_binop(const anvil_module_t *mod,
                                instr->operands[1]->type,
                                instr->result->type)) return true;
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "binary instruction in function %s uses an invalid operand type",
                        func_name(func));
 }
@@ -685,7 +674,7 @@ static bool verify_shift(const anvil_module_t *mod,
                          size_t error_len)
 {
     if (instr->num_operands != 2 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "shift in function %s must have two operands and a result",
                            func_name(func));
     }
@@ -695,12 +684,8 @@ static bool verify_shift(const anvil_module_t *mod,
         !verify_value_ref(mod, func, amount, error, error_len)) {
         return false;
     }
-    if (!type_is_integer(value->type) ||
-        value->type->kind == ANVIL_TYPE_I1 ||
-        !type_is_integer(amount->type) ||
-        amount->type->kind == ANVIL_TYPE_I1 ||
-        !type_equal(instr->result->type, value->type)) {
-        return verify_fail(error, error_len,
+    if (!anvil_sem_shift_types(value->type, amount->type, instr->result->type)) {
+        return anvil_format_failure(error, error_len,
                            "shift in function %s has invalid operand type",
                            func_name(func));
     }
@@ -714,7 +699,7 @@ static bool verify_cmp(const anvil_module_t *mod,
                        size_t error_len)
 {
     if (instr->num_operands != 2 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "comparison in function %s must have two operands and a result",
                            func_name(func));
     }
@@ -726,13 +711,13 @@ static bool verify_cmp(const anvil_module_t *mod,
     }
     if (!anvil_sem_cmp_types(instr->op, lhs->type, rhs->type,
                              instr->result->type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "comparison in function %s has operand/result type mismatch",
                            func_name(func));
     }
     if (instr->op == ANVIL_OP_FCMP &&
         (unsigned)instr->fcmp_pred > (unsigned)ANVIL_FCMP_TRUE) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "floating comparison in function %s has invalid predicate",
                            func_name(func));
     }
@@ -746,14 +731,14 @@ static bool verify_unop(const anvil_module_t *mod,
                         size_t error_len)
 {
     if (instr->num_operands != 1 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "unary instruction in function %s must have one operand and a result",
                            func_name(func));
     }
     anvil_value_t *src = instr->operands[0];
     if (!verify_value_ref(mod, func, src, error, error_len)) return false;
     if (!type_equal(src->type, instr->result->type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "unary instruction in function %s has result type mismatch",
                            func_name(func));
     }
@@ -761,7 +746,7 @@ static bool verify_unop(const anvil_module_t *mod,
     if (anvil_sem_unary_types(instr->op, src->type,
                               instr->result->type)) return true;
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "unary instruction in function %s uses an invalid operand type",
                        func_name(func));
 }
@@ -773,7 +758,7 @@ static bool verify_cast(const anvil_module_t *mod,
                         size_t error_len)
 {
     if (instr->num_operands != 1 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "cast in function %s must have one operand and a result",
                            func_name(func));
     }
@@ -783,7 +768,7 @@ static bool verify_cast(const anvil_module_t *mod,
 
     if (anvil_sem_cast_types(instr->op, src->type, dst_type)) return true;
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "cast in function %s uses incompatible source/result types",
                        func_name(func));
 }
@@ -796,7 +781,7 @@ static bool verify_memory(const anvil_module_t *mod,
 {
     if (instr->op == ANVIL_OP_LOAD) {
         if (instr->num_operands != 1 || !instr->result) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "load in function %s must have one address and a result",
                                func_name(func));
         }
@@ -804,19 +789,21 @@ static bool verify_memory(const anvil_module_t *mod,
         if (!verify_value_ref(mod, func, addr, error, error_len)) return false;
         anvil_type_t *object_type = memory_object_type(addr);
         if (!object_type || !type_equal(object_type, instr->result->type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "load in function %s has address/result type mismatch",
                                func_name(func));
         }
+        if (!anvil_sem_type_is_sized(object_type) || object_type->kind == ANVIL_TYPE_FUNC || object_type->kind == ANVIL_TYPE_VOID)
+            return anvil_format_failure(error, error_len, "load in function %s reads an unsized or non-object type", func_name(func));
         if (instr->memory_access.alignment && instr->memory_access.alignment < object_type->align)
-            return verify_fail(error, error_len, "load alignment is below the natural type alignment");
+            return anvil_format_failure(error, error_len, "load alignment is below the natural type alignment");
 
         return true;
     }
 
     if (instr->op == ANVIL_OP_STORE) {
         if (instr->num_operands != 2 || instr->result) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "store in function %s must have value/address operands and no result",
                                func_name(func));
         }
@@ -828,17 +815,19 @@ static bool verify_memory(const anvil_module_t *mod,
         }
         anvil_type_t *object_type = memory_object_type(addr);
         if (!object_type || !type_equal(object_type, value->type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "store in function %s has value/address type mismatch",
                                func_name(func));
         }
+        if (!anvil_sem_type_is_sized(object_type) || object_type->kind == ANVIL_TYPE_FUNC || object_type->kind == ANVIL_TYPE_VOID)
+            return anvil_format_failure(error, error_len, "store in function %s writes an unsized or non-object type", func_name(func));
         if (instr->memory_access.alignment && instr->memory_access.alignment < object_type->align)
-            return verify_fail(error, error_len, "store alignment is below the natural type alignment");
+            return anvil_format_failure(error, error_len, "store alignment is below the natural type alignment");
 
         return true;
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "internal verifier error in function %s",
                        func_name(func));
 }
@@ -851,7 +840,7 @@ static bool verify_gep(const anvil_module_t *mod,
 {
     if (instr->num_operands < 2 || !instr->result ||
         instr->result->type->kind != ANVIL_TYPE_PTR || !instr->aux_type) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "GEP in function %s must have source type, base, index, and pointer result",
                            func_name(func));
     }
@@ -860,7 +849,7 @@ static bool verify_gep(const anvil_module_t *mod,
     }
     anvil_type_t *base_type = memory_object_type(instr->operands[0]);
     if (!base_type || !type_equal(base_type, instr->aux_type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "GEP in function %s base/source element types do not match",
                            func_name(func));
     }
@@ -872,26 +861,26 @@ static bool verify_gep(const anvil_module_t *mod,
         anvil_gep_step_t step;
         if (!type_is_integer(index->type) ||
             !anvil_gep_analyze_step(&current, index, i - 1, &step)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "GEP in function %s has an invalid typed index walk",
                                func_name(func));
         }
         if (index->kind == ANVIL_VAL_CONST_INT) {
             int64_t ignored;
             if (!anvil_gep_const_step_offset(&step, index, &ignored)) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "GEP in function %s has a constant byte-offset overflow",
                                    func_name(func));
             }
             if (!anvil_gep_accumulate_offset(&constant_offset, ignored)) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "GEP in function %s has accumulated offset overflow",
                                    func_name(func));
             }
         }
     }
     if (!type_equal(instr->result->type->data.pointee, current)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "GEP in function %s has an incorrect inferred result type",
                            func_name(func));
     }
@@ -908,7 +897,7 @@ static bool verify_struct_gep(const anvil_module_t *mod,
         instr->result->type->kind != ANVIL_TYPE_PTR ||
         !instr->aux_type || instr->aux_type->kind != ANVIL_TYPE_STRUCT ||
         !instr->aux_type->data.struc.complete) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "struct GEP in function %s is malformed",
                            func_name(func));
     }
@@ -923,7 +912,7 @@ static bool verify_struct_gep(const anvil_module_t *mod,
         index->kind != ANVIL_VAL_CONST_INT ||
         index->data.i < 0 ||
         (size_t)index->data.i >= instr->aux_type->data.struc.num_fields) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "struct GEP in function %s has invalid base or field index",
                            func_name(func));
     }
@@ -931,7 +920,7 @@ static bool verify_struct_gep(const anvil_module_t *mod,
     anvil_type_t *field_type =
         instr->aux_type->data.struc.fields[(size_t)index->data.i];
     if (!type_equal(instr->result->type->data.pointee, field_type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "struct GEP in function %s has field/result type mismatch",
                            func_name(func));
     }
@@ -945,7 +934,7 @@ static bool verify_call(const anvil_module_t *mod,
                         size_t error_len)
 {
     if (instr->num_operands < 1) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "call in function %s must have a callee operand",
                            func_name(func));
     }
@@ -961,7 +950,7 @@ static bool verify_call(const anvil_module_t *mod,
          !anvil_sem_type_is_sized(fn_type->data.func.ret)) ||
         (fn_type->data.func.num_params > 0 &&
          !fn_type->data.func.params)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "call in function %s targets a non-function or malformed signature",
                            func_name(func));
     }
@@ -969,16 +958,27 @@ static bool verify_call(const anvil_module_t *mod,
     if (!anvil_cc_resolve(mod->ctx, fn_type->data.func.cc, &effective_cc) ||
         effective_cc != fn_type->data.func.cc ||
         instr->call_cc != effective_cc) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "call in function %s has an invalid or mismatched calling convention",
                            func_name(func));
     }
 
     size_t num_args = instr->num_operands - 1;
     size_t num_fixed = fn_type->data.func.num_params;
+    /* Call-site attributes: only unnamed arguments, only BYVAL pointers to
+     * sized aggregates. */
+    for (size_t i = num_fixed; instr->call_arg_attrs && i < num_args; i++) {
+        anvil_param_attr_t attr = (anvil_param_attr_t)instr->call_arg_attrs[i];
+        const anvil_type_t *type = instr->operands[i + 1] ? instr->operands[i + 1]->type : NULL;
+        const anvil_type_t *pointee = type && type->kind == ANVIL_TYPE_PTR ? type->data.pointee : NULL;
+        if (attr != ANVIL_PARAM_PLAIN &&
+            (attr != ANVIL_PARAM_BYVAL || !pointee || !anvil_sem_type_is_sized(pointee) ||
+             (pointee->kind != ANVIL_TYPE_STRUCT && pointee->kind != ANVIL_TYPE_ARRAY)))
+            return anvil_format_failure(error, error_len, "call in function %s gives unnamed argument %zu an invalid attribute", func_name(func), i);
+    }
     if ((!fn_type->data.func.variadic && num_args != num_fixed) ||
         (fn_type->data.func.variadic && num_args < num_fixed)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "call in function %s has wrong argument count",
                            func_name(func));
     }
@@ -991,7 +991,7 @@ static bool verify_call(const anvil_module_t *mod,
              fn_type->data.func.params[i]->owner_ctx != mod->ctx ||
              !anvil_sem_type_is_sized(fn_type->data.func.params[i]) ||
              !type_equal(arg->type, fn_type->data.func.params[i]))) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "call in function %s has argument type mismatch",
                                func_name(func));
         }
@@ -1004,7 +1004,7 @@ static bool verify_call(const anvil_module_t *mod,
         return true;
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "call in function %s has return type mismatch",
                        func_name(func));
 }
@@ -1016,7 +1016,7 @@ static bool verify_select(const anvil_module_t *mod,
                           size_t error_len)
 {
     if (instr->num_operands != 3 || !instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "select in function %s must have cond/then/else operands and a result",
                            func_name(func));
     }
@@ -1028,10 +1028,8 @@ static bool verify_select(const anvil_module_t *mod,
         !verify_value_ref(mod, func, else_val, error, error_len)) {
         return false;
     }
-    if (!type_is_bool_like(cond->type) ||
-        !type_equal(then_val->type, else_val->type) ||
-        !type_equal(instr->result->type, then_val->type)) {
-        return verify_fail(error, error_len,
+    if (!anvil_sem_select_types(cond->type, then_val->type, else_val->type, instr->result->type)) {
+        return anvil_format_failure(error, error_len,
                            "select in function %s has operand/result type mismatch",
                            func_name(func));
     }
@@ -1047,7 +1045,7 @@ static bool verify_phi(const anvil_module_t *mod,
     if (!instr->result || instr->num_phi_incoming == 0 ||
         instr->num_operands != instr->num_phi_incoming ||
         !instr->phi_blocks) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "PHI in function %s is malformed",
                            func_name(func));
     }
@@ -1059,19 +1057,19 @@ static bool verify_phi(const anvil_module_t *mod,
             return false;
         }
         if (!type_equal(incoming->type, instr->result->type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "PHI in function %s has incoming value type mismatch",
                                func_name(func));
         }
         if (!block_belongs_to_func(func, incoming_block) ||
             !block_has_successor(incoming_block, instr->parent)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "PHI in function %s references a non-predecessor block",
                                func_name(func));
         }
         for (size_t j = 0; j < i; j++) {
             if (instr->phi_blocks[j] == incoming_block) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "PHI in function %s has duplicate incoming predecessor %s",
                                    func_name(func), block_name(incoming_block));
             }
@@ -1081,7 +1079,7 @@ static bool verify_phi(const anvil_module_t *mod,
     for (const anvil_block_t *pred = func->blocks; pred; pred = pred->next) {
         if (block_has_successor(pred, instr->parent) &&
             !phi_has_incoming_from(instr, pred)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "PHI in function %s is missing an incoming predecessor",
                                func_name(func));
         }
@@ -1101,14 +1099,14 @@ static bool verify_branch(const anvil_func_t *func,
             block_belongs_to_func(func, instr->true_block)) {
             return true;
         }
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "branch in function %s has invalid target",
                            func_name(func));
     }
 
     if (instr->op == ANVIL_OP_BR_COND) {
         if (instr->num_operands != 1 || instr->result) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "conditional branch in function %s is malformed",
                                func_name(func));
         }
@@ -1117,7 +1115,7 @@ static bool verify_branch(const anvil_func_t *func,
             return false;
         }
         if (!type_is_bool_like(cond->type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "conditional branch in function %s requires a boolean condition",
                                func_name(func));
         }
@@ -1125,12 +1123,12 @@ static bool verify_branch(const anvil_func_t *func,
             block_belongs_to_func(func, instr->false_block)) {
             return true;
         }
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "conditional branch in function %s has invalid target",
                            func_name(func));
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "internal verifier error in function %s",
                        func_name(func));
 }
@@ -1146,7 +1144,7 @@ static bool verify_switch(const anvil_module_t *mod,
         instr->result ||
         instr->false_block ||
         !block_belongs_to_func(func, instr->true_block)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "switch in function %s is malformed",
                            func_name(func));
     }
@@ -1155,7 +1153,7 @@ static bool verify_switch(const anvil_module_t *mod,
     if (!verify_value_ref(mod, func, selector, error, error_len)) return false;
     if (!type_is_integer(selector->type) ||
         selector->type->kind == ANVIL_TYPE_I1) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "switch in function %s requires an integer selector",
                            func_name(func));
     }
@@ -1170,19 +1168,19 @@ static bool verify_switch(const anvil_module_t *mod,
         }
         if (case_value->kind != ANVIL_VAL_CONST_INT ||
             !type_equal(case_value->type, selector->type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "switch in function %s has case type mismatch",
                                func_name(func));
         }
         if (!block_belongs_to_func(func, case_block)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "switch in function %s has a case with invalid target",
                                func_name(func));
         }
         for (size_t j = 0; j < i; j++) {
             if (instr->operands[j + 1] &&
                 instr->operands[j + 1]->data.u == case_value->data.u) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "switch in function %s has duplicate case value",
                                    func_name(func));
             }
@@ -1200,13 +1198,13 @@ static bool verify_ret(const anvil_func_t *func,
     anvil_type_t *ret_type = func->type->data.func.ret;
     if (type_is_void(ret_type)) {
         if (instr->num_operands == 0 && !instr->result) return true;
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "return in function %s returns a value from void function",
                            func_name(func));
     }
 
     if (instr->num_operands != 1 || instr->result) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "return in function %s must return one value",
                            func_name(func));
     }
@@ -1215,7 +1213,7 @@ static bool verify_ret(const anvil_func_t *func,
         return false;
     }
     if (!value || !type_equal(value->type, ret_type)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "return in function %s has result type mismatch",
                            func_name(func));
     }
@@ -1230,7 +1228,7 @@ static bool verify_alloca(const anvil_module_t *mod,
 {
     if (!instr->result || instr->result->type->kind != ANVIL_TYPE_PTR ||
         !anvil_sem_type_is_sized(instr->result->type->data.pointee)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "alloca in function %s must produce a pointer",
                            func_name(func));
     }
@@ -1242,7 +1240,7 @@ static bool verify_alloca(const anvil_module_t *mod,
         if (type_is_integer(instr->operands[0]->type) &&
             instr->operands[0]->type->kind != ANVIL_TYPE_I1) return true;
     }
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "dynamic alloca in function %s requires one integer count",
                        func_name(func));
 }
@@ -1250,7 +1248,7 @@ static bool verify_alloca(const anvil_module_t *mod,
 static bool verify_atomic(const anvil_module_t *mod, const anvil_func_t *func, const anvil_instr_t *instr, char *error, size_t error_len)
 {
     if (!anvil_atomic_info_valid(instr->op, &instr->atomic))
-        return verify_fail(error, error_len, "invalid atomic memory ordering");
+        return anvil_format_failure(error, error_len, "invalid atomic memory ordering");
 
     size_t count = 0;
     switch (instr->op)
@@ -1271,7 +1269,7 @@ static bool verify_atomic(const anvil_module_t *mod, const anvil_func_t *func, c
 
     bool has_result = instr->op != ANVIL_OP_ATOMIC_STORE && instr->op != ANVIL_OP_ATOMIC_FENCE;
     if (instr->num_operands != count || (instr->result != NULL) != has_result)
-        return verify_fail(error, error_len, "invalid atomic operands or result");
+        return anvil_format_failure(error, error_len, "invalid atomic operands or result");
 
     for (size_t index = 0; index < count; index++)
     {
@@ -1284,16 +1282,16 @@ static bool verify_atomic(const anvil_module_t *mod, const anvil_func_t *func, c
 
     anvil_type_t *object = memory_object_type(instr->operands[0]);
     if (!anvil_atomic_type_valid(object) || (has_result && !type_equal(object, instr->result->type)))
-        return verify_fail(error, error_len, "invalid atomic object or result type");
+        return anvil_format_failure(error, error_len, "invalid atomic object or result type");
 
     for (size_t index = 1; index < count; index++)
     {
         if (!type_equal(object, instr->operands[index]->type))
-            return verify_fail(error, error_len, "atomic value and object types differ");
+            return anvil_format_failure(error, error_len, "atomic value and object types differ");
     }
 
     if (instr->op == ANVIL_OP_ATOMIC_RMW && instr->atomic.rmw != ANVIL_ATOMIC_EXCHANGE && !anvil_type_is_integer(object))
-        return verify_fail(error, error_len, "arithmetic atomic RMW requires an integer");
+        return anvil_format_failure(error, error_len, "arithmetic atomic RMW requires an integer");
 
     return true;
 }
@@ -1305,12 +1303,12 @@ static bool verify_instr(const anvil_module_t *mod,
                          size_t error_len)
 {
     if (!instr) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s contains a null instruction",
                            func_name(func));
     }
     if (instr->op < 0 || instr->op >= ANVIL_OP_COUNT) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s contains an invalid opcode",
                            func_name(func));
     }
@@ -1318,11 +1316,11 @@ static bool verify_instr(const anvil_module_t *mod,
     if ((alignment || instr->memory_access.is_volatile) &&
         instr->op != ANVIL_OP_LOAD && instr->op != ANVIL_OP_STORE)
     {
-        return verify_fail(error, error_len, "memory access attributes require a load or store");
+        return anvil_format_failure(error, error_len, "memory access attributes require a load or store");
     }
 
     if (alignment && (alignment & (alignment - 1)) != 0)
-        return verify_fail(error, error_len, "memory alignment must be a power of two");
+        return anvil_format_failure(error, error_len, "memory alignment must be a power of two");
 
     if (instr->result) {
         if (instr->result->kind != ANVIL_VAL_INSTR ||
@@ -1330,22 +1328,34 @@ static bool verify_instr(const anvil_module_t *mod,
             !instr->result->type ||
             instr->result->owner_ctx != mod->ctx ||
             instr->result->type->owner_ctx != mod->ctx) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s contains malformed instruction result",
                                func_name(func));
         }
+    }
+
+    for (size_t i = 0; i < instr->num_operands; i++) {
+        if (!anvil_sem_global_operand_allowed(instr->operands[i], instr->op, i))
+            return anvil_format_failure(error, error_len, "function %s uses global %s as a value (a global names its storage)", func_name(func),
+                               instr->operands[i]->name ? instr->operands[i]->name : "<anon>");
     }
 
     if (anvil_op_is_atomic(instr->op))
         return verify_atomic(mod, func, instr, error, error_len);
 
     if (instr->atomic.order || instr->atomic.failure_order || instr->atomic.rmw)
-        return verify_fail(error, error_len, "atomic metadata requires an atomic instruction");
+        return anvil_format_failure(error, error_len, "atomic metadata requires an atomic instruction");
 
     switch (instr->op) {
         case ANVIL_OP_ADD:
         case ANVIL_OP_SUB:
         case ANVIL_OP_MUL:
+        case ANVIL_OP_UMULH:
+        case ANVIL_OP_SMULH:
+        case ANVIL_OP_ADD_SAT_U:
+        case ANVIL_OP_ADD_SAT_S:
+        case ANVIL_OP_SUB_SAT_U:
+        case ANVIL_OP_SUB_SAT_S:
         case ANVIL_OP_SDIV:
         case ANVIL_OP_UDIV:
         case ANVIL_OP_SMOD:
@@ -1362,6 +1372,7 @@ static bool verify_instr(const anvil_module_t *mod,
         case ANVIL_OP_SHL:
         case ANVIL_OP_SHR:
         case ANVIL_OP_SAR:
+        case ANVIL_OP_ROTL:
             return verify_shift(mod, func, instr, error, error_len);
 
         case ANVIL_OP_CMP_EQ:
@@ -1381,6 +1392,7 @@ static bool verify_instr(const anvil_module_t *mod,
         case ANVIL_OP_NOT:
         case ANVIL_OP_FNEG:
         case ANVIL_OP_FABS:
+        case ANVIL_OP_FSQRT:
             return verify_unop(mod, func, instr, error, error_len);
 
         case ANVIL_OP_TRUNC:
@@ -1444,11 +1456,48 @@ static bool verify_instr(const anvil_module_t *mod,
             /* Dispatched to verify_atomic before this switch. */
             return verify_atomic(mod, func, instr, error, error_len);
 
+        case ANVIL_OP_REDUCE_OR:
+        case ANVIL_OP_REDUCE_ADD:
+        case ANVIL_OP_REDUCE_AND:
+        case ANVIL_OP_REDUCE_XOR:
+        case ANVIL_OP_REDUCE_SMIN:
+        case ANVIL_OP_REDUCE_SMAX:
+        case ANVIL_OP_REDUCE_UMIN:
+        case ANVIL_OP_REDUCE_UMAX:
+        case ANVIL_OP_REDUCE_FADD:
+            if (instr->num_operands == 1 && instr->result &&
+                anvil_sem_reduce_types(instr->op, instr->operands[0]->type, instr->result->type))
+                return true;
+            return anvil_format_failure(error, error_len, "function %s has a reduction of a vector it does not accept",
+                                        func_name(func));
+
+        case ANVIL_OP_FMA:
+            if (instr->num_operands == 3 && instr->result &&
+                anvil_sem_fma_types(instr->operands[0]->type, instr->operands[1]->type, instr->operands[2]->type, instr->result->type))
+                return true;
+            return anvil_format_failure(error, error_len, "function %s has an FMA whose operands are not one FP type",
+                                        func_name(func));
+
+        case ANVIL_OP_ACCUM_ZEXT:
+        case ANVIL_OP_ACCUM_SEXT:
+            if (instr->num_operands == 2 && instr->result &&
+                anvil_sem_accumulate_types(instr->op, instr->operands[0]->type, instr->operands[1]->type, instr->result->type))
+                return true;
+            return anvil_format_failure(error, error_len, "function %s accumulates lanes that do not widen into its vector",
+                                        func_name(func));
+
+        case ANVIL_OP_SPLAT:
+            if (instr->num_operands == 1 && instr->result && instr->result->type->kind == ANVIL_TYPE_VECTOR &&
+                anvil_types_equal(instr->operands[0]->type, instr->result->type->data.vector.element))
+                return true;
+            return anvil_format_failure(error, error_len, "function %s has a splat whose scalar is not the vector's element",
+                                        func_name(func));
+
         case ANVIL_OP_COUNT:
             break;
     }
 
-    return verify_fail(error, error_len,
+    return anvil_format_failure(error, error_len,
                        "function %s uses invalid source opcode",
                        func_name(func));
 }
@@ -1458,15 +1507,15 @@ static bool verify_function_shape(const anvil_func_t *func,
                                   size_t error_len)
 {
     if (!func) {
-        return verify_fail(error, error_len, "module contains a null function");
+        return anvil_format_failure(error, error_len, "module contains a null function");
     }
     if (!func->parent) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has no parent module",
                            func_name(func));
     }
     if (!func->type || func->type->kind != ANVIL_TYPE_FUNC) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has non-function type",
                            func_name(func));
     }
@@ -1474,7 +1523,7 @@ static bool verify_function_shape(const anvil_func_t *func,
     if (!anvil_cc_resolve(func->parent->ctx, func->type->data.func.cc,
                           &effective_cc) ||
         effective_cc != func->type->data.func.cc) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has a calling convention incompatible with its target",
                            func_name(func));
     }
@@ -1490,21 +1539,21 @@ static bool verify_function_shape(const anvil_func_t *func,
         func->value->type->owner_ctx != func->parent->ctx ||
         func->value->type->kind != ANVIL_TYPE_PTR ||
         func->value->type->data.pointee != func->type) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has a malformed callable value",
                            func_name(func));
     }
     if ((unsigned)func->linkage > (unsigned)ANVIL_LINK_WEAK) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has invalid linkage", func_name(func));
     }
     if (func->num_params != func->type->data.func.num_params) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s parameter count does not match its type",
                            func_name(func));
     }
     if (func->num_params > 0 && !func->type->data.func.params) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has a malformed function type",
                            func_name(func));
     }
@@ -1513,7 +1562,7 @@ static bool verify_function_shape(const anvil_func_t *func,
         return_type->kind == ANVIL_TYPE_FUNC ||
         (return_type->kind != ANVIL_TYPE_VOID &&
          !anvil_sem_type_is_sized(return_type))) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s has an invalid return type",
                            func_name(func));
     }
@@ -1523,7 +1572,7 @@ static bool verify_function_shape(const anvil_func_t *func,
             param_type->kind == ANVIL_TYPE_VOID ||
             param_type->kind == ANVIL_TYPE_FUNC ||
             !anvil_sem_type_is_sized(param_type)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s has an invalid parameter type",
                                func_name(func));
         }
@@ -1541,7 +1590,7 @@ static bool verify_function_shape(const anvil_func_t *func,
             param->data.param.func != func ||
             param->data.param.index != i ||
             !type_equal(param->type, func->type->data.func.params[i])) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s has malformed parameter %zu",
                                func_name(func), i);
         }
@@ -1556,19 +1605,19 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
 
     if (func->is_declaration) {
         if (!func->entry && !func->blocks) return true;
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "declaration %s must not have a body",
                            func_name(func));
     }
 
     if (!func->entry || !func->blocks) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s must have an entry block",
                            func_name(func));
     }
     mark_func_blocks(func);
     if (!block_belongs_to_func(func, func->entry)) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "function %s entry block is not in the function",
                            func_name(func));
     }
@@ -1576,12 +1625,12 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
     const anvil_module_t *mod = func->parent;
     for (const anvil_block_t *block = func->blocks; block; block = block->next) {
         if (block->parent != func) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "function %s has a block with wrong parent",
                                func_name(func));
         }
         if (!block->first || !block->last) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "block %s in function %s is missing a terminator",
                                block_name(block), func_name(func));
         }
@@ -1590,17 +1639,17 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
         bool saw_terminator = false;
         for (const anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             if (instr->parent != block) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "block %s in function %s has instruction with wrong parent",
                                    block_name(block), func_name(func));
             }
             if (saw_terminator) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "block %s in function %s has instructions after a terminator",
                                    block_name(block), func_name(func));
             }
             if (instr->op == ANVIL_OP_PHI && saw_non_phi) {
-                return verify_fail(error, error_len,
+                return anvil_format_failure(error, error_len,
                                    "PHI in function %s must appear before non-PHI instructions",
                                    func_name(func));
             }
@@ -1612,7 +1661,7 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
         }
 
         if (!saw_terminator) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "block %s in function %s is missing a terminator",
                                block_name(block), func_name(func));
         }
@@ -1628,9 +1677,9 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
 bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_len)
 {
     if (error && error_len > 0) error[0] = '\0';
-    if (!mod) return verify_fail(error, error_len, "module is null");
+    if (!mod) return anvil_format_failure(error, error_len, "module is null");
     if (!mod->ctx) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "module %s has no context",
                            mod->name ? mod->name : "<anon>");
     }
@@ -1643,7 +1692,7 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
             !global->value->name ||
             anvil_module_lookup_symbol(mod, global->value->name) != global->value ||
             global->value->type->owner_ctx != mod->ctx) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "module %s contains a malformed global",
                                mod->name ? mod->name : "<anon>");
         }
@@ -1651,7 +1700,7 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
                 (unsigned)ANVIL_LINK_COMMON ||
             (global->value->data.global.is_declaration &&
              global->value->data.global.init)) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "module %s contains a global with invalid declaration state",
                                mod->name ? mod->name : "<anon>");
         }
@@ -1660,14 +1709,14 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
                   global->value->data.global.init, mod->ctx, mod)
             : ANVIL_CONST_DAG_VALID;
         if (dag == ANVIL_CONST_DAG_NOMEM) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "out of memory validating a global initializer");
         }
         if (global->value->data.global.init &&
             (dag != ANVIL_CONST_DAG_VALID ||
              !type_equal(global->value->data.global.init->type,
                          global->value->type))) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "module %s has an invalid global initializer constant DAG",
                                mod->name ? mod->name : "<anon>");
         }
@@ -1677,7 +1726,7 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
         if (func->parent != mod || !func->value ||
             func->value->owner_module != mod || !func->value->name ||
             anvil_module_lookup_symbol(mod, func->value->name) != func->value) {
-            return verify_fail(error, error_len,
+            return anvil_format_failure(error, error_len,
                                "module %s contains a function with wrong parent",
                                mod->name ? mod->name : "<anon>");
         }
@@ -1685,7 +1734,7 @@ bool anvil_module_verify(const anvil_module_t *mod, char *error, size_t error_le
     }
 
     if (mod->num_symbols != mod->num_funcs + mod->num_globals) {
-        return verify_fail(error, error_len,
+        return anvil_format_failure(error, error_len,
                            "module %s has inconsistent symbol cardinality",
                            mod->name ? mod->name : "<anon>");
     }

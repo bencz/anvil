@@ -9,16 +9,19 @@
 
 static const int x64_sysv_int_args[] = {7, 6, 2, 1, 8, 9};
 static const int x64_sysv_fp_args[] = {0, 1, 2, 3, 4, 5, 6, 7};
-static const int x64_sysv_alloc_gpr[] = {8, 9, 6, 7, 3, 12, 13, 14};
-static const int x64_sysv_alloc_fpr[] = {0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14};
-static const int x64_sysv_scratch_gpr[] = {10, 11, 15, X64_RAX};
+/* Pools list volatile registers first, those the printer takes as
+ * per-instruction scratch (RCX, RDX:RAX) after the others; spill reloads
+ * use the scratch lists, part of the pools (anvil_regalloc_allocate). */
+static const int x64_sysv_alloc_gpr[] = {8, 9, 6, 7, 10, 11, 2, 1, X64_RAX, 3, 12, 13, 14, 15};
+static const int x64_sysv_alloc_fpr[] = {0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 8, 9, 10};
+static const int x64_sysv_scratch_gpr[] = {11, 10, X64_RAX};
 static const int x64_sysv_scratch_fpr[] = {8, 9, 10};
 
 static const int x64_win64_int_args[] = {1, 2, 8, 9};
 static const int x64_win64_fp_args[] = {0, 1, 2, 3};
-static const int x64_win64_alloc_gpr[] = {8, 9, 3, 7, 6, 12, 13, 14};
-static const int x64_win64_alloc_fpr[] = {0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12};
-static const int x64_win64_scratch_gpr[] = {10, 11, 15, X64_RAX};
+static const int x64_win64_alloc_gpr[] = {8, 9, 10, 11, 2, 1, X64_RAX, 3, 7, 6, 12, 13, 14, 15};
+static const int x64_win64_alloc_fpr[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+static const int x64_win64_scratch_gpr[] = {11, 10, X64_RAX};
 static const int x64_win64_scratch_fpr[] = {13, 14, 15};
 
 static const anvil_x64_abi_desc_t x64_abi_descs[] = {
@@ -29,6 +32,11 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .positional_args = false,
         .is_darwin = false,
         .is_win64 = false,
+        .reloc_models = (1u << ANVIL_RELOC_STATIC) | (1u << ANVIL_RELOC_PIE) | (1u << ANVIL_RELOC_PIC),
+        .default_reloc = ANVIL_RELOC_STATIC,
+        .plt_suffix = "@PLT",
+        .format = &anvil_obj_format_elf,
+        .caller_extends_narrow_args = true,
         .shadow_space = 0,
         .int_arg_regs = x64_sysv_int_args,
         .num_int_arg_regs = (int)(sizeof(x64_sysv_int_args) / sizeof(int)),
@@ -48,6 +56,7 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .num_scratch_gpr_regs = (int)(sizeof(x64_sysv_scratch_gpr) / sizeof(int)),
         .scratch_fpr_regs = x64_sysv_scratch_fpr,
         .num_scratch_fpr_regs = (int)(sizeof(x64_sysv_scratch_fpr) / sizeof(int)),
+        .sse_temps = {15, 14},
     },
     {
         .abi = ANVIL_ABI_DARWIN,
@@ -56,6 +65,11 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .positional_args = false,
         .is_darwin = true,
         .is_win64 = false,
+        .reloc_models = (1u << ANVIL_RELOC_PIE) | (1u << ANVIL_RELOC_PIC),
+        .default_reloc = ANVIL_RELOC_PIE,
+        .plt_suffix = "",
+        .format = &anvil_obj_format_macho,
+        .caller_extends_narrow_args = true,
         .shadow_space = 0,
         .int_arg_regs = x64_sysv_int_args,
         .num_int_arg_regs = (int)(sizeof(x64_sysv_int_args) / sizeof(int)),
@@ -75,6 +89,7 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .num_scratch_gpr_regs = (int)(sizeof(x64_sysv_scratch_gpr) / sizeof(int)),
         .scratch_fpr_regs = x64_sysv_scratch_fpr,
         .num_scratch_fpr_regs = (int)(sizeof(x64_sysv_scratch_fpr) / sizeof(int)),
+        .sse_temps = {15, 14},
     },
     {
         .abi = ANVIL_ABI_WIN64,
@@ -83,6 +98,11 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .positional_args = true,
         .is_darwin = false,
         .is_win64 = true,
+        .reloc_models = 1u << ANVIL_RELOC_STATIC,
+        .default_reloc = ANVIL_RELOC_STATIC,
+        .plt_suffix = NULL,
+        .format = &anvil_obj_format_coff,
+        .caller_extends_narrow_args = true,
         .shadow_space = 32,
         .int_arg_regs = x64_win64_int_args,
         .num_int_arg_regs = (int)(sizeof(x64_win64_int_args) / sizeof(int)),
@@ -102,6 +122,7 @@ static const anvil_x64_abi_desc_t x64_abi_descs[] = {
         .num_scratch_gpr_regs = (int)(sizeof(x64_win64_scratch_gpr) / sizeof(int)),
         .scratch_fpr_regs = x64_win64_scratch_fpr,
         .num_scratch_fpr_regs = (int)(sizeof(x64_win64_scratch_fpr) / sizeof(int)),
+        .sse_temps = {5, 4},
     },
 };
 

@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 700
 
 #include "../fiber.h"
+#include "st_fatal.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@ static void enter_fiber(void)
     st_native_fiber_t *fiber = entering_fiber;
 
     fiber->entry(fiber->argument);
-    abort();
+    st_fatal("posix fiber", "a fiber entry returned");
 }
 
 static st_native_fiber_t *capture(void)
@@ -98,7 +99,7 @@ static void transfer(st_native_fiber_t *from, st_native_fiber_t *to)
     errno = to->saved_errno;
 
     if (swapcontext(&from->context, &to->context) != 0)
-        abort();
+        st_fatal_code("posix fiber", "swapcontext failed", (uint64_t)errno);
 
     errno = from->saved_errno;
 }
@@ -126,7 +127,7 @@ static uint64_t milliseconds(void)
     struct timespec now;
 
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        abort();
+        st_fatal_code("posix fiber", "clock_gettime(CLOCK_MONOTONIC) failed", (uint64_t)errno);
 
     return (uint64_t)now.tv_sec * UINT64_C(1000) + (uint64_t)now.tv_nsec / UINT64_C(1000000);
 }
@@ -140,7 +141,7 @@ static void sleep_milliseconds(uint32_t duration)
 
     while (nanosleep(&remaining, &remaining) != 0) {
         if (errno != EINTR)
-            abort();
+            st_fatal_code("posix fiber", "nanosleep failed", (uint64_t)errno);
     }
 }
 

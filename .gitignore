@@ -31,6 +31,9 @@ Thumbs.db
 # macOS debug symbols
 *.dSYM/
 
+# QEMU 
+qemu_t*
+
 samples/mcc/*.asm
 samples/mcc/obj
 samples/mcc/mcc

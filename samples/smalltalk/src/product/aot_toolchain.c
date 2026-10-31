@@ -3,6 +3,7 @@
 #endif
 
 #include "st_aot_toolchain.h"
+#include "st_publish_noreplace.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -17,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -31,10 +31,6 @@ extern char **environ;
 #ifndef O_NOFOLLOW
 #define ST_AOT_TOOLCHAIN_LACKS_NOFOLLOW 1
 #define O_NOFOLLOW 0
-#endif
-
-#ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE (1u << 0)
 #endif
 
 #define ST_MANIFEST_LIMIT (16u * 1024u * 1024u)
@@ -719,16 +715,7 @@ static void cleanup_staging(int output_directory, int staging_directory,
 static int publish_noreplace(int directory, const char *staging,
                              const char *publication)
 {
-#ifdef SYS_renameat2
-    return (int)syscall(SYS_renameat2, directory, staging,
-                        directory, publication, RENAME_NOREPLACE);
-#else
-    (void)directory;
-    (void)staging;
-    (void)publication;
-    errno = ENOSYS;
-    return -1;
-#endif
+    return st_publish_noreplace(directory, staging, publication);
 }
 
 static bool options_valid(const st_aot_toolchain_options_t *options,
@@ -1022,7 +1009,7 @@ st_aot_toolchain_status_t st_aot_toolchain_link(
     if (publish_noreplace(output_directory, staging_name,
                           options->publication_name) != 0) {
         result->system_error = errno;
-        status = errno == EEXIST ? ST_AOT_TOOLCHAIN_ERR_COLLISION
+        status = errno == EEXIST || errno == ENOTEMPTY ? ST_AOT_TOOLCHAIN_ERR_COLLISION
                                  : ST_AOT_TOOLCHAIN_ERR_IO;
         goto cleanup;
     }

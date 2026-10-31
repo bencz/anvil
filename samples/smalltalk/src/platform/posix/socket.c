@@ -1,28 +1,48 @@
 #define _GNU_SOURCE 1
-#include "../socket.h"
+#include "socket_reactor.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-typedef struct native_socket {
-    struct native_socket *next;
-    struct native_socket **previous_link;
-    st_socket_reactor_t *reactor;
-    int descriptor;
-    void *reader;
-    void *writer;
-    bool registered;
-} native_socket_t;
+/* Readiness comes from posix_reactor (socket_reactor.h).  Where the host
+ * lacks the atomic SOCK_NONBLOCK/SOCK_CLOEXEC flags and accept4 (macOS),
+ * descriptors are configured with fcntl; where it lacks MSG_NOSIGNAL,
+ * SO_NOSIGPIPE keeps a closed peer from raising SIGPIPE. */
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+#define ST_ATOMIC_SOCKET_FLAGS (SOCK_NONBLOCK | SOCK_CLOEXEC)
+#else
+#define ST_ATOMIC_SOCKET_FLAGS 0
+#endif
 
-struct st_socket_reactor {
-    int descriptor;
-    native_socket_t *sockets;
-};
+#if defined(MSG_NOSIGNAL)
+#define ST_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define ST_SEND_FLAGS 0
+#endif
+
+static bool configure_descriptor(int descriptor)
+{
+#if !(defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC))
+    int status = fcntl(descriptor, F_GETFL);
+    int flags = fcntl(descriptor, F_GETFD);
+
+    if (status < 0 || flags < 0 || fcntl(descriptor, F_SETFL, status | O_NONBLOCK) != 0 || fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != 0)
+        return false;
+#endif
+#if !defined(MSG_NOSIGNAL) && defined(SO_NOSIGPIPE)
+    int enabled = 1;
+
+    if (setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0)
+        return false;
+#endif
+    (void)descriptor;
+    return true;
+}
 
 static st_socket_reactor_t *create_reactor(int *error_out)
 {
@@ -35,10 +55,7 @@ static st_socket_reactor_t *create_reactor(int *error_out)
         return NULL;
     }
 
-    reactor->descriptor = epoll_create1(EPOLL_CLOEXEC);
-
-    if (reactor->descriptor < 0) {
-        *error_out = errno;
+    if (!posix_reactor.open(reactor, error_out)) {
         free(reactor);
         return NULL;
     }
@@ -70,7 +87,7 @@ static uintptr_t adopt(st_socket_reactor_t *reactor, int descriptor, int *error_
 
 static uintptr_t listen_loopback(st_socket_reactor_t *reactor, uint16_t port, int *error_out)
 {
-    int descriptor = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int descriptor = socket(AF_INET, SOCK_STREAM | ST_ATOMIC_SOCKET_FLAGS, 0);
     int enabled = 1;
     struct sockaddr_in address = {
         .sin_family = AF_INET,
@@ -80,7 +97,7 @@ static uintptr_t listen_loopback(st_socket_reactor_t *reactor, uint16_t port, in
 
     *error_out = 0;
 
-    if (descriptor < 0 || setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) != 0
+    if (descriptor < 0 || !configure_descriptor(descriptor) || setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) != 0
             || bind(descriptor, (const struct sockaddr *)&address, sizeof(address)) != 0 || listen(descriptor, SOMAXCONN) != 0) {
         *error_out = errno;
 
@@ -99,8 +116,18 @@ static uintptr_t accept_connection(uintptr_t handle, int *error_out)
     int descriptor;
 
     do {
-        descriptor = accept4(listener->descriptor, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+        descriptor = accept4(listener->descriptor, NULL, NULL, ST_ATOMIC_SOCKET_FLAGS);
+#else
+        descriptor = accept(listener->descriptor, NULL, NULL);
+#endif
     } while (descriptor < 0 && errno == EINTR);
+
+    if (descriptor >= 0 && !configure_descriptor(descriptor)) {
+        *error_out = errno;
+        close(descriptor);
+        return ST_SOCKET_INVALID;
+    }
 
     *error_out = descriptor < 0 ? errno : 0;
     return descriptor < 0 ? ST_SOCKET_INVALID : adopt(listener->reactor, descriptor, error_out);
@@ -108,32 +135,7 @@ static uintptr_t accept_connection(uintptr_t handle, int *error_out)
 
 static bool update_watch(native_socket_t *socket, int *error_out)
 {
-    uint32_t events = EPOLLONESHOT;
-
-    if (socket->reader != NULL)
-        events |= EPOLLIN;
-
-    if (socket->writer != NULL)
-        events |= EPOLLOUT;
-
-    if (socket->reader == NULL && socket->writer == NULL) {
-        if (socket->registered)
-            epoll_ctl(socket->reactor->descriptor, EPOLL_CTL_DEL, socket->descriptor, NULL);
-
-        socket->registered = false;
-        return true;
-    }
-
-    struct epoll_event event = { .events = events, .data = { .ptr = socket } };
-    int operation = socket->registered ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-
-    if (epoll_ctl(socket->reactor->descriptor, operation, socket->descriptor, &event) != 0) {
-        *error_out = errno;
-        return false;
-    }
-
-    socket->registered = true;
-    return true;
+    return posix_reactor.update(socket, error_out);
 }
 
 static bool watch_socket(uintptr_t handle, uint32_t events, void *token, int *error_out)
@@ -205,7 +207,7 @@ static bool destroy_reactor(st_socket_reactor_t *reactor, int *error_out)
         return false;
     }
 
-    close(reactor->descriptor);
+    posix_reactor.close(reactor);
     free(reactor);
     return true;
 }
@@ -245,7 +247,7 @@ static int64_t send_bytes(uintptr_t handle, const void *bytes, size_t count, int
     ssize_t result;
 
     do {
-        result = send(socket->descriptor, bytes, count > INT_MAX ? INT_MAX : count, MSG_NOSIGNAL);
+        result = send(socket->descriptor, bytes, count > INT_MAX ? INT_MAX : count, ST_SEND_FLAGS);
     } while (result < 0 && errno == EINTR);
 
     *error_out = result < 0 ? errno : 0;
@@ -259,7 +261,7 @@ static bool would_block(int error)
 
 static int wait_events(st_socket_reactor_t *reactor, void **tokens, size_t capacity, int timeout, int *error_out)
 {
-    struct epoll_event events[128];
+    posix_ready_t ready[128];
     size_t limit = capacity / 2u;
 
     *error_out = 0;
@@ -272,25 +274,23 @@ static int wait_events(st_socket_reactor_t *reactor, void **tokens, size_t capac
     if (limit > 128u)
         limit = 128u;
 
-    int count = epoll_wait(reactor->descriptor, events, (int)limit, timeout);
+    int count = posix_reactor.wait(reactor, ready, limit, timeout, error_out);
 
-    if (count < 0) {
-        *error_out = errno == EINTR ? 0 : errno;
-        return errno == EINTR ? 0 : -1;
-    }
+    if (count <= 0)
+        return count;
 
     size_t emitted = 0u;
 
     for (int index = 0; index < count; index++) {
-        native_socket_t *socket = events[index].data.ptr;
-        uint32_t flags = events[index].events;
+        native_socket_t *socket = ready[index].socket;
+        uint32_t flags = ready[index].ready;
 
-        if (socket->reader != NULL && (flags & (EPOLLIN | EPOLLERR | EPOLLHUP)) != 0u) {
+        if (socket->reader != NULL && (flags & (POSIX_READY_IN | POSIX_READY_ERROR)) != 0u) {
             tokens[emitted++] = socket->reader;
             socket->reader = NULL;
         }
 
-        if (socket->writer != NULL && (flags & (EPOLLOUT | EPOLLERR | EPOLLHUP)) != 0u) {
+        if (socket->writer != NULL && (flags & (POSIX_READY_OUT | POSIX_READY_ERROR)) != 0u) {
             tokens[emitted++] = socket->writer;
             socket->writer = NULL;
         }

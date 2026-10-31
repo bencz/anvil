@@ -44,10 +44,13 @@ level is a strict superset of the one below it.
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
 | O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | Currently the same verified pass set as O2 |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inline, unroll, loop-vectorize, vectorize (SLP) |
 
-O3 currently produces the same result as O2; no unimplemented pass is selected
-or exposed.
+The two vectorizers create vector operations only where the backend's
+`vector_operation_cost` hook accepts them for the CPU model, and floating-point
+vectors only in functions with `anvil_func_set_fp_vectorization` (MCC:
+`-ffp-vectorize`); lane-wise arithmetic gives the same results as the scalar
+loop, the policy exists for exception-flag and denormal behaviour.
 
 ## Available Passes
 
@@ -136,8 +139,19 @@ Replaces expensive operations with cheaper equivalents.
 | `x / 4` | `x >> 2` | Unsigned, power of 2 |
 | `x % 2` | `x & 1` | Unsigned, power of 2 |
 | `x % 8` | `x & 7` | Unsigned, power of 2 |
+| `x / 8` (signed) | `(x + ((x >> 31) & 7)) >> 3` | Signed, power of 2 (bias rounds toward zero) |
+| `x / 10` (unsigned) | `umulh(x, 0xCCCCCCCD) >> 3` | Any other constant, where the target prices `UMULH` |
+| `x / 7` (signed) | `q = smulh(x, m) + x; q >>= 2; q += q >>u 31` | Any other constant (`|d| >= 2`), where the target prices `SMULH` |
+| `x % d` | `x - (x / d) * d` | As the division |
+| `a * b + c` (FP) | `fma(a, b, c)` | `anvil_func_set_fp_contraction` and a target FMA |
 
-**Note:** Signed division/modulo by power of 2 is not optimized due to rounding differences for negative numbers.
+Division by a constant uses the Granlund-Montgomery reciprocal with the magic
+numbers of Hacker's Delight (10-1 signed, 10-2 unsigned with the "add"
+fix-up) at the operand width. It needs the high half of a product
+(`UMULH`/`SMULH`), so it applies only where the backend's cost hook prices
+that operation for the type (`ANVIL_VECTOR_SHAPE_SCALAR`): 32 and 64 bits on
+x86-64, ARM64 and 64-bit PowerPC, 32 bits on i386 and ppc32; SystemZ keeps
+the division.
 
 ### Copy Propagation (`ANVIL_PASS_COPY_PROP`) - Og+
 
@@ -288,6 +302,38 @@ the semantic tests below are implemented.
 - Maximum body size: 32 instructions
 - Nested loops not supported
 - PHI node pattern detection needs work
+
+### Loop Strength Reduction (`ANVIL_PASS_LOOP_STRENGTH`) - O2+
+
+`src/opt/loop_strength.c`. In a loop whose induction variable steps by one,
+an address `gep T base, i, ...` with a loop-invariant base and a `T` whose
+size no scaled index absorbs (not 1, 2, 4 or 8) becomes an access through a
+pointer that starts at `gep T base, start` and advances one `T` in the
+latch, so no multiply runs per iteration. Indices narrower than a pointer
+are extended by their signedness; the rewrite needs the header's `i < n`
+(signed or unsigned as `i` is) to show the index cannot wrap in the body.
+
+### Loop Vectorization (`ANVIL_PASS_LOOP_VECTORIZE`) - O3
+
+`src/opt/loop_vectorize.c`. An innermost counted loop
+
+```
+header: %i = phi [%start, preheader], [%i + 1, body]
+        br (%i < %n | %i u< %n | %i != %n), body, exit
+body:   straight-line lane-wise arithmetic over base[..., %i] accesses
+```
+
+gets a vector copy (`vec.header`/`vec.body`, 16-byte vectors of the element
+type) that runs while a whole vector of iterations remains; the original loop,
+entered with the vector index, runs the rest. Accesses are GEPs whose last
+index is the loop index (or its extension) and whose other operands are
+invariant, so consecutive iterations are adjacent. Invariant operands become
+one `splat` in the preheader. Streams that are stored through and whose
+distance is unknown are checked once in the preheader: when two first-iteration
+addresses are closer than one vector (and not equal), the vector loop runs zero
+iterations. The original header is marked `vectorized` so later runs leave the
+remainder loop alone. Every operation's legality and cost come from
+`vector_operation_cost`; the pass knows no target.
 
 ### CFG Simplification (`ANVIL_PASS_SIMPLIFY_CFG`)
 

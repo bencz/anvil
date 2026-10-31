@@ -23,6 +23,9 @@ typedef struct anvil_cfg {
     size_t *source_offsets;
     size_t *source_targets;
     size_t *references;
+    /* anvil_opt_cfg_build_layout: this acquirer's loop-contiguous order
+     * (never shared through the cache; freed by destroy). */
+    size_t *layout;
 } anvil_opt_cfg_t;
 
 bool anvil_opt_cfg_build(anvil_func_t *func, anvil_opt_cfg_t *cfg);
@@ -65,6 +68,16 @@ typedef struct {
 bool anvil_loop_analysis_build(const anvil_opt_cfg_t *cfg, anvil_loop_analysis_t *analysis);
 bool anvil_loop_contains(const anvil_loop_analysis_t *analysis, size_t loop, size_t block);
 void anvil_loop_analysis_destroy(anvil_loop_analysis_t *analysis);
+
+/* Fills `order` (cfg->count entries) with the blocks in reverse postorder
+ * except that every natural loop's blocks are consecutive, header first:
+ * plain RPO can place a loop's latch after all code reachable from the
+ * loop's exit.  Cold blocks, and the blocks they dominate, follow the rest
+ * of their innermost loop (or of the function).  Each block still follows its dominators.  Back ends lower in
+ * this order so live ranges and the emitted layout keep loops whole. */
+bool anvil_opt_cfg_loop_layout(const anvil_opt_cfg_t *cfg, size_t *order);
+/* Sets cfg->layout to that order (cfg->count entries). */
+bool anvil_opt_cfg_build_layout(anvil_opt_cfg_t *cfg);
 
 /* Def-use snapshot indexed by live instructions, independent of sparse IDs.
  * Rebuild after replacing operands or inserting/removing instructions. */

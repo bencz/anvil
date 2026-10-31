@@ -149,6 +149,10 @@ static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
             case ANVIL_OP_MUL:
                 result = (int64_t)((((uint64_t)a) * ((uint64_t)b)) & mask);
                 break;
+            case ANVIL_OP_UMULH:
+            case ANVIL_OP_SMULH:
+                result = (int64_t)anvil_opt_mul_high((uint64_t)a, (uint64_t)b, bits, op == ANVIL_OP_SMULH);
+                break;
             case ANVIL_OP_SDIV:
                 a = sign_extend_to_bits((uint64_t)a, bits);
                 b = sign_extend_to_bits((uint64_t)b, bits);
@@ -176,6 +180,12 @@ static anvil_value_t *try_fold_binop_int(anvil_ctx_t *ctx, anvil_op_t op,
             case ANVIL_OP_SHR:
             case ANVIL_OP_SAR:
                 return fold_shift(ctx, op, a, b, type);
+            case ANVIL_OP_ROTL: {
+                unsigned amount = (unsigned)((uint64_t)b % bits);
+                uint64_t value = (uint64_t)a & mask;
+                result = (int64_t)((amount ? (value << amount) | (value >> (bits - amount)) : value) & mask);
+                break;
+            }
             default: return NULL;
         }
         
@@ -416,6 +426,10 @@ static anvil_value_t *try_fold_unop(anvil_ctx_t *ctx, anvil_op_t op,
         switch (op) {
             case ANVIL_OP_FNEG: return make_const_float(ctx, type, -v);
             case ANVIL_OP_FABS: return make_const_float(ctx, type, fabs(v));
+            /* Correctly rounded on the host as on the target; a NaN's sign
+             * and payload are the target's, so negatives stay. */
+            case ANVIL_OP_FSQRT:
+                return v >= 0.0 ? make_const_float(ctx, type, sqrt(v)) : NULL;
             default: break;
         }
     }
@@ -433,6 +447,8 @@ anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *ins
         case ANVIL_OP_ADD:
         case ANVIL_OP_SUB:
         case ANVIL_OP_MUL:
+        case ANVIL_OP_UMULH:
+        case ANVIL_OP_SMULH:
         case ANVIL_OP_SDIV:
         case ANVIL_OP_UDIV:
         case ANVIL_OP_SMOD:
@@ -443,6 +459,7 @@ anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *ins
         case ANVIL_OP_SHL:
         case ANVIL_OP_SHR:
         case ANVIL_OP_SAR:
+        case ANVIL_OP_ROTL:
             return try_fold_binop_int(ctx, instr->op, left, right, instr->result->type);
         case ANVIL_OP_CMP_EQ:
         case ANVIL_OP_CMP_NE:
@@ -461,6 +478,7 @@ anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *ins
         case ANVIL_OP_TRUNC:
         case ANVIL_OP_ZEXT:
         case ANVIL_OP_SEXT:
+        case ANVIL_OP_BITCAST:  /* integer to integer of the same width */
         {
             unsigned source_bits = type_int_bits(left->type);
             unsigned target_bits = type_int_bits(instr->result->type);
@@ -508,6 +526,8 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
                     case ANVIL_OP_ADD:
                     case ANVIL_OP_SUB:
                     case ANVIL_OP_MUL:
+                    case ANVIL_OP_UMULH:
+                    case ANVIL_OP_SMULH:
                     case ANVIL_OP_SDIV:
                     case ANVIL_OP_UDIV:
                     case ANVIL_OP_SMOD:
@@ -518,6 +538,7 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
                     case ANVIL_OP_SHL:
                     case ANVIL_OP_SHR:
                     case ANVIL_OP_SAR:
+                    case ANVIL_OP_ROTL:
                         folded = try_fold_binop_int(ctx, instr->op, lhs, rhs, instr->result->type);
                         break;
                         
@@ -558,7 +579,14 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
                     case ANVIL_OP_NOT:
                     case ANVIL_OP_FNEG:
                     case ANVIL_OP_FABS:
+                    case ANVIL_OP_FSQRT:
                         folded = try_fold_unop(ctx, instr->op, val, instr->result->type);
+                        break;
+                    case ANVIL_OP_TRUNC:
+                    case ANVIL_OP_ZEXT:
+                    case ANVIL_OP_SEXT:
+                    case ANVIL_OP_BITCAST:
+                        folded = anvil_opt_fold_integer(ctx, instr, val, NULL);
                         break;
                         
                     default:

@@ -571,7 +571,7 @@ static void test_target_layout_relocations(void)
         anvil_type_t *method_type = anvil_type_func(
             ctx, anvil_type_i32(ctx), NULL, 0, false);
         anvil_func_t *method = anvil_func_declare(
-            mod, "method_target", method_type);
+            mod, "mtarget", method_type);
         anvil_value_t *address = method
             ? anvil_const_symbol_addr(anvil_func_get_value(method)) : NULL;
         anvil_type_t *fields[] = {
@@ -597,7 +597,7 @@ static void test_target_layout_relocations(void)
         anvil_value_t *vtable_init = address
             ? anvil_const_array(ctx, address->type, method_entries, 2) : NULL;
         anvil_value_t *vtable = vtable_init
-            ? anvil_module_add_global(mod, "method_vtable", vtable_init->type,
+            ? anvil_module_add_global(mod, "mvtable", vtable_init->type,
                                       ANVIL_LINK_INTERNAL) : NULL;
         anvil_value_t *vtable_addr = vtable
             ? anvil_const_symbol_addr(vtable) : NULL;
@@ -638,12 +638,12 @@ static void test_target_layout_relocations(void)
                          ptr_offset - 1);
                 snprintf(trailing, sizeof(trailing), "DC    %zuX'00'", tail);
                 CHECK(strstr(text, cases[c].pointer_size == 8
-                                   ? "DC    AD(METHOD_TARGET)"
-                                   : "DC    A(METHOD_TARGET)"),
+                                   ? "DC    AD(MTARGET)"
+                                   : "DC    A(MTARGET)"),
                       "HLASM relocation must use target-width A/AD syntax");
                 CHECK(strstr(text, cases[c].pointer_size == 8
-                                   ? "DC    AD(METHOD_VTABLE+8)"
-                                   : "DC    A(METHOD_VTABLE+4)"),
+                                   ? "DC    AD(MVTABLE+8)"
+                                   : "DC    A(MVTABLE+4)"),
                       "HLASM typed GEP relocation must retain its addend");
                 CHECK(strstr(text, cases[c].pointer_size == 8
                                    ? "DC    AD(AVG00000)"
@@ -656,12 +656,12 @@ static void test_target_layout_relocations(void)
                          ptr_offset - 1);
                 snprintf(trailing, sizeof(trailing), "\t.zero %zu\n", tail);
                 CHECK(strstr(text, cases[c].pointer_size == 8
-                                   ? "\t.quad method_target\n"
-                                   : "\t.long method_target\n"),
+                                   ? "\t.quad mtarget\n"
+                                   : "\t.long mtarget\n"),
                       "GNU relocation must use the target pointer width");
                 CHECK(strstr(text, cases[c].pointer_size == 8
-                                   ? "\t.quad method_vtable+8\n"
-                                   : "\t.long method_vtable+4\n"),
+                                   ? "\t.quad mvtable+8\n"
+                                   : "\t.long mvtable+4\n"),
                       "GNU typed GEP relocation must retain its addend");
                 CHECK(strstr(text, cases[c].pointer_size == 8
                                    ? "\t.quad .Lanvil_global_string_0\n"

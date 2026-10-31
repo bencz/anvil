@@ -11,6 +11,7 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_opt.h"
 #include "anvil/anvil_analysis.h"
+#include "opt_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -289,36 +290,35 @@ static bool is_empty_block(anvil_block_t *block)
 }
 
 /* Replace all branches to old_block with branches to new_block */
+/* Redirects every edge of one terminator from old_block to new_block. */
+static void replace_branch_target_in(anvil_instr_t *term, anvil_block_t *old_block, anvil_block_t *new_block)
+{
+    if (!term)
+        return;
+    if (term->op == ANVIL_OP_BR) {
+        if (term->true_block == old_block)
+            term->true_block = new_block;
+    } else if (term->op == ANVIL_OP_BR_COND) {
+        if (term->true_block == old_block)
+            term->true_block = new_block;
+        if (term->false_block == old_block)
+            term->false_block = new_block;
+    } else if (term->op == ANVIL_OP_SWITCH) {
+        if (term->true_block == old_block)
+            term->true_block = new_block;
+        for (size_t i = 0; i < term->num_switch_cases; i++) {
+            if (term->switch_blocks && term->switch_blocks[i] == old_block)
+                term->switch_blocks[i] = new_block;
+        }
+    }
+}
+
 static void replace_branch_target(anvil_func_t *func, 
                                    anvil_block_t *old_block, 
                                    anvil_block_t *new_block)
 {
-    for (anvil_block_t *block = func->blocks; block; block = block->next) {
-        anvil_instr_t *term = block->last;
-        if (!term) continue;
-        
-        if (term->op == ANVIL_OP_BR) {
-            if (term->true_block == old_block) {
-                term->true_block = new_block;
-            }
-        } else if (term->op == ANVIL_OP_BR_COND) {
-            if (term->true_block == old_block) {
-                term->true_block = new_block;
-            }
-            if (term->false_block == old_block) {
-                term->false_block = new_block;
-            }
-        } else if (term->op == ANVIL_OP_SWITCH) {
-            if (term->true_block == old_block) {
-                term->true_block = new_block;
-            }
-            for (size_t i = 0; i < term->num_switch_cases; i++) {
-                if (term->switch_blocks && term->switch_blocks[i] == old_block) {
-                    term->switch_blocks[i] = new_block;
-                }
-            }
-        }
-    }
+    for (anvil_block_t *block = func->blocks; block; block = block->next)
+        replace_branch_target_in(block->last, old_block, new_block);
 }
 
 /* Return true when pred already has an edge to target.  Redirecting another
@@ -614,6 +614,351 @@ static bool simplify_const_branch(anvil_block_t *block)
     return true;
 }
 
+/* Instructions an if-conversion may execute on both sides of a branch:
+ * they cannot trap, touch memory or the floating-point environment. */
+static bool speculatable(const anvil_instr_t *instr)
+{
+    switch (instr->op) {
+    case ANVIL_OP_ADD:
+    case ANVIL_OP_SUB:
+    case ANVIL_OP_MUL:
+    case ANVIL_OP_UMULH:
+    case ANVIL_OP_SMULH:
+    case ANVIL_OP_NEG:
+    case ANVIL_OP_AND:
+    case ANVIL_OP_OR:
+    case ANVIL_OP_XOR:
+    case ANVIL_OP_NOT:
+    case ANVIL_OP_SHL:
+    case ANVIL_OP_SHR:
+    case ANVIL_OP_SAR:
+    case ANVIL_OP_ROTL:
+    case ANVIL_OP_CMP_EQ:
+    case ANVIL_OP_CMP_NE:
+    case ANVIL_OP_CMP_LT:
+    case ANVIL_OP_CMP_LE:
+    case ANVIL_OP_CMP_GT:
+    case ANVIL_OP_CMP_GE:
+    case ANVIL_OP_CMP_ULT:
+    case ANVIL_OP_CMP_ULE:
+    case ANVIL_OP_CMP_UGT:
+    case ANVIL_OP_CMP_UGE:
+    case ANVIL_OP_SELECT:
+    case ANVIL_OP_TRUNC:
+    case ANVIL_OP_ZEXT:
+    case ANVIL_OP_SEXT:
+    case ANVIL_OP_BITCAST:
+    case ANVIL_OP_PTRTOINT:
+    case ANVIL_OP_INTTOPTR:
+    case ANVIL_OP_GEP:
+    case ANVIL_OP_STRUCT_GEP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* The most instructions if-conversion hoists from both sides together. */
+enum { SPECULATION_LIMIT = 8 };
+
+/* Instructions before the side block's terminator, or SIZE_MAX when one
+ * may not be speculated. */
+static size_t speculated_count(const anvil_block_t *side)
+{
+    size_t count = 0;
+    for (const anvil_instr_t *instr = side->first; instr && instr != side->last; instr = instr->next) {
+        if (!speculatable(instr))
+            return SIZE_MAX;
+        count++;
+    }
+    return count;
+}
+
+/* Where one edge of a two-way branch in `from` leads: straight to a join,
+ * or through a block that only `from` enters, holding speculatable work
+ * and a branch to the join.  `via` is the join's predecessor on that path. */
+static anvil_block_t *two_way_join(anvil_block_t *from, anvil_block_t *side, anvil_block_t **via)
+{
+    if (side != from && side->last && side->last->op == ANVIL_OP_BR && side->num_preds == 1 && side->preds[0] == from &&
+        speculated_count(side) <= SPECULATION_LIMIT) {
+        *via = side;
+        return side->last->true_block;
+    }
+    *via = from;
+    return side;
+}
+
+/* Moves a side block's work before the branch that chose it. */
+static void hoist_side(anvil_block_t *side, anvil_instr_t *branch)
+{
+    while (side->first != side->last) {
+        anvil_instr_t *instr = side->first;
+        anvil_opt_erase_instr(instr);
+        anvil_opt_insert_before(branch, instr);
+    }
+}
+
+static anvil_value_t *phi_incoming(const anvil_instr_t *phi, const anvil_block_t *block)
+{
+    for (size_t item = 0; item < phi->num_phi_incoming; item++) {
+        if (phi->phi_blocks[item] == block)
+            return phi->operands[item];
+    }
+    return NULL;
+}
+
+/* If-conversion of a two-way branch whose sides do little:
+ *     br_cond c, T, F  ->  T/F (speculatable work) ->  J: x = phi [a, T], [b, F]
+ * becomes T's and F's work before the branch, x = select c, a, b and a
+ * branch to J.  Returns false (with the context error set) only on
+ * allocation failure; *folded tells whether the IR changed. */
+static bool fold_two_way_branch(anvil_func_t *func, anvil_block_t *block, bool *folded)
+{
+    *folded = false;
+    anvil_instr_t *term = block->last;
+    if (!term || term->op != ANVIL_OP_BR_COND || term->num_operands != 1 || term->true_block == term->false_block)
+        return true;
+    anvil_block_t *via_true, *via_false;
+    anvil_block_t *join = two_way_join(block, term->true_block, &via_true);
+    if (!join || join == block || join != two_way_join(block, term->false_block, &via_false) || via_true == via_false ||
+        join->num_preds != 2 || join == func->entry ||
+        (via_true != block ? speculated_count(via_true) : 0) + (via_false != block ? speculated_count(via_false) : 0) > SPECULATION_LIMIT)
+        return true;
+
+    size_t phis = 0;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        if (!phi_incoming(phi, via_true) || !phi_incoming(phi, via_false))
+            return true;
+        phis++;
+    }
+
+    /* Create every select before changing anything. */
+    anvil_ctx_t *ctx = func->owner_ctx;
+    anvil_instr_t **selects = phis ? anvil_ctx_calloc(ctx, phis, sizeof(*selects)) : NULL;
+    if (phis && !selects)
+        return false;
+    size_t index = 0;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next, index++) {
+        anvil_value_t *chosen = phi_incoming(phi, via_true), *other = phi_incoming(phi, via_false);
+        if (chosen == other)
+            continue;
+        anvil_value_t *operands[] = {term->operands[0], chosen, other};
+        selects[index] = anvil_instr_create(ctx, ANVIL_OP_SELECT, phi->result->type, phi->result->name);
+        if (!selects[index] || !anvil_instr_add_operands(selects[index], operands, 3)) {
+            free(selects);
+            return false;
+        }
+    }
+
+    if (via_true != block)
+        hoist_side(via_true, term);
+    if (via_false != block)
+        hoist_side(via_false, term);
+    index = 0;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; index++) {
+        anvil_instr_t *next = phi->next;
+        anvil_value_t *value = phi_incoming(phi, via_true);
+        if (selects[index]) {
+            anvil_opt_insert_before(term, selects[index]);
+            value = selects[index]->result;
+        }
+        anvil_opt_replace_uses_in_func(func, phi->result, value);
+        anvil_opt_erase_instr(phi);
+        phi = next;
+    }
+    free(selects);
+
+    term->op = ANVIL_OP_BR;
+    term->true_block = join;
+    term->false_block = NULL;
+    free(term->operands);
+    term->operands = NULL;
+    term->num_operands = 0;
+    if (via_true != block)
+        remove_block(func, via_true);
+    if (via_false != block)
+        remove_block(func, via_false);
+    *folded = true;
+    return true;
+}
+
+static bool is_zero(const anvil_value_t *value)
+{
+    return value->kind == ANVIL_VAL_CONST_INT && value->data.i == 0;
+}
+
+/* A branch on a negated or widened boolean branches on the boolean:
+ * c == 0, zext(c) == 0, xor c, true swap the targets; c != 0, zext(c) != 0
+ * keep them.  Returns whether the branch changed. */
+static bool simplify_branch_condition(anvil_instr_t *term)
+{
+    if (!term || term->op != ANVIL_OP_BR_COND || term->num_operands != 1)
+        return false;
+    bool changed = false;
+    for (;;) {
+        anvil_value_t *cond = term->operands[0];
+        if (cond->kind != ANVIL_VAL_INSTR)
+            return changed;
+        const anvil_instr_t *test = cond->data.instr;
+        anvil_value_t *inner = NULL;
+        bool negated = false;
+        if ((test->op == ANVIL_OP_CMP_EQ || test->op == ANVIL_OP_CMP_NE) && test->num_operands == 2) {
+            anvil_value_t *other = is_zero(test->operands[1]) ? test->operands[0] : is_zero(test->operands[0]) ? test->operands[1] : NULL;
+            if (other && other->type->kind != ANVIL_TYPE_I1 && other->kind == ANVIL_VAL_INSTR &&
+                (other->data.instr->op == ANVIL_OP_ZEXT || other->data.instr->op == ANVIL_OP_SEXT) &&
+                other->data.instr->operands[0]->type->kind == ANVIL_TYPE_I1)
+                other = other->data.instr->operands[0];
+            if (other && other->type->kind == ANVIL_TYPE_I1) {
+                inner = other;
+                negated = test->op == ANVIL_OP_CMP_EQ;
+            }
+        } else if (test->op == ANVIL_OP_XOR && test->num_operands == 2 && test->result->type->kind == ANVIL_TYPE_I1 &&
+                   test->operands[1]->kind == ANVIL_VAL_CONST_INT && test->operands[1]->data.i != 0) {
+            inner = test->operands[0];
+            negated = true;
+        }
+        if (!inner)
+            return changed;
+        term->operands[0] = inner;
+        if (negated) {
+            anvil_block_t *swap = term->true_block;
+            term->true_block = term->false_block;
+            term->false_block = swap;
+        }
+        changed = true;
+    }
+}
+
+/* Room for one more incoming value in a PHI (allocation only). */
+static bool phi_reserve_incoming(anvil_ctx_t *ctx, anvil_instr_t *phi)
+{
+    size_t needed = phi->num_phi_incoming + 1;
+    if (!anvil_instr_reserve_operands(phi, needed))
+        return false;
+    if (phi->phi_capacity >= needed)
+        return true;
+    anvil_block_t **blocks = anvil_ctx_realloc(ctx, phi->phi_blocks, needed * sizeof(*blocks));
+    if (!blocks)
+        return false;
+    phi->phi_blocks = blocks;
+    phi->phi_capacity = needed;
+    return true;
+}
+
+static anvil_value_t *incoming_for(const anvil_instr_t *phi, const anvil_block_t *block)
+{
+    for (size_t item = 0; item < phi->num_phi_incoming; item++) {
+        if (phi->phi_blocks[item] == block)
+            return phi->operands[item];
+    }
+    return NULL;
+}
+
+/* Whether `value` (defined in `join`) is used only in `join` and as the
+ * value a PHI of a successor takes from `join`. */
+static bool used_only_through(anvil_func_t *func, const anvil_value_t *value, const anvil_block_t *join)
+{
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (const anvil_instr_t *instr = block->first; instr; instr = instr->next) {
+            for (size_t operand = 0; operand < instr->num_operands; operand++) {
+                if (instr->operands[operand] != value || block == join)
+                    continue;
+                if (instr->op != ANVIL_OP_PHI || instr->phi_blocks[operand] != join)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* Jump threading on a known outcome.  `join` holds PHIs, at most one
+ * comparison of a PHI with a constant, and a two-way branch on it (or on an
+ * i1 PHI): a predecessor bringing a constant decides the branch, so its
+ * edge goes straight to the chosen successor.  Returns false (context error
+ * set) only on allocation failure; *threaded tells whether the IR changed. */
+static bool thread_known_branch(anvil_func_t *func, anvil_block_t *join, bool *threaded)
+{
+    *threaded = false;
+    anvil_instr_t *term = join->last;
+    if (!term || term->op != ANVIL_OP_BR_COND || term->true_block == term->false_block || !join->first ||
+        join->first->op != ANVIL_OP_PHI)
+        return true;
+    anvil_instr_t *compare = term->prev && term->prev->op != ANVIL_OP_PHI ? term->prev : NULL;
+    if (compare && (compare->prev && compare->prev->op != ANVIL_OP_PHI))
+        return true;
+    anvil_instr_t *decided = NULL;   /* the PHI the branch depends on */
+    anvil_value_t *constant = NULL;
+    if (compare) {
+        if (term->operands[0] != compare->result || compare->num_operands != 2 || compare->op < ANVIL_OP_CMP_EQ ||
+            compare->op > ANVIL_OP_CMP_UGE)
+            return true;
+        for (size_t operand = 0; operand < 2; operand++) {
+            anvil_value_t *value = compare->operands[operand];
+            if (value->kind == ANVIL_VAL_INSTR && value->data.instr->parent == join && value->data.instr->op == ANVIL_OP_PHI &&
+                compare->operands[1 - operand]->kind == ANVIL_VAL_CONST_INT) {
+                decided = value->data.instr;
+                constant = compare->operands[1 - operand];
+            }
+        }
+    } else if (term->operands[0]->kind == ANVIL_VAL_INSTR && term->operands[0]->data.instr->parent == join) {
+        decided = term->operands[0]->data.instr;
+    }
+    if (!decided || (compare && !used_only_through(func, compare->result, join)))
+        return true;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        if (!used_only_through(func, phi->result, join))
+            return true;
+    }
+
+    anvil_ctx_t *ctx = func->owner_ctx;
+    for (size_t item = 0; item < decided->num_phi_incoming; item++) {
+        anvil_block_t *from = decided->phi_blocks[item];
+        anvil_value_t *value = decided->operands[item];
+        if (value->kind != ANVIL_VAL_CONST_INT || !from->last || from == join)
+            continue;
+        bool taken;
+        if (compare) {
+            anvil_value_t *left = compare->operands[0] == decided->result ? value : constant;
+            anvil_value_t *right = compare->operands[0] == decided->result ? constant : value;
+            anvil_value_t *outcome = anvil_opt_fold_integer(ctx, compare, left, right);
+            if (!outcome || outcome->kind != ANVIL_VAL_CONST_INT)
+                continue;
+            taken = outcome->data.i != 0;
+        } else {
+            taken = value->data.i != 0;
+        }
+        anvil_block_t *target = taken ? term->true_block : term->false_block;
+        if (block_targets(from, target))
+            continue;  /* the edge would collide with one `from` has */
+
+        /* Allocate every PHI slot before changing an edge. */
+        for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+            if (!phi_reserve_incoming(ctx, phi))
+                return false;
+        }
+        for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+            anvil_value_t *through = incoming_for(phi, join);
+            if (through && through->kind == ANVIL_VAL_INSTR && through->data.instr->parent == join)
+                through = incoming_for(through->data.instr, from);
+            phi->operands[phi->num_phi_incoming] = through;
+            phi->phi_blocks[phi->num_phi_incoming++] = from;
+            phi->num_operands = phi->num_phi_incoming;
+        }
+        replace_branch_target_in(from->last, join, target);
+        for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+            for (size_t entry = 0; entry < phi->num_phi_incoming; entry++) {
+                if (phi->phi_blocks[entry] == from) {
+                    remove_phi_incoming(phi, entry);
+                    break;
+                }
+            }
+        }
+        *threaded = true;
+        return true;  /* predecessor lists are now stale */
+    }
+    return true;
+}
+
 /* Merge block with its single successor if possible */
 static bool try_merge_blocks(anvil_func_t *func, anvil_block_t *block)
 {
@@ -626,11 +971,19 @@ static bool try_merge_blocks(anvil_func_t *func, anvil_block_t *block)
     /* Don't merge entry block's successor if it has multiple preds */
     if (count_preds(func, succ) != 1) return false;
     
-    /* Don't merge if successor has PHI nodes */
-    if (succ->first && succ->first->op == ANVIL_OP_PHI) return false;
+    /* With one predecessor every PHI has one value: use it directly. */
+    while (succ->first && succ->first->op == ANVIL_OP_PHI) {
+        anvil_instr_t *phi = succ->first;
+        if (phi->num_phi_incoming != 1 || phi->phi_blocks[0] != block) return false;
+        anvil_opt_replace_uses_in_func(func, phi->result, phi->operands[0]);
+        anvil_opt_erase_instr(phi);
+    }
     
     /* Don't merge block with itself */
     if (block == succ) return false;
+
+    /* The entry block can be a loop target but must stay first. */
+    if (succ == func->entry) return false;
     
     /* Remove the branch instruction */
     if (term->prev) {
@@ -698,6 +1051,50 @@ anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func)
             if (simplify_const_branch(block)) {
                 any_changed = true;
                 changed = true;
+            }
+        }
+
+        if (any_changed) {
+            block_index_destroy(&index);
+            continue;
+        }
+
+        /* Branches on negated booleans, and on values a predecessor
+         * already decides. */
+        for (anvil_block_t *block = func->blocks; block; block = block->next) {
+            if (simplify_branch_condition(block->last)) {
+                any_changed = true;
+                changed = true;
+            }
+        }
+        for (anvil_block_t *block = func->blocks; block && !any_changed; block = block->next) {
+            bool threaded;
+            if (!thread_known_branch(func, block, &threaded)) {
+                block_index_destroy(&index);
+                return ANVIL_PASS_RUN_ERROR;
+            }
+            if (threaded) {
+                any_changed = true;
+                changed = true;
+            }
+        }
+
+        if (any_changed) {
+            block_index_destroy(&index);
+            continue;
+        }
+
+        /* Two-way branches over empty sides become selects. */
+        for (anvil_block_t *block = func->blocks; block; block = block->next) {
+            bool folded;
+            if (!fold_two_way_branch(func, block, &folded)) {
+                block_index_destroy(&index);
+                return ANVIL_PASS_RUN_ERROR;
+            }
+            if (folded) {
+                any_changed = true;
+                changed = true;
+                break; /* Pred caches and block iteration are now stale. */
             }
         }
 

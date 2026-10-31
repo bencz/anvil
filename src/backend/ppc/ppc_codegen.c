@@ -19,54 +19,14 @@ static bool ppc_validate_config(anvil_backend_t *be, const anvil_ppc_target_desc
 
 static bool ppc_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, const anvil_ppc_target_desc_t *desc)
 {
-    if (!mod || !desc || mod->num_globals == 0)
-        return mod && desc;
-
-    anvil_gnu_string_pool_t strings;
-    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
-
-    bool emitted_header = false;
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (!g->value)
-            continue;
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC) {
-            continue;
-        }
-
-        if (!emitted_header) {
-            anvil_strbuf_append(out, "\t.data\n");
-            emitted_header = true;
-        }
-
-        if (!g->value->name || !g->value->type) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-        if (g->value->data.global.is_declaration) {
-            anvil_strbuf_appendf(out, "\t.extern %s\n", g->value->name);
-            continue;
-        }
-
-        size_t align = g->value->type ? anvil_type_align(g->value->type) : 1;
-        if (align == 0)
-            align = 1;
-        if (g->value->data.global.linkage == ANVIL_LINK_EXTERNAL || g->value->data.global.linkage == ANVIL_LINK_COMMON)
-            anvil_strbuf_appendf(out, "\t.globl %s\n", g->value->name);
-        else if (g->value->data.global.linkage == ANVIL_LINK_WEAK)
-            anvil_strbuf_appendf(out, "\t.weak %s\n", g->value->name);
-        anvil_strbuf_appendf(out, "\t.align %zu\n", align);
-        anvil_strbuf_appendf(out, "%s:\n", g->value->name);
-        if (!anvil_gnu_emit_constant(out, g->value->type, g->value->data.global.init, (size_t)desc->word_size, "", &strings, NULL, NULL)) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-    }
-
-    if (emitted_header)
-        anvil_strbuf_append(out, "\n");
-    bool ok = anvil_gnu_string_pool_emit(out, &strings, "\t.section .rodata");
-    anvil_gnu_string_pool_destroy(&strings);
-    return ok && !out->failed;
+    if (!mod || !desc)
+        return false;
+    anvil_gnu_globals_config_t config = {
+        .format = &anvil_obj_format_elf,
+        .symbol_prefix = "",
+        .pointer_size = (size_t)desc->word_size,
+    };
+    return anvil_gnu_emit_globals(out, mod, &config);
 }
 
 static const char *ppc_variant_display_name(anvil_ppc_variant_t variant)
@@ -110,11 +70,11 @@ anvil_error_t anvil_ppc_codegen_func(anvil_backend_t *be, anvil_func_t *func, an
         return ANVIL_ERR_CODEGEN;
     }
 
-    bool ok = anvil_ppc_regalloc_mir(mir, variant);
+    bool ok = anvil_ppc_regalloc_mir_features(mir, variant, be->ctx->cpu_features);
     char *mir_text = NULL;
     size_t mir_len = 0;
     if (ok)
-        ok = anvil_ppc_emit_mir(mir, variant, &mir_text, &mir_len);
+        ok = ppc_emit_mir_reloc(mir, variant, be->ctx->cpu_features, anvil_ctx_get_reloc_model(be->ctx), &mir_text, &mir_len);
     anvil_mir_func_destroy(mir);
 
     if (!ok || !mir_text) {
@@ -179,6 +139,7 @@ anvil_error_t anvil_ppc_codegen_module(anvil_backend_t *be, anvil_module_t *mod,
         anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN, "PowerPC global initializer is not representable");
         return ANVIL_ERR_CODEGEN;
     }
+    anvil_obj_emit_module_end(&result, &anvil_obj_format_elf);
 
     if (result.failed) {
         anvil_strbuf_destroy(&result);
@@ -186,4 +147,80 @@ anvil_error_t anvil_ppc_codegen_module(anvil_backend_t *be, anvil_module_t *mod,
     }
     *output = anvil_strbuf_detach(&result, len);
     return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+}
+
+const anvil_ppc_target_desc_t *ppc_backend_desc(const anvil_backend_t *be)
+{
+    for (anvil_ppc_variant_t variant = ANVIL_PPC_VARIANT_PPC32; variant <= ANVIL_PPC_VARIANT_PPC64LE; variant++) {
+        const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
+        if (desc && be && be->ops && desc->arch == be->ops->arch)
+            return desc;
+    }
+    return NULL;
+}
+
+anvil_error_t anvil_ppc_backend_init(anvil_backend_t *be, anvil_ctx_t *ctx)
+{
+    (void)ctx;
+    return ppc_backend_desc(be) ? ANVIL_OK : ANVIL_ERR_NO_BACKEND;
+}
+
+void anvil_ppc_backend_cleanup(anvil_backend_t *be)
+{
+    (void)be;
+}
+
+void anvil_ppc_backend_reset(anvil_backend_t *be)
+{
+    (void)be;
+}
+
+const anvil_arch_info_t *anvil_ppc_backend_arch_info(anvil_backend_t *be)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc ? desc->arch_info : NULL;
+}
+
+anvil_error_t anvil_ppc_backend_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc ? anvil_ppc_codegen_module(be, mod, desc->variant, output, len) : ANVIL_ERR_NO_BACKEND;
+}
+
+anvil_error_t anvil_ppc_backend_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc ? anvil_ppc_codegen_func(be, func, desc->variant, output, len) : ANVIL_ERR_NO_BACKEND;
+}
+
+/* Reservation loops cover every size up to the register width. */
+bool anvil_ppc_backend_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc && anvil_atomic_type_valid(type) && type->size <= desc->word_size;
+}
+
+anvil_value_t *anvil_ppc_backend_build_va_arg(anvil_backend_t *be, anvil_value_t *storage, anvil_type_t *type, const char *name)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc ? desc->abi_ops->build_va_arg(be, desc, storage, type, name) : NULL;
+}
+
+anvil_value_t *anvil_ppc_backend_build_va_copy(anvil_backend_t *be, anvil_value_t *cursor, const char *name)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc ? desc->abi_ops->build_va_copy(be, cursor, name) : NULL;
+}
+
+bool anvil_ppc_backend_build_va_copy_into(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor)
+{
+    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
+    return desc && desc->abi_ops->build_va_copy_into(be, destination, cursor);
+}
+
+/* Every PowerPC ELF variant can produce static, PIE and shared-object code. */
+bool anvil_ppc_backend_reloc_model_supported(anvil_backend_t *be, anvil_reloc_model_t model)
+{
+    (void)be;
+    return model == ANVIL_RELOC_STATIC || model == ANVIL_RELOC_PIE || model == ANVIL_RELOC_PIC;
 }

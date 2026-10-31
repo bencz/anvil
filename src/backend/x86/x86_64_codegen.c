@@ -79,68 +79,24 @@ static anvil_error_t x64_emit_func(x64_backend_t *be, anvil_func_t *func)
     return ANVIL_OK;
 }
 
+static size_t x64_global_align(const anvil_type_t *type)
+{
+    int align = x64_type_align((anvil_type_t *)type);
+    return align > 0 ? (size_t)align : 1;
+}
+
 static bool x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
 {
-    if (mod->num_globals == 0)
-        return true;
-
-    const char *prefix = x64_symbol_prefix(be);
-
-    int actual_globals = 0;
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC)
-            continue;
-        actual_globals++;
-    }
-    if (actual_globals == 0)
-        return true;
-
-    anvil_gnu_string_pool_t strings;
-    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
-
-    anvil_strbuf_append(&be->data, "\t.data\n");
-
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC)
-            continue;
-
-        anvil_value_t *global = g->value;
-        if (!global || !global->name || !global->type) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-        if (global->data.global.is_declaration) {
-            anvil_strbuf_appendf(&be->data, "\t.extern %s%s\n", prefix, global->name);
-            continue;
-        }
-        if (global->data.global.linkage == ANVIL_LINK_EXTERNAL || global->data.global.linkage == ANVIL_LINK_COMMON) {
-            anvil_strbuf_appendf(&be->data, "\t.globl %s%s\n", prefix, global->name);
-        } else if (global->data.global.linkage == ANVIL_LINK_WEAK) {
-            anvil_strbuf_appendf(&be->data, "\t.weak %s%s\n", prefix, global->name);
-        }
-
-        int align = g->value->type ? x64_type_align(g->value->type) : 8;
-
-        if (x64_is_darwin(be)) {
-            int p2align = (align <= 1) ? 0 : (align <= 2) ? 1 : (align <= 4) ? 2 : 3;
-            anvil_strbuf_appendf(&be->data, "\t.p2align %d\n", p2align);
-        } else {
-            anvil_strbuf_appendf(&be->data, "\t.align %d\n", align);
-        }
-
-        anvil_strbuf_appendf(&be->data, "%s%s:\n", prefix, g->value->name);
-
-        if (!anvil_gnu_emit_constant(&be->data, global->type, global->data.global.init, 8, prefix, &strings, NULL, NULL)) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-    }
-
-    anvil_strbuf_append(&be->data, "\n");
-    const char *string_section = x64_is_darwin(be) ? "\t.section __TEXT,__cstring,cstring_literals" : (be->ctx && be->ctx->abi == ANVIL_ABI_WIN64 ? "\t.section .rdata,\"dr\"" : "\t.section .rodata");
-    bool ok = anvil_gnu_string_pool_emit(&be->data, &strings, string_section);
-    anvil_gnu_string_pool_destroy(&strings);
-    return ok && !be->data.failed;
+    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
+    if (!desc)
+        return false;
+    anvil_gnu_globals_config_t config = {
+        .format = desc->format,
+        .symbol_prefix = x64_symbol_prefix(be),
+        .pointer_size = 8,
+        .type_align = x64_global_align,
+    };
+    return anvil_gnu_emit_globals(&be->data, mod, &config);
 }
 
 anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
@@ -181,29 +137,8 @@ anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char 
     if (priv->code.failed || priv->data.failed)
         return ANVIL_ERR_NOMEM;
 
-    anvil_strbuf_t result;
-    anvil_strbuf_init(&result);
-    if (result.failed)
-        return ANVIL_ERR_NOMEM;
-    char *code_str = anvil_strbuf_detach(&priv->code, NULL);
-    char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (!code_str || !data_str) {
-        free(code_str);
-        free(data_str);
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-    anvil_strbuf_append(&result, code_str);
-    anvil_strbuf_append(&result, data_str);
-    free(code_str);
-    free(data_str);
-    if (result.failed) {
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-
-    *output = anvil_strbuf_detach(&result, len);
-    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+    const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(priv->ctx ? priv->ctx->abi : ANVIL_ABI_DEFAULT);
+    return anvil_obj_finish_module(&priv->code, &priv->data, desc ? desc->format : NULL, output, len);
 }
 
 anvil_error_t x64_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len)

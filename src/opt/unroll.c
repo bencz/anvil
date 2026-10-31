@@ -210,11 +210,8 @@ static bool expand_loop(anvil_func_t *func, unroll_plan *plan)
                 return false;
 
             copies[index] = copy;
-            copy->fcmp_pred = original->fcmp_pred;
-            copy->call_cc = original->call_cc;
-            copy->memory_access = original->memory_access;
-            copy->atomic = original->atomic;
-            copy->aux_type = original->aux_type;
+            if (!anvil_instr_copy_attributes(copy, original))
+                return false;
             copy->num_operands = original->num_operands;
             for (size_t operand = 0; operand < original->num_operands; operand++)
                 copy->operands[operand] = map_value(plan, values, copies, index, original->operands[operand]);

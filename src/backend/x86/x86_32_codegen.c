@@ -82,7 +82,8 @@ static anvil_error_t x86_emit_func(x86_backend_priv_t *priv, anvil_func_t *func)
     char *mir_text = NULL;
     size_t mir_len = 0;
     if (ok) {
-        ok = anvil_x86_emit_mir_abi(mir, func, abi, priv->syntax, &mir_text, &mir_len);
+        anvil_cpu_features_t features = priv->ctx ? priv->ctx->cpu_features : anvil_cpu_model_features(anvil_arch_default_cpu(ANVIL_ARCH_X86));
+        ok = x86_emit_mir_reloc(mir, func, abi, priv->syntax, features, anvil_ctx_get_reloc_model(priv->ctx), &mir_text, &mir_len);
     }
     anvil_mir_func_destroy(mir);
 
@@ -101,68 +102,26 @@ static anvil_error_t x86_emit_func(x86_backend_priv_t *priv, anvil_func_t *func)
     return ANVIL_OK;
 }
 
+static size_t x86_global_align(const anvil_type_t *type)
+{
+    int align = x86_type_align((anvil_type_t *)type);
+    return align > 0 ? (size_t)align : 1;
+}
+
 static bool x86_emit_globals(x86_backend_priv_t *priv, anvil_module_t *mod)
 {
-    if (mod->num_globals == 0)
-        return true;
-
-    const char *prefix = x86_symbol_prefix(priv);
-
-    int actual_globals = 0;
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC)
-            continue;
-        actual_globals++;
-    }
-    if (actual_globals == 0)
-        return true;
-
-    anvil_gnu_string_pool_t strings;
-    anvil_gnu_string_pool_init(&strings, ".Lanvil_global_string_");
-
-    anvil_strbuf_append(&priv->data, "\t.data\n");
-
-    for (anvil_global_t *g = mod->globals; g; g = g->next) {
-        if (g->value->type && g->value->type->kind == ANVIL_TYPE_FUNC)
-            continue;
-
-        anvil_value_t *global = g->value;
-        if (!global || !global->name || !global->type) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-        if (global->data.global.is_declaration) {
-            anvil_strbuf_appendf(&priv->data, "\t.extern %s%s\n", prefix, global->name);
-            continue;
-        }
-        if (global->data.global.linkage == ANVIL_LINK_EXTERNAL || global->data.global.linkage == ANVIL_LINK_COMMON) {
-            anvil_strbuf_appendf(&priv->data, "\t.globl %s%s\n", prefix, global->name);
-        } else if (global->data.global.linkage == ANVIL_LINK_WEAK) {
-            anvil_strbuf_appendf(&priv->data, "\t.weak %s%s\n", prefix, global->name);
-        }
-
-        int align = g->value->type ? x86_type_align(g->value->type) : 4;
-
-        if (x86_is_macho(priv)) {
-            int p2align = (align <= 1) ? 0 : (align <= 2) ? 1 : (align <= 4) ? 2 : 3;
-            anvil_strbuf_appendf(&priv->data, "\t.p2align %d\n", p2align);
-        } else {
-            anvil_strbuf_appendf(&priv->data, "\t.align %d\n", align);
-        }
-
-        anvil_strbuf_appendf(&priv->data, "%s%s:\n", prefix, g->value->name);
-
-        if (!anvil_gnu_emit_constant(&priv->data, global->type, global->data.global.init, 4, prefix, &strings, x86_format_data_symbol, priv)) {
-            anvil_gnu_string_pool_destroy(&strings);
-            return false;
-        }
-    }
-
-    anvil_strbuf_append(&priv->data, "\n");
-    const char *string_section = x86_is_macho(priv) ? "\t.section __TEXT,__cstring,cstring_literals" : (x86_is_coff(priv) ? "\t.section .rdata,\"dr\"" : "\t.section .rodata");
-    bool ok = anvil_gnu_string_pool_emit(&priv->data, &strings, string_section);
-    anvil_gnu_string_pool_destroy(&strings);
-    return ok && !priv->data.failed;
+    const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(priv->ctx ? priv->ctx->abi : ANVIL_ABI_DEFAULT);
+    if (!plat)
+        return false;
+    anvil_gnu_globals_config_t config = {
+        .format = plat->format,
+        .symbol_prefix = x86_symbol_prefix(priv),
+        .pointer_size = 4,
+        .type_align = x86_global_align,
+        .format_symbol = x86_format_data_symbol,
+        .format_user = priv,
+    };
+    return anvil_gnu_emit_globals(&priv->data, mod, &config);
 }
 
 anvil_error_t x86_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
@@ -202,29 +161,8 @@ anvil_error_t x86_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char 
     if (priv->code.failed || priv->data.failed)
         return ANVIL_ERR_NOMEM;
 
-    anvil_strbuf_t result;
-    anvil_strbuf_init(&result);
-    if (result.failed)
-        return ANVIL_ERR_NOMEM;
-    char *code_str = anvil_strbuf_detach(&priv->code, NULL);
-    char *data_str = anvil_strbuf_detach(&priv->data, NULL);
-    if (!code_str || !data_str) {
-        free(code_str);
-        free(data_str);
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-    anvil_strbuf_append(&result, code_str);
-    anvil_strbuf_append(&result, data_str);
-    free(code_str);
-    free(data_str);
-    if (result.failed) {
-        anvil_strbuf_destroy(&result);
-        return ANVIL_ERR_NOMEM;
-    }
-
-    *output = anvil_strbuf_detach(&result, len);
-    return *output ? ANVIL_OK : ANVIL_ERR_NOMEM;
+    const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(priv->ctx ? priv->ctx->abi : ANVIL_ABI_DEFAULT);
+    return anvil_obj_finish_module(&priv->code, &priv->data, plat ? plat->format : NULL, output, len);
 }
 
 anvil_error_t x86_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len)

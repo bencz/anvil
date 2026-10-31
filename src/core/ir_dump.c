@@ -88,6 +88,27 @@ static const char *op_name(anvil_op_t op)
         [ANVIL_OP_ATOMIC_RMW] = "atomic_rmw",
         [ANVIL_OP_ATOMIC_CMPXCHG] = "atomic_cmpxchg",
         [ANVIL_OP_ATOMIC_FENCE] = "atomic_fence",
+        [ANVIL_OP_SPLAT] = "splat",
+        [ANVIL_OP_REDUCE_OR] = "reduce_or",
+        [ANVIL_OP_REDUCE_ADD] = "reduce_add",
+        [ANVIL_OP_REDUCE_AND] = "reduce_and",
+        [ANVIL_OP_REDUCE_XOR] = "reduce_xor",
+        [ANVIL_OP_REDUCE_SMIN] = "reduce_smin",
+        [ANVIL_OP_REDUCE_SMAX] = "reduce_smax",
+        [ANVIL_OP_REDUCE_UMIN] = "reduce_umin",
+        [ANVIL_OP_REDUCE_UMAX] = "reduce_umax",
+        [ANVIL_OP_REDUCE_FADD] = "reduce_fadd",
+        [ANVIL_OP_FMA] = "fma",
+        [ANVIL_OP_FSQRT] = "fsqrt",
+        [ANVIL_OP_UMULH] = "umulh",
+        [ANVIL_OP_SMULH] = "smulh",
+        [ANVIL_OP_ACCUM_ZEXT] = "accum_zext",
+        [ANVIL_OP_ACCUM_SEXT] = "accum_sext",
+        [ANVIL_OP_ADD_SAT_U] = "add_sat_u",
+        [ANVIL_OP_ADD_SAT_S] = "add_sat_s",
+        [ANVIL_OP_SUB_SAT_U] = "sub_sat_u",
+        [ANVIL_OP_SUB_SAT_S] = "sub_sat_s",
+        [ANVIL_OP_ROTL] = "rotl",
     };
     
     if (op >= 0 && op < ANVIL_OP_COUNT && names[op]) {
@@ -509,6 +530,8 @@ void anvil_dump_block(FILE *out, anvil_block_t *block)
     if (!block) return;
     
     fprintf(out, "%s:", block->name ? block->name : "?");
+    if (block->cold)
+        fprintf(out, "  ; cold");
     
     /* Print predecessors */
     if (block->num_preds > 0) {

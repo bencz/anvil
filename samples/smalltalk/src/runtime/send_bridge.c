@@ -1,5 +1,6 @@
 #include "st_send_bridge.h"
 #include "st_reflection_primitives.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -340,7 +341,7 @@ st_value_t st_aot_send_failure(
      * language message miss. In particular, arity mismatches must never be
      * disguised as doesNotUnderstand:. */
     if (status != ST_AOT_SEND_ERR_NOT_FOUND) {
-        abort();
+        st_fatal("send bridge: send failed", st_aot_send_status_string(status));
     }
     if (caller == NULL || st_aot_frame_validate(caller, 0u) != ST_AOT_SEND_OK
             || (thread = caller->thread) == NULL
@@ -350,19 +351,20 @@ st_value_t st_aot_send_failure(
             || (argc != 0u && argv == NULL)
             || receiver_class(thread, receiver, &authenticated_class)
                 != ST_AOT_SEND_OK) {
-        abort();
+        st_fatal("send bridge", "message miss reported with an invalid frame, site or receiver");
     }
     for (uint32_t index = 0u; index < argc; index++) {
         if (receiver_class(thread, argv[index], &authenticated_class)
                 != ST_AOT_SEND_OK) {
-            abort();
+            st_fatal_code("send bridge", "message miss reported with an invalid argument",
+                          (uint64_t)index);
         }
     }
     result = thread->failure(thread->failure_user, caller, site, receiver,
                              argv, argc, status);
     if (receiver_class(thread, result, &authenticated_class)
             != ST_AOT_SEND_OK)
-        abort();
+        st_fatal("send bridge", "send failure handler returned an invalid value");
     return result;
 }
 

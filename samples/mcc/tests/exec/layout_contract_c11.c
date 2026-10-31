@@ -1,5 +1,15 @@
 #include <stddef.h>
 
+#if !defined(EXPECT_PROBE_SIZE) && defined(__i386__)
+/* i386 SysV: 64-bit scalars are 4-byte aligned inside structs. */
+#define EXPECT_PROBE_SIZE 20
+#define EXPECT_PROBE_ALIGN 4
+#define EXPECT_LL_OFFSET 4
+#define EXPECT_DOUBLE_OFFSET 12
+#define EXPECT_ARRAY_SIZE 12
+#define EXPECT_PTR_OFFSET 8
+#endif
+
 #ifndef EXPECT_PROBE_SIZE
 #define EXPECT_PROBE_SIZE 24
 #define EXPECT_PROBE_ALIGN 8

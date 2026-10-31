@@ -35,6 +35,8 @@ void anvil_opt_cfg_destroy(anvil_opt_cfg_t *cfg)
     if (!cfg)
         return;
 
+    free(cfg->layout);
+    cfg->layout = NULL;
     if (cfg->references && --*cfg->references)
     {
         memset(cfg, 0, sizeof(*cfg));
@@ -118,27 +120,29 @@ static bool cache_matches(const anvil_func_t *func, const anvil_opt_cfg_t *cfg)
     return index == cfg->count;
 }
 
-/* Iterative DFS avoids exhausting the host stack on generated CFGs. */
+/* Iterative DFS avoids exhausting the host stack on generated CFGs.
+ * Successors are visited last to first, so in reverse postorder a branch's
+ * first (true) successor comes right after it, as in source order. */
 static void compute_rpo(anvil_opt_cfg_t *cfg, size_t *stack, size_t *cursor)
 {
     size_t depth = 1;
     stack[0] = cfg->entry;
-    cursor[0] = cfg->successor_offsets[cfg->entry];
+    cursor[0] = cfg->successor_offsets[cfg->entry + 1];
     cfg->rpo_rank[cfg->entry] = 0;
 
     while (depth)
     {
         size_t block = stack[depth - 1];
         size_t edge = cursor[depth - 1];
-        if (edge < cfg->successor_offsets[block + 1])
+        if (edge > cfg->successor_offsets[block])
         {
-            cursor[depth - 1]++;
-            size_t successor = cfg->successors[edge];
+            cursor[depth - 1]--;
+            size_t successor = cfg->successors[edge - 1];
             if (cfg->rpo_rank[successor] == SIZE_MAX)
             {
                 cfg->rpo_rank[successor] = 0;
                 stack[depth] = successor;
-                cursor[depth] = cfg->successor_offsets[successor];
+                cursor[depth] = cfg->successor_offsets[successor + 1];
                 depth++;
             }
         }

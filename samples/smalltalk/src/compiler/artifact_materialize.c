@@ -4,6 +4,7 @@
 
 #include "st_artifact_materialize.h"
 #include "artifact_materialize_internal.h"
+#include "st_publish_noreplace.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -16,16 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 #ifndef O_NOFOLLOW
 #define ST_ARTIFACT_MATERIALIZE_LACKS_NOFOLLOW 1
 #define O_NOFOLLOW 0
-#endif
-
-#ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE (1u << 0)
 #endif
 
 #ifndef NAME_MAX
@@ -293,16 +289,7 @@ static void bit_set(uint8_t *bits, size_t index)
 int st_artifact_publish_noreplace(
     int directory, const char *staging, const char *profile)
 {
-#ifdef SYS_renameat2
-    return (int)syscall(SYS_renameat2, directory, staging, directory, profile,
-                        RENAME_NOREPLACE);
-#else
-    (void)directory;
-    (void)staging;
-    (void)profile;
-    errno = ENOSYS;
-    return -1;
-#endif
+    return st_publish_noreplace(directory, staging, profile);
 }
 
 static bool write_all(st_artifact_materialize_write_fn writer, void *user,

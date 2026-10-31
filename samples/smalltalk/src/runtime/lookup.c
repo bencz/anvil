@@ -341,7 +341,11 @@ static bool pic_slot_read(const st_pic_slot_t *slot, uint32_t *class_id_out,
     *entry_out = atomic_load_explicit(&slot->entry, memory_order_relaxed);
     *binding_out = atomic_load_explicit(&slot->binding,
                                         memory_order_relaxed);
-    second = atomic_load_explicit(&slot->sequence, memory_order_acquire);
+    /* Seqlock: the relaxed field loads must complete before the sequence is
+       read again, which an acquire load of the sequence alone does not
+       order.  Pairs with the release fence in pic_slot_write. */
+    atomic_thread_fence(memory_order_acquire);
+    second = atomic_load_explicit(&slot->sequence, memory_order_relaxed);
     return first == second && (second & UINT64_C(1)) == 0;
 }
 
@@ -363,6 +367,8 @@ static bool pic_slot_write(st_pic_slot_t *slot, uint32_t class_id,
                 memory_order_acq_rel, memory_order_acquire))
             break;
     }
+    /* The odd sequence must be visible before any field store. */
+    atomic_thread_fence(memory_order_release);
     atomic_store_explicit(&slot->class_id, class_id, memory_order_relaxed);
     atomic_store_explicit(&slot->epoch, epoch, memory_order_relaxed);
     atomic_store_explicit(&slot->entry, entry, memory_order_relaxed);

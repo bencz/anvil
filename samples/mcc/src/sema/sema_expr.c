@@ -454,9 +454,17 @@ mcc_type_t *sema_analyze_cast_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 mcc_type_t *sema_analyze_sizeof_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
     mcc_type_t *operand_type = expr->data.sizeof_expr.type_arg;
+    mcc_ast_node_t *operand = expr->data.sizeof_expr.expr_arg;
     if (expr->data.sizeof_expr.type_arg) {
         /* sizeof(type) */
-    } else if (expr->data.sizeof_expr.expr_arg) {
+    } else if (operand && operand->kind == AST_STRING_LIT) {
+        /* A string literal is an array of its characters and the
+         * terminator; it only decays to a pointer elsewhere. */
+        operand_type = mcc_type_array(sema->types, mcc_type_char(sema->types), operand->data.string_lit.length + 1);
+        sema_analyze_expr(sema, operand);
+        expr->data.sizeof_expr.type_arg = operand_type;
+        expr->data.sizeof_expr.expr_arg = NULL;
+    } else if (operand) {
         operand_type = sema_analyze_expr(sema,
                                          expr->data.sizeof_expr.expr_arg);
     }

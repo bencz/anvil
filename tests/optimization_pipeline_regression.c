@@ -438,7 +438,9 @@ static void test_loop_motion(anvil_arch_t arch)
 
     anvil_pass_manager_t *pm = anvil_pass_manager_create(ctx);
     check(anvil_pass_manager_set_level(pm, ANVIL_OPT_STANDARD) == ANVIL_OK, "select O2 pipeline");
-    check(!anvil_pass_manager_is_enabled(pm, ANVIL_PASS_LICM), "O2 does not enable loop speculation");
+    /* Like GCC/Clang -O2: invariant motion of nontrapping operations only
+     * (the division below must stay in the loop). */
+    check(anvil_pass_manager_is_enabled(pm, ANVIL_PASS_LICM), "O2 enables nontrapping loop invariant motion");
     check(anvil_pass_manager_set_level(pm, ANVIL_OPT_AGGRESSIVE) == ANVIL_OK, "select O3 pipeline");
     check(anvil_pass_manager_is_enabled(pm, ANVIL_PASS_LICM), "O3 enables loop invariant motion");
     size_t events = 0;

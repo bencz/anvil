@@ -5,11 +5,11 @@
 anvil_mir_vreg_t anvil_agg_frame_object(anvil_mir_func_t *mir, size_t size, size_t align,
                                         anvil_agg_target_t target)
 {
-    if (size == 0 || size > UINT16_MAX / 8)
+    if (size == 0)
         return ANVIL_MIR_NO_VREG;
     if (align < 8)
         align = 8;
-    int slot = anvil_mir_add_frame_slot(mir, (uint16_t)(size * 8), (uint16_t)align);
+    int slot = anvil_mir_add_frame_slot(mir, size, (uint32_t)align);
     anvil_mir_vreg_t address = anvil_mir_add_vreg_typed(mir, ANVIL_MIR_REG_GPR, (uint16_t)(target.word * 8), false);
     if (slot < 0 || address == ANVIL_MIR_NO_VREG || !anvil_mir_add_frame_addr(mir, address, slot))
         return ANVIL_MIR_NO_VREG;

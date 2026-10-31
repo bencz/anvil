@@ -3,6 +3,7 @@
 #include "st_control_roots.h"
 #include "st_dnu.h"
 #include "st_image_runtime.h"
+#include "st_fatal.h"
 #include "../platform/fiber.h"
 #include "fiber_io.h"
 
@@ -355,7 +356,7 @@ static bool dispatch_one(st_fiber_context_t *context, uint64_t wait_until)
             int count = st_socket_platform.wait(context->reactor, tokens, 256u, timeout, &error);
 
             if (count < 0)
-                abort();
+                st_fatal_code("fiber scheduler", "socket reactor wait failed", (uint64_t)error);
 
             for (int index = 0; index < count; index++) {
                 fiber_record_t *fiber = tokens[index];
@@ -425,20 +426,23 @@ static void enter_block(void *argument)
 
     st_control_scope_init(&scope);
 
-    if (st_control_scope_enter(&fiber->control, &scope, &root) != ST_CONTROL_OK)
-        abort();
+    st_control_status_t control = st_control_scope_enter(&fiber->control, &scope, &root);
+    if (control != ST_CONTROL_OK)
+        st_fatal("fiber root scope enter", st_control_status_string(control));
 
     st_aot_closure_status_t call = st_aot_closure_invoke(&root, fiber->roots[0], NULL, 0u, &result);
 
     fiber->status = call == ST_AOT_CLOSURE_OK ? ST_FIBER_OK : ST_FIBER_RUNTIME_ERROR;
 
-    if (st_control_scope_leave(&fiber->control, &scope, result, &leave) != ST_CONTROL_OK)
-        abort();
+    control = st_control_scope_leave(&fiber->control, &scope, result, &leave);
+    if (control != ST_CONTROL_OK)
+        st_fatal("fiber root scope leave", st_control_status_string(control));
 
     st_control_pending_info_t pending;
 
-    if (st_control_pending_get(&fiber->control, &pending) != ST_CONTROL_OK)
-        abort();
+    control = st_control_pending_get(&fiber->control, &pending);
+    if (control != ST_CONTROL_OK)
+        st_fatal("fiber pending control", st_control_status_string(control));
 
     if (pending.kind == ST_CONTROL_PENDING_EXCEPTION) {
         fiber->status = ST_FIBER_EXCEPTION;
@@ -448,8 +452,9 @@ static void enter_block(void *argument)
         fiber->status = ST_FIBER_RUNTIME_ERROR;
     }
 
-    if (st_control_pending_clear(&fiber->control) != ST_CONTROL_OK)
-        abort();
+    control = st_control_pending_clear(&fiber->control);
+    if (control != ST_CONTROL_OK)
+        st_fatal("fiber pending control clear", st_control_status_string(control));
 
     fiber->roots[0] = st_value_nil();
     if (fiber->detached && fiber->status != ST_FIBER_OK)
@@ -468,7 +473,7 @@ static void enter_block(void *argument)
     }
 
     st_fiber_platform.transfer(fiber->native, fiber->context->main.native);
-    abort();
+    st_fatal("fiber", "a finished fiber was resumed");
 }
 
 static bool initialize_thread(fiber_record_t *fiber, st_aot_thread_t *source)
@@ -517,8 +522,11 @@ static void dispose_record(fiber_record_t *fiber)
     if (fiber->provider.owner != NULL)
         st_image_runtime_root_provider_detach(fiber->thread->image, &fiber->provider);
 
-    if (fiber->control._st_thread_id != 0u && st_control_thread_destroy(&fiber->control) != ST_CONTROL_OK)
-        abort();
+    if (fiber->control._st_thread_id != 0u) {
+        st_control_status_t control = st_control_thread_destroy(&fiber->control);
+        if (control != ST_CONTROL_OK)
+            st_fatal("fiber control thread destroy", st_control_status_string(control));
+    }
 
     st_aot_thread_destroy(fiber->thread);
     st_fiber_platform.destroy(fiber->native);
@@ -1017,8 +1025,9 @@ void st_fiber_io_interrupt(StFrame *frame, uintptr_t socket)
 {
     fiber_record_t *current;
 
-    if (current_fiber(frame, &current) != ST_FIBER_OK)
-        abort();
+    st_fiber_status_t status = current_fiber(frame, &current);
+    if (status != ST_FIBER_OK)
+        st_fatal_code("fiber I/O interrupt", "no current fiber", (uint64_t)status);
 
     st_fiber_context_t *context = current->context;
     fiber_record_t *fiber = &context->main;
@@ -1039,8 +1048,9 @@ void st_fiber_io_finish(StFrame *frame)
 {
     fiber_record_t *fiber;
 
-    if (current_fiber(frame, &fiber) != ST_FIBER_OK)
-        abort();
+    st_fiber_status_t status = current_fiber(frame, &fiber);
+    if (status != ST_FIBER_OK)
+        st_fatal_code("fiber I/O finish", "no current fiber", (uint64_t)status);
 
     fiber->root_count = 2u;
 }

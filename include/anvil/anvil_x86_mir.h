@@ -32,6 +32,15 @@ bool anvil_x86_emit_mir_abi(const anvil_mir_func_t *mir,
                             anvil_syntax_t syntax,
                             char **output,
                             size_t *len);
+/* As anvil_x86_emit_mir_abi for a CPU model's features: floating point uses
+ * SSE2 when ANVIL_FEATURE_X86_SSE2 is present, the x87 FPU otherwise. */
+bool anvil_x86_emit_mir_features(const anvil_mir_func_t *mir,
+                                 anvil_func_t *func,
+                                 anvil_abi_t abi,
+                                 anvil_syntax_t syntax,
+                                 anvil_cpu_features_t features,
+                                 char **output,
+                                 size_t *len);
 
 #ifdef __cplusplus
 }

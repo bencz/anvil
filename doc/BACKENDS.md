@@ -24,6 +24,50 @@ if (anvil_ctx_has_feature(ctx, ANVIL_FEATURE_PPC_VSX)) {
 anvil_cpu_model_t cpu = anvil_ctx_get_cpu(ctx);
 ```
 
+Every instruction choice that depends on the processor generation must come
+from these features, never from the architecture alone: the target
+descriptor states what the *architecture* defines (register width, byte
+order), the CPU model what the *implementation* adds.  Examples:
+
+| Decision | Feature | Fallback |
+|---|---|---|
+| PowerPC `fcfid`/`fctidz` | `ANVIL_FEATURE_PPC_64BIT` (970, POWER4+) | magic-number sequence or run-time helper |
+| PowerPC `fcfids`/`fcfidu`/`fctiwuz`/`fctiduz` | `ANVIL_FEATURE_PPC_FPCVT` (POWER7+) | `fcfid`+`frsp`, helpers |
+| i386 floating point in SSE2 registers (`asm/gas32_sse2.c`) | `ANVIL_FEATURE_X86_SSE2` (Pentium 4+) | x87 FPU (`asm/gas32_x87.c`): FPR assignments become frame home slots, `fld`/op/`fstp` per instruction |
+| i386 x87 compare with `fucomip` | `ANVIL_FEATURE_X86_CMOV` (P6 family) | `fucompp` + `fnstsw %ax` + `sahf` |
+| SystemZ IEEE (BFP) arithmetic and constants | `ANVIL_FEATURE_ZARCH_BFP` (S/390 G5+, every z) | HFP only; IEEE formats are rejected |
+| SystemZ HFP <-> fixed conversions (`CDFR`, `CFDR`...) | `ANVIL_FEATURE_ZARCH_HFP_EXT` (G5+) | classic unnormalized-add sequence (S/370, G1-G4) |
+| SystemZ `LGFI` / `MSGFI` | `ANVIL_FEATURE_ZARCH_EIMM` (z9) / `ANVIL_FEATURE_ZARCH_GIE` (z10) | `LGF` / `MSG` from a literal |
+| SystemZ `AHI`/`CHI`/`MHI` immediates | `ANVIL_FEATURE_ZARCH_IMMREL` (S/390 G1+, every z) | register forms or `C`/`CL` from a literal (S/370) |
+| SystemZ `NILF`/`OILF`/`XILF` | `ANVIL_FEATURE_ZARCH_EIMM` (z9) | `N`/`O`/`X` from a literal |
+| Scalar operations priced by table (`ANVIL_MIR_OP_SCALAR`: FMA, FSQRT, UMULH/SMULH) | the same tables, `ANVIL_VECTOR_SHAPE_SCALAR` rows: x86-64 FMA3 `vfmadd231sd`, `sqrtsd`, `mul`/`imul` into RDX:RAX; i386 `sqrtsd` with `ANVIL_FEATURE_X86_SSE2`, else x87 `fsqrt`, `mull`/`imull`; ARM64 `fmadd`, `fsqrt`, `umulh`/`smulh` (`umull`/`smull` + `lsr #32` for words); PowerPC `fmadd`, `fsqrt` with `ANVIL_FEATURE_PPC_FSQRT` (970, POWER), `mulhwu`/`mulhw`, `mulhdu`/`mulhd` in 64-bit mode | priced 0: front ends keep their library call (G3/G4, SystemZ); division by constants stays a division |
+| 128-bit f32/f64 vectors (SLP, loop vectorizer, `splat`) | `vector_operation_cost`: x86-64 `ANVIL_FEATURE_X86_SSE2` (`addps`, `shufps`/`unpcklpd`), ARM64 `ANVIL_FEATURE_ARM64_NEON` (`fadd v.4s`, `dup`), PowerPC `ANVIL_FEATURE_PPC_VSX` (POWER7+: `lxvd2x`/`stxvd2x`, `xvaddsp`, `xxspltw`, `xxpermdi`) | scalar code |
+
+`anvil_ctx_set_cpu()` accepts a model from the same family when it runs the
+context's architecture (x86-64 CPUs for i386, 64-bit PowerPC CPUs for ppc32 and
+ppc64le, z/Architecture CPUs for ESA/390); `anvil_cpu_model_lookup(arch, name)`
+finds a model by name among those that run the architecture (names such as
+"g4" exist in both the PowerPC and S/390 families; e.g. MCC's `-mcpu=power7`).
+
+**Instruction selection facts.** `src/backend/common/mir_isel.c` gives every
+MachineIR printer the same facts: which GPR vregs hold a known constant (their
+only definition is a `MOV` of an immediate), how often each vreg is used, and
+which constant `MOV`s are still needed.  Each printer supplies one callback
+saying which operands it encodes as immediates (x86-64 imm32, ARM64 12-bit
+arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
+facility), so a folded constant never occupies a register.  The printers also
+branch on the condition flags when a compare's only use is the following
+`BR_COND`, turn multiplication by a power of two into a shift, and fall through
+to the next block instead of jumping to it.  None of this changes the MIR
+contract; it is selection inside each backend's printer.
+
+**64-bit integers on 32-bit targets.** `src/backend/common/wide_mir.c` legalizes
+64-bit operations into pairs of 32-bit virtual registers with target-independent
+MachineIR (carries through unsigned compares, constant shifts inline).  A target
+supplies one hook, `anvil_wide_target_t.call_helper`, to call the libgcc/compiler-rt
+helpers (`__muldi3`, `__divdi3`, variable shifts, floating conversions) in its
+calling convention; x86-32, PPC32 and the 31-bit SystemZ targets use it.
+
 All actively maintained backends now follow the same MachineIR pipeline that
 ARM64 established as the reference path: **lower source IR to MachineIR ->
 verify target legality -> coalesce copies -> linear-scan register allocation ->
@@ -126,22 +170,38 @@ The ARM64 backend is the stable reference implementation for the MachineIR path:
 
 ```
 src/backend/arm64/
-├── arm64.c           # Backend lifecycle and codegen entry points
-├── arm64_internal.h  # Register constants and backend state
+├── arm64.c           # Backend lifecycle, module emission, va_* dispatch
+├── arm64_internal.h  # Register constants, backend state, ABI descriptor type
 ├── arm64_helpers.c   # Type size/alignment and register names
 ├── arm64_mir.c       # Source IR -> MachineIR -> ARM64 assembly
-└── opt/              # ARM64-specific optimizations
-    ├── arm64_opt.h       # Optimization interface
-    ├── arm64_opt.c       # Pass manager
-    ├── arm64_peephole.c  # Peephole optimizations
-    └── arm64_branch.c     # Branch optimization
+└── abi/
+    ├── aapcs64.c     # Rules both ABIs share; descriptor registry
+    ├── linux.c       # AAPCS64 with ELF
+    └── darwin.c      # Apple's AAPCS64 variant with Mach-O
 ```
 
 **Key ARM64 Components:**
-- **`arm64_mir.c`**: source IR lowering, ABI constraints, PHI edge copies, switch lowering, MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission
-- **`arm64_internal.h`**: backend state and ARM64 register constants
+- **`arm64_mir.c`**: source IR lowering, PHI edge copies, switch lowering, MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission. Argument placement, `va_start` and every object-format spelling come from the ABI descriptor.
+- **`abi/`**: one `arm64_abi_desc_t` per ABI (`arm64_get_abi_desc()`), holding:
+  - argument passing: register counts, the indirect result (x8) and indirect call (x16) registers, aggregate classification and `assign_scalar` / `assign_aggregate`;
+  - variadic support: the MachineIR form of `va_start`, its prologue register save and emission, and IR-level `va_arg` / `va_copy`;
+  - object format: symbol prefix, module header, string section, function header/footer, symbol addressing and data alignment.
+
+  `aapcs64.c` holds what both share: HFA / small composite / by-reference classification, consecutive register allocation and the stack placement of aggregates.
+- **Linux vs Darwin** (checked against clang by `tests/arm64_abi_regression.c`):
+
+  | | Linux (`linux.c`) | Darwin (`darwin.c`) |
+  |---|---|---|
+  | Named stack arguments | doubleword slots | packed at natural size and alignment |
+  | 8/16-bit integer arguments | callee extends | caller extends to 32 bits |
+  | 16-byte aligned composites | even x register pair | next x registers |
+  | Unnamed arguments | as named | doubleword stack slots only |
+  | `va_list` | AAPCS64 cursor over register save areas | pointer into the stack slots |
+  | Symbols / sections | ELF, `:lo12:` | `_` prefix, `@PAGE` / `@PAGEOFF`, `__TEXT` |
+
+- **`arm64_internal.h`**: backend state, ARM64 register constants and the ABI descriptor type
 - **`arm64_helpers.c`**: target type sizing/alignment helpers and register name tables
-- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, and module/function codegen entry points
+- **`arm64.c`**: `arm64_init()`, `arm64_cleanup()`, module/function codegen entry points, and `va_arg` / `va_copy` routed to the context's ABI
 
 ARM64 deliberately has no target `prepare_ir` hook or dormant target peephole
 directory. Source-IR transformations run through the generic pass manager;
@@ -158,7 +218,7 @@ should follow ARM64's MachineIR structure.
 |---------|-----------|----------|--------------------|--------|----------|
 | x86-64 | `ANVIL_ARCH_X86_64` | MachineIR | SysV (Linux/BSD), Darwin, Win64 | GAS/AT&T | Linux/SysV and Win64 execution-tested; Darwin emit-validated |
 | x86 (32-bit) | `ANVIL_ARCH_X86` | MachineIR | cdecl, stdcall, fastcall; ELF/Mach-O/COFF decoration | GAS/AT&T | ELF execution-tested (`as --32` / `gcc -m32`); Mach-O/COFF emit-validated only |
-| ARM64 | `ANVIL_ARCH_ARM64` | MachineIR (reference) | AAPCS64 (Linux SysV), Darwin | GAS | Reference path; execution-tested |
+| ARM64 | `ANVIL_ARCH_ARM64` | MachineIR (reference) | AAPCS64 (Linux SysV), Darwin | GAS | Linux execution-tested (qemu-user); Darwin ABI checked against clang and assembled, not executed |
 | PPC32 | `ANVIL_ARCH_PPC32` | MachineIR | System V (ELF) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
 | PPC64 (ELFv1) | `ANVIL_ARCH_PPC64` | MachineIR | ELFv1 (BE) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
 | PPC64LE (ELFv2) | `ANVIL_ARCH_PPC64LE` | MachineIR | ELFv2 (LE) | GAS | Lowering/emission regressions; native ABI coverage incomplete |
@@ -211,29 +271,79 @@ invariants are checked separately.
 
 Every backend listed above lowers source IR into target MachineIR and then runs
 the shared pipeline. The per-target driver (e.g. `anvil_x86_64_regalloc_mir`)
-calls into the generic passes in this order:
+calls into the generic passes in this order (x86-64, i386, ARM64 and PowerPC
+run all of them; SystemZ skips the optional optimizations):
 
 ```
-verify-legal  ->  coalesce_copies  ->  verify-legal  ->
-linear-scan regalloc  ->  materialize_spills  ->  verify-legal
+verify-legal  ->  duplicate_branch_targets  ->  local_cse  ->
+fold_address_arithmetic  ->  call clobbers  ->  coalesce_copies  ->
+verify-legal  ->  printer scratch  ->  regalloc + materialize_spills  ->  verify-legal
 ```
 
 - **Legality verification** (`anvil_<arch>_verify_mir_legal`): per-target rules,
   run before coalescing, after coalescing, and once more after spill insertion.
-- **Copy coalescing** (`anvil_mir_coalesce_copies`, `src/machine/machine_ir.c`).
+- **Branch-target duplication** (`anvil_mir_duplicate_branch_targets`): a jump
+  to a small test block (pure instructions and a conditional branch) becomes a
+  copy of it, keeping one incoming edge, so top-tested loops branch back from
+  their latch.
+- **Local value numbering** (`anvil_mir_local_cse`): a repeated pure integer
+  computation in a block becomes a copy of the first.
+- **Address folding** (`anvil_mir_fold_address_arithmetic`): `ADD(base,
+  index * 1|2|4|8)` feeding loads/stores becomes an indexed access
+  (`index_scale` on LOAD/STORE) when the target's hook accepts the form:
+  x86 `disp(base,index,scale)` (both widths, `x86_address.h`), ARM64
+  `[base, index, lsl #log2(size)]`, PowerPC X-form. Targets without the hook never see indexed accesses.
+- **Call clobbers**: every CALL (and every instruction the printer expands into
+  a helper call) carries the ABI's caller-saved set as a per-instruction
+  clobber mask; the allocator keeps values that cross it out of those
+  registers. The sets live in ABI data: `call_gpr_clobbers` /
+  `call_fpr_clobbers` in the x86-64 ABI and i386 convention descriptors and
+  the PowerPC ABI ops, the AAPCS64 register convention
+  (`arm64_aapcs64_registers`).
+- **Printer scratch** (`anvil_mir_set_instr_scratch`): registers the printer
+  overwrites while printing an instruction, before it has read its operands
+  (x86-64: CL for a variable shift or rotate count, RDX:RAX for division and
+  the high half of a product, R11/RAX for conversions, floating constants and
+  dynamic allocation; `x64_annotate_printer_scratch`, next to the emitters;
+  i386: CL for a variable shift, `x86_annotate_printer_registers`, which also
+  marks EDX:EAX of division and high products and EAX of dynamic allocation
+  as clobbers, since those read their operands first). Unlike a clobber, a
+  scratch register holds none of the instruction's operands or its result
+  either; elsewhere it is an ordinary pool register.
+- **Copy coalescing** (`anvil_mir_coalesce_copies`): removes copies between
+  single-definition values within a block, and folds PHI moves (`t = op;
+  x = COPY t`) by letting `op` write `x` when nothing in between touches it.
 - **Register allocation** (`anvil_regalloc_linear_scan_classes`,
-  `src/machine/regalloc.c`): classic linear scan over typed virtual registers
-  using per-register-class allocatable pools
-  (`anvil_regalloc_class_config_t { reg_class, num_phys_regs, phys_regs }`).
-  The allocator has **no call-clobber model** — it knows nothing about
-  caller-saved vs callee-saved registers and does not treat call-crossing live
-  ranges specially. Backends keep call-safety correct by handing the allocator
-  **callee-saved-only** allocatable pools and reserving caller-saved registers
-  for ABI argument/return marshaling and spill scratch.
-- **Spill materialization** (`anvil_mir_materialize_spills`,
-  `src/machine/machine_ir.c`): inserts `SPILL_LOAD`/`SPILL_STORE` using a
-  per-target scratch-register pool; the final load/store assembly is emitted by
-  the target's emitter.
+  `src/machine/regalloc.c`): linear scan over typed virtual registers with
+  per-class pools (`anvil_regalloc_class_config_t`). Pools list caller-saved
+  registers first, so values that do not cross a call need no save. Copy
+  hints place a value copied to or from a fixed register (arguments, results)
+  in that register, and the two sides of a plain copy in one register. A
+  fixed-register interval that displaces an allocated value moves it to a free
+  register before spilling it; spilled single-definition values are split at
+  clobbers and allocation reruns. `narrow_bits`/`narrow_regs` keep small
+  values in the registers that have a form of their width (i386: bytes and
+  booleans in EAX-EDX); reloads follow the same rule.
+- **Spill materialization** (`anvil_mir_materialize_spills`): inserts
+  `SPILL_LOAD`/`SPILL_STORE` using the per-target scratch pool, checked per
+  bundle (RET_VALUE_PART…RET, CALL…CALL_RESULT) against the scratch registers
+  free there (and not printer scratch of the bundle) before anything is
+  rewritten; in a bundle of several instructions the members' results are
+  off limits too (they are written together, before the spill stores). A
+  spilled result reuses its instruction's first reload register; a COPY
+  between a register and a spill slot becomes the store or load itself. With
+  `printer_declares_writes` on a scratch config (x86), a register keeps
+  serving the value it reloaded or stored for later uses in its block until
+  something declared writes it.
+  `anvil_regalloc_allocate` runs both: with the spill scratch registers in the
+  pool first, reloading where nothing occupies them; where a bundle's reloads
+  do not fit, the values occupying scratch registers there are spilled
+  (`anvil_mir_spill_for_scratch`, a few rounds); failing that, allocation
+  reruns with the first 1, 2, ... scratch registers of each class out of the
+  pool.
+- **Spill choice**: when no register is free, a value recomputable from
+  nothing (constant, symbol or frame address) is given up first: it costs a
+  recomputation per use, no memory traffic.
 
 ### Backend Interface
 
@@ -874,7 +984,7 @@ before extending or integrating this target family.
 - Float: D0 (double) or S0 (float)
 
 **SystemZ arena convention:**
-- Integer: R15
+- Integer: R15 (31-bit targets: a 64-bit integer in R15 high, R0 low)
 - Float: F0
 
 ## Register Allocation
@@ -887,34 +997,49 @@ materialization.
 
 Key design points to keep in mind when wiring up a new backend:
 
-- **No call-clobber model.** The allocator does not distinguish caller-saved from
-  callee-saved registers and does not detect live ranges that cross calls.
-  Backends therefore make the **allocatable pools callee-saved-only** so any value
-  kept in a register survives calls automatically. Caller-saved registers are
-  reserved for ABI argument/return marshaling during lowering and for spill
-  scratch during materialization.
+- **Clobbers are per instruction.** A call (or any instruction that destroys
+  registers) carries a clobber mask per class
+  (`anvil_mir_set_instr_clobbers`); registers a call preserves only in part
+  (AAPCS64 v8-v15, PowerPC f14-f31 low halves) are declared in the class
+  config. A value may keep a clobbered register only where it is not live
+  across the clobber: the allocator records, from per-block liveness, the
+  values live across each clobbering instruction, so a value redefined after a
+  call (a hole in its interval) still uses a caller-saved register. Calls in
+  cold blocks are split around first (`anvil_mir_split_around_cold_calls`): a
+  value live across them is copied to a fresh vreg at the block's start and
+  back after the last call, so its store and reload stay on the rare path.
+- **Two-address classes.** A class config with `two_address` (a backend whose
+  arithmetic overwrites its first operand: x86 GPR and SSE) makes a result prefer the
+  register of a first operand that dies there and avoid the second operand's,
+  which saves the printer's copy or temporary.
 - **ABI registers are modeled as fixed vregs.** Incoming arguments and return
   values are pinned to the physical ABI registers via `anvil_mir_set_fixed_reg`,
   then copied into ordinary allocatable vregs (`ANVIL_MIR_OP_COPY`) before
   allocation. The allocator honors fixed assignments.
+- **Printer temporaries are per instruction.** Registers a printer needs while
+  expanding one instruction are declared on it (`anvil_mir_set_instr_scratch`)
+  instead of being withheld from the pool: the allocator keeps that
+  instruction's operands, result and the values live across it out of them.
 - **Spills are explicit.** `anvil_mir_materialize_spills()` rewrites the
   instruction stream with `SPILL_LOAD`/`SPILL_STORE` using the scratch pool; the
   target emitter turns those into real load/store instructions.
+  `anvil_regalloc_allocate()` lets the spill scratch registers be part of the
+  pool, reserving them only for a function whose reloads cannot otherwise be
+  placed.
 
-**Example pools (per backend):**
+**Pools (x86-64 from its ABI descriptors; see each backend's tables):**
 
-| Backend | Allocatable GPR | Allocatable FPR | GPR scratch | FPR scratch |
-|---------|-----------------|-----------------|-------------|-------------|
-| ARM64 | x19-x28 | v8-v15 | x12-x15 | v16-v19 |
-| x86-64 (SysV) | rbx, r12-r14 | *(empty — all FP spilled)* | r10, r11, r15 | xmm8-xmm10 |
-| x86 (32-bit) | EBX, ESI, EDI | *(empty)* | EAX, ECX, EDX | xmm5-xmm7 |
+| Backend | Allocatable GPR | Allocatable FPR | Spill scratch (in the pool) |
+|---------|-----------------|-----------------|-----------------------------|
+| x86-64 SysV | r8, r9, rsi, rdi, r10, r11, rdx, rcx, rax, rbx, r12-r15 | xmm0-xmm13 | r11, r10, rax; xmm8-xmm10 |
+| x86-64 Win64 | r8-r11, rdx, rcx, rax, rbx, rdi, rsi, r12-r15 | xmm0-xmm3, xmm6-xmm15 | r11, r10, rax; xmm13-xmm15 |
+| x86 (32-bit) | ECX, EDX, EAX, EBX, ESI, EDI (bytes: EAX-EDX) | xmm0-xmm3, xmm5-xmm7 (x87: home slots) | EAX, ECX, EDX; xmm5-xmm7 |
 
-> **x86-64 FP note:** Under SysV/Darwin there are **no callee-saved XMM
-> registers**, so the allocatable FPR pool is **empty** and every floating-point
-> value is spilled to the stack. Win64 allocation uses its ABI descriptor's
-> callee-saved `xmm6-xmm12` pool and wider GPR pool. The emitter saves and
-> restores every allocated or spill-scratch nonvolatile XMM register actually
-> used by the function.
+> The x86-64 printer keeps two XMM temporaries outside the pool
+> (`sse_temps`: xmm14/xmm15 SysV, xmm4/xmm5 Win64), the i386 SSE2 unit one
+> (xmm4). The emitter saves and
+> restores every callee-saved register the function actually uses, spill
+> reloads included.
 
 ## Handling Special Cases
 
@@ -1201,12 +1326,11 @@ decoration. Stack cleanup bytes are computed by `x86_compute_ret_pop()`.
 
 ### 64-bit integers on x86 (32-bit)
 
-`i64`/`u64` are legalized into **lo/hi register pairs** (little-endian).
-Supported operations on pairs are limited to constant materialization, compares
-(`lower_i64_cmp_pair`), bitwise AND/OR/XOR (`lower_i64_bitwise_pair`),
-load/store, and parameter/return passing. **Runtime 64-bit ADD, SUB, MUL, and
-shifts are not supported** — lowering of those returns failure (the same posture
-as the PPC32 backend). Constant i64 NEG/NOT are folded at lowering time.
+`i64`/`u64` are legalized into **lo/hi register pairs** (little-endian) by the
+shared `common/wide_mir` legalizer: arithmetic, shifts, compares, conversions,
+PHIs and selects. Multiplication, division, variable shifts and floating
+conversions call the libgcc helpers with cdecl; results come back in EDX:EAX
+(`RET_VALUE_PART` / `CALL_RESULT` carry the high word).
 
 ### Byte registers on x86 (32-bit)
 

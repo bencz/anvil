@@ -14,6 +14,7 @@
 
 #include "anvil.h"
 #include "anvil_machine.h"
+#include "anvil_cpu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,9 +43,8 @@ typedef struct {
     anvil_fp_format_t fp_format;
     bool big_endian;
     bool has_64bit_gprs;
-    bool supports_ieee_fp;
-    bool supports_dfp;
-    bool has_relative_branches;
+    /* Facilities that vary by processor model (BFP, HFP extensions,
+     * extended immediates...) are CPU-model features (anvil_cpu.h). */
     int param_list_reg;
     int return_addr_reg;
     int return_gpr;
@@ -74,12 +74,24 @@ bool anvil_mainframe_verify_mir_legal(
     anvil_mainframe_variant_t variant,
     char *error,
     size_t error_len);
+/* As anvil_mainframe_regalloc_mir for a CPU model: the additional
+ * floating-point registers exist only with ANVIL_FEATURE_ZARCH_BFP. */
+bool anvil_mainframe_regalloc_mir_features(anvil_mir_func_t *mir,
+                                           anvil_mainframe_variant_t variant,
+                                           anvil_cpu_features_t features);
 bool anvil_mainframe_regalloc_mir(anvil_mir_func_t *mir,
                                   anvil_mainframe_variant_t variant);
 bool anvil_mainframe_emit_mir(const anvil_mir_func_t *mir,
                               anvil_mainframe_variant_t variant,
                               char **output,
                               size_t *len);
+/* As anvil_mainframe_emit_mir, for a CPU with the given ANVIL_FEATURE_ZARCH_*
+ * set (anvil_mainframe_emit_mir assumes the variant's default CPU). */
+bool anvil_mainframe_emit_mir_features(const anvil_mir_func_t *mir,
+                                       anvil_mainframe_variant_t variant,
+                                       anvil_cpu_features_t features,
+                                       char **output,
+                                       size_t *len);
 
 anvil_error_t anvil_mainframe_codegen_func(anvil_backend_t *be,
                                            anvil_func_t *func,

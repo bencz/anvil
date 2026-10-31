@@ -1,4 +1,5 @@
 #include "st_closure_bridge.h"
+#include "st_fatal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -197,7 +198,7 @@ static void entry_remove(st_aot_closure_state_t *state,
     size_t slot = (size_t)entry->hash & mask;
     while (state->entries[slot] != entry) {
         if (!state->entries[slot]) {
-            abort();
+            st_fatal("closure bridge", "home entry to remove is not in the entry table");
         }
         slot = (slot + 1u) & mask;
     }
@@ -281,9 +282,9 @@ static void reclaim_commit(
     if (!state_ready(state) || !entry || entry->closure != exact_value
             || class_id != state->closure_class_id
             || shape_id != state->closure_shape_id)
-        abort();
+        st_fatal("closure bridge", "reclaim commit does not match its prepared closure");
     if (entry_find(state, exact_value) != entry) {
-        abort();
+        st_fatal("closure bridge", "reclaimed closure is not registered in the entry table");
     }
     entry_remove(state, entry);
     if (entry->home) st_home_token_release(entry->home);
@@ -550,10 +551,12 @@ st_aot_closure_status_t st_aot_closure_create(
         return heap_status(allocation);
     }
     st_object_view_t view;
-    if (st_heap_object_view(state->heap, closure, &view) != ST_HEAP_OK
-            || view.shape_descriptor->shape_id != state->closure_shape_id
+    st_heap_status_t view_status = st_heap_object_view(state->heap, closure, &view);
+    if (view_status != ST_HEAP_OK)
+        st_fatal("closure bridge: new closure view", st_heap_status_string(view_status));
+    if (view.shape_descriptor->shape_id != state->closure_shape_id
             || view.indexed_length != capture_count)
-        abort();
+        st_fatal("closure bridge", "new closure has an unexpected shape");
     uint64_t *fixed = view.fixed_words;
     fixed[0] = CLOSURE_OBJECT_MAGIC;
     fixed[1] = (uint64_t)(uintptr_t)descriptor;
@@ -876,8 +879,7 @@ _Noreturn st_value_t st_aot_closure_contract_violation(
     st_aot_closure_status_t status, StFrame *frame)
 {
     (void)frame;
-    (void)status;
-    abort();
+    st_fatal("closure contract violation", st_aot_closure_status_string(status));
 }
 
 const char *st_aot_closure_status_string(st_aot_closure_status_t status)
