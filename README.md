@@ -386,6 +386,8 @@ Best of 10 runs, in milliseconds:
 
 | kernel | x86-64 clang | x86-64 MCC | ratio | i386 clang | i386 MCC | ratio |
 |--------|-------------:|-----------:|------:|-----------:|---------:|------:|
+| andlut (AND/OR/XOR through a nibble table) | 236 | 2237 | 9.48 | 242 | 2455 | 10.1 |
+| bigprime (number-theoretic transforms, 64-bit products modulo a prime) | 299 | 368 | 1.23 | 367 | 494 | 1.35 |
 | calls (small static helpers, structs by value) | 97 | 87 | 0.90 | 97 | 167 | 1.72 |
 | crc32 | 70 | 72 | 1.03 | 62 | 73 | 1.18 |
 | fib | 22 | 23 | 1.05 | 18 | 24 | 1.33 |
@@ -394,6 +396,7 @@ Best of 10 runs, in milliseconds:
 | lexer (74-case switch) | 28 | 37 | 1.32 | 28 | 36 | 1.29 |
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
+| pidigits (a Brainfuck program as C, 30 digits of pi) | 8 | 15 | 1.88 | 6 | 17 | 2.83 |
 | qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
 | sieve | 91 | 93 | 1.02 | 100 | 184 | 1.84 |
 | strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |
