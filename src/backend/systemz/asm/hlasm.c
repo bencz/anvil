@@ -846,6 +846,24 @@ static const char *systemz_cmp_branch(anvil_mir_opcode_t op)
     }
 }
 
+/* Branch masks of the FCMP predicates: condition code 0 equal, 1 low,
+ * 2 high, 3 unordered. */
+static const unsigned fcmp_masks[] = {0, 8, 2, 10, 4, 12, 6, 14, 9, 3, 11, 5, 13, 7, 1, 15};
+
+/* Every condition code: a mask's complement is SYSTEMZ_CC_ANY ^ mask. */
+enum { SYSTEMZ_CC_ANY = 15 };
+
+/* A compare read only by the SELECT after it leaves its condition code:
+ * the select loads on condition under `mask`. */
+static bool systemz_fuse_select(systemz_emit_t *emit, size_t index, const anvil_mir_instr_info_t *instr, unsigned mask)
+{
+    if (!anvil_mir_isel_feeds_next_select(&emit->isel, index, instr))
+        return false;
+    emit->select_fused = true;
+    emit->select_mask = mask;
+    return true;
+}
+
 static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
     if (index == emit->tm_at) {
@@ -868,6 +886,8 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         bool ieee = systemz_use_ieee_fp(emit);
         anvil_strbuf_appendf(&emit->code, "         %s   %s,%s\n", lhs_info->size_bits == 32 ? (ieee ? "CEBR" : "CER") : (ieee ? "CDBR" : "CDR"), systemz_vreg_reg_name(emit, lhs),
                              systemz_vreg_reg_name(emit, rhs));
+        if ((unsigned)instr.imm <= ANVIL_FCMP_TRUE && systemz_fuse_select(emit, index, &instr, fcmp_masks[(unsigned)instr.imm]))
+            return;
     } else {
         bool wide = lhs_info->size_bits > 32 && emit->desc->has_64bit_gprs;
         bool unsigned_cmp = systemz_cmp_unsigned(instr.op);
@@ -877,10 +897,14 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         bool immediate = systemz_rhs_immediate(emit, index, &instr, &imm);
         /* == 0 or != 0 of the value just computed: its condition code
          * tells. */
+        bool next_branch = anvil_mir_isel_feeds_next_branch(&emit->isel, index, &instr);
         if (immediate && imm == 0 && (instr.op == ANVIL_MIR_OP_CMP_EQ || instr.op == ANVIL_MIR_OP_CMP_NE) &&
-            anvil_mir_isel_feeds_next_branch(&emit->isel, index, &instr) &&
+            (next_branch || anvil_mir_isel_feeds_next_select(&emit->isel, index, &instr)) &&
             anvil_print_flags_take(&emit->flags, &emit->code, systemz_phys_reg(emit, lhs), wide ? 8 : 4)) {
-            emit->fused_branch = systemz_cmp_branch(instr.op);
+            if (next_branch)
+                emit->fused_branch = systemz_cmp_branch(instr.op);
+            else
+                systemz_fuse_select(emit, index, &instr, systemz_cmp_mask(instr.op));
             return;
         }
         /* A narrow value tested against zero: its own bits alone, which a
@@ -902,15 +926,16 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         } else {
             anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", cmp, a, systemz_vreg_reg_name(emit, rhs));
         }
-        if (anvil_mir_isel_feeds_next_branch(&emit->isel, index, &instr)) {
+        if (next_branch) {
             emit->fused_branch = systemz_cmp_branch(instr.op);
             return;
         }
+        if (systemz_fuse_select(emit, index, &instr, systemz_cmp_mask(instr.op)))
+            return;
     }
     const char *dst = systemz_vreg_reg_name(emit, instr.def);
     /* With load on condition, no branch: 0, then 1 where the condition
      * holds (the branch's mask). */
-    static const unsigned fcmp_masks[] = {0, 8, 2, 10, 4, 12, 6, 14, 9, 3, 11, 5, 13, 7, 1, 15};
     if ((emit->features & ANVIL_FEATURE_ZARCH_LOADSTORE) && emit->desc->has_64bit_gprs &&
         (instr.op != ANVIL_MIR_OP_FCMP || (unsigned)instr.imm <= ANVIL_FCMP_TRUE)) {
         unsigned mask = instr.op == ANVIL_MIR_OP_FCMP ? fcmp_masks[(unsigned)instr.imm] : systemz_cmp_mask(instr.op);
@@ -1758,22 +1783,28 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         systemz_emit_dynamic_alloca(emit, instr, u0);
         break;
     case ANVIL_MIR_OP_SELECT: {
-        /* Load on condition (z196): test the condition, take `else`, then
-         * `then` where it was nonzero (mask 7); a destination already
-         * holding `then` takes `else` where it was zero (mask 8). */
+        /* `then` where the condition code is under `mask`: the fused
+         * compare's, or nonzero after testing the condition.  Load on
+         * condition (z196): take `else`, then `then` under the mask; a
+         * destination already holding `then` takes `else` under the
+         * complement. */
+        unsigned mask = emit->select_fused ? emit->select_mask : systemz_cmp_mask(ANVIL_MIR_OP_CMP_NE);
+        bool fused = emit->select_fused;
+        emit->select_fused = false;
         const anvil_mir_vreg_info_t *def_info = systemz_emit_vreg_info(emit, instr.def);
         if (def_info && def_info->reg_class == ANVIL_MIR_REG_GPR && emit->desc->has_64bit_gprs &&
             (emit->features & ANVIL_FEATURE_ZARCH_LOADSTORE)) {
-            anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
-                                 systemz_vreg_reg_name(emit, u0));
+            if (!fused)
+                anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
+                                     systemz_vreg_reg_name(emit, u0));
             int dst = systemz_phys_reg(emit, instr.def);
             if (dst == systemz_phys_reg(emit, u1)) {
-                anvil_strbuf_appendf(&emit->code, "         LOCGR %s,%s,8\n", systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, u2));
+                anvil_strbuf_appendf(&emit->code, "         LOCGR %s,%s,%u\n", systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, u2), SYSTEMZ_CC_ANY ^ mask);
                 break;
             }
             if (dst != systemz_phys_reg(emit, u2))
                 systemz_emit_copy(emit, instr.def, u2);
-            anvil_strbuf_appendf(&emit->code, "         LOCGR %s,%s,7\n", systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, u1));
+            anvil_strbuf_appendf(&emit->code, "         LOCGR %s,%s,%u\n", systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, u1), mask);
             break;
         }
         char true_label[SYSTEMZ_INTERNAL_LABEL_CAP];
@@ -1781,9 +1812,10 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         snprintf(true_label, sizeof(true_label), "%s#SEL_T_%u", emit->func_label, emit->label_counter);
         snprintf(end_label, sizeof(end_label), "%s#SEL_E_%u", emit->func_label, emit->label_counter++);
         /* Test the condition at its width (no copy needed: LTR leaves it). */
-        anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
-                             systemz_vreg_reg_name(emit, u0));
-        anvil_strbuf_appendf(&emit->code, "         BNE   %s\n", true_label);
+        if (!fused)
+            anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
+                                 systemz_vreg_reg_name(emit, u0));
+        anvil_strbuf_appendf(&emit->code, "         BC    %u,%s\n", mask, true_label);
         systemz_emit_copy(emit, instr.def, u2);
         anvil_strbuf_appendf(&emit->code, "         B     %s\n", end_label);
         anvil_strbuf_appendf(&emit->code, "%-8s DS    0H\n", true_label);

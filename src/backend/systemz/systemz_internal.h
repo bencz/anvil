@@ -44,6 +44,10 @@ typedef struct {
     anvil_mir_layout_t layout;   /* blocks printed, and where branches land */
     anvil_mir_block_t block;     /* being emitted (blocks print in order) */
     const char *fused_branch;    /* set by a compare folded into the next BR_COND */
+    /* A compare folded into the next SELECT: the condition-code mask under
+     * which the select takes `then`. */
+    bool select_fused;
+    unsigned select_mask;
     anvil_print_flags_t flags;   /* what the condition code tells */
     /* anvil_mir_counter_loops roles: counters for BRCT/BRCTG, and the
      * counter register of the branch being printed. */

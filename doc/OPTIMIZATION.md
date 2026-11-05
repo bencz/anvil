@@ -402,6 +402,20 @@ the first vector. The vector loop runs when the start is element-aligned and
 `start - off` does not wrap the index, otherwise the scalar loop runs alone.
 Only one read-only stream, no stores and no accumulators.
 
+### Scalar Replacement of Aggregates (`ANVIL_PASS_SROA`) - O2
+
+`src/opt/sroa.c`. A struct or array allocated in the entry block splits into
+one scalar allocation per accessed field, which mem2reg then promotes. Every
+use of its address must be a constant-index GEP or STRUCT_GEP, a pointer
+BITCAST (same offset), or a non-volatile scalar load or store. Any other use
+(an escape, an aggregate access, a variable index) keeps the object whole.
+Accesses at one offset share a slice when their types are equal, or when both
+are integers of the same size (not `i1`). A copy of a struct in words then
+reads the fields that its code writes. Such an access whose type is not its
+slice's goes through a value BITCAST: a load becomes a load of the slice type
+plus a bitcast, a store stores the bitcast value. Partly overlapping accesses
+keep the object whole. Every instruction and allocation precedes the rewrite.
+
 ### Switch Tables (`ANVIL_PASS_SWITCH_TABLE`) - O2
 
 `src/opt/switch_table.c`. A switch of at least four cases that only chooses
@@ -734,6 +748,7 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/load_elim.c` | Redundant load elimination |
 | `src/opt/ctx_opt.c` | Context integration |
 | `src/opt/cse.c` | Common subexpression elimination |
+| `src/opt/sroa.c` | Scalar replacement of aggregates |
 
 ## Not Implemented
 

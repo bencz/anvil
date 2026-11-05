@@ -387,7 +387,7 @@ Best of 10 runs, in milliseconds:
 
 | kernel | x86-64 clang | x86-64 MCC | ratio | i386 clang | i386 MCC | ratio |
 |--------|-------------:|-----------:|------:|-----------:|---------:|------:|
-| calls (small static helpers, structs by value) | 94 | 930 | 9.89 | 95 | 1061 | 11.2 |
+| calls (small static helpers, structs by value) | 97 | 87 | 0.90 | 97 | 167 | 1.72 |
 | crc32 | 70 | 72 | 1.03 | 62 | 73 | 1.18 |
 | fib | 22 | 23 | 1.05 | 18 | 24 | 1.33 |
 | hashmap | 28 | 29 | 1.04 | 28 | 29 | 1.04 |
@@ -395,14 +395,15 @@ Best of 10 runs, in milliseconds:
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
 | qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
-| sieve | 91 | 93 | 1.02 | (see below) | | |
+| sieve | 91 | 93 | 1.02 | 100 | 184 | 1.84 |
 | strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |
 
 Where the gaps come from:
-* **calls**: clang keeps the small structs in registers across the inlined
-  helpers. MCC copies structs byte by byte, which keeps them in memory, and
-  the selects of `clamp` still materialize their condition there. This is
-  being worked on (see [doc/REVIEW.md](doc/REVIEW.md)).
+* **calls**: on x86-64 the structs live in registers across the inlined
+  helpers (MCC copies them in words, which SROA splits into fields) and each
+  `clamp` is `cmp` + `cmov`. On i386, with six registers, the constants of
+  `clamp` are recomputed between the compare and its select, so the select
+  tests a materialized boolean, and the loop counter stays on the stack.
 * **nbody**: clang packs the x/y fields of each struct into one register
   (SLP). ANVIL's SLP vectorizer does not group struct fields yet.
 * **strings**: clang replaces the hand-written `strlen` loop with a call to
@@ -410,8 +411,8 @@ Where the gaps come from:
   search, which is generic and not tied to C.
 * **i386 crc32 and fib**: open. Both have six allocatable registers, and fib
   still has a branch-then-jump in its loop layout.
-* **i386 sieve**: the program's output differs between the compilers. It
-  relies on 64-bit `long`, so the i386 run is not comparable.
+* **i386 sieve**: open. The inner loop's index is 64-bit (`long long`, so
+  that `i * i` cannot overflow), a register pair on i386.
 
 How to reproduce:
 

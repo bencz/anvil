@@ -763,8 +763,83 @@ static void test_store_before_trap(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* A struct written field by field (i32) and copied in words through a
+ * pointer bitcast (u32): the copy reads the fields the code writes, so the
+ * struct still splits into scalars (the u32 accesses through value
+ * bitcasts) and no stack allocation remains.  Shape 0 copies into a second
+ * struct; shapes 1 and 2 copy fields 0-1 onto fields 2-3 of one struct, the
+ * copy's source address built first or last, so a converted store may store
+ * a converted load either before or after that load is replaced.
+ * Allocation failure at any point leaves valid IR. */
+static bool run_word_copy_case(anvil_arch_t arch, int shape, size_t allowance, bool *completed)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_module_t *module = anvil_module_create(ctx, "word_copy");
+    anvil_type_t *i32 = anvil_type_i32(ctx), *u32 = anvil_type_u32(ctx);
+    anvil_type_t *fields[] = { i32, i32, i32, i32 };
+    anvil_type_t *record = anvil_type_struct(ctx, "record", fields, shape ? 4 : 2);
+    anvil_type_t *params[] = { i32 };
+    anvil_func_t *func = anvil_func_create(module, "word_copy", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+    anvil_value_t *a = anvil_build_alloca(ctx, record, "a"), *b = shape ? a : anvil_build_alloca(ctx, record, "b");
+    unsigned copy = shape ? 2 : 0;
+    anvil_build_store(ctx, anvil_func_get_param(func, 0), anvil_build_struct_gep(ctx, record, a, 0, "ax"));
+    anvil_build_store(ctx, anvil_const_i32(ctx, 7), anvil_build_struct_gep(ctx, record, a, 1, "ay"));
+    anvil_value_t *from = anvil_build_bitcast(ctx, a, anvil_type_ptr(ctx, u32), "from");
+    anvil_value_t *to = shape ? from : anvil_build_bitcast(ctx, b, anvil_type_ptr(ctx, u32), "to");
+    for (unsigned word = 0; word < 2; word++) {
+        anvil_value_t *source_index = anvil_const_i32(ctx, (int32_t)word), *target_index = anvil_const_i32(ctx, (int32_t)(word + copy));
+        anvil_value_t *source = NULL, *target = NULL;
+        if (shape == 2)
+            target = anvil_build_gep(ctx, u32, to, &target_index, 1, "dst");
+        source = anvil_build_gep(ctx, u32, from, &source_index, 1, "src");
+        if (shape != 2)
+            target = anvil_build_gep(ctx, u32, to, &target_index, 1, "dst");
+        anvil_build_store(ctx, anvil_build_load(ctx, u32, source, "word"), target);
+    }
+    anvil_value_t *x = anvil_build_load(ctx, i32, anvil_build_struct_gep(ctx, record, b, copy, "bx"), "x");
+    anvil_value_t *y = anvil_build_load(ctx, i32, anvil_build_struct_gep(ctx, record, b, copy + 1, "by"), "y");
+    anvil_build_ret(ctx, anvil_build_add(ctx, x, y, "sum"));
+
+    if (allowance != SIZE_MAX)
+        anvil_test_fail_alloc_after(ctx, allowance);
+    anvil_pass_result_t status = anvil_pass_sroa(func);
+    anvil_test_disable_alloc_fail(ctx);
+    anvil_ctx_clear_error(ctx);
+    char error[256] = { 0 };
+    bool valid = anvil_func_verify(func, error, sizeof(error));
+    *completed = status != ANVIL_PASS_RUN_ERROR;
+    if (*completed) {
+        valid &= status == ANVIL_PASS_RUN_CHANGED && anvil_pass_mem2reg(func) == ANVIL_PASS_RUN_CHANGED &&
+                 count_opcode(func, ANVIL_OP_ALLOCA) == 0 && anvil_func_verify(func, error, sizeof(error));
+        char *assembly = NULL;
+        size_t length = 0;
+        valid &= anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && length > 0;
+        free(assembly);
+    }
+    if (!valid)
+        fprintf(stderr, "word copy SROA failure: arch=%d shape=%d allowance=%zu status=%d error=%s\n", (int)arch, shape, allowance, status, error);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid;
+}
+
+static void test_word_copy(anvil_arch_t arch, bool sweep)
+{
+    for (int shape = 0; shape < 3; shape++) {
+        bool completed = false;
+        for (size_t allowance = sweep ? 0 : SIZE_MAX; !completed; allowance = allowance == SIZE_MAX ? SIZE_MAX : allowance + 1) {
+            check(run_word_copy_case(arch, shape, allowance, &completed), "SROA splits a struct copied in words");
+            if (allowance == SIZE_MAX || allowance > 400)
+                break;
+        }
+        check(completed, "SROA of a word copy completes");
+    }
+}
+
 int main(void)
 {
+    test_word_copy(ANVIL_ARCH_X86_64, true);
     test_promotion_allocation_failure();
     test_cfg_cache();
     test_parallel_copies();
@@ -793,6 +868,7 @@ int main(void)
         test_global_values(targets[index]);
         test_scalar_replacement(targets[index], false);
         test_scalar_replacement(targets[index], true);
+        test_word_copy(targets[index], false);
         test_loop_motion(targets[index]);
         test_conditional_constants(targets[index]);
         test_bit_facts(targets[index]);

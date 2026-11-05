@@ -298,8 +298,6 @@ static void test_frames(void)
     }
 }
 
-/* (a < b) as a value on SystemZ: with load on condition (z196 on) no
- * branch, LOCGR picks 1; before it, a branch. */
 /* static int f(int a, int b) called only directly takes the target's
  * local convention (i386: a in ECX, b in EDX, as fastcall); one whose
  * address is stored, or an external one, keeps the default (cdecl: the
@@ -394,6 +392,8 @@ static void test_systemz_byte_zero_test(void)
     }
 }
 
+/* (a < b) as a value on SystemZ: with load on condition (z196 on) no
+ * branch, LOCGR picks 1; before it, a branch. */
 static void test_systemz_compare_value(void)
 {
     static const struct {
@@ -423,6 +423,53 @@ static void test_systemz_compare_value(void)
         free(assembly);
         anvil_module_destroy(module);
         anvil_ctx_destroy(ctx);
+    }
+}
+
+/* a < b ? x : y on SystemZ, for an integer and an FP compare: the select
+ * reads the compare's condition code (mask 4, low), with no 0/1 value and no
+ * test of it: LOCGR under 4 or its complement with load on condition, a
+ * branch under 4 without. */
+static void test_systemz_compare_select(void)
+{
+    static const struct {
+        anvil_arch_t arch;
+        anvil_cpu_model_t cpu;
+        bool locgr;
+    } cases[] = {{ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z196, true}, {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z10, false}, {ANVIL_ARCH_S390, ANVIL_CPU_GENERIC, false}};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        for (int fp = 0; fp < 2; fp++) {
+            anvil_ctx_t *ctx = anvil_ctx_create_for_target(cases[c].arch);
+            if (cases[c].cpu != ANVIL_CPU_GENERIC)
+                anvil_ctx_set_cpu(ctx, cases[c].cpu);
+            anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+            anvil_module_t *module = anvil_module_create(ctx, "PICK");
+            anvil_type_t *i32 = anvil_type_i32(ctx), *operand = fp ? anvil_type_f64(ctx) : i32;
+            anvil_type_t *params[] = {operand, operand, i32, i32};
+            anvil_func_t *func = anvil_func_create(module, "PICK", anvil_type_func(ctx, i32, params, 4, false), ANVIL_LINK_EXTERNAL);
+            anvil_set_insert_point(ctx, func->entry);
+            anvil_value_t *a = anvil_func_get_param(func, 0), *b = anvil_func_get_param(func, 1);
+            anvil_value_t *less = fp ? anvil_build_fcmp(ctx, ANVIL_FCMP_OLT, a, b, "less") : anvil_build_cmp_lt(ctx, a, b, "less");
+            anvil_build_ret(ctx, anvil_build_select(ctx, less, anvil_func_get_param(func, 2), anvil_func_get_param(func, 3), "pick"));
+            char *assembly = NULL;
+            size_t length = 0;
+            bool built = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+            bool tested = built && (strstr(assembly, " LTR ") || strstr(assembly, " LTGR ") || strstr(assembly, " LA    R1,1\n"));
+            const char *locgr = built ? strstr(assembly, " LOCGR ") : NULL;
+            const char *mask = locgr ? strchr(locgr, '\n') : NULL;
+            bool fused = cases[c].locgr ? mask && (!strncmp(mask - 2, ",4", 2) || !strncmp(mask - 3, ",11", 3))
+                                        : !locgr && built && (strstr(assembly, " BRC   4,") || strstr(assembly, " BC    4,"));
+            bool ok = built && !tested && fused;
+            char message[128];
+            snprintf(message, sizeof(message), "SystemZ arch %d cpu %d %s: a select reads its compare's condition code", (int)cases[c].arch,
+                     (int)cases[c].cpu, fp ? "fp" : "int");
+            CHECK(ok, message);
+            if (!ok && assembly)
+                fprintf(stderr, "%s\n", assembly);
+            free(assembly);
+            anvil_module_destroy(module);
+            anvil_ctx_destroy(ctx);
+        }
     }
 }
 
@@ -683,6 +730,7 @@ int main(void)
     test_bit_branch();
     test_early_return_before_frame();
     test_systemz_compare_value();
+    test_systemz_compare_select();
     test_frames();
     test_paired_accesses();
     test_folds();

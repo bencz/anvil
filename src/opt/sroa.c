@@ -1,4 +1,8 @@
-/* Split nonescaping aggregates accessed through constant, disjoint addresses. */
+/* Split nonescaping aggregates accessed through constant, disjoint addresses.
+ * Pointer bitcasts keep the offset; integer accesses of one size at one
+ * offset share a slice whatever their signedness (a copy of a struct in
+ * words reads the fields its code writes), the other type's loads and
+ * stores going through a value bitcast. */
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
 
@@ -16,11 +20,21 @@ typedef struct {
     anvil_instr_t *allocation;
 } aggregate_slice_t;
 
+/* A load or store of an address whose type is not its slice's: the value
+ * crosses through a bitcast (and a load, a new one of the slice's type). */
+typedef struct {
+    anvil_instr_t *access;
+    anvil_instr_t *load;        /* loads: the slice-typed replacement */
+    anvil_instr_t *convert;
+} aggregate_convert_t;
+
 typedef struct {
     aggregate_address_t *addresses;
     aggregate_slice_t *slices;
+    aggregate_convert_t *converts;
     size_t address_count;
     size_t slice_count;
+    size_t convert_count;
     size_t capacity;
     size_t object_size;
 } aggregate_plan_t;
@@ -72,7 +86,9 @@ static bool register_slice(aggregate_plan_t *plan, aggregate_address_t *address)
     for (size_t index = 0; index < plan->slice_count; index++)
     {
         aggregate_slice_t *slice = &plan->slices[index];
-        if (slice->offset == address->offset && anvil_types_equal(slice->type, type))
+        bool same_integer = anvil_type_is_integer(slice->type) && anvil_type_is_integer(type) && slice->type->kind != ANVIL_TYPE_I1 &&
+                            type->kind != ANVIL_TYPE_I1 && slice->type->size == type->size;
+        if (slice->offset == address->offset && (anvil_types_equal(slice->type, type) || same_integer))
         {
             address->slice = index;
             return true;
@@ -102,7 +118,13 @@ static bool collect_address_users(anvil_func_t *func, aggregate_plan_t *plan, si
                 if (instr->operands[operand] != address->pointer)
                     continue;
 
-                if ((instr->op == ANVIL_OP_GEP || instr->op == ANVIL_OP_STRUCT_GEP) && operand == 0)
+                if (instr->op == ANVIL_OP_BITCAST && operand == 0 && instr->result && instr->result->type->kind == ANVIL_TYPE_PTR)
+                {
+                    if (plan->address_count == plan->capacity)
+                        return false;
+                    plan->addresses[plan->address_count++] = (aggregate_address_t){ .pointer = instr->result, .offset = address->offset, .slice = SIZE_MAX };
+                }
+                else if ((instr->op == ANVIL_OP_GEP || instr->op == ANVIL_OP_STRUCT_GEP) && operand == 0)
                 {
                     size_t offset;
                     if (plan->address_count == plan->capacity || !address_offset(instr, address->offset, &offset) || offset > plan->object_size)
@@ -143,6 +165,43 @@ static bool prepare_slices(anvil_func_t *func, aggregate_plan_t *plan)
             return false;
     }
 
+    /* The conversions of the accesses whose type is not their slice's. */
+    for (size_t index = 0; index < plan->address_count; index++)
+    {
+        aggregate_address_t *address = &plan->addresses[index];
+        if (address->slice == SIZE_MAX)
+            continue;
+        anvil_type_t *slice_type = plan->slices[address->slice].type, *own = address->pointer->type->data.pointee;
+        if (anvil_types_equal(slice_type, own))
+            continue;
+        for (anvil_block_t *block = func->blocks; block; block = block->next)
+            for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
+            {
+                bool load = instr->op == ANVIL_OP_LOAD && instr->operands[0] == address->pointer;
+                bool store = instr->op == ANVIL_OP_STORE && instr->num_operands == 2 && instr->operands[1] == address->pointer;
+                if (!load && !store)
+                    continue;
+                if (plan->convert_count == plan->capacity)
+                    return false;
+                aggregate_convert_t *convert = &plan->converts[plan->convert_count++];
+                *convert = (aggregate_convert_t){ .access = instr };
+                if (load)
+                {
+                    convert->load = anvil_instr_create(ctx, ANVIL_OP_LOAD, slice_type, "scalarized.load");
+                    convert->convert = convert->load ? anvil_instr_create(ctx, ANVIL_OP_BITCAST, own, "scalarized.value") : NULL;
+                    if (!convert->convert || !anvil_instr_add_operand(convert->convert, convert->load->result) ||
+                        !anvil_instr_reserve_operands(convert->load, 1) || !anvil_instr_copy_attributes(convert->load, instr))
+                        return false;
+                }
+                else
+                {
+                    /* The value is read when applied: it may be a converted load, replaced by then. */
+                    convert->convert = anvil_instr_create(ctx, ANVIL_OP_BITCAST, slice_type, "scalarized.value");
+                    if (!convert->convert || !anvil_instr_reserve_operands(convert->convert, 1))
+                        return false;
+                }
+            }
+    }
     return true;
 }
 
@@ -163,6 +222,28 @@ static void apply_slices(anvil_func_t *func, anvil_instr_t *allocation, aggregat
             entry->first = scalar;
 
         allocation->prev = scalar;
+    }
+
+    /* Accesses of another type than their slice's: through the value
+     * bitcasts made beforehand (a load replaced by one of the slice's type). */
+    for (size_t index = 0; index < plan->convert_count; index++)
+    {
+        aggregate_convert_t *convert = &plan->converts[index];
+        anvil_instr_t *access = convert->access;
+        if (convert->load)
+        {
+            convert->load->operands[convert->load->num_operands++] = access->operands[0];
+            anvil_opt_insert_before(access, convert->load);
+            anvil_opt_insert_before(access, convert->convert);
+            anvil_opt_replace_uses_in_func(func, access->result, convert->convert->result);
+            anvil_opt_erase_instr(access);
+        }
+        else
+        {
+            convert->convert->operands[convert->convert->num_operands++] = access->operands[0];
+            anvil_opt_insert_before(access, convert->convert);
+            access->operands[0] = convert->convert->result;
+        }
     }
 
     /* Rewrite scalar addresses before unlinking the entire derived-address
@@ -216,10 +297,12 @@ anvil_pass_result_t anvil_pass_sroa(anvil_func_t *func)
         aggregate_plan_t plan = { .capacity = capacity, .object_size = type->size };
         plan.addresses = anvil_ctx_calloc(ctx, capacity, sizeof(*plan.addresses));
         plan.slices = anvil_ctx_calloc(ctx, capacity, sizeof(*plan.slices));
-        if (!plan.addresses || !plan.slices)
+        plan.converts = anvil_ctx_calloc(ctx, capacity, sizeof(*plan.converts));
+        if (!plan.addresses || !plan.slices || !plan.converts)
         {
             free(plan.addresses);
             free(plan.slices);
+            free(plan.converts);
             return ANVIL_PASS_RUN_ERROR;
         }
 
@@ -243,6 +326,7 @@ anvil_pass_result_t anvil_pass_sroa(anvil_func_t *func)
 
         free(plan.addresses);
         free(plan.slices);
+        free(plan.converts);
         if (result == ANVIL_PASS_RUN_ERROR)
             break;
     }

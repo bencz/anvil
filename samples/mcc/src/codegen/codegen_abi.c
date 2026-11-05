@@ -147,13 +147,34 @@ static bool copy_unit(mcc_codegen_t *cg, anvil_type_t *unit, anvil_value_t *inde
     return value && anvil_build_store_ex(cg->anvil_ctx, value, unit_pointer(cg, state->destination, unit, index), state->access);
 }
 
+/* The widest unit that divides both the size and the alignment of an
+ * object of `type`, and that the target handles natively: copies and
+ * zeroing move whole words, which the optimizer sees as the fields'
+ * own accesses (a byte at a time, a struct could never live in registers). */
+static anvil_type_t *object_unit(mcc_codegen_t *cg, mcc_type_t *type, size_t *width)
+{
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
+    size_t size = mcc_type_sizeof(type);
+    size_t align = mcc_type_alignof(type);
+    size_t limit = arch && arch->ptr_size == 4 ? 4 : 8;
+    *width = 1;
+    while (*width * 2 <= limit && size % (*width * 2) == 0 && align % (*width * 2) == 0)
+        *width *= 2;
+    return *width == 8 ? anvil_type_u64(cg->anvil_ctx)
+         : *width == 4 ? anvil_type_u32(cg->anvil_ctx)
+         : *width == 2 ? anvil_type_u16(cg->anvil_ctx)
+         : anvil_type_u8(cg->anvil_ctx);
+}
+
 bool codegen_copy_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *source, anvil_value_t *destination, const anvil_memory_access_t *access)
 {
     if (!source || !destination)
         return false;
 
+    size_t width;
+    anvil_type_t *unit = object_unit(cg, type, &width);
     copy_state_t state = { source, destination, access };
-    return for_each_object_unit(cg, anvil_type_u8(cg->anvil_ctx), mcc_type_sizeof(type), "copy", copy_unit, &state);
+    return for_each_object_unit(cg, unit, mcc_type_sizeof(type) / width, "copy", copy_unit, &state);
 }
 
 static bool zero_unit(mcc_codegen_t *cg, anvil_type_t *unit, anvil_value_t *index, void *user)
@@ -167,21 +188,9 @@ bool codegen_zero_object(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *des
     if (!destination)
         return false;
 
-    /* The widest unit that divides both the size and the alignment of the
-     * object, and that the target handles natively. */
-    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(cg->anvil_ctx);
-    size_t size = mcc_type_sizeof(type);
-    size_t align = mcc_type_alignof(type);
-    size_t limit = arch && arch->ptr_size == 4 ? 4 : 8;
-    size_t width = 1;
-    while (width * 2 <= limit && size % (width * 2) == 0 && align % (width * 2) == 0)
-        width *= 2;
-
-    anvil_type_t *unit = width == 8 ? anvil_type_u64(cg->anvil_ctx)
-        : width == 4 ? anvil_type_u32(cg->anvil_ctx)
-        : width == 2 ? anvil_type_u16(cg->anvil_ctx)
-        : anvil_type_u8(cg->anvil_ctx);
-    return for_each_object_unit(cg, unit, size / width, "zero", zero_unit, destination);
+    size_t width;
+    anvil_type_t *unit = object_unit(cg, type, &width);
+    return for_each_object_unit(cg, unit, mcc_type_sizeof(type) / width, "zero", zero_unit, destination);
 }
 
 anvil_value_t *codegen_abi_pack(mcc_codegen_t *cg, mcc_type_t *type, anvil_value_t *pointer, const anvil_abi_value_plan_t *plan)

@@ -15,7 +15,7 @@ int main(void)
             if (composite[i])
                 continue;
             count++;
-            for (long j = (long)i * i; j <= LIMIT; j += i)
+            for (long long j = (long long)i * i; j <= LIMIT; j += i)
                 composite[j] = 1;
         }
         total += count;

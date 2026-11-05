@@ -57,7 +57,10 @@ saying which operands it encodes as immediates (x86-64 imm32, ARM64 12-bit
 arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
 facility), so a folded constant never occupies a register.  The printers also
 branch on the condition flags when a compare's only use is the following
-`BR_COND`, turn multiplication by a power of two into a shift, and fall through
+`BR_COND`, select on them when it is the following `SELECT` (x86 `cmov`, ARM64
+`csel`, PowerPC `isel`, SystemZ `LOCGR` under the compare's mask, or a branch
+on the flags where the CPU has no conditional move), turn multiplication by a
+power of two into a shift, and fall through
 to the next block instead of jumping to it.  None of this changes the MIR
 contract; it is selection inside each backend's printer.
 
