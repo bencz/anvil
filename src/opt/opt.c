@@ -48,6 +48,7 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
     ANVIL_PASS_DEAD_STORE,
     ANVIL_PASS_LOAD_ELIM,
     ANVIL_PASS_SIMPLIFY_CFG,       /* 6. Clean up CFG after the rewrites */
+    ANVIL_PASS_SWITCH_TABLE,       /* after the CFG shares the switch's edges */
     ANVIL_PASS_TAIL_RECURSION,     /* recursive returns become loops LICM sees */
     ANVIL_PASS_LICM,
     ANVIL_PASS_UNROLL,
@@ -178,9 +179,9 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
         .id = ANVIL_PASS_INLINE,
         .name = "inline",
-        .description = "Inline small leaf CFGs with bounded code growth",
+        .description = "Inline small internal functions and single call sites, with bounded code growth",
         .run = anvil_pass_inline,
-        .min_level = ANVIL_OPT_AGGRESSIVE,
+        .min_level = ANVIL_OPT_STANDARD,
     },
     {
         .id = ANVIL_PASS_UNROLL,
@@ -229,6 +230,13 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "loop-table",
         .description = "Loops storing constants per index become read-only tables",
         .run = anvil_pass_loop_table,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_SWITCH_TABLE,
+        .name = "switch-table",
+        .description = "Switches choosing constants become table lookups",
+        .run = anvil_pass_switch_table,
         .min_level = ANVIL_OPT_STANDARD,
     }
 };

@@ -274,5 +274,11 @@ static inline int anvil_opt_replace_uses_in_func(anvil_func_t *func,
 }
 
 anvil_func_t **anvil_opt_call_order(anvil_module_t *module);
+/* Whether `value` (an initializer, or a part of one) names `target`. */
+bool anvil_opt_initializer_names(const anvil_value_t *value, const anvil_value_t *target);
+/* Whether every reference to `func` in the module is the callee of a direct
+ * call (in convention *cc when cc is given): no other operand and no
+ * initializer names it.  *calls (when given) receives their number. */
+bool anvil_opt_direct_calls(const anvil_module_t *mod, const anvil_func_t *func, const anvil_cc_t *cc, size_t *calls);
 
 #endif /* ANVIL_OPT_UTILS_H */

@@ -16,6 +16,10 @@ This documentation provides comprehensive technical details about the ANVIL libr
 | [MAINFRAME.md](MAINFRAME.md) | IBM Mainframe backends (S/370, S/390, z/Architecture) |
 | [ARM64_REFACTOR.md](ARM64_REFACTOR.md) | ARM64 backend architecture and refactoring notes |
 | [HACKING.md](HACKING.md) | Guide for contributors and hackers |
+| [OPTIMIZER_IMPLEMENTATION.md](OPTIMIZER_IMPLEMENTATION.md) | Optimizer implementation limits and roadmap (in Portuguese, to be translated) |
+| [REVIEW.md](REVIEW.md) | Review findings (correctness, structure, optimizer, SIMD, quality) and their status |
+| [WINDOWS_REVIEW.md](WINDOWS_REVIEW.md) | Windows (COFF, Win64) coverage and known defects (in Portuguese, to be translated) |
+| [../AGENTS.md](../AGENTS.md) | Rules for agents and contributors working in this repository |
 
 ## Quick Reference
 

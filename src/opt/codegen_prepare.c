@@ -230,46 +230,6 @@ static void mark_sign_unobserved(anvil_func_t *func)
                 instr->sign_unobserved = false;
 }
 
-/* Whether `value` (an initializer, or a part of one) names `target`. */
-static bool initializer_names(const anvil_value_t *value, const anvil_value_t *target, unsigned depth)
-{
-    if (!value || depth > 16)
-        return false;
-    if (value == target)
-        return true;
-    switch (value->kind) {
-    case ANVIL_VAL_CONST_ARRAY:
-    case ANVIL_VAL_CONST_STRUCT:
-        for (size_t e = 0; e < value->data.aggregate.num_elements; e++)
-            if (initializer_names(value->data.aggregate.elements[e], target, depth + 1))
-                return true;
-        return false;
-    case ANVIL_VAL_CONST_SYMBOL_ADDR:
-    case ANVIL_VAL_CONST_GEP:
-        return initializer_names(value->data.reloc.symbol, target, depth + 1) || initializer_names(value->data.reloc.base, target, depth + 1);
-    default:
-        return false;
-    }
-}
-
-/* Whether every use of `func` in the module is the callee of a direct call
- * in its own convention (no address taken: no other operand, no
- * initializer). */
-static bool only_called_directly(anvil_module_t *mod, anvil_func_t *func, anvil_cc_t cc)
-{
-    const anvil_value_t *value = func->value;
-    for (anvil_func_t *caller = mod->funcs; caller; caller = caller->next)
-        for (anvil_block_t *block = caller->blocks; block; block = block->next)
-            for (const anvil_instr_t *instr = block->first; instr; instr = instr->next)
-                for (size_t o = 0; o < instr->num_operands; o++)
-                    if (instr->operands[o] == value && (instr->op != ANVIL_OP_CALL || o != 0 || instr->call_cc != cc))
-                        return false;
-    for (const anvil_global_t *global = mod->globals; global; global = global->next)
-        if (global->value && initializer_names(global->value->data.global.init, value, 0))
-            return false;
-    return true;
-}
-
 /* An internal function called only directly is the module's own business:
  * where the target offers a cheaper convention for such functions
  * (anvil_ctx_local_call_convention: i386 passes the first integer
@@ -291,7 +251,7 @@ static bool use_local_conventions(anvil_module_t *mod)
         bool plain = true;
         for (size_t p = 0; p < type->data.func.num_params && plain; p++)
             plain = anvil_type_func_param_attr(type, p) == ANVIL_PARAM_PLAIN;
-        if (!plain || !only_called_directly(mod, func, current))
+        if (!plain || !anvil_opt_direct_calls(mod, func, &current, NULL))
             continue;
         anvil_type_t *changed = anvil_type_func_cc(ctx, type->data.func.ret, type->data.func.params, type->data.func.num_params, false, local);
         anvil_type_t *pointer = changed ? anvil_type_ptr(ctx, changed) : NULL;
@@ -308,9 +268,68 @@ static bool use_local_conventions(anvil_module_t *mod)
     return true;
 }
 
+/* Internal functions nothing alive refers to (inlined everywhere, or never
+ * called) go: the live ones are those the module exports, those an
+ * initializer names, and those a live function's instructions name. */
+static bool remove_dead_functions(anvil_module_t *mod)
+{
+    size_t count = 0;
+    for (anvil_func_t *func = mod->funcs; func; func = func->next)
+        count++;
+    if (!count)
+        return true;
+    anvil_func_t **funcs = malloc(count * sizeof(*funcs));
+    bool *live = calloc(count, sizeof(*live));
+    size_t *work = malloc(count * sizeof(*work));
+    if (!funcs || !live || !work) {
+        free(funcs);
+        free(live);
+        free(work);
+        return false;
+    }
+    size_t at = 0, pending = 0;
+    for (anvil_func_t *func = mod->funcs; func; func = func->next)
+        funcs[at++] = func;
+    for (size_t f = 0; f < count; f++) {
+        bool root = funcs[f]->linkage != ANVIL_LINK_INTERNAL || funcs[f]->is_declaration || !funcs[f]->value;
+        for (const anvil_global_t *global = mod->globals; !root && global; global = global->next)
+            root = global->value && anvil_opt_initializer_names(global->value->data.global.init, funcs[f]->value);
+        if (root) {
+            live[f] = true;
+            work[pending++] = f;
+        }
+    }
+    while (pending) {
+        anvil_func_t *func = funcs[work[--pending]];
+        for (anvil_block_t *block = func->blocks; block; block = block->next)
+            for (const anvil_instr_t *instr = block->first; instr; instr = instr->next)
+                for (size_t o = 0; o < instr->num_operands; o++) {
+                    const anvil_value_t *operand = instr->operands[o];
+                    if (operand->kind == ANVIL_VAL_CONST_SYMBOL_ADDR || operand->kind == ANVIL_VAL_CONST_GEP)
+                        operand = operand->data.reloc.symbol;
+                    if (!operand || operand->kind != ANVIL_VAL_FUNC)
+                        continue;
+                    for (size_t f = 0; f < count; f++)
+                        if (!live[f] && funcs[f]->value == operand) {
+                            live[f] = true;
+                            work[pending++] = f;
+                        }
+                }
+    }
+    for (size_t f = 0; f < count; f++)
+        if (!live[f])
+            anvil_module_unlink_func(mod, funcs[f]);
+    free(funcs);
+    free(live);
+    free(work);
+    return true;
+}
+
 bool anvil_opt_prepare_codegen(anvil_module_t *mod)
 {
     if (!mod)
+        return false;
+    if (!remove_dead_functions(mod))
         return false;
     if (!use_local_conventions(mod))
         return false;

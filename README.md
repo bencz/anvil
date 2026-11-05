@@ -249,8 +249,8 @@ the one below it:
 | O0 | `ANVIL_OPT_NONE` | none (default) |
 | Og | `ANVIL_OPT_DEBUG` | copy propagation, store-load propagation |
 | O1 | `ANVIL_OPT_BASIC` | Og + mem2reg, constant folding, DCE; codegen preparation |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + SROA, SCCP, known bits, GVN, CSE, strength reduction, dead stores, load elimination, CFG simplification, LICM, tail recursion, complete unrolling, loop strength reduction, runtime unrolling, loop tables, loop vectorization |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inlining, SLP vectorization |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + SROA, SCCP, known bits, GVN, CSE, strength reduction, dead stores, load elimination, CFG simplification, switch tables, LICM, tail recursion, inlining (small bodies, single call sites), complete unrolling, loop strength reduction, runtime unrolling, loop tables, loop vectorization |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + larger inlining budgets, SLP vectorization |
 
 Highlights (details in [doc/OPTIMIZATION.md](doc/OPTIMIZATION.md)):
 
@@ -277,7 +277,8 @@ Highlights (details in [doc/OPTIMIZATION.md](doc/OPTIMIZATION.md)):
   `-fno-fp-vectorize`) keeps them scalar. Reductions also need
   `anvil_func_set_fp_reassociation`.
 * **Codegen preparation (O1+)**: late loop strength rounds, address sinking,
-  loads whose sign no reader observes, and local calling conventions.
+  loads whose sign no reader observes, local calling conventions, and removal
+  of internal functions nothing alive refers to.
 
 Custom passes, per-pass enabling, statistics and a pass observer are
 available through `anvil_opt.h`:
@@ -338,12 +339,13 @@ kernels this short):
 
 | kernel | what it stresses | x86-64 clang | x86-64 ANVIL | ratio | i386 clang | i386 ANVIL | ratio |
 |--------|------------------|-------------:|-------------:|------:|-----------:|-----------:|------:|
-| fib | recursive calls, prologues, argument passing | 22 | 21 | 0.95 | 18 | 20 | 1.11 |
-| crc32 | table-driven bit loop, table built by a loop | 100 | 100 | 1.00 | 100 | 101 | 1.01 |
-| sieve | byte stores, nested counted loops | 112 | 104 | 0.93 | 111 | 106 | 0.95 |
-| matmul | integer multiply-accumulate, strided loads | 19 | 20 | 1.05 | 21 | 22 | 1.05 |
-| strings | strlen / strcmp / strcpy / reverse byte loops | 75 | 49 | 0.65 | 77 | 46 | 0.60 |
-| qsort | recursion, compares, swaps, branches | 168 | 170 | 1.01 | 163 | 173 | 1.06 |
+| fib | recursive calls, prologues, argument passing | 23 | 22 | 0.96 | 19 | 21 | 1.11 |
+| crc32 | table-driven bit loop, table built by a loop | 102 | 103 | 1.01 | 103 | 103 | 1.00 |
+| sieve | byte stores, nested counted loops | 115 | 109 | 0.95 | 115 | 111 | 0.97 |
+| matmul | integer multiply-accumulate, strided loads | 20 | 21 | 1.05 | 22 | 22 | 1.00 |
+| strings | strlen / strcmp / strcpy / reverse byte loops | 76 | 51 | 0.67 | 77 | 46 | 0.60 |
+| qsort | recursion, compares, swaps, branches | 174 | 176 | 1.01 | 169 | 178 | 1.05 |
+| lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
@@ -357,6 +359,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | matmul | 214,390 | 207,910 | 0.97 | 340,798 | 286,037 | 0.84 |
 | strings | 253,432 | 196,936 | 0.78 | 292,630 | 242,296 | 0.83 |
 | qsort | 800,784 | 826,725 | 1.03 | 1,138,113 | 994,093 | 0.87 |
+| lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
 |--------|-----------------:|------------:|------:|------------:|------------:|------:|
@@ -366,15 +369,17 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | matmul | 388,710 | 387,247 | 1.00 | 390,554 | 389,090 | 1.00 |
 | strings | 289,547 | 289,559 | 1.00 | 289,618 | 289,810 | 1.00 |
 | qsort | 1,012,850 | 998,492 | 0.99 | 1,049,861 | 877,019 | 0.84 |
+| lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
 
 Typical sources of the differences, both ways:
 * ANVIL wins with counter branches and update-form streams on PowerPC
   (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep pointers
   sharing one index on x86, in-place index updates, and vectorized open
   searches (strings: clang leaves the `strlen` scan scalar when it may not
-  call the library).
-* Open gaps: ARM64 qsort, x86 matmul, and i386 fib and qsort (tracked in
-  [doc/REVIEW.md](doc/REVIEW.md)).
+  call the library). Switches that only choose values become table lookups
+  on every target (lexer).
+* Open gaps: ARM64 qsort, x86 matmul, i386 fib and qsort, and the lexer's
+  loop on x86 and ARM64 (tracked in [doc/REVIEW.md](doc/REVIEW.md)).
 
 ### C compiler sample (`samples/mcc/tests/bench`, MCC -O2 vs clang -O2)
 
@@ -382,24 +387,27 @@ Best of 10 runs, in milliseconds:
 
 | kernel | x86-64 clang | x86-64 MCC | ratio | i386 clang | i386 MCC | ratio |
 |--------|-------------:|-----------:|------:|-----------:|---------:|------:|
-| crc32 | 69 | 69 | 1.00 | 61 | 73 | 1.20 |
-| fib | 22 | 23 | 1.05 | 17 | 22 | 1.29 |
-| hashmap | 27 | 30 | 1.11 | 26 | 28 | 1.08 |
-| matmul (double) | 14 | 14 | 1.00 | 15 | 15 | 1.00 |
-| nbody (double) | 79 | 97 | 1.23 | 82 | 96 | 1.17 |
-| qsort | 107 | 106 | 0.99 | 103 | 105 | 1.02 |
-| sieve | 91 | 91 | 1.00 | (see below) | | |
-| strings | 18 | 19 | 1.06 | 21 | 19 | 0.90 |
+| calls (small static helpers, structs by value) | 94 | 930 | 9.89 | 95 | 1061 | 11.2 |
+| crc32 | 70 | 72 | 1.03 | 62 | 73 | 1.18 |
+| fib | 22 | 23 | 1.05 | 18 | 24 | 1.33 |
+| hashmap | 28 | 29 | 1.04 | 28 | 29 | 1.04 |
+| lexer (74-case switch) | 28 | 37 | 1.32 | 28 | 36 | 1.29 |
+| matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
+| nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
+| qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
+| sieve | 91 | 93 | 1.02 | (see below) | | |
+| strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |
 
 Where the gaps come from:
-* **nbody**: clang packs the x/y fields of each struct into one register (SLP).
-  ANVIL's SLP vectorizer does not group struct fields yet. matmul's loop
-  vectorizes like clang's, with lane-wise FP vectorization on by default.
+* **calls**: clang keeps the small structs in registers across the inlined
+  helpers. MCC copies structs byte by byte, which keeps them in memory, and
+  the selects of `clamp` still materialize their condition there. This is
+  being worked on (see [doc/REVIEW.md](doc/REVIEW.md)).
+* **nbody**: clang packs the x/y fields of each struct into one register
+  (SLP). ANVIL's SLP vectorizer does not group struct fields yet.
 * **strings**: clang replaces the hand-written `strlen` loop with a call to
   the C library's `strlen`. ANVIL vectorizes the loop itself as an open
-  search, which is generic and not tied to C. `bench/ir` builds its references
-  with `-fno-builtin` to compare code generation alone; there ANVIL's
-  vectorized scan is 0.60–0.65x of clang's scalar loop.
+  search, which is generic and not tied to C.
 * **i386 crc32 and fib**: open. Both have six allocatable registers, and fib
   still has a branch-then-jump in its loop layout.
 * **i386 sieve**: the program's output differs between the compilers. It
@@ -507,15 +515,16 @@ the IR before or after optimization with `-dump-ir` / `-dump-ir-opt`.
 
 ## Roadmap
 
-* Binary object emission (opcodes, relocations)
-* Debug information (DWARF)
+* Source-level debug information through assembler directives (`.file`/`.loc`
+  line tables and DWARF sections written as assembly, as `.cfi` unwinding
+  already is)
 * RISC-V
 * Native z/OS linkage (F4SA, Language Environment) and validation on hardware
 * Broader vectorization and idiom recognition
 
 ## Documentation
 
-See [doc/INDEX.md](doc/INDEX.md) for the documentation map: API
+Contributors and agents follow [AGENTS.md](AGENTS.md). See [doc/INDEX.md](doc/INDEX.md) for the documentation map: API
 ([doc/API.md](doc/API.md)), IR ([doc/IR.md](doc/IR.md)), optimizer
 ([doc/OPTIMIZATION.md](doc/OPTIMIZATION.md)), backends
 ([doc/BACKENDS.md](doc/BACKENDS.md)) and the review log

@@ -129,6 +129,37 @@ void anvil_module_symbol_register(anvil_module_t *mod, anvil_value_t *value)
     mod->symbols[mod->num_symbols++] = value;
 }
 
+bool anvil_module_unlink_func(anvil_module_t *mod, anvil_func_t *func)
+{
+    if (!mod || !func || func->parent != mod)
+        return false;
+    for (anvil_func_t **link = &mod->funcs; *link; link = &(*link)->next) {
+        if (*link != func)
+            continue;
+        *link = func->next;
+        func->next = NULL;
+        mod->num_funcs--;
+        anvil_value_t *value = func->value;
+        if (value && value->name && mod->symbol_bucket_count) {
+            size_t slot = (size_t)(symbol_hash(value->name) & (uint64_t)(mod->symbol_bucket_count - 1));
+            for (anvil_value_t **chain = &mod->symbol_buckets[slot]; *chain; chain = &(*chain)->symbol_next)
+                if (*chain == value) {
+                    *chain = value->symbol_next;
+                    value->symbol_next = NULL;
+                    break;
+                }
+            for (size_t i = 0; i < mod->num_symbols; i++)
+                if (mod->symbols[i] == value) {
+                    memmove(&mod->symbols[i], &mod->symbols[i + 1], (mod->num_symbols - i - 1) * sizeof(*mod->symbols));
+                    mod->num_symbols--;
+                    break;
+                }
+        }
+        return true;
+    }
+    return false;
+}
+
 static anvil_error_t verify_codegen_stage(anvil_module_t *mod,
                                           const char *stage)
 {

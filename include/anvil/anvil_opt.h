@@ -41,14 +41,15 @@ typedef enum {
     ANVIL_PASS_LICM,            /* Hoist nontrapping integer loop invariants (O3) */
     ANVIL_PASS_SCCP,            /* Sparse conditional integer constants (O2+) */
     ANVIL_PASS_KNOWN_BITS,      /* Bit facts and unsigned range folding (O2+) */
-    ANVIL_PASS_INLINE,         /* Bounded leaf-function inlining (O3) */
+    ANVIL_PASS_INLINE,         /* Inlining of small internal functions and single call sites (O2+) */
     ANVIL_PASS_UNROLL,         /* Completely unroll small proven-trip loops (O2+) */
     ANVIL_PASS_VECTORIZE,      /* Pack independent memory streams with target costs (O3) */
-    ANVIL_PASS_LOOP_VECTORIZE, /* Vector copies of counted unit-stride loops (O3) */
+    ANVIL_PASS_LOOP_VECTORIZE, /* Vector copies of counted loops and open searches (O2+) */
     ANVIL_PASS_LOOP_STRENGTH,  /* Pointer streams for strided loop addresses (O2+) */
     ANVIL_PASS_TAIL_RECURSION, /* Recursive returns as loops, with an accumulator (O2+) */
     ANVIL_PASS_RUNTIME_UNROLL, /* Small counted loops run several body copies per test (O2+) */
     ANVIL_PASS_LOOP_TABLE,     /* Loops storing constants per index become read-only tables (O2+) */
+    ANVIL_PASS_SWITCH_TABLE,   /* Switches choosing constants become table lookups (O2+) */
     ANVIL_PASS_COUNT
 } anvil_pass_id_t;
 
@@ -220,6 +221,7 @@ anvil_pass_result_t anvil_pass_loop_strength(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_tail_recursion(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_runtime_unroll(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_loop_table(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_switch_table(anvil_func_t *func);
 
 /* After optimization, before a backend lowers the module: recomputes each
  * address (GEP) in the other blocks that load or store through it, so the

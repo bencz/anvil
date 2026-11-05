@@ -308,7 +308,8 @@ static void test_local_convention(void)
 {
     for (int variant = 0; variant < 3; variant++) {
         anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86);
-        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        /* O1: codegen preparation runs, inlining (O2) would take f. */
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_BASIC);
         anvil_module_t *module = anvil_module_create(ctx, "local");
         anvil_type_t *i32 = anvil_type_i32(ctx);
         anvil_type_t *pair[] = {i32, i32}, *one[] = {i32};

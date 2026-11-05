@@ -5,9 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Small leaf bodies only. Stack/varargs operations require a separate lifetime
- * and ABI policy; excluding nested calls also prevents recursive expansion. */
-enum { INLINE_BODY_LIMIT = 48, INLINE_CALLER_LIMIT = 1024 };
+/* Internal callees within a size budget: at O2 small bodies, or larger
+ * ones with a single call site (the copy replaces the original, which dead
+ * code removal then drops); at O3 twice those.  Calls inside the callee are
+ * copied too, except a call of the callee itself (no recursive expansion);
+ * static allocas move to the caller's entry block, so they stay static and
+ * promotable wherever the call sits.  Varargs and dynamic allocas keep the
+ * call.  The caller stops growing at INLINE_CALLER_LIMIT. */
+enum { INLINE_SMALL_BODY = 24, INLINE_SINGLE_BODY = 64, INLINE_BODY_LIMIT = 128, INLINE_CALLER_LIMIT = 1024 };
 
 typedef struct {
     anvil_opt_cfg_t cfg;
@@ -41,7 +46,8 @@ static size_t body_cost(const anvil_func_t *callee)
     {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
         {
-            if (instr->op == ANVIL_OP_CALL || instr->op == ANVIL_OP_ALLOCA || instr->op == ANVIL_OP_VA_START)
+            if (instr->op == ANVIL_OP_VA_START || (instr->op == ANVIL_OP_CALL && direct_callee(instr) == callee) ||
+                (instr->op == ANVIL_OP_ALLOCA && (instr->num_operands || block != callee->entry)))
                 return SIZE_MAX;
 
             if (instr->true_block == callee->entry || instr->false_block == callee->entry)
@@ -110,9 +116,13 @@ static bool prepare_body(inline_plan *plan, anvil_func_t *caller, anvil_func_t *
     if (!anvil_opt_cfg_build(callee, &plan->cfg))
         return false;
 
+    size_t instructions = 0;
+    for (size_t block = 0; block < plan->cfg.count; block++)
+        for (anvil_instr_t *original = plan->cfg.blocks[block]->first; original; original = original->next)
+            instructions++;
     plan->blocks = anvil_ctx_calloc(ctx, plan->cfg.count, sizeof(*plan->blocks));
-    plan->originals = anvil_ctx_calloc(ctx, INLINE_BODY_LIMIT, sizeof(*plan->originals));
-    plan->copies = anvil_ctx_calloc(ctx, INLINE_BODY_LIMIT, sizeof(*plan->copies));
+    plan->originals = anvil_ctx_calloc(ctx, instructions ? instructions : 1, sizeof(*plan->originals));
+    plan->copies = anvil_ctx_calloc(ctx, instructions ? instructions : 1, sizeof(*plan->copies));
     if (!plan->blocks || !plan->originals || !plan->copies)
         return false;
 
@@ -272,6 +282,15 @@ static bool inline_call(anvil_func_t *caller, anvil_func_t *callee, anvil_instr_
     anvil_func_append_block(caller, continuation);
     if (result)
         anvil_opt_replace_uses_in_func(caller, call->result, result->result);
+    /* The callee's static allocas: at the top of the caller's entry block. */
+    for (size_t index = 0; index < plan.instruction_count; index++)
+    {
+        anvil_instr_t *copy = plan.copies[index];
+        if (copy->op != ANVIL_OP_ALLOCA || !caller->entry->first)
+            continue;
+        anvil_opt_erase_instr(copy);
+        anvil_opt_insert_before(caller->entry->first, copy);
+    }
 
     anvil_func_invalidate_cfg(caller);
     success = true;
@@ -285,6 +304,7 @@ anvil_pass_result_t anvil_pass_inline(anvil_func_t *func)
 {
     if (!func || !func->parent)
         return ANVIL_PASS_RUN_ERROR;
+    bool aggressive = anvil_ctx_get_opt_level(func->owner_ctx) >= ANVIL_OPT_AGGRESSIVE;
 
     anvil_ctx_clear_error(func->owner_ctx);
     size_t size = 0;
@@ -304,7 +324,9 @@ anvil_pass_result_t anvil_pass_inline(anvil_func_t *func)
                 continue;
 
             size_t cost = body_cost(callee);
-            if (cost > INLINE_BODY_LIMIT || cost + 2 > INLINE_CALLER_LIMIT - size)
+            size_t scale = aggressive ? 2 : 1, calls = 0;
+            bool fits = cost <= INLINE_SMALL_BODY * scale || (cost <= INLINE_SINGLE_BODY * scale && anvil_opt_direct_calls(callee->parent, callee, NULL, &calls) && calls == 1);
+            if (!fits || cost + 2 > INLINE_CALLER_LIMIT - size)
                 continue;
 
             if (!inline_call(func, callee, instr))

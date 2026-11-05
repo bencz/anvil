@@ -566,22 +566,7 @@ static bool rewrite_successor_phis(anvil_instr_t *term,
  * removed block was at the tail. */
 static void remove_block(anvil_func_t *func, anvil_block_t *block)
 {
-    anvil_block_t **pp = &func->blocks;
-    while (*pp) {
-        if (*pp == block) {
-            *pp = block->next;
-            func->num_blocks--;
-            if (func->last_block == block) {
-                anvil_block_t *new_last = func->blocks;
-                if (new_last) {
-                    while (new_last->next) new_last = new_last->next;
-                }
-                func->last_block = new_last;
-            }
-            return;
-        }
-        pp = &(*pp)->next;
-    }
+    anvil_func_unlink_block(func, block);
 }
 
 /* Simplify conditional branch with constant condition */
@@ -871,6 +856,35 @@ static bool used_only_through(anvil_func_t *func, const anvil_value_t *value, co
     return true;
 }
 
+/* Redirects `from`'s edge into `join` to `target`: the values `join`'s
+ * PHIs had for it flow into `target`'s PHIs (all allocated before any edge
+ * changes), and `join`'s PHIs drop it.  False only on allocation failure. */
+static bool redirect_through(anvil_ctx_t *ctx, anvil_block_t *join, anvil_block_t *from, anvil_block_t *target)
+{
+    for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        if (!phi_reserve_incoming(ctx, phi))
+            return false;
+    }
+    for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        anvil_value_t *through = incoming_for(phi, join);
+        if (through && through->kind == ANVIL_VAL_INSTR && through->data.instr->parent == join)
+            through = incoming_for(through->data.instr, from);
+        phi->operands[phi->num_phi_incoming] = through;
+        phi->phi_blocks[phi->num_phi_incoming++] = from;
+        phi->num_operands = phi->num_phi_incoming;
+    }
+    replace_branch_target_in(from->last, join, target);
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        for (size_t entry = 0; entry < phi->num_phi_incoming; entry++) {
+            if (phi->phi_blocks[entry] == from) {
+                remove_phi_incoming(phi, entry);
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 /* Jump threading on a known outcome.  `join` holds PHIs, at most one
  * comparison of a PHI with a constant, and a two-way branch on it (or on an
  * i1 PHI): a predecessor bringing a constant decides the branch, so its
@@ -930,28 +944,157 @@ static bool thread_known_branch(anvil_func_t *func, anvil_block_t *join, bool *t
         anvil_block_t *target = taken ? term->true_block : term->false_block;
         if (block_targets(from, target))
             continue;  /* the edge would collide with one `from` has */
+        if (!redirect_through(ctx, join, from, target))
+            return false;
+        *threaded = true;
+        return true;  /* predecessor lists are now stale */
+    }
+    return true;
+}
 
-        /* Allocate every PHI slot before changing an edge. */
-        for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
-            if (!phi_reserve_incoming(ctx, phi))
+/* The most pure instructions sunk out of a join block before threading. */
+enum { SINK_LIMIT = 8 };
+
+/* Moves the pure instructions of `join` (before its two-way branch) into
+ * both successors, a copy in each, so the join holds only its branch and a
+ * threaded edge skips nothing.  Each successor must have `join` as its only
+ * predecessor, and the instructions be read only inside `join` or by those
+ * two blocks.  *sunk tells whether it happened; false only on allocation
+ * failure (every copy is made before anything changes). */
+static bool sink_into_successors(anvil_func_t *func, anvil_block_t *join, bool *sunk)
+{
+    *sunk = false;
+    anvil_instr_t *term = join->last, *originals[SINK_LIMIT];
+    size_t count = 0;
+    anvil_block_t *sides[2] = {term->true_block, term->false_block};
+    for (size_t side = 0; side < 2; side++)
+        if (!sides[side] || sides[side] == join || sides[side]->num_preds != 1 || sides[side]->preds[0] != join ||
+            (sides[side]->first && sides[side]->first->op == ANVIL_OP_PHI))
+            return true;
+    for (anvil_instr_t *instr = join->first; instr != term; instr = instr->next) {
+        if (instr->op == ANVIL_OP_PHI || !speculatable(instr) || !instr->result || count == SINK_LIMIT)
+            return true;
+        originals[count++] = instr;
+    }
+    if (!count)
+        return true;
+    for (const anvil_block_t *block = func->blocks; block; block = block->next) {
+        if (block == join || block == sides[0] || block == sides[1])
+            continue;
+        for (const anvil_instr_t *user = block->first; user; user = user->next)
+            for (size_t o = 0; o < user->num_operands; o++)
+                for (size_t k = 0; k < count; k++)
+                    if (user->operands[o] == originals[k]->result)
+                        return true;
+    }
+    for (size_t k = 0; k < count; k++)
+        for (size_t o = 0; o < term->num_operands; o++)
+            if (term->operands[o] == originals[k]->result)
+                return true;
+
+    anvil_ctx_t *ctx = func->owner_ctx;
+    anvil_instr_t *copies[2][SINK_LIMIT];
+    for (size_t side = 0; side < 2; side++) {
+        for (size_t k = 0; k < count; k++) {
+            anvil_instr_t *original = originals[k];
+            anvil_instr_t *copy = anvil_instr_create(ctx, original->op, original->result->type, original->result->name);
+            if (!copy || !anvil_instr_reserve_operands(copy, original->num_operands) || !anvil_instr_copy_attributes(copy, original))
                 return false;
-        }
-        for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
-            anvil_value_t *through = incoming_for(phi, join);
-            if (through && through->kind == ANVIL_VAL_INSTR && through->data.instr->parent == join)
-                through = incoming_for(through->data.instr, from);
-            phi->operands[phi->num_phi_incoming] = through;
-            phi->phi_blocks[phi->num_phi_incoming++] = from;
-            phi->num_operands = phi->num_phi_incoming;
-        }
-        replace_branch_target_in(from->last, join, target);
-        for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
-            for (size_t entry = 0; entry < phi->num_phi_incoming; entry++) {
-                if (phi->phi_blocks[entry] == from) {
-                    remove_phi_incoming(phi, entry);
-                    break;
-                }
+            for (size_t o = 0; o < original->num_operands; o++) {
+                anvil_value_t *operand = original->operands[o];
+                for (size_t earlier = 0; earlier < k; earlier++)
+                    if (operand == originals[earlier]->result)
+                        operand = copies[side][earlier]->result;
+                copy->operands[o] = operand;
             }
+            copy->num_operands = original->num_operands;
+            copies[side][k] = copy;
+        }
+    }
+    for (size_t side = 0; side < 2; side++) {
+        anvil_instr_t *position = sides[side]->first;
+        for (size_t k = 0; k < count; k++)
+            anvil_opt_insert_before(position, copies[side][k]);
+        for (anvil_instr_t *user = position; user; user = user->next)
+            for (size_t o = 0; o < user->num_operands; o++)
+                for (size_t k = 0; k < count; k++)
+                    if (user->operands[o] == originals[k]->result)
+                        user->operands[o] = copies[side][k]->result;
+    }
+    for (size_t k = count; k-- > 0;)
+        anvil_opt_erase_instr(originals[k]);
+    *sunk = true;
+    return true;
+}
+
+/* The value the branch condition `cond` has on the edge from `from` into
+ * `join`: `from` branches on it, or `join` is reached from a block that
+ * does through blocks with one predecessor each.  -1 when unknown. */
+static int edge_implies(const anvil_value_t *cond, const anvil_block_t *from, const anvil_block_t *join)
+{
+    const anvil_block_t *into = join, *block = from;
+    for (unsigned depth = 0; block && depth < 8; depth++) {
+        const anvil_instr_t *term = block->last;
+        if (term && term->op == ANVIL_OP_BR_COND && term->num_operands && term->operands[0] == cond && term->true_block != term->false_block)
+            return term->true_block == into ? 1 : term->false_block == into ? 0 : -1;
+        if (block->num_preds != 1 || !block->preds)
+            return -1;
+        into = block;
+        block = block->preds[0];
+    }
+    return -1;
+}
+
+/* Jump threading on an earlier test of the same condition.  `join` holds
+ * only PHIs read through it and a two-way branch on a condition computed
+ * elsewhere (a loop's exit test of the value its loop tested): an edge that
+ * implies the condition goes straight to the successor it chooses.  Returns
+ * false (context error set) only on allocation failure. */
+static bool thread_implied_branch(anvil_func_t *func, anvil_block_t *join, bool *threaded)
+{
+    *threaded = false;
+    anvil_instr_t *term = join->last;
+    if (!term || term->op != ANVIL_OP_BR_COND || term->true_block == term->false_block || !term->num_operands)
+        return true;
+    const anvil_value_t *cond = term->operands[0];
+    if (cond->kind == ANVIL_VAL_INSTR && cond->data.instr && cond->data.instr->parent == join)
+        return true;
+    bool any_known = false;
+    for (size_t p = 0; p < join->num_preds && !any_known; p++)
+        any_known = join->preds[p] != join && edge_implies(cond, join->preds[p], join) >= 0;
+    if (!any_known)
+        return true;
+    /* Pure work before the branch moves into the successors first. */
+    bool pure_work = false;
+    for (anvil_instr_t *instr = join->first; instr != term; instr = instr->next)
+        pure_work |= instr->op != ANVIL_OP_PHI;
+    if (pure_work) {
+        bool sunk;
+        if (!sink_into_successors(func, join, &sunk))
+            return false;
+        if (!sunk)
+            return true;
+        *threaded = true;
+        return true;  /* the next round threads the emptied join */
+    }
+    for (anvil_instr_t *instr = join->first; instr != term; instr = instr->next)
+        if (instr->op != ANVIL_OP_PHI || !used_only_through(func, instr->result, join))
+            return true;
+    for (size_t p = 0; p < join->num_preds; p++) {
+        anvil_block_t *from = join->preds[p];
+        int known = from == join ? -1 : edge_implies(cond, from, join);
+        if (known < 0)
+            continue;
+        anvil_block_t *target = known ? term->true_block : term->false_block;
+        if (target == join || block_targets(from, target))
+            continue;
+        if (!redirect_through(func->owner_ctx, join, from, target))
+            return false;
+        if (join->num_preds == 1 && join != func->entry) {
+            /* Its last edge went: the join goes now, with its PHI entries in
+             * the successors (nothing to allocate). */
+            (void)rewrite_successor_phis(term, join, NULL);
+            remove_block(func, join);
         }
         *threaded = true;
         return true;  /* predecessor lists are now stale */
@@ -1069,7 +1212,7 @@ anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func)
         }
         for (anvil_block_t *block = func->blocks; block && !any_changed; block = block->next) {
             bool threaded;
-            if (!thread_known_branch(func, block, &threaded)) {
+            if (!thread_known_branch(func, block, &threaded) || (!threaded && !thread_implied_branch(func, block, &threaded))) {
                 block_index_destroy(&index);
                 return ANVIL_PASS_RUN_ERROR;
             }

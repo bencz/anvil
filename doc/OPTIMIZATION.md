@@ -43,8 +43,8 @@ level is a strict superset of the one below it.
 | O0 | `ANVIL_OPT_NONE` | None (default) |
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, loop-vectorize |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inline, vectorize (SLP); unrolling runs from O2 |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, switch-table, inline (small bodies and single call sites), loop-vectorize; unrolling |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + larger inlining budgets, vectorize (SLP) |
 
 The two vectorizers create vector operations only where the backend's
 `vector_operation_cost` hook accepts them for the CPU model.  Floating-point
@@ -402,6 +402,21 @@ the first vector. The vector loop runs when the start is element-aligned and
 `start - off` does not wrap the index, otherwise the scalar loop runs alone.
 Only one read-only stream, no stores and no accumulators.
 
+### Switch Tables (`ANVIL_PASS_SWITCH_TABLE`) - O2
+
+`src/opt/switch_table.c`. A switch of at least four cases that only chooses
+values becomes a table lookup. Either every destination forwards to one merge
+block whose PHIs take a constant from each, or every destination returns a
+constant (a classifying function). The case values must span at most 4096
+values with a density of at least 40%. The selector minus the lowest case
+indexes one read-only table per chosen value. Holes, and the entry past the
+range where an out-of-range index is clamped, hold the default's value, so
+no branch remains. A default that is code keeps its own path:
+`off u< span ? lookup : default`. Every allocation precedes the rewrite, which
+then removes the forwarding blocks with their PHI entries. Other switches
+lower as sorted runs and a balanced tree of compares (see
+[BACKENDS.md](BACKENDS.md)).
+
 ### SLP Vectorization (`ANVIL_PASS_VECTORIZE`) - O3
 
 `src/opt/vectorize.c`. In one block, as many stores of one element type as a
@@ -429,9 +444,16 @@ Simplifies the control flow graph.
 **Transformations:**
 
 1. **Constant Branch Folding**: Converts conditional branches with constant conditions to unconditional branches
-2. **Empty Block Removal**: Removes blocks that only contain an unconditional branch
+2. **Empty Block Removal**: Removes blocks that only contain an unconditional branch; a predecessor that already
+   reaches the destination gets a second edge unless the destination's PHIs would need two values from it
 3. **Block Merging**: Merges a block with its single successor if the successor has only one predecessor
 4. **Unreachable Code Removal**: Removes blocks not reachable from the entry block
+5. **Jump Threading**: a branch on a PHI of constants (or a compare of one with a constant) sends each predecessor
+   bringing a constant straight to the chosen successor; a branch on a condition computed elsewhere sends each
+   predecessor whose edge implies the condition (it branches on it, or is reached through single-predecessor blocks
+   from one that does) straight to its successor. Pure instructions in the join move into both successors first.
+   This keeps a loop that exits on a test from carrying the test's result as a value.
+6. **If-conversion**: two-way branches over small speculatable sides become selects
 
 The pass is aware of all source IR terminators: `br`, `br_cond`, and `switch`.
 Switch defaults and case targets are included in reachability analysis,

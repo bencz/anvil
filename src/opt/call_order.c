@@ -121,3 +121,50 @@ anvil_func_t **anvil_opt_call_order(anvil_module_t *module)
     free(frames);
     return order;
 }
+
+bool anvil_opt_initializer_names(const anvil_value_t *value, const anvil_value_t *target)
+{
+    for (unsigned depth = 0; value && depth <= 16; depth++) {
+        if (value == target)
+            return true;
+        switch (value->kind) {
+        case ANVIL_VAL_CONST_ARRAY:
+        case ANVIL_VAL_CONST_STRUCT:
+            for (size_t e = 0; e < value->data.aggregate.num_elements; e++)
+                if (anvil_opt_initializer_names(value->data.aggregate.elements[e], target))
+                    return true;
+            return false;
+        case ANVIL_VAL_CONST_SYMBOL_ADDR:
+        case ANVIL_VAL_CONST_GEP:
+            if (anvil_opt_initializer_names(value->data.reloc.base, target))
+                return true;
+            value = value->data.reloc.symbol;
+            continue;
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+bool anvil_opt_direct_calls(const anvil_module_t *mod, const anvil_func_t *func, const anvil_cc_t *cc, size_t *calls)
+{
+    size_t count = 0;
+    const anvil_value_t *value = func->value;
+    for (const anvil_func_t *caller = mod->funcs; caller; caller = caller->next)
+        for (const anvil_block_t *block = caller->blocks; block; block = block->next)
+            for (const anvil_instr_t *instr = block->first; instr; instr = instr->next)
+                for (size_t o = 0; o < instr->num_operands; o++) {
+                    if (instr->operands[o] != value)
+                        continue;
+                    if (instr->op != ANVIL_OP_CALL || o != 0 || (cc && instr->call_cc != *cc))
+                        return false;
+                    count++;
+                }
+    for (const anvil_global_t *global = mod->globals; global; global = global->next)
+        if (global->value && anvil_opt_initializer_names(global->value->data.global.init, value))
+            return false;
+    if (calls)
+        *calls = count;
+    return true;
+}

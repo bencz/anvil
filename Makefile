@@ -131,6 +131,7 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/tail_recursion.c \
 	$(SRC_DIR)/opt/runtime_unroll.c \
 	$(SRC_DIR)/opt/loop_table.c \
+	$(SRC_DIR)/opt/switch_table.c \
 	$(SRC_DIR)/opt/codegen_prepare.c \
 	$(SRC_DIR)/opt/mem2reg.c \
 	$(SRC_DIR)/opt/sroa.c \
@@ -200,6 +201,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/count_loop_regression \
 	$(BUILD_DIR)/tests/operand_fold_regression \
 	$(BUILD_DIR)/tests/switch_lowering_regression \
+	$(BUILD_DIR)/tests/jump_threading_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \
 	$(BUILD_DIR)/tests/core_arm64_regression \

@@ -528,3 +528,20 @@ bool anvil_block_has_terminator(anvil_block_t *block)
            op == ANVIL_OP_BR_COND ||
            op == ANVIL_OP_SWITCH;
 }
+
+void anvil_func_unlink_block(anvil_func_t *func, anvil_block_t *block)
+{
+    for (anvil_block_t **link = &func->blocks; *link; link = &(*link)->next) {
+        if (*link != block)
+            continue;
+        *link = block->next;
+        func->num_blocks--;
+        if (func->last_block == block) {
+            anvil_block_t *last = func->blocks;
+            while (last && last->next)
+                last = last->next;
+            func->last_block = last;
+        }
+        return;
+    }
+}
