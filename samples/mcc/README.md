@@ -71,8 +71,11 @@ make clean && make
 # Pick the CPU model (instruction choices follow its features)
 ./mcc -O3 -mcpu=haswell -o output.s input.c
 
-# Floating-point policies (all off by default)
-./mcc -O3 -ffp-vectorize -fassociative-math -ffp-contract=fast -o output.s input.c
+# Floating-point policies: FP lanes vectorize by default (results unchanged,
+# -fno-fp-vectorize keeps scalar code); reassociation and contraction are off
+# by default
+./mcc -O3 -fassociative-math -ffp-contract=fast -o output.s input.c
+./mcc -O2 -fno-fp-vectorize -o output.s input.c
 
 # sqrt/sqrtf run as the target's square-root instruction; the library is
 # called only for a NaN result (errno).  -fno-math-errno drops that call,

@@ -26,7 +26,7 @@ static void print_usage(const char *prog)
     printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
     printf("                      x86_64_windows (Windows x64, LLP64)\n");
     printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
-    printf("  -ffp-vectorize    Allow FP lane packing at O2/O3 (changes exception observation order)\n");
+    printf("  -fno-fp-vectorize Keep FP code scalar (FP lane packing is the default: same results, exception order may change)\n");
     printf("  -fassociative-math  Allow reordering FP additions (vectorized FP sums)\n");
     printf("  -ffp-contract=fast  Allow fusing a*b+c into one multiply-add (one rounding)\n");
     printf("  -fno-builtin, -ffreestanding  Treat standard library names as ordinary functions\n");
@@ -611,6 +611,9 @@ int main(int argc, char **argv)
     mcc_options_t opts = {0};
     opts.arch = mcc_host.default_target;
     opts.opt_level = MCC_OPT_NONE;
+    /* ANVIL's default: independent FP lanes may share an instruction
+     * (results unchanged); -fno-fp-vectorize keeps scalar FP code. */
+    opts.fp_vectorization = true;
     opts.c_std = MCC_STD_DEFAULT; /* Default to C89 */
     
     /* Dynamic arrays for include paths and defines */

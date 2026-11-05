@@ -712,8 +712,10 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
 /* Get function as a value (for use in calls) */
 anvil_value_t *anvil_func_get_value(anvil_func_t *func);
 /* Permit packing independent FP operations. Results keep their lane-wise
- * arithmetic, but the order of FP exception observations may change.
- * Disabled by default; this does not permit reassociation or contraction. */
+ * arithmetic (bit for bit what the scalar code computes), but the order of
+ * FP exception observations may change.  Enabled by default, as clang's -O2
+ * vectorizes; disable it where exception-flag order is observed.  This does
+ * not permit reassociation (reductions) or contraction. */
 void anvil_func_set_fp_vectorization(anvil_func_t *func, bool enabled);
 /* Permit reordering FP additions (a vectorized sum adds its lanes in
  * another order, so the rounding differs).  Disabled by default. */

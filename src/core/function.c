@@ -234,6 +234,9 @@ anvil_func_t *anvil_func_create(anvil_module_t *mod, const char *name,
     }
     func->value->data.func = func;
     func->value->owner_module = mod;
+    /* Lane-wise FP vectors compute what the scalar code does (see
+     * anvil_func_set_fp_vectorization). */
+    func->fp_vectorization = true;
     
     /* Add to module's function list */
     func->next = mod->funcs;
@@ -329,6 +332,9 @@ anvil_func_t *anvil_func_declare_linkage(anvil_module_t *mod,
     }
     func->value->data.func = func;
     func->value->owner_module = mod;
+    /* Lane-wise FP vectors compute what the scalar code does (see
+     * anvil_func_set_fp_vectorization). */
+    func->fp_vectorization = true;
     
     /* Add to module's function list */
     func->next = mod->funcs;

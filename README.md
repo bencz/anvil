@@ -270,8 +270,10 @@ Highlights (details in [doc/OPTIMIZATION.md](doc/OPTIMIZATION.md)):
   entries, runs at compile time into a read-only global.
 * **Vectorization**: loops and SLP groups become vectors only where the
   backend's `vector_operation_cost` hook accepts them for the CPU model.
-  Floating-point vectors need `anvil_func_set_fp_vectorization` (MCC:
-  `-ffp-vectorize`).
+  Floating-point lanes vectorize by default, with results identical to the
+  scalar code; `anvil_func_set_fp_vectorization(func, false)` (MCC:
+  `-fno-fp-vectorize`) keeps them scalar. Reductions also need
+  `anvil_func_set_fp_reassociation`.
 * **Codegen preparation (O1+)**: late loop strength rounds, address sinking,
   loads whose sign no reader observes, and local calling conventions.
 
@@ -379,16 +381,16 @@ Best of 10 runs, in milliseconds:
 | crc32 | 69 | 69 | 1.00 | 61 | 73 | 1.20 |
 | fib | 22 | 23 | 1.05 | 17 | 22 | 1.29 |
 | hashmap | 27 | 30 | 1.11 | 26 | 28 | 1.08 |
-| matmul (double) | 14 | 25 | 1.79 | 14 | 26 | 1.86 |
+| matmul (double) | 14 | 14 | 1.00 | 15 | 15 | 1.00 |
 | nbody (double) | 79 | 97 | 1.23 | 82 | 96 | 1.17 |
 | qsort | 107 | 106 | 0.99 | 103 | 105 | 1.02 |
 | sieve | 91 | 91 | 1.00 | (see below) | | |
 | strings | 17 | 26 | 1.53 | 21 | 26 | 1.24 |
 
 Where the gaps come from:
-* **matmul and nbody**: clang vectorizes floating-point loops by default.
-  ANVIL keeps scalar FP order unless the function allows FP vectorization
-  (MCC: `-O3 -ffp-vectorize`).
+* **nbody**: clang packs the x/y fields of each struct into one register (SLP).
+  ANVIL's SLP vectorizer does not group struct fields yet. matmul's loop
+  vectorizes like clang's, with lane-wise FP vectorization on by default.
 * **strings**: clang replaces the hand-written `strlen` loop with a call to
   the C library's vectorized `strlen`. ANVIL compiles the loop as written
   (`bench/ir` builds its references with `-fno-builtin` to compare code

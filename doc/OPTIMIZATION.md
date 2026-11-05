@@ -47,10 +47,12 @@ level is a strict superset of the one below it.
 | O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inline, vectorize (SLP); unrolling runs from O2 |
 
 The two vectorizers create vector operations only where the backend's
-`vector_operation_cost` hook accepts them for the CPU model, and floating-point
-vectors only in functions with `anvil_func_set_fp_vectorization` (MCC:
-`-ffp-vectorize`); lane-wise arithmetic gives the same results as the scalar
-loop, the policy exists for exception-flag and denormal behaviour.
+`vector_operation_cost` hook accepts them for the CPU model.  Floating-point
+vectors follow `anvil_func_set_fp_vectorization`, on by default (MCC:
+`-fno-fp-vectorize` turns it off): lane-wise arithmetic gives the same results
+as the scalar loop, the policy exists for exception-flag and denormal
+behaviour.  Reductions (a vectorized sum) also need
+`anvil_func_set_fp_reassociation`, off by default.
 
 ## Available Passes
 
