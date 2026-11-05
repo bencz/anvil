@@ -913,6 +913,87 @@ static void test_dce_uses_dense_function_worklist(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* Mark and sweep: a loop-carried sum nothing reads after the loop (a PHI
+ * cycle) goes with its update; unused loads go where they cannot fault
+ * (inside a static alloca or a defined global) and stay where they might
+ * (past the end of an object, through a weak declaration) or are
+ * volatile.  allowance limits allocations: a failed run changes nothing. */
+static bool run_mark_sweep_case(size_t allowance, bool *completed)
+{
+    anvil_ctx_t *ctx = new_ctx();
+    if (!ctx)
+        return false;
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *params[] = { i32 };
+    anvil_module_t *mod = NULL;
+    anvil_func_t *fn = new_i32_func(ctx, &mod, "opt_mark_sweep", "mark_sweep", params, 1);
+    bool ok = fn != NULL;
+    if (fn) {
+        anvil_value_t *defined = anvil_module_add_global(mod, "defined", i32, ANVIL_LINK_INTERNAL);
+        anvil_value_t *weak = anvil_module_declare_global(mod, "weak", i32, ANVIL_LINK_WEAK);
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_block_t *header = anvil_block_create(fn, "header");
+        anvil_block_t *body = anvil_block_create(fn, "body");
+        anvil_block_t *exit = anvil_block_create(fn, "exit");
+        anvil_set_insert_point(ctx, entry);
+        anvil_value_t *slot = anvil_build_alloca(ctx, i32, "slot");
+        anvil_build_store(ctx, anvil_const_i32(ctx, 1), slot);
+        anvil_value_t *in_slot = anvil_build_load(ctx, i32, slot, "in_slot");
+        anvil_value_t *in_global = anvil_build_load(ctx, i32, defined, "in_global");
+        anvil_value_t *in_weak = anvil_build_load(ctx, i32, weak, "in_weak");
+        anvil_value_t *past = anvil_const_i32(ctx, 1);
+        anvil_value_t *past_end = anvil_build_load(ctx, i32, anvil_build_gep(ctx, i32, slot, &past, 1, "past"), "past_end");
+        anvil_memory_access_t observable = { .is_volatile = true };
+        anvil_value_t *volatile_load = anvil_build_load_ex(ctx, i32, slot, &observable, "volatile");
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *i = anvil_build_phi(ctx, i32, "i");
+        anvil_value_t *sum = anvil_build_phi(ctx, i32, "sum");
+        anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, i, anvil_func_get_param(fn, 0), "more"), body, exit);
+        anvil_set_insert_point(ctx, body);
+        anvil_value_t *next_sum = anvil_build_add(ctx, sum, i, "next_sum");
+        anvil_value_t *next_i = anvil_build_add(ctx, i, anvil_const_i32(ctx, 1), "next_i");
+        anvil_build_br(ctx, header);
+        anvil_phi_add_incoming(i, anvil_const_i32(ctx, 0), entry);
+        anvil_phi_add_incoming(i, next_i, body);
+        anvil_phi_add_incoming(sum, anvil_const_i32(ctx, 0), entry);
+        anvil_phi_add_incoming(sum, next_sum, body);
+        anvil_set_insert_point(ctx, exit);
+        anvil_build_ret(ctx, i);
+        check_module_valid(mod, "mark and sweep case starts valid");
+
+        if (allowance != SIZE_MAX)
+            anvil_test_fail_alloc_after(ctx, allowance);
+        anvil_pass_result_t status = anvil_pass_dce(fn);
+        anvil_test_disable_alloc_fail(ctx);
+        *completed = status != ANVIL_PASS_RUN_ERROR;
+        bool removed = !block_has_instr(header, sum->data.instr) && !block_has_instr(body, next_sum->data.instr) &&
+                       !block_has_instr(entry, in_slot->data.instr) && !block_has_instr(entry, in_global->data.instr);
+        bool kept = block_has_instr(header, i->data.instr) && block_has_instr(body, next_i->data.instr) &&
+                    block_has_instr(entry, in_weak->data.instr) && block_has_instr(entry, past_end->data.instr) &&
+                    block_has_instr(entry, volatile_load->data.instr);
+        bool untouched = block_has_instr(header, sum->data.instr) && block_has_instr(entry, in_slot->data.instr);
+        ok = *completed ? status == ANVIL_PASS_RUN_CHANGED && removed && kept : untouched && kept;
+        char error[256] = { 0 };
+        ok = ok && anvil_module_verify(mod, error, sizeof(error));
+        if (!ok)
+            fprintf(stderr, "mark and sweep: allowance %zu status %d error %s\n", allowance, (int)status, error);
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+    return ok;
+}
+
+static void test_dce_mark_sweep(void)
+{
+    bool completed = false;
+    CHECK(run_mark_sweep_case(SIZE_MAX, &completed) && completed, "DCE removes dead PHI cycles and loads that cannot fault");
+    completed = false;
+    for (size_t allowance = 0; !completed && allowance < 64; allowance++)
+        CHECK(run_mark_sweep_case(allowance, &completed), "DCE under allocation failure changes nothing or completes");
+    CHECK(completed, "DCE completes once its allocations succeed");
+}
+
 static void test_dce_preserves_may_trap_and_memory_operations(void)
 {
     anvil_ctx_t *ctx = new_ctx();
@@ -1711,6 +1792,7 @@ int main(void)
     test_erase_repairs_builder_cursor();
     test_dce_uses_dense_function_worklist();
     test_dce_preserves_may_trap_and_memory_operations();
+    test_dce_mark_sweep();
     test_simplify_cfg_rewrites_phi_from_empty_block_to_predecessor();
     test_simplify_cfg_removes_phi_incoming_from_dead_const_branch_edge();
     test_simplify_cfg_preserves_switch_successors_as_reachable();

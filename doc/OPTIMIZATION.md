@@ -103,12 +103,19 @@ Evaluates constant expressions at compile time.
 
 ### Dead Code Elimination (`ANVIL_PASS_DCE`)
 
-Removes instructions whose results are never used.
+`src/opt/dce.c`. Mark and sweep: the instructions that must run mark the
+definitions they read, transitively, and every unmarked instruction is
+removed. Cycles die too: a PHI that only its own update reads, such as a
+loop-carried sum nobody uses after the loop.
 
 **Rules:**
-- Instructions with side effects (store, call, branch, ret) are never removed
+- Roots: instructions without a result (stores, branches, returns), calls with
+  effects, divisions (they may trap), floating-point operations, atomics, and
+  loads, unless the load is not volatile and its whole range lies inside a
+  static alloca or a global that exists (not a weak declaration), so it
+  cannot fault
 - NOP instructions (left by other passes) are always removed
-- Iterates until no more dead code is found
+- Every allocation precedes the sweep, which allocates nothing
 
 **Example:**
 

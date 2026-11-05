@@ -1,9 +1,6 @@
 # Anvil Smalltalk
 
-This directory contains the new Smalltalk implementation built on Anvil.  The
-project in `../smalltalk-jit` is an executable language and test reference; it
-is not linked into this implementation and its private IR, register allocator,
-assembler, object handles, and x64 register ABI are not dependencies here.
+This directory contains the Smalltalk implementation built on Anvil.
 
 The port is intentionally bottom-up:
 
@@ -137,7 +134,7 @@ separate native Windows/Linux runtime and load tests.
 
 ## Current gates
 
-The lexer implements the reference lexical grammar without depending on the
+The lexer implements the Smalltalk lexical grammar without depending on the
 VM heap. It handles memory and file input, bounded lookahead, exact byte spans,
 long tokens, escaped quotes, comments, radix/floating/scaled-decimal spelling,
 canonical shortest-form UTF-8 characters, terminal/idempotent EOF, and
@@ -179,7 +176,7 @@ owner's superclass, immutable versioned bindings are published through stable
 epoch, entry and binding as one atomic snapshot. Cache replacement uses a
 power-of-two mask; the hit/miss machine-code paths remain fixed AOT code.
 
-The parser ports the reference grammar onto that AST: class and namespace
+The parser implements the Smalltalk grammar on that AST: class and namespace
 declarations, extensions, unary/binary/keyword methods, pragmas, lexical
 blocks, temporaries, assignments, message precedence, cascades, exact numeric
 literals, Unicode character literals, and nested literal arrays. Errors are
@@ -344,15 +341,7 @@ captured output, placeholder entrypoint, or JIT path is involved. See
 The Anvil-linked dispatch kernel is part of the repository-wide `make tests`
 gate because it links against the current root `libanvil` build.
 
-When the supplied reference tree is present, all package, test, sample,
-benchmark, and typed-prototype sources are gated separately (407 files in the
-current reference, with no known-failure list):
-
-```sh
-make -C samples/smalltalk test-reference-corpus
-```
-
 See [docs/architecture.md](docs/architecture.md) for the port boundary and ABI
 direction. The image is developed by semantic layer rather than by copying the
-reference file or primitive count; see
+source file or primitive count; see
 [docs/image-roadmap.md](docs/image-roadmap.md) for those boundaries and gates.

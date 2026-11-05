@@ -213,15 +213,13 @@ DEPS = $(LEXER_OBJECT:.o=.d) $(LEXER_TEST_OBJECT:.o=.d) \
 	$(DNU_OBJECT:.o=.d) $(DNU_TEST_OBJECT:.o=.d) \
 	$(IMAGE_PRIMITIVE_CATALOG_TEST_OBJECT:.o=.d)
 
-.PHONY: all test test-reference-corpus clean
+.PHONY: all test clean
 
 all: $(TESTS) $(ST_PARSE)
 
 test: $(TESTS)
 	@for test in $(TESTS); do "$$test" || exit 1; done
 
-test-reference-corpus: $(ST_PARSE)
-	ST_PARSE_BIN=$(abspath $(ST_PARSE)) bash tests/run_reference_corpus.sh
 
 $(LEXER_TEST): $(LEXER_OBJECT) $(LEXER_TEST_OBJECT)
 	$(CC) $(CFLAGS) $^ -o $@

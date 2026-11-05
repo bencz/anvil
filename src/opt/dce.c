@@ -1,11 +1,14 @@
 /*
  * ANVIL - Dead Code Elimination Pass
  *
- * Function-local O(I + uses) worklist DCE.  Value IDs are context-global and
- * may be sparse, so they are deliberately not used as array indexes here.
+ * Mark and sweep, O(I + uses): the instructions that must run mark the
+ * definitions they read, transitively; every other one goes, cycles of PHIs
+ * and pure operations included.  Value IDs are context-global and may be
+ * sparse, so they are deliberately not used as array indexes here.
  */
 
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_analysis.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
 #include <stdlib.h>
@@ -13,9 +16,7 @@
 
 typedef struct {
     anvil_instr_t *instr;
-    anvil_value_t *result;
-    size_t uses;
-    bool queued;
+    bool live;
 } dce_node_t;
 
 typedef struct {
@@ -70,8 +71,8 @@ static bool dce_map_insert(anvil_ctx_t *ctx, dce_map_t *map,
     return false;
 }
 
-/* Ordinary loads can fault; volatile loads are additionally observable.
- * Neither may be discarded solely because its SSA result is unused. */
+/* Ordinary loads can fault and volatile loads are observable: a load stays
+ * unless load_cannot_fault proves the first false and it is not volatile. */
 static bool has_side_effects(const anvil_instr_t *instr)
 {
     if (anvil_op_is_atomic(instr->op))
@@ -111,10 +112,27 @@ static bool has_side_effects(const anvil_instr_t *instr)
     }
 }
 
-static bool is_dead_candidate(const dce_node_t *node)
+/* A load that cannot fault: its whole range lies inside a stack object or a
+ * global that exists (a weak declaration may resolve to nothing). */
+static bool load_cannot_fault(const anvil_instr_t *instr)
 {
-    if (node->instr->op == ANVIL_OP_NOP) return true;
-    return node->uses == 0 && (node->result || node->instr->op == ANVIL_OP_CALL) && !has_side_effects(node->instr);
+    const anvil_value_t *object;
+    size_t offset;
+    if (instr->op != ANVIL_OP_LOAD || instr->memory_access.is_volatile || !instr->result || !instr->result->type || !instr->result->type->size ||
+        !anvil_memory_bounded_range(instr->operands[0], instr->result->type->size, &object, &offset))
+        return false;
+    return object->kind != ANVIL_VAL_GLOBAL || !object->data.global.is_declaration || object->data.global.linkage != ANVIL_LINK_WEAK;
+}
+
+/* Whether the instruction runs whatever reads its result: effects, control
+ * flow, and anything without a result but a call. */
+static bool is_root(const anvil_instr_t *instr)
+{
+    if (instr->op == ANVIL_OP_NOP)
+        return false;
+    if (!instr->result && instr->op != ANVIL_OP_CALL)
+        return true;
+    return has_side_effects(instr) && !load_cannot_fault(instr);
 }
 
 anvil_pass_result_t anvil_pass_dce(anvil_func_t *func)
@@ -166,7 +184,6 @@ anvil_pass_result_t anvil_pass_dce(anvil_func_t *func)
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
             nodes[node_index].instr = instr;
-            nodes[node_index].result = instr->result;
             if (instr->result &&
                 !dce_map_insert(ctx, &map, instr->result, node_index)) {
                 goto fail;
@@ -175,49 +192,34 @@ anvil_pass_result_t anvil_pass_dce(anvil_func_t *func)
         }
     }
 
-    /* Count only uses of values defined in this function. Constants,
-     * parameters, globals and cross-function values do not need nodes. */
-    for (size_t i = 0; i < count; i++) {
-        anvil_instr_t *instr = nodes[i].instr;
-        if (instr->op == ANVIL_OP_NOP) continue;
-        for (size_t op_index = 0; op_index < instr->num_operands; op_index++) {
-            size_t definition;
-            if (!dce_map_find(&map, instr->operands[op_index], &definition))
-                continue;
-            if (nodes[definition].uses == SIZE_MAX) {
-                anvil_set_error(ctx, ANVIL_ERR_NOMEM,
-                                "DCE use count overflow");
-                goto fail;
-            }
-            nodes[definition].uses++;
-        }
-    }
-
-    size_t head = 0;
     size_t tail = 0;
     for (size_t i = 0; i < count; i++) {
-        if (is_dead_candidate(&nodes[i])) {
-            nodes[i].queued = true;
+        if (is_root(nodes[i].instr)) {
+            nodes[i].live = true;
             worklist[tail++] = i;
         }
     }
 
-    bool changed = false;
-    while (head < tail) {
-        dce_node_t *node = &nodes[worklist[head++]];
-        anvil_instr_t *instr = node->instr;
+    /* Values defined in this function only: constants, parameters and
+     * globals have no node. */
+    while (tail) {
+        anvil_instr_t *instr = nodes[worklist[--tail]].instr;
         for (size_t op_index = 0; op_index < instr->num_operands; op_index++) {
             size_t definition;
             if (!dce_map_find(&map, instr->operands[op_index], &definition))
                 continue;
             dce_node_t *operand_node = &nodes[definition];
-            if (operand_node->uses > 0) operand_node->uses--;
-            if (!operand_node->queued && is_dead_candidate(operand_node)) {
-                operand_node->queued = true;
+            if (!operand_node->live && operand_node->instr->op != ANVIL_OP_NOP) {
+                operand_node->live = true;
                 worklist[tail++] = definition;
             }
         }
-        if (anvil_opt_erase_instr(instr)) changed = true;
+    }
+
+    bool changed = false;
+    for (size_t i = 0; i < count; i++) {
+        if (!nodes[i].live && anvil_opt_erase_instr(nodes[i].instr))
+            changed = true;
     }
 
     free(nodes);

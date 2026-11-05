@@ -2,9 +2,8 @@
 
 The Anvil Smalltalk image is a language library compiled together with the
 application. It is not a serialized VM snapshot, a bytecode image, or a copy of
-the reference implementation. The reference tree is useful as a grammar and
-behavior oracle, but it does not define our object ABI, compiler pipeline, or
-runtime boundaries.
+another implementation: its object ABI, compiler pipeline and runtime boundaries
+are its own.
 
 ## Design rules
 
@@ -149,6 +148,6 @@ Each promoted protocol needs all of the following:
 - differential behavior tests against a language-level oracle where one is
   available.
 
-The number of reference files or primitive names is useful for discovery, but
+The number of source files or primitive names is useful for discovery, but
 is never a completion criterion. The completion criterion is a closed,
 executable semantic path from image source through the final linked program.

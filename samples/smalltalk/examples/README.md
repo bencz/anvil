@@ -48,7 +48,7 @@ See the parent [README](../README.md#creating-compiling-and-running-an-applicati
 for the complete application layout, manifest rules, generated profile tree,
 entrypoint contract and a from-scratch source example.
 
-- `hello` uses the reference-compatible protocol exactly:
+- `hello` uses the standard Transcript protocol exactly:
   `Transcript nextPutAll: 'Hello from Anvil Smalltalk'; lf`.  The frontend gate
   validates both sends. The end-to-end regression compiles the complete image
   and application, materializes all five assembly profiles, assembles and links

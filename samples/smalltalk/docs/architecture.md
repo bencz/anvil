@@ -1,16 +1,14 @@
 # Smalltalk-on-Anvil architecture
 
-## Reference boundary
+## Design boundary
 
-The tokenizer, parser grammar, AST behavior, class lookup rules, bootstrap
-packages, and tests in `samples/smalltalk-jit` are specifications and oracles.
-The following implementation details are deliberately replaced:
+The implementation is ahead-of-time and stands on Anvil alone. It has none of
+a JIT VM's machinery:
 
-- its heap-object AST and parser-time allocation into a moving GC;
-- its register bytecode, private SSA/LIR, register allocator, and assemblers;
-- its x64-only method ABI with fixed VM registers;
-- its target-specific stack maps and implicit runtime-code-generation
-  contracts.
+- no heap-object AST and no parser-time allocation into a moving GC;
+- no register bytecode, private SSA/LIR, register allocator or assemblers;
+- no x64-only method ABI with fixed VM registers;
+- no target-specific stack maps or runtime code generation.
 
 The new frontend remains usable before the runtime is initialized. Parsing
 produces arena-owned C data. Runtime objects are created only after parsing and
@@ -133,8 +131,8 @@ authority for a non-local return. Neither requires runtime code generation.
 Generated code updates `safepoint_id` before operations that may allocate,
 dispatch or unwind.
 
-The first runtime target is 64-bit because the reference value/header encoding
-is 64-bit. A 32-bit object model is a separate ABI design, not an accidental
+The first runtime target is 64-bit because the value/header encoding is
+64-bit. A 32-bit object model is a separate ABI design, not an accidental
 truncation of the 64-bit representation.
 
 ## Values and object headers
