@@ -11,7 +11,9 @@ typedef struct {
     anvil_instr_t *phis[UNROLL_BODY_LIMIT];
     anvil_value_t *initial[UNROLL_BODY_LIMIT];
     anvil_value_t *backedge[UNROLL_BODY_LIMIT];
+    /* The header's instructions before its compare, then the body's. */
     anvil_instr_t *instructions[UNROLL_BODY_LIMIT];
+    size_t header_count;
     anvil_value_t *condition;
     anvil_value_t *condition_true;
     size_t phi_count;
@@ -57,6 +59,29 @@ static bool compare_induction(anvil_op_t operation, uint64_t value, uint64_t lim
     }
 }
 
+/* The constant step of induction `phi` from its next value `updated`: an
+ * add or sub of a constant, or that on the value extended and truncated back
+ * (a narrow C counter promoted to int), the same modulo the counter's width. */
+static bool induction_step(const unroll_plan *plan, const anvil_value_t *phi, const anvil_value_t *updated, uint64_t *increment)
+{
+    const anvil_instr_t *step = updated->kind == ANVIL_VAL_INSTR ? updated->data.instr : NULL;
+    bool truncated = step && step->op == ANVIL_OP_TRUNC && step->parent == plan->body && step->operands[0]->kind == ANVIL_VAL_INSTR;
+    if (truncated)
+        step = step->operands[0]->data.instr;
+    if (!step || (step->op != ANVIL_OP_ADD && step->op != ANVIL_OP_SUB) || step->num_operands != 2 || !anvil_opt_is_const_int(step->operands[1]) ||
+        (step->parent != plan->body && step->parent != plan->header))
+        return false;
+    const anvil_value_t *source = step->operands[0];
+    if (truncated && source->kind == ANVIL_VAL_INSTR && (source->data.instr->op == ANVIL_OP_ZEXT || source->data.instr->op == ANVIL_OP_SEXT))
+        source = source->data.instr->operands[0];
+    if (source != phi)
+        return false;
+    *increment = (uint64_t)step->operands[1]->data.i;
+    if (step->op == ANVIL_OP_SUB)
+        *increment = UINT64_C(0) - *increment;
+    return true;
+}
+
 static bool trip_count(unroll_plan *plan, anvil_instr_t *comparison)
 {
     if (comparison->num_operands != 2 || !anvil_opt_is_const_int(comparison->operands[1]))
@@ -69,13 +94,8 @@ static bool trip_count(unroll_plan *plan, anvil_instr_t *comparison)
     if (induction == plan->phi_count || !anvil_opt_is_const_int(plan->initial[induction]))
         return false;
 
-    anvil_value_t *updated = plan->backedge[induction];
-    if (updated->kind != ANVIL_VAL_INSTR)
-        return false;
-
-    anvil_instr_t *step = updated->data.instr;
-    if (step->parent != plan->body || (step->op != ANVIL_OP_ADD && step->op != ANVIL_OP_SUB) ||
-        step->operands[0] != comparison->operands[0] || !anvil_opt_is_const_int(step->operands[1]))
+    uint64_t increment;
+    if (!induction_step(plan, comparison->operands[0], plan->backedge[induction], &increment))
         return false;
 
     unsigned bits = (unsigned)comparison->operands[0]->type->size * 8;
@@ -85,9 +105,6 @@ static bool trip_count(unroll_plan *plan, anvil_instr_t *comparison)
     uint64_t mask = UINT64_MAX >> (64 - bits);
     uint64_t value = (uint64_t)plan->initial[induction]->data.i & mask;
     uint64_t limit = (uint64_t)comparison->operands[1]->data.i & mask;
-    uint64_t increment = (uint64_t)step->operands[1]->data.i;
-    if (step->op == ANVIL_OP_SUB)
-        increment = UINT64_C(0) - increment;
 
     for (size_t iteration = 0; iteration <= UNROLL_ITERATION_LIMIT; iteration++)
     {
@@ -145,7 +162,17 @@ static bool recognize_loop(const anvil_opt_cfg_t *cfg, size_t header_index, unro
         comparison = comparison->next;
     }
 
-    if (!comparison || comparison->next != branch || branch->operands[0] != comparison->result || !trip_count(plan, comparison))
+    /* Pure work ahead of the compare: copied in every iteration, in the
+     * original order, and once more on the way out. */
+    while (comparison && comparison->next != branch)
+    {
+        if (plan->instruction_count == UNROLL_BODY_LIMIT || !anvil_opt_pure(comparison))
+            return false;
+        plan->instructions[plan->instruction_count++] = comparison;
+        comparison = comparison->next;
+    }
+    plan->header_count = plan->instruction_count;
+    if (!comparison || branch->operands[0] != comparison->result || !trip_count(plan, comparison))
         return false;
 
     plan->condition = comparison->result;
@@ -159,7 +186,7 @@ static bool recognize_loop(const anvil_opt_cfg_t *cfg, size_t header_index, unro
         plan->instructions[plan->instruction_count++] = instruction;
     }
 
-    return plan->instruction_count * plan->iterations <= UNROLL_GROWTH_LIMIT;
+    return plan->instruction_count * plan->iterations + plan->header_count <= UNROLL_GROWTH_LIMIT;
 }
 
 static anvil_value_t *map_value(const unroll_plan *plan, anvil_value_t **values, anvil_instr_t **copies, size_t copied, anvil_value_t *value)
@@ -182,6 +209,30 @@ static anvil_value_t *map_value(const unroll_plan *plan, anvil_value_t **values,
     return value;
 }
 
+/* Copies of instructions [0, count) for one iteration, appended to `prepared`. */
+static bool copy_instructions(anvil_ctx_t *ctx, const unroll_plan *plan, anvil_value_t **values, anvil_instr_t **copies, size_t count,
+                              anvil_block_t *prepared)
+{
+    for (size_t index = 0; index < count; index++)
+    {
+        anvil_instr_t *original = plan->instructions[index];
+        anvil_type_t *type = original->result ? original->result->type : ctx->type_void;
+        anvil_instr_t *copy = anvil_instr_create(ctx, original->op, type, original->result ? original->result->name : NULL);
+        if (!copy || !anvil_instr_reserve_operands(copy, original->num_operands))
+            return false;
+
+        copies[index] = copy;
+        if (!anvil_instr_copy_attributes(copy, original))
+            return false;
+        copy->num_operands = original->num_operands;
+        for (size_t operand = 0; operand < original->num_operands; operand++)
+            copy->operands[operand] = map_value(plan, values, copies, index, original->operands[operand]);
+
+        anvil_block_append_prepared(prepared, copy);
+    }
+    return true;
+}
+
 static bool expand_loop(anvil_func_t *func, unroll_plan *plan)
 {
     anvil_ctx_t *ctx = func->owner_ctx;
@@ -201,23 +252,8 @@ static bool expand_loop(anvil_func_t *func, unroll_plan *plan)
     for (size_t iteration = 0; iteration < plan->iterations; iteration++)
     {
         anvil_instr_t *copies[UNROLL_BODY_LIMIT];
-        for (size_t index = 0; index < plan->instruction_count; index++)
-        {
-            anvil_instr_t *original = plan->instructions[index];
-            anvil_type_t *type = original->result ? original->result->type : ctx->type_void;
-            anvil_instr_t *copy = anvil_instr_create(ctx, original->op, type, original->result ? original->result->name : NULL);
-            if (!copy || !anvil_instr_reserve_operands(copy, original->num_operands))
-                return false;
-
-            copies[index] = copy;
-            if (!anvil_instr_copy_attributes(copy, original))
-                return false;
-            copy->num_operands = original->num_operands;
-            for (size_t operand = 0; operand < original->num_operands; operand++)
-                copy->operands[operand] = map_value(plan, values, copies, index, original->operands[operand]);
-
-            anvil_block_append_prepared(prepared, copy);
-        }
+        if (!copy_instructions(ctx, plan, values, copies, plan->instruction_count, prepared))
+            return false;
 
         anvil_value_t *next[UNROLL_BODY_LIMIT];
         for (size_t index = 0; index < plan->phi_count; index++)
@@ -226,6 +262,11 @@ static bool expand_loop(anvil_func_t *func, unroll_plan *plan)
         for (size_t index = 0; index < plan->phi_count; index++)
             values[index] = next[index];
     }
+
+    /* The header's work once more, for the readers after the loop. */
+    anvil_instr_t *last[UNROLL_BODY_LIMIT];
+    if (!copy_instructions(ctx, plan, values, last, plan->header_count, prepared))
+        return false;
 
     anvil_instr_t *branch = anvil_instr_create(ctx, ANVIL_OP_BR, ctx->type_void, NULL);
     if (!branch)
@@ -238,6 +279,8 @@ static bool expand_loop(anvil_func_t *func, unroll_plan *plan)
     for (size_t index = 0; index < plan->phi_count; index++)
         anvil_opt_replace_uses_in_func(func, plan->phis[index]->result, values[index]);
 
+    for (size_t index = 0; index < plan->header_count; index++)
+        anvil_opt_replace_uses_in_func(func, plan->instructions[index]->result, last[index]->result);
     anvil_opt_replace_uses_in_func(func, plan->condition, condition_false);
 
     while (plan->header->first)

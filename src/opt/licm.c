@@ -14,40 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool safe_to_speculate(anvil_op_t op)
-{
-    switch (op)
-    {
-        case ANVIL_OP_ADD:
-        case ANVIL_OP_SUB:
-        case ANVIL_OP_MUL:
-        case ANVIL_OP_UMULH:
-        case ANVIL_OP_SMULH:
-        case ANVIL_OP_AND:
-        case ANVIL_OP_OR:
-        case ANVIL_OP_XOR:
-        case ANVIL_OP_CMP_EQ:
-        case ANVIL_OP_CMP_NE:
-        case ANVIL_OP_CMP_LT:
-        case ANVIL_OP_CMP_LE:
-        case ANVIL_OP_CMP_GT:
-        case ANVIL_OP_CMP_GE:
-        case ANVIL_OP_CMP_ULT:
-        case ANVIL_OP_CMP_ULE:
-        case ANVIL_OP_CMP_UGT:
-        case ANVIL_OP_CMP_UGE:
-        case ANVIL_OP_TRUNC:
-        case ANVIL_OP_ZEXT:
-        case ANVIL_OP_SEXT:
-        /* Address arithmetic: no memory access, cannot trap. */
-        case ANVIL_OP_GEP:
-        case ANVIL_OP_STRUCT_GEP:
-            return true;
-        default:
-            return false;
-    }
-}
-
 static bool operands_available(const anvil_opt_cfg_t *cfg, const anvil_instr_t *instr, size_t preheader)
 {
     for (size_t operand = 0; operand < instr->num_operands; operand++)
@@ -92,7 +58,7 @@ static bool has_hoistable_root(const anvil_opt_cfg_t *cfg, const anvil_loop_anal
 
         for (anvil_instr_t *instr = cfg->blocks[block]->first; instr; instr = instr->next)
         {
-            if (!instr->result || !safe_to_speculate(instr->op))
+            if (!instr->result || !anvil_opt_speculatable(instr))
                 continue;
 
             bool available = true;
@@ -213,7 +179,7 @@ rebuild:
                 while (instr)
                 {
                     anvil_instr_t *next = instr->next;
-                    if (instr->result && safe_to_speculate(instr->op) && operands_available(&cfg, instr, preheader))
+                    if (instr->result && anvil_opt_speculatable(instr) && operands_available(&cfg, instr, preheader))
                     {
                         move_before_terminator(instr, cfg.blocks[preheader]);
                         moved = true;

@@ -247,10 +247,10 @@ runtime metadata rather than integer arithmetic.
 %result = add %lhs, %rhs
 ```
 
-Integer or floating-point addition.
+Integer addition (floating point uses `fadd`).
 
 **Operands:**
-- `%lhs`: Left operand (integer or float)
+- `%lhs`: Left operand (integer)
 - `%rhs`: Right operand (same type as lhs)
 
 **Result:** Same type as operands

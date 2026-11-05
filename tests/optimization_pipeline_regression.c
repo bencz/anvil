@@ -867,6 +867,77 @@ static void test_word_copy(anvil_arch_t arch, bool sweep)
     }
 }
 
+/* c ? x << n : 0: a shift by a count at or above the width is undefined, so
+ * if-conversion may run x << n unconditionally only for a constant count
+ * below the width, never a variable one. */
+static void test_shift_speculation(anvil_arch_t arch)
+{
+    for (int constant = 0; constant < 2; constant++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+        anvil_module_t *module = anvil_module_create(ctx, "shift_speculation");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { i32, i32, i32 };
+        anvil_func_t *func = anvil_func_create(module, "shift", anvil_type_func(ctx, i32, params, 3, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *then = anvil_block_create(func, "then"), *join = anvil_block_create(func, "join");
+        anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+        anvil_value_t *taken = anvil_build_cmp_ne(ctx, anvil_func_get_param(func, 0), anvil_const_i32(ctx, 0), "taken");
+        anvil_build_br_cond(ctx, taken, then, join);
+        anvil_set_insert_point(ctx, then);
+        anvil_value_t *amount = constant ? anvil_const_i32(ctx, 3) : anvil_func_get_param(func, 2);
+        anvil_value_t *shifted = anvil_build_shl(ctx, anvil_func_get_param(func, 1), amount, "shifted");
+        anvil_build_br(ctx, join);
+        anvil_set_insert_point(ctx, join);
+        anvil_value_t *value = anvil_build_phi(ctx, i32, "value");
+        anvil_phi_add_incoming(value, shifted, then);
+        anvil_phi_add_incoming(value, anvil_const_i32(ctx, 0), anvil_func_get_entry(func));
+        anvil_build_ret(ctx, value);
+        check(anvil_pass_simplify_cfg(func) != ANVIL_PASS_RUN_ERROR, "if-conversion runs");
+        char error[256] = { 0 };
+        bool converted = count_opcode(func, ANVIL_OP_SELECT) == 1 && count_opcode(func, ANVIL_OP_BR_COND) == 0;
+        check(anvil_func_verify(func, error, sizeof(error)) && converted == (constant != 0),
+              "only a shift by a constant below the width runs unconditionally");
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* In a loop, an invariant select leaves for the preheader; an invariant
+ * x << n with n unknown stays, as running it before the loop's test could
+ * run a shift the loop never runs (a count at or above the width is
+ * undefined). */
+static void test_licm_speculation(anvil_arch_t arch)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_module_t *module = anvil_module_create(ctx, "licm_speculation");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *params[] = { i32, i32, i32, anvil_type_ptr(ctx, i32) };
+    anvil_func_t *func = anvil_func_create(module, "licm", anvil_type_func(ctx, anvil_type_void(ctx), params, 4, false), ANVIL_LINK_EXTERNAL);
+    anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body"), *exit = anvil_block_create(func, "exit");
+    anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+    anvil_build_br(ctx, header);
+    anvil_set_insert_point(ctx, header);
+    anvil_value_t *i = anvil_build_phi(ctx, i32, "i");
+    anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, i, anvil_func_get_param(func, 2), "more"), body, exit);
+    anvil_set_insert_point(ctx, body);
+    anvil_value_t *x = anvil_func_get_param(func, 0), *n = anvil_func_get_param(func, 1);
+    anvil_value_t *chosen = anvil_build_select(ctx, anvil_build_cmp_ne(ctx, x, n, "differ"), x, n, "chosen");
+    anvil_value_t *shifted = anvil_build_shl(ctx, x, n, "shifted");
+    anvil_memory_access_t access = { .is_volatile = true };
+    anvil_build_store_ex(ctx, anvil_build_add(ctx, chosen, shifted, "sum"), anvil_func_get_param(func, 3), &access);
+    anvil_value_t *next = anvil_build_add(ctx, i, anvil_const_i32(ctx, 1), "next");
+    anvil_build_br(ctx, header);
+    anvil_phi_add_incoming(i, anvil_const_i32(ctx, 0), anvil_func_get_entry(func));
+    anvil_phi_add_incoming(i, next, body);
+    anvil_set_insert_point(ctx, exit);
+    anvil_build_ret_void(ctx);
+    check(anvil_pass_licm(func) == ANVIL_PASS_RUN_CHANGED, "LICM runs");
+    char error[256] = { 0 };
+    check(anvil_func_verify(func, error, sizeof(error)) && chosen->data.instr->parent != body && shifted->data.instr->parent == body,
+          "LICM hoists an invariant select, not a shift by an unknown count");
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+}
+
 /* A call inlines only when caller and callee share their floating-point
  * policies: inlined code keeps its own. */
 static void test_inline_fp_policy(void)
@@ -936,6 +1007,8 @@ int main(void)
         test_loop_motion(targets[index]);
         test_conditional_constants(targets[index]);
         test_bit_facts(targets[index]);
+        test_shift_speculation(targets[index]);
+        test_licm_speculation(targets[index]);
         test_memory_aliasing(targets[index], false);
         test_memory_aliasing(targets[index], true);
     }

@@ -206,6 +206,67 @@ static inline uint64_t anvil_opt_mul_high(uint64_t a, uint64_t b, unsigned bits,
     return high;
 }
 
+/* Instructions without effects: they cannot trap, touch memory or the
+ * floating-point environment.  Moving one to every path that already runs
+ * it (sinking into successors, copying a loop's iterations) is safe. */
+static inline bool anvil_opt_pure(const anvil_instr_t *instr)
+{
+    switch (instr->op) {
+    case ANVIL_OP_ADD:
+    case ANVIL_OP_SUB:
+    case ANVIL_OP_MUL:
+    case ANVIL_OP_UMULH:
+    case ANVIL_OP_SMULH:
+    case ANVIL_OP_NEG:
+    case ANVIL_OP_AND:
+    case ANVIL_OP_OR:
+    case ANVIL_OP_XOR:
+    case ANVIL_OP_NOT:
+    case ANVIL_OP_SHL:
+    case ANVIL_OP_SHR:
+    case ANVIL_OP_SAR:
+    case ANVIL_OP_ROTL:
+    case ANVIL_OP_CMP_EQ:
+    case ANVIL_OP_CMP_NE:
+    case ANVIL_OP_CMP_LT:
+    case ANVIL_OP_CMP_LE:
+    case ANVIL_OP_CMP_GT:
+    case ANVIL_OP_CMP_GE:
+    case ANVIL_OP_CMP_ULT:
+    case ANVIL_OP_CMP_ULE:
+    case ANVIL_OP_CMP_UGT:
+    case ANVIL_OP_CMP_UGE:
+    case ANVIL_OP_SELECT:
+    case ANVIL_OP_TRUNC:
+    case ANVIL_OP_ZEXT:
+    case ANVIL_OP_SEXT:
+    case ANVIL_OP_BITCAST:
+    case ANVIL_OP_PTRTOINT:
+    case ANVIL_OP_INTTOPTR:
+    case ANVIL_OP_GEP:
+    case ANVIL_OP_STRUCT_GEP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Pure instructions that may also run where the code did not run them
+ * (hoisted out of a loop, ahead of a branch): no operand makes them
+ * undefined.  A shift count at or above the width is undefined behaviour,
+ * so only a constant one below it qualifies. */
+static inline bool anvil_opt_speculatable(const anvil_instr_t *instr)
+{
+    if (!anvil_opt_pure(instr))
+        return false;
+    if (instr->op != ANVIL_OP_SHL && instr->op != ANVIL_OP_SHR && instr->op != ANVIL_OP_SAR)
+        return true;
+    anvil_type_t *type = instr->num_operands == 2 ? instr->operands[0]->type : NULL;
+    anvil_type_t *lane = type ? anvil_type_vector_element(type) : NULL;
+    return type && anvil_opt_is_const_int(instr->operands[1]) &&
+           (uint64_t)instr->operands[1]->data.i < (uint64_t)anvil_type_bit_width(lane ? lane : type);
+}
+
 /* Whether `value` is an integer constant whose bits, in its type's width,
  * are one power of two 2^shift. */
 static inline bool anvil_opt_power_of_two(anvil_value_t *value, int *shift)

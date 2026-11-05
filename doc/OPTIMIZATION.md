@@ -287,36 +287,34 @@ result = a * a;
 Commutative operations recognized for normalization: `ADD`, `MUL`, `AND`, `OR`,
 `XOR`, `CMP_EQ`, `CMP_NE`.
 
-### Loop Unrolling - Design requirement, not exposed
+### Loop-Invariant Code Motion (`ANVIL_PASS_LICM`) - O2
 
-Unrolls small loops with known trip counts to reduce branch overhead.
+`src/opt/licm.c`. An instruction in a loop whose operands are all defined
+outside it moves to the loop's preheader (created when one is missing and
+something can move) when it is speculatable (`anvil_opt_speculatable`):
+integer arithmetic, compares, selects, casts, address arithmetic, rotates and
+shifts by a constant below the width. Divisions, loads, calls and
+floating-point operations stay in the loop. An address `gep p, a + b` with
+`p` and `a` invariant splits into `gep (gep p, a), b`, so the invariant part
+leaves the loop.
 
-**Status:** not part of the current API or pipeline. It will only be exposed
-after LoopInfo, canonicalization, trip-count proof, remainder generation and
-the semantic tests below are implemented.
+### Complete Unrolling (`ANVIL_PASS_UNROLL`) - O2
 
-**Supported Loop Patterns:**
-- Simple counted loops with constant bounds
-- Loops with single back-edge
-- Loops without complex control flow (no nested loops, no early exits)
+`src/opt/unroll.c`. A loop of one header and one body block becomes straight
+code when its trip count is proven and small. The header has PHIs,
+pure work (`anvil_opt_pure`), a compare and the branch; the
+body ends with the back edge. Its counter starts at a constant, is compared
+with a constant, and steps by a constant. The step may be direct
+(`i + c`, `i - c`) or done on the counter widened and truncated back
+(`trunc(zext(i) + c)`, `trunc(sext(i) - c)`: a narrow C counter promoted to
+`int`), which is the same modulo its width.
 
-**Unrolling Strategies:**
-
-| Strategy | Condition | Description |
-|----------|-----------|-------------|
-| Full Unroll | Trip count ≤ 8 | Completely eliminates loop structure |
-| Partial Unroll | Trip count > 8 or unknown | Duplicates body 2-4x, keeps loop |
-
-**Benefits:**
-- Reduces branch overhead
-- Enables instruction scheduling
-- Allows further optimizations (constant folding, CSE)
-
-**Limitations:**
-- Only simple loops are analyzed
-- Maximum body size: 32 instructions
-- Nested loops not supported
-- PHI node pattern detection needs work
+Limits: at most 8 iterations and 32 instructions of header work and body
+together, and the copies must stay within 128 instructions. Each iteration copies the header's work and
+then the body's. After the last iteration the header's work runs once more,
+on the final counter, for the values the loop's readers take after it. Every
+copy is made before the loop is replaced. Larger counted loops are unrolled
+partially at run time (`ANVIL_PASS_RUNTIME_UNROLL`).
 
 ### Loop Strength Reduction (`ANVIL_PASS_LOOP_STRENGTH`) - O2+
 
@@ -493,7 +491,9 @@ Simplifies the control flow graph.
    predecessor whose edge implies the condition (it branches on it, or is reached through single-predecessor blocks
    from one that does) straight to its successor. Pure instructions in the join move into both successors first.
    This keeps a loop that exits on a test from carrying the test's result as a value.
-6. **If-conversion**: two-way branches over small speculatable sides become selects
+6. **If-conversion**: two-way branches over small speculatable sides (`anvil_opt_speculatable`, shared with LICM: no
+   trap, memory or FP-environment effect, and no shift whose count could reach the width, which is undefined) become
+   selects
 
 The pass is aware of all source IR terminators: `br`, `br_cond`, and `switch`.
 Switch defaults and case targets are included in reachability analysis,
