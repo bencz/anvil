@@ -10,13 +10,19 @@ static bool run_case(unsigned mode, size_t allowance, bool *completed)
     anvil_module_t *module = anvil_module_create(ctx, "vector_contracts");
     anvil_type_t *element = anvil_type_f32(ctx);
     anvil_type_t *pointer = anvil_type_ptr(ctx, element);
-    anvil_type_t *type = anvil_type_func(ctx, anvil_type_void(ctx), &pointer, 1, false);
+    /* Modes: 0 packs; 1 no FP vectorization; 2 a volatile load; 3 the
+     * destination overlaps the sources; 4 one parameter as the base of
+     * every access (disjoint constant offsets: packs); 5 the destination
+     * through a second parameter, which may alias the sources. */
+    anvil_type_t *params[] = {pointer, pointer};
+    anvil_type_t *type = anvil_type_func(ctx, anvil_type_void(ctx), params, 2, false);
     anvil_func_t *func = anvil_func_create(module, "pack_values", type, ANVIL_LINK_EXTERNAL);
     anvil_func_set_fp_vectorization(func, mode != 1);
     anvil_set_insert_point(ctx, func->entry);
     anvil_type_t *array = anvil_type_array(ctx, element, 16);
     anvil_value_t *storage = anvil_build_alloca(ctx, array, "storage");
-    anvil_value_t *base = mode == 4 ? anvil_func_get_param(func, 0) : anvil_build_bitcast(ctx, storage, pointer, "base");
+    anvil_value_t *base = mode >= 4 ? anvil_func_get_param(func, 0) : anvil_build_bitcast(ctx, storage, pointer, "base");
+    anvil_value_t *target = mode == 5 ? anvil_func_get_param(func, 1) : base;
     anvil_memory_access_t access = { .is_volatile = mode == 2 };
     for (size_t lane = 0; lane < 4; lane++)
     {
@@ -25,7 +31,7 @@ static bool run_case(unsigned mode, size_t allowance, bool *completed)
         anvil_value_t *c = anvil_const_i64(ctx, (int64_t)lane + (mode == 3 ? 2 : 8));
         anvil_value_t *left_address = anvil_build_gep(ctx, element, base, &a, 1, "left.address");
         anvil_value_t *right_address = anvil_build_gep(ctx, element, base, &b, 1, "right.address");
-        anvil_value_t *destination = anvil_build_gep(ctx, element, base, &c, 1, "destination");
+        anvil_value_t *destination = anvil_build_gep(ctx, element, target, &c, 1, "destination");
         anvil_value_t *left = anvil_build_load_ex(ctx, element, left_address, &access, "left");
         anvil_value_t *right = anvil_build_load(ctx, element, right_address, "right");
         anvil_value_t *value = anvil_build_fadd(ctx, left, right, "value");
@@ -44,11 +50,12 @@ static bool run_case(unsigned mode, size_t allowance, bool *completed)
     *completed = status != ANVIL_PASS_RUN_ERROR;
     if (*completed)
     {
-        valid &= status == (mode == 0 ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED);
+        bool packs = mode == 0 || mode == 4;
+        valid &= status == (packs ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED);
         char *assembly = NULL;
         size_t length = 0;
         valid &= anvil_module_codegen(module, &assembly, &length) == ANVIL_OK;
-        if (mode == 0)
+        if (packs)
             valid &= assembly && strstr(assembly, "addps") && strstr(assembly, "movups");
 
         free(assembly);
@@ -77,7 +84,7 @@ int main(void)
     if (!completed)
         return 1;
 
-    for (unsigned mode = 1; mode < 5; mode++)
+    for (unsigned mode = 1; mode < 6; mode++)
     {
         if (!run_case(mode, SIZE_MAX, &completed) || !completed)
             return 1;

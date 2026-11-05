@@ -64,9 +64,12 @@ static bool describe_location(const anvil_value_t *pointer, size_t size, memory_
 
         if (instr->op != ANVIL_OP_GEP && instr->op != ANVIL_OP_STRUCT_GEP)
             break;
-        if (!add_gep_offset(instr, &location->offset))
-            return false;
-
+        /* A variable index: this address is the root, constant offsets
+         * from it still apart. */
+        int64_t offset = location->offset;
+        if (!add_gep_offset(instr, &offset))
+            break;
+        location->offset = offset;
         location->base = instr->operands[0];
     }
 
@@ -80,6 +83,16 @@ static bool describe_location(const anvil_value_t *pointer, size_t size, memory_
         object->size <= maximum_object && (uint64_t)location->offset <= object->size && size <= object->size - (size_t)location->offset)
         location->bounded = true;
 
+    return true;
+}
+
+bool anvil_memory_offset(const anvil_value_t *pointer, const anvil_value_t **root, int64_t *offset)
+{
+    memory_location_t location;
+    if (!root || !offset || !describe_location(pointer, 1, &location))
+        return false;
+    *root = location.base;
+    *offset = location.offset;
     return true;
 }
 
@@ -106,6 +119,13 @@ anvil_alias_result_t anvil_memory_alias(const anvil_value_t *left, size_t left_s
 
     if (first.base == second.base && first.offset == second.offset && first.size == second.size)
         return ANVIL_ALIAS_MUST;
+    /* Constant offsets from one pointer value: the ranges decide, whatever
+     * it points into.  (One value: compared where one access dominates the
+     * other, it holds the same address at both.) */
+    if (first.base == second.base) {
+        int64_t first_end = first.offset + (int64_t)first.size, second_end = second.offset + (int64_t)second.size;
+        return first_end <= second.offset || second_end <= first.offset ? ANVIL_ALIAS_NO : ANVIL_ALIAS_MAY;
+    }
     if (!first.bounded || !second.bounded)
         return ANVIL_ALIAS_MAY;
 

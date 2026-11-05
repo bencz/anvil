@@ -402,6 +402,26 @@ the first vector. The vector loop runs when the start is element-aligned and
 `start - off` does not wrap the index, otherwise the scalar loop runs alone.
 Only one read-only stream, no stores and no accumulators.
 
+### SLP Vectorization (`ANVIL_PASS_VECTORIZE`) - O3
+
+`src/opt/vectorize.c`. In one block, as many stores of one element type as a
+16-byte vector holds, to consecutive addresses of one root (a *seed*), become
+one vector store when their values form a tree the target computes lane by
+lane. A bundle (one scalar per lane) is a splat (the same value in every
+lane, defined before the seed), a vector load (loads of consecutive addresses
+of one root), or one operation (integer add/sub/mul/and/or/xor, FP
+add/sub/mul/div) on every lane whose operand bundles are again bundles.
+Addresses are a root plus a constant offset (`anvil_memory_offset`: GEPs with
+constant indices, struct fields, bitcasts; a variable index makes the root).
+The tree is computed at the seed's first store. Loads and stores moved there
+must not pass an access that may overlap them (`anvil_memory_alias`), a call
+with memory effects or a volatile access. Scalars read outside the tree stay,
+and a bundle built for an earlier seed of the block is reused. A vector load
+is refused where the function stores narrower values into its range through
+another path: the load could not take their data forwarded. The cost compares
+the vector operations, loads and splats with the scalar instructions and
+stores that go away.
+
 ### CFG Simplification (`ANVIL_PASS_SIMPLIFY_CFG`)
 
 Simplifies the control flow graph.

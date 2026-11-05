@@ -103,6 +103,11 @@ typedef enum {
 /* Constant address walks and bounded allocation identity. Unknown offsets,
  * escaping pointer values and unsupported address expressions stay MAY. */
 anvil_alias_result_t anvil_memory_alias(const anvil_value_t *left, size_t left_size, const anvil_value_t *right, size_t right_size);
+/* `pointer` as `root` plus a constant byte offset, through GEPs with
+ * constant indices, struct field addresses and pointer bitcasts; the root
+ * is the first value that is none of those.  Two accesses through one root
+ * (where one dominates the other) are apart by their offsets. */
+bool anvil_memory_offset(const anvil_value_t *pointer, const anvil_value_t **root, int64_t *offset);
 /* Succeeds only for a complete range inside a known stack/global object. */
 bool anvil_memory_bounded_range(const anvil_value_t *pointer, size_t size, const anvil_value_t **object, size_t *offset);
 
