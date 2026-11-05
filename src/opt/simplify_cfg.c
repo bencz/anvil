@@ -1118,8 +1118,13 @@ anvil_pass_result_t anvil_pass_simplify_cfg(anvil_func_t *func)
                         return ANVIL_PASS_RUN_ERROR;
                     }
 
+                    /* A predecessor reaching the target already gets a
+                     * second edge to it: harmless unless the target's PHIs
+                     * would need two values from it (a switch's cases
+                     * sharing one destination keep their own edges). */
                     bool edge_collision = false;
-                    for (size_t i = 0; i < num_old_preds; i++) {
+                    bool target_phis = target->first && target->first->op == ANVIL_OP_PHI;
+                    for (size_t i = 0; i < num_old_preds && target_phis; i++) {
                         if (block_targets(old_preds[i], target)) {
                             edge_collision = true;
                             break;

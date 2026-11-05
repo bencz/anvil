@@ -1,3 +1,4 @@
+#include "../common/switch_lower.h"
 #include "ppc_internal.h"
 #include "../common/narrow_mir.h"
 #include "../common/wide_mir.h"
@@ -2187,6 +2188,72 @@ static bool ppc_lower_wide_binary(ppc_mir_lower_t *lower, anvil_instr_t *instr, 
     return ok && ppc_wide_put(lower, instr->result, out);
 }
 
+/* The shared switch lowering (anvil_mir_lower_switch_tree): its blocks,
+ * PHI-aware case targets and boolean values in this lowerer's forms. */
+typedef struct {
+    ppc_mir_lower_t *lower;
+    anvil_instr_t *instr;
+    pending_phi_edge_t **edges;
+    size_t *num_edges, *cap_edges;
+    size_t chain;
+} ppc_switch_user_t;
+
+static anvil_mir_block_t ppc_switch_new_block(void *opaque)
+{
+    ppc_switch_user_t *user = opaque;
+    anvil_mir_block_t current = anvil_mir_current_block(user->lower->mir);
+    anvil_mir_block_t block = create_switch_chain_block(user->lower, user->instr->parent, ++user->chain);
+    return block != ANVIL_MIR_NO_BLOCK && anvil_mir_set_current_block(user->lower->mir, current) ? block : ANVIL_MIR_NO_BLOCK;
+}
+
+static anvil_mir_block_t ppc_switch_case_target(void *opaque, size_t index)
+{
+    ppc_switch_user_t *user = opaque;
+    anvil_mir_block_t current = anvil_mir_current_block(user->lower->mir), target = ANVIL_MIR_NO_BLOCK;
+    if (!prepare_phi_aware_target(user->lower, user->instr->parent, user->instr->switch_blocks[index], &target, user->edges, user->num_edges,
+                                  user->cap_edges) ||
+        !anvil_mir_set_current_block(user->lower->mir, current))
+        return ANVIL_MIR_NO_BLOCK;
+    return target;
+}
+
+static anvil_mir_vreg_t ppc_switch_bool(void *opaque)
+{
+    ppc_switch_user_t *user = opaque;
+    return anvil_mir_add_vreg_typed(user->lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+}
+
+/* From ANVIL_SWITCH_TREE_MIN_CASES constant cases on, a selector in one
+ * register of 32 or 64 bits takes the shared tree.  -1: not taken. */
+static int ppc_switch_tree(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_vreg_t selector, anvil_mir_block_t default_target,
+                           pending_phi_edge_t **edges, size_t *num_edges, size_t *cap_edges)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(lower->mir, selector);
+    anvil_type_t *type = instr->operands[0]->type;
+    size_t count = instr->num_switch_cases;
+    if (count < ANVIL_SWITCH_TREE_MIN_CASES || !info || info->reg_class != ANVIL_MIR_REG_GPR || (info->size_bits != 32 && info->size_bits != 64) ||
+        !anvil_type_is_integer(type) || anvil_type_size(type) * 8 != info->size_bits)
+        return -1;
+    for (size_t i = 0; i < count; i++)
+        if (instr->operands[i + 1]->kind != ANVIL_VAL_CONST_INT)
+            return -1;
+    int64_t *values = malloc(count * sizeof(*values));
+    size_t *targets = malloc(count * sizeof(*targets));
+    bool ok = values && targets;
+    for (size_t i = 0; ok && i < count; i++) {
+        values[i] = instr->operands[i + 1]->data.i;
+        targets[i] = (size_t)(uintptr_t)instr->switch_blocks[i];
+    }
+    ppc_switch_user_t user = {.lower = lower, .instr = instr, .edges = edges, .num_edges = num_edges, .cap_edges = cap_edges};
+    anvil_switch_lowering_t lowering = {.mir = lower->mir, .user = &user, .selector = selector, .bits = info->size_bits,
+                                        .is_signed = type->is_signed, .default_target = default_target, .new_block = ppc_switch_new_block,
+                                        .case_target = ppc_switch_case_target, .new_bool = ppc_switch_bool};
+    ok = ok && anvil_mir_lower_switch_tree(&lowering, values, targets, count);
+    free(values);
+    free(targets);
+    return ok ? 1 : 0;
+}
+
 static bool lower_switch(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands != instr->num_switch_cases + 1 || instr->num_operands < 1 || !instr->true_block) {
@@ -2209,6 +2276,13 @@ static bool lower_switch(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 
     if (instr->num_switch_cases == 0) {
         bool ok = anvil_mir_add_branch(lower->mir, default_target) && emit_pending_phi_edges(lower, instr->parent, edges, num_edges);
+        free(edges);
+        return ok;
+    }
+
+    int tree = ppc_switch_tree(lower, instr, selector, default_target, &edges, &num_edges, &cap_edges);
+    if (tree >= 0) {
+        bool ok = tree == 1 && emit_pending_phi_edges(lower, instr->parent, edges, num_edges);
         free(edges);
         return ok;
     }

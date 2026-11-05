@@ -968,7 +968,7 @@ The ARM64 backend includes several important features for robust code generation
    sub sp, sp, x16         ; Allocate stack space
    ```
 
-5. **PHI and Switch Lowering**: PHI nodes are lowered into edge copies, including parallel-copy cycle handling. `switch` terminators lower to compare/branch chains with PHI-aware edge blocks.
+5. **PHI and Switch Lowering**: PHI nodes are lowered into edge copies, including parallel-copy cycle handling. `switch` terminators with PHI-aware edge blocks: from four constant cases over a one-register selector, sorted runs (consecutive values with one destination as one unsigned range test) decided by a balanced tree of compares (`anvil_mir_lower_switch_tree`, shared by every lowerer); fewer cases, or a selector held in a register pair, a chain of compares.
 
 6. **Type-Aware Load/Store**: Correct instruction selection based on type class and size (`ldr`, `ldrsb`, `ldrsh`, `ldrsw`, `strb`, `strh`, floating-point `ldr`/`str`).
 

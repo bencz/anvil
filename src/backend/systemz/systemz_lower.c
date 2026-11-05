@@ -1,3 +1,4 @@
+#include "../common/switch_lower.h"
 #include "systemz_internal.h"
 #include "../common/ir_lower.h"
 #include "../common/wide_mir.h"
@@ -1364,6 +1365,37 @@ static bool systemz_lower_call(systemz_lower_t *lower, anvil_instr_t *instr)
     return result.hi != ANVIL_MIR_NO_VREG ? systemz_wide_put(lower, instr->result, result) : systemz_map_put(lower, instr->result, result.lo);
 }
 
+/* The shared switch lowering (anvil_mir_lower_switch_tree) in this
+ * lowerer's forms: edge blocks for the PHI moves, boolean values. */
+typedef struct {
+    systemz_lower_t *lower;
+    anvil_instr_t *instr;
+} systemz_switch_user_t;
+
+static anvil_mir_block_t systemz_switch_new_block(void *opaque)
+{
+    systemz_switch_user_t *user = opaque;
+    anvil_mir_block_t current = anvil_mir_current_block(user->lower->mir);
+    char name[96];
+    snprintf(name, sizeof(name), "switch_case_%zu", anvil_mir_num_blocks(user->lower->mir));
+    anvil_mir_block_t block = anvil_mir_add_block(user->lower->mir, name);
+    return block != ANVIL_MIR_NO_BLOCK && anvil_mir_set_current_block(user->lower->mir, current) ? block : ANVIL_MIR_NO_BLOCK;
+}
+
+static anvil_mir_block_t systemz_switch_case_target(void *opaque, size_t index)
+{
+    systemz_switch_user_t *user = opaque;
+    anvil_mir_block_t current = anvil_mir_current_block(user->lower->mir);
+    anvil_mir_block_t target = systemz_create_phi_edge_block(user->lower, user->instr->parent, user->instr->switch_blocks[index]);
+    return target != ANVIL_MIR_NO_BLOCK && anvil_mir_set_current_block(user->lower->mir, current) ? target : ANVIL_MIR_NO_BLOCK;
+}
+
+static anvil_mir_vreg_t systemz_switch_bool(void *opaque)
+{
+    systemz_switch_user_t *user = opaque;
+    return systemz_add_bool_vreg(user->lower);
+}
+
 static bool systemz_lower_switch(systemz_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands == 0 || !instr->true_block)
@@ -1378,6 +1410,34 @@ static bool systemz_lower_switch(systemz_lower_t *lower, anvil_instr_t *instr)
     anvil_mir_block_t default_block = systemz_create_phi_edge_block(lower, instr->parent, instr->true_block);
     if (default_block == ANVIL_MIR_NO_BLOCK)
         return false;
+
+    /* From ANVIL_SWITCH_TREE_MIN_CASES constant cases on, a selector in
+     * one register of 32 or 64 bits takes the shared tree. */
+    const anvil_mir_vreg_info_t *info = wide ? NULL : anvil_mir_get_vreg_info(lower->mir, selector);
+    anvil_type_t *type = instr->operands[0]->type;
+    size_t count = instr->num_switch_cases;
+    bool tree = info && count >= ANVIL_SWITCH_TREE_MIN_CASES && instr->switch_blocks && instr->num_operands == count + 1 &&
+                info->reg_class == ANVIL_MIR_REG_GPR && (info->size_bits == 32 || info->size_bits == 64) && anvil_type_is_integer(type) &&
+                anvil_type_size(type) * 8 == info->size_bits;
+    for (size_t i = 0; tree && i < count; i++)
+        tree = instr->operands[i + 1]->kind == ANVIL_VAL_CONST_INT;
+    if (tree) {
+        int64_t *values = malloc(count * sizeof(*values));
+        size_t *targets = malloc(count * sizeof(*targets));
+        bool ok = values && targets;
+        for (size_t i = 0; ok && i < count; i++) {
+            values[i] = instr->operands[i + 1]->data.i;
+            targets[i] = (size_t)(uintptr_t)instr->switch_blocks[i];
+        }
+        systemz_switch_user_t user = {.lower = lower, .instr = instr};
+        anvil_switch_lowering_t lowering = {.mir = lower->mir, .user = &user, .selector = selector, .bits = info->size_bits,
+                                            .is_signed = type->is_signed, .default_target = default_block, .new_block = systemz_switch_new_block,
+                                            .case_target = systemz_switch_case_target, .new_bool = systemz_switch_bool};
+        ok = ok && anvil_mir_lower_switch_tree(&lowering, values, targets, count);
+        free(values);
+        free(targets);
+        return ok;
+    }
 
     for (size_t i = 0; i < instr->num_switch_cases; i++) {
         if (!instr->switch_blocks || i + 1 >= instr->num_operands)

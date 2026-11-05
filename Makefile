@@ -47,6 +47,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/aggregate_mir.c \
 	$(SRC_DIR)/backend/common/wide_mir.c \
 	$(SRC_DIR)/backend/common/mir_isel.c \
+	$(SRC_DIR)/backend/common/switch_lower.c \
 	$(SRC_DIR)/backend/common/narrow_mir.c \
 	$(SRC_DIR)/backend/common/parallel_move.c \
 	$(SRC_DIR)/backend/common/va_cursor.c \
@@ -198,6 +199,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/no_wrap_regression \
 	$(BUILD_DIR)/tests/count_loop_regression \
 	$(BUILD_DIR)/tests/operand_fold_regression \
+	$(BUILD_DIR)/tests/switch_lowering_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \
 	$(BUILD_DIR)/tests/core_arm64_regression \

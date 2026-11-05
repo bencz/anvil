@@ -619,8 +619,33 @@ void codegen_switch_stmt(mcc_codegen_t *cg, mcc_ast_node_t *stmt)
         cg->switch_info.default_block = anvil_block_create(cg->current_func, name);
     }
 
-    /* Comparison chain in source order of the labels. */
-    for (size_t i = 0; i < num_cases; i++) {
+    /* Constant labels without GNU ranges: one IR switch, which the back
+     * end lowers as it sees fit.  Otherwise a chain of comparisons in
+     * source order of the labels. */
+    bool constant_labels = num_cases > 0;
+    anvil_value_t **labels = num_cases ? mcc_alloc(cg->mcc_ctx, num_cases * sizeof(*labels)) : NULL;
+    for (size_t i = 0; constant_labels && i < num_cases; i++) {
+        mcc_ast_node_t *case_node = cases[i];
+        if (case_node->data.case_stmt.end_expr || !labels) {
+            constant_labels = false;
+            break;
+        }
+        anvil_value_t *value = codegen_expr(cg, case_node->data.case_stmt.expr);
+        labels[i] = codegen_convert_value(cg, value, case_node->data.case_stmt.expr->type, switch_c_type, "case.cast");
+        constant_labels = labels[i] && anvil_value_is_const_int(labels[i]);
+    }
+    if (constant_labels) {
+        anvil_block_t *otherwise = cg->switch_info.default_block ? cg->switch_info.default_block : codegen_switch_end_block(cg);
+        anvil_instr_t *dispatch = anvil_build_switch(cg->anvil_ctx, switch_val, otherwise);
+        for (size_t i = 0; dispatch && i < num_cases; i++)
+            if (!anvil_switch_add_case(dispatch, labels[i], case_blocks[i]))
+                dispatch = NULL;
+        if (!dispatch) {
+            mcc_error_at(cg->mcc_ctx, stmt->location, "cannot build the switch dispatch");
+            return;
+        }
+    }
+    for (size_t i = 0; !constant_labels && i < num_cases; i++) {
         mcc_ast_node_t *case_node = cases[i];
         anvil_value_t *low = codegen_expr(cg, case_node->data.case_stmt.expr);
         low = codegen_convert_value(cg, low, case_node->data.case_stmt.expr->type,
