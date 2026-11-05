@@ -1147,7 +1147,8 @@ static void test_arm64_regalloc_materializes_machineir_spills(void)
     CHECK(mir != NULL, "ARM64 spill pressure MIR function should be created");
     if (!mir) return;
 
-    enum { NUM_VALUES = 20 };
+    /* More values than the 26 allocatable general registers. */
+    enum { NUM_VALUES = 32 };
     anvil_mir_vreg_t values[NUM_VALUES];
     for (size_t i = 0; i < NUM_VALUES; i++) {
         values[i] = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 64);
@@ -1430,7 +1431,8 @@ static void test_arm64_emits_materialized_spills_with_frame_slots(void)
     CHECK(mir != NULL, "ARM64 MIR spill emitter function should be created");
     if (!mir) return;
 
-    enum { NUM_VALUES = 20 };
+    /* More values than the 26 allocatable general registers. */
+    enum { NUM_VALUES = 32 };
     anvil_mir_vreg_t values[NUM_VALUES];
     for (size_t i = 0; i < NUM_VALUES; i++) {
         values[i] = anvil_mir_add_vreg_ex(mir, ANVIL_MIR_REG_GPR, 64);

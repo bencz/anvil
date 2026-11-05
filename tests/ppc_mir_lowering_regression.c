@@ -284,8 +284,10 @@ static void test_ppc64_variants_lower_and_emit_distinct_abis(void)
                     } else {
                         check_contains(asm_text, "\t.abiversion 2\n",
                                        "PPC64LE should emit ELFv2 ABI marker");
-                        check_contains(asm_text, "\t.localentry ppc64le_iadd64",
-                                       "PPC64LE should emit ELFv2 localentry directive");
+                        /* A leaf reading no TOC has one entry point. */
+                        check_not_contains(asm_text, "\t.localentry ppc64le_iadd64",
+                                           "a PPC64LE leaf without TOC use has no ELFv2 local entry");
+                        check_not_contains(asm_text, "(.TOC.-0b)", "a PPC64LE leaf without TOC use sets up no TOC");
                         check_not_contains(asm_text, ".section \".opd\",\"aw\"\n",
                                            "PPC64LE should not emit ELFv1 descriptor section");
                     }

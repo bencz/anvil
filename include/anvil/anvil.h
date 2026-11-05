@@ -360,7 +360,30 @@ typedef struct {
      * size cannot fault when another byte of the block is accessible.  0
      * when not known; optimizations that read ahead are then off. */
     size_t access_fault_granularity;
+    /* Address forms of loads and stores, for passes that shape address
+     * arithmetic: bit k of index_scales says base + index * 2^k folds into
+     * an access of any width; index_scale_access says base + index * the
+     * access's own size does; address_increments holds the
+     * ANVIL_ADDRESS_*_INCREMENT forms that also update the base. */
+    uint8_t index_scales;
+    bool index_scale_access;
+    uint8_t address_increments;
+    uint8_t address_increment_bytes;  /* the widest access with those forms */
+    /* base + index * scale + a constant folds into one access (x86). */
+    bool index_displacement;
+    /* Body copies per iteration for small counted loops, where the loop
+     * control costs enough to unroll it at run time (1: none). */
+    uint8_t small_loop_unroll;
+    /* A counter counting down to zero is decremented, tested and branched
+     * on by one instruction (a counter register or branch on count): a
+     * loop whose index only counts needs no add and compare of its own. */
+    bool counter_branches;
 } anvil_arch_info_t;
+
+/* base += displacement, then the access at the new base. */
+#define ANVIL_ADDRESS_PRE_INCREMENT 1u
+/* The access at base, then base += displacement. */
+#define ANVIL_ADDRESS_POST_INCREMENT 2u
 
 #define ANVIL_FP_FORMAT_BIT(format) (1u << (unsigned)(format))
 
@@ -819,6 +842,20 @@ anvil_value_t *anvil_build_umod(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_valu
 anvil_value_t *anvil_build_umulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_smulh(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
 anvil_value_t *anvil_build_neg(anvil_ctx_t *ctx, anvil_value_t *val, const char *name);
+/* No-wrap: the frontend guarantees that the exact result of an integer
+ * add, sub or mul (each lane of a vector) lies in the range of its type
+ * under the type's signedness: a signed type does not overflow, an unsigned
+ * one does not carry or borrow.  A flagged operation whose exact result
+ * falls outside that range is undefined behavior, which lets the optimizer
+ * treat it as exact arithmetic (an extension of the sum is the sum of the
+ * extensions; a narrow counter widens).  On an integer trunc the flag
+ * means exact: the source is the extension of the result under the
+ * result type's signedness (no bits are lost); on an integer sdiv or udiv
+ * it means exact too: the dividend is a multiple of the divisor (a
+ * pointer difference divided by the element size).  Fails on any other
+ * value. */
+bool anvil_set_no_wrap(anvil_value_t *value, bool no_wrap);
+bool anvil_is_no_wrap(const anvil_value_t *value);
 
 /* Bitwise operations */
 anvil_value_t *anvil_build_and(anvil_ctx_t *ctx, anvil_value_t *lhs, anvil_value_t *rhs, const char *name);
@@ -1056,6 +1093,10 @@ typedef struct anvil_backend_ops {
      * (NULL: STATIC). */
     bool (*reloc_model_supported)(anvil_backend_t *be, anvil_reloc_model_t model);
     anvil_reloc_model_t (*default_reloc_model)(anvil_backend_t *be);
+    /* The convention an internal function called only directly may take
+     * instead of the default one, for the current ABI (NULL or
+     * ANVIL_CC_DEFAULT: none). */
+    anvil_cc_t (*local_call_convention)(anvil_backend_t *be);
 } anvil_backend_ops_t;
 
 /* Register a custom backend */

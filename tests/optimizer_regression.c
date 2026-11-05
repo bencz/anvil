@@ -532,6 +532,38 @@ static void test_cse_keys_fcmp_predicate(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* Types are not uniqued: a GEP over another, structurally equal type
+ * object is the same expression, whatever the objects' addresses (CSE once
+ * hashed them by address and merged such GEPs only by chance). */
+static void test_cse_merges_geps_over_equal_type_objects(void)
+{
+    anvil_ctx_t *ctx = new_ctx();
+    if (!ctx) return;
+    anvil_type_t *f32 = anvil_type_f32(ctx);
+    anvil_type_t *params[] = { anvil_type_ptr(ctx, anvil_type_array(ctx, f32, 64)), anvil_type_i64(ctx) };
+    anvil_module_t *mod = NULL;
+    anvil_func_t *fn = new_typed_func(ctx, &mod, "opt_gep_types_cse", "gep_types_cse", f32, params, 2);
+    if (fn) {
+        anvil_block_t *entry = anvil_func_get_entry(fn);
+        anvil_set_insert_point(ctx, entry);
+        anvil_value_t *base = anvil_func_get_param(fn, 0);
+        anvil_value_t *index = anvil_func_get_param(fn, 1);
+        anvil_value_t *indices[] = { anvil_const_i64(ctx, 0), index };
+        anvil_value_t *first = anvil_build_gep(ctx, anvil_type_array(ctx, f32, 64), base, indices, 2, "first");
+        anvil_value_t *second = anvil_build_gep(ctx, anvil_type_array(ctx, f32, 64), base, indices, 2, "second");
+        anvil_value_t *a = anvil_build_load(ctx, f32, first, "a");
+        anvil_value_t *b = anvil_build_load(ctx, f32, second, "b");
+        anvil_build_ret(ctx, anvil_build_fadd(ctx, a, b, "sum"));
+
+        CHECK(anvil_pass_cse(fn) == ANVIL_PASS_RUN_CHANGED && !block_has_instr(entry, second->data.instr) &&
+                  block_has_instr(entry, first->data.instr),
+              "CSE must merge GEPs over structurally equal type objects");
+        check_module_valid(mod, "GEP CSE across type objects must preserve valid IR");
+    }
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_strength_reduce_u64_high_bit_and_typed_constants(void)
 {
     anvil_ctx_t *ctx = new_ctx();
@@ -1668,6 +1700,7 @@ int main(void)
     test_const_fold_strict_fp_special_values();
     test_const_fold_all_fcmp_predicates();
     test_cse_keys_fcmp_predicate();
+    test_cse_merges_geps_over_equal_type_objects();
     test_strength_reduce_u64_high_bit_and_typed_constants();
     test_strength_reduce_is_transactional_on_oom();
     test_dead_store_keeps_store_before_may_alias_load();

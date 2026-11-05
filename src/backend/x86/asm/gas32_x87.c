@@ -29,7 +29,7 @@ static const char *home(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg, char *buf, 
         emit->failed = true;
         return "?";
     }
-    snprintf(buf, len, "%d(%%ebp)", -emit->fp_area_off + phys * 8);
+    snprintf(buf, len, "%s", x86_frame(emit, (int)(-emit->fp_area_off + phys * 8)));
     return buf;
 }
 
@@ -88,9 +88,9 @@ static void constant(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, uint64_t bits)
     if (emit->failed)
         return;
     int offset = -emit->fp_area_off + phys * 8;
-    anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %d(%%ebp)\n", (uint32_t)bits, offset);
+    anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)bits, x86_frame(emit, (int)(offset)));
     if (size > 4)
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %d(%%ebp)\n", (uint32_t)(bits >> 32), offset + 4);
+        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)(bits >> 32), x86_frame(emit, (int)(offset + 4)));
 }
 
 static void binary(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t a, anvil_mir_vreg_t b)
@@ -140,17 +140,15 @@ static void compare(x86_mir_emit_t *emit, anvil_mir_vreg_t a, anvil_mir_vreg_t b
     } else {
         /* C0/C2/C3 reach CF/PF/ZF through AH; EAX is preserved (MOV
          * leaves the flags alone). */
-        anvil_strbuf_appendf(&emit->code, "\tfucompp\n\tmovl %%eax, %d(%%ebp)\n\tfnstsw %%ax\n\tsahf\n\tmovl %d(%%ebp), %%eax\n", scratch(emit, 8),
-                             scratch(emit, 8));
+        anvil_strbuf_appendf(&emit->code, "\tfucompp\n\tmovl %%eax, %s\n\tfnstsw %%ax\n\tsahf\n\tmovl %s, %%eax\n", x86_frame(emit, (int)(scratch(emit, 8))), x86_frame(emit, (int)(scratch(emit, 8))));
     }
 }
 
 /* Truncating x87 store of ST(0): round toward zero for the duration. */
 static void store_integer_truncated(x86_mir_emit_t *emit, const char *op, int at)
 {
-    anvil_strbuf_appendf(&emit->code, "\tfnstcw %d(%%ebp)\n\tfnstcw %d(%%ebp)\n\torw $0x0c00, %d(%%ebp)\n\tfldcw %d(%%ebp)\n", scratch(emit, 0),
-                         scratch(emit, 2), scratch(emit, 2), scratch(emit, 2));
-    anvil_strbuf_appendf(&emit->code, "\t%s %d(%%ebp)\n\tfldcw %d(%%ebp)\n", op, at, scratch(emit, 0));
+    anvil_strbuf_appendf(&emit->code, "\tfnstcw %s\n\tfnstcw %s\n\torw $0x0c00, %s\n\tfldcw %s\n", x86_frame(emit, (int)(scratch(emit, 0))), x86_frame(emit, (int)(scratch(emit, 2))), x86_frame(emit, (int)(scratch(emit, 2))), x86_frame(emit, (int)(scratch(emit, 2))));
+    anvil_strbuf_appendf(&emit->code, "\t%s %s\n\tfldcw %s\n", op, x86_frame(emit, (int)(at)), x86_frame(emit, (int)(scratch(emit, 0))));
 }
 
 static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
@@ -164,11 +162,11 @@ static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_
         if (emit->failed)
             break;
         /* Unsigned: the 64-bit value (0, src), exact on the FPU. */
-        anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %d(%%ebp)\n", s, scratch(emit, 8));
+        anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %s\n", s, x86_frame(emit, (int)(scratch(emit, 8))));
         if (op == ANVIL_MIR_OP_UITOFP)
-            anvil_strbuf_appendf(&emit->code, "\tmovl $0, %d(%%ebp)\n\tfildll %d(%%ebp)\n", scratch(emit, 12), scratch(emit, 8));
+            anvil_strbuf_appendf(&emit->code, "\tmovl $0, %s\n\tfildll %s\n", x86_frame(emit, (int)(scratch(emit, 12))), x86_frame(emit, (int)(scratch(emit, 8))));
         else
-            anvil_strbuf_appendf(&emit->code, "\tfildl %d(%%ebp)\n", scratch(emit, 8));
+            anvil_strbuf_appendf(&emit->code, "\tfildl %s\n", x86_frame(emit, (int)(scratch(emit, 8))));
         anvil_strbuf_appendf(&emit->code, "\tfstp%s %s\n", suffix(size), md);
         break;
     }
@@ -181,7 +179,7 @@ static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_
         /* Unsigned: the low word of the 64-bit conversion. */
         anvil_strbuf_appendf(&emit->code, "\tfld%s %s\n", suffix(size), ms);
         store_integer_truncated(emit, op == ANVIL_MIR_OP_FPTOUI ? "fistpll" : "fistpl", scratch(emit, 8));
-        anvil_strbuf_appendf(&emit->code, "\tmovl %d(%%ebp), %%%s\n", scratch(emit, 8), d);
+        anvil_strbuf_appendf(&emit->code, "\tmovl %s, %%%s\n", x86_frame(emit, (int)(scratch(emit, 8))), d);
         break;
     }
     case ANVIL_MIR_OP_FPEXT:

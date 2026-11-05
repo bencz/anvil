@@ -418,6 +418,8 @@ void anvil_dump_instr(FILE *out, anvil_instr_t *instr)
     fprintf(out, "%s", op_name(instr->op));
     if (anvil_op_is_atomic(instr->op))
         fprintf(out, " order(%u) failure(%u) rmw(%u)", instr->atomic.order, instr->atomic.failure_order, instr->atomic.rmw);
+    if (instr->no_wrap)
+        fprintf(out, " nowrap");
     if (instr->memory_access.is_volatile)
         fprintf(out, " volatile");
 

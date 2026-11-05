@@ -67,6 +67,9 @@ typedef struct {
     bool callee_pops_sret;
     /* Alignment ESP must have at every call (bytes). */
     int stack_alignment;
+    /* The convention internal functions called only directly take: the
+     * first integer arguments in ECX and EDX instead of the stack. */
+    anvil_cc_t local_cc;
     const anvil_obj_format_t *format;
 } anvil_x86_plat_desc_t;
 
@@ -130,11 +133,16 @@ anvil_error_t x86_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **o
 
 bool x86_needs_pair(anvil_type_t *type);
 
-/* Scalar operations the IR prices on single values (FSQRT, MULH); no
- * vectors. */
+/* Scalar operations the IR prices on single values (FSQRT, MULH). */
 extern const anvil_vector_isa_t x86_scalar_isa[];
 extern const size_t x86_scalar_isa_count;
-unsigned x86_scalar_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
+/* The cost hook: scalar operations from x86_scalar_isa, lane operations
+ * from the shared SSE table where the CPU has vector registers. */
+unsigned x86_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
+bool x86_has_vectors(anvil_cpu_features_t features);
+/* Whether a function keeps EBP as its frame pointer: only where ESP moves
+ * within the body (dynamic allocations); elsewhere EBP is allocated. */
+bool x86_keeps_frame_pointer(const anvil_mir_func_t *mir);
 
 int64_t x86_stack_arg_slot_size(anvil_type_t *type);
 
@@ -152,5 +160,9 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
 /* The COFF stdcall/fastcall spelling of `name` (false: undecorated). */
 bool x86_decorated_symbol(const anvil_x86_plat_desc_t *plat, const anvil_x86_cc_desc_t *desc, anvil_type_t *fn_type,
                           const char *name, char *out, size_t out_size);
+
+/* Before allocation: the values gas32.c never puts in a register
+ * (anvil_mir_isel_mark_registerless under its immediate rules). */
+bool anvil_x86_mark_registerless(anvil_mir_func_t *mir);
 
 #endif

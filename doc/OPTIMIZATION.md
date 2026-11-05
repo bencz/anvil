@@ -43,8 +43,8 @@ level is a strict superset of the one below it.
 | O0 | `ANVIL_OPT_NONE` | None (default) |
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse |
-| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inline, unroll, loop-vectorize, vectorize (SLP) |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, loop-vectorize |
+| O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + inline, vectorize (SLP); unrolling runs from O2 |
 
 The two vectorizers create vector operations only where the backend's
 `vector_operation_cost` hook accepts them for the CPU model, and floating-point
@@ -144,6 +144,10 @@ Replaces expensive operations with cheaper equivalents.
 | `x / 7` (signed) | `q = smulh(x, m) + x; q >>= 2; q += q >>u 31` | Any other constant (`|d| >= 2`), where the target prices `SMULH` |
 | `x % d` | `x - (x / d) * d` | As the division |
 | `a * b + c` (FP) | `fma(a, b, c)` | `anvil_func_set_fp_contraction` and a target FMA |
+| `lo <= x && x <= hi` | `(x - lo) u<= hi - lo` | Constants `lo <= hi` (an i1 `and` or the select forms) |
+| `ext(a) == ext(b)`, `sext(c) != C` | `a == b`, `c != C` | Extensions of one narrow type; a constant the narrow type represents |
+| `sext(a) < sext(b)` / `zext(a) u< zext(b)` | `a < b` / `a u< b` | The extension's kind matches the order |
+| `zext(a) < zext(b)` (signed) | `a u< b` | Unsigned narrow values |
 
 Division by a constant uses the Granlund-Montgomery reciprocal with the magic
 numbers of Hacker's Delight (10-1 signed, 10-2 unsigned with the "add"
@@ -312,8 +316,36 @@ pointer that starts at `gep T base, start` and advances one `T` in the
 latch, so no multiply runs per iteration. Indices narrower than a pointer
 are extended by their signedness; the rewrite needs the header's `i < n`
 (signed or unsigned as `i` is) to show the index cannot wrap in the body.
+A narrow IV stepped by a constant or by a loop-invariant no-wrap amount is
+widened first. After the pipeline (`anvil_opt_loop_strength_late`) streams
+also replace indexes that fold where the target's accesses advance their
+base and either nothing else reads the IV (it is rebuilt after the loop
+from a stream) or only the loop test does on a target with counter branches
+(`anvil_arch_info_t.counter_branches`: the IV is left a pure counter, PowerPC
+CTR, SystemZ BRCTG); counted loops then count to zero. Pointers advancing in
+lockstep (two or more header PHIs stepped by the same bytes, read in the
+loop only as addresses or through a constant displacement the target folds)
+become `p0 + i` over one byte index where an index folds into the access and
+no access advances its own base (x86, the mainframes): one add per iteration
+for all of them.
 
-### Loop Vectorization (`ANVIL_PASS_LOOP_VECTORIZE`) - O3
+### Loop Tables (`ANVIL_PASS_LOOP_TABLE`) - O2
+
+`src/opt/loop_table.c`. A loop (after complete unrolling, also O2) that
+computes from constants one integer per iteration and stores it to
+base[iteration], with no loads, calls or other stores, runs at compile time;
+its values become a read-only table the store copies from.
+
+### Runtime Unrolling (`ANVIL_PASS_RUNTIME_UNROLL`) - O2
+
+`src/opt/runtime_unroll.c`. A loop of a header and a body counting up to
+zero (after loop strength reduction) with a small body and no calls runs,
+where `anvil_arch_info_t.small_loop_unroll` asks for it (PowerPC), a loop of
+U body copies per test first (its own counter, values stepped by a constant
+c as v + k*c, addresses as (base + v) + k*c), then the original loop for the
+remaining iterations.
+
+### Loop Vectorization (`ANVIL_PASS_LOOP_VECTORIZE`) - O2
 
 `src/opt/loop_vectorize.c`. An innermost counted loop
 
@@ -334,6 +366,14 @@ addresses are closer than one vector (and not equal), the vector loop runs zero
 iterations. The original header is marked `vectorized` so later runs leave the
 remainder loop alone. Every operation's legality and cost come from
 `vector_operation_cost`; the pass knows no target.
+
+A loop with accumulators whose body is one small block runs two copies of the
+vector body per iteration (interleaving), each with its own accumulators,
+combined after the loop: the next copy's additions do not wait for the
+previous one's. It does so when every accumulator starts from its operation's
+identity (not min/max) and the copies' accumulators and temporaries fit the
+target's FP/vector registers (`anvil_arch_info_t.num_fpr`); the vector trip
+count is then a multiple of twice the lanes.
 
 ### CFG Simplification (`ANVIL_PASS_SIMPLIFY_CFG`)
 

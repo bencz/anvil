@@ -90,11 +90,11 @@ static const anvil_x86_cc_desc_t x86_cc_descs[] = {
  * registers.  (MSVC would return float/double members in EAX:EDX.) */
 static const anvil_x86_plat_desc_t x86_plat_descs[] = {
     {.platform = X86_PLAT_ELF, .sym_prefix = "", .is_macho = false, .is_coff = false,
-     .small_aggregates_in_regs = false, .float_aggregates_in_x87 = false, .callee_pops_sret = true, .stack_alignment = 16, .format = &anvil_obj_format_elf},
+     .small_aggregates_in_regs = false, .float_aggregates_in_x87 = false, .callee_pops_sret = true, .stack_alignment = 16, .local_cc = ANVIL_CC_FASTCALL, .format = &anvil_obj_format_elf},
     {.platform = X86_PLAT_MACHO, .sym_prefix = "_", .is_macho = true, .is_coff = false,
-     .small_aggregates_in_regs = true, .float_aggregates_in_x87 = true, .callee_pops_sret = true, .stack_alignment = 16, .format = &anvil_obj_format_macho},
+     .small_aggregates_in_regs = true, .float_aggregates_in_x87 = true, .callee_pops_sret = true, .stack_alignment = 16, .local_cc = ANVIL_CC_FASTCALL, .format = &anvil_obj_format_macho},
     {.platform = X86_PLAT_COFF, .sym_prefix = "_", .is_macho = false, .is_coff = true,
-     .small_aggregates_in_regs = true, .float_aggregates_in_x87 = true, .callee_pops_sret = false, .stack_alignment = 16, .format = &anvil_obj_format_coff},
+     .small_aggregates_in_regs = true, .float_aggregates_in_x87 = true, .callee_pops_sret = false, .stack_alignment = 16, .local_cc = ANVIL_CC_FASTCALL, .format = &anvil_obj_format_coff},
 };
 
 const anvil_agg_target_t x86_agg_target = {4, false};

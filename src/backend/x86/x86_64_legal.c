@@ -1,5 +1,6 @@
 #include "x86_64_internal.h"
 #include "x86_address.h"
+#include "asm/x86_sse_vector.h"
 #include "anvil/anvil_analysis.h"
 
 #include <limits.h>
@@ -173,29 +174,13 @@ static bool x64_legal_instr(const anvil_mir_func_t *mir, size_t instr_index, con
         }
     }
 
-    bool vector = instr->def != ANVIL_MIR_NO_VREG && anvil_mir_get_vreg_info(mir, instr->def)->size_bits == 128;
-    for (size_t operand = 0; operand < instr->num_uses; operand++)
-        vector |= anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, instr_index, operand))->size_bits == 128;
-
-    if (vector) {
-        switch (instr->op) {
-        case ANVIL_MIR_OP_VECTOR:
-        case ANVIL_MIR_OP_LOAD:
-        case ANVIL_MIR_OP_STORE:
-        case ANVIL_MIR_OP_COPY:
-        case ANVIL_MIR_OP_SPILL_LOAD:
-        case ANVIL_MIR_OP_SPILL_STORE:
-        case ANVIL_MIR_OP_KEEPALIVE:
-            break;
-        default:
-            return anvil_format_failure(error, error_len, "instruction %zu has no legal vector form", instr_index);
-        }
-    }
+    if (!anvil_vector_mir_operands_legal(mir, instr_index, instr, 128))
+        return anvil_format_failure(error, error_len, "instruction %zu has no legal vector form", instr_index);
 
     switch (instr->op) {
     case ANVIL_MIR_OP_VECTOR:
     case ANVIL_MIR_OP_SCALAR:
-        if (anvil_vector_isa_for_mir(x64_vector_isa, x64_vector_isa_count, mir, instr_index, instr, anvil_mir_func_cpu_features(mir)))
+        if (anvil_vector_isa_for_mir(x86_sse_isa, x86_sse_isa_count, mir, instr_index, instr, anvil_mir_func_cpu_features(mir)))
             return true;
         return anvil_format_failure(error, error_len, "x86-64 MIR instruction %zu has no SSE form on this CPU", instr_index);
     case ANVIL_MIR_OP_ADD:
@@ -358,7 +343,7 @@ bool anvil_x86_64_regalloc_mir_abi(anvil_mir_func_t *mir, anvil_abi_t abi)
     };
     size_t num_configs = sizeof(configs) / sizeof(configs[0]), num_scratch_configs = sizeof(scratch_configs) / sizeof(scratch_configs[0]);
 
-    if (!anvil_x86_64_verify_mir_legal(mir, NULL, 0) || !anvil_mir_duplicate_branch_targets(mir, 4) || !anvil_mir_local_cse(mir) || !anvil_mir_fold_address_arithmetic(mir, x86_address_mode, NULL))
+    if (!anvil_x86_64_verify_mir_legal(mir, NULL, 0) || !anvil_mir_optimize_before_allocation(mir, x86_address_mode, NULL, NULL))
         return false;
     for (size_t index = 0; index < anvil_mir_num_instrs(mir); index++) {
         anvil_mir_instr_info_t info;
@@ -383,9 +368,9 @@ bool anvil_x86_64_regalloc_mir_abi(anvil_mir_func_t *mir, anvil_abi_t abi)
             return false;
     }
 
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !x64_annotate_printer_scratch(mir, desc))
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) || !x64_annotate_printer_scratch(mir, desc))
         return false;
-    if (!anvil_x86_64_verify_mir_legal(mir, NULL, 0))
+    if (!anvil_x86_64_verify_mir_legal(mir, NULL, 0) || !anvil_x64_mark_registerless(mir) || !anvil_mir_hoist_materialized_constants(mir))
         return false;
     if (!anvil_regalloc_allocate(mir, configs, num_configs, scratch_configs, num_scratch_configs))
         return false;
@@ -395,4 +380,9 @@ bool anvil_x86_64_regalloc_mir_abi(anvil_mir_func_t *mir, anvil_abi_t abi)
 bool anvil_x86_64_regalloc_mir(anvil_mir_func_t *mir)
 {
     return anvil_x86_64_regalloc_mir_abi(mir, ANVIL_ABI_SYSV);
+}
+
+unsigned x64_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape)
+{
+    return anvil_vector_isa_cost(x86_sse_isa, x86_sse_isa_count, 16, be->ctx, operation, type, shape);
 }

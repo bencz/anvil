@@ -54,6 +54,14 @@ typedef struct anvil_instr {
     anvil_cc_t call_cc;
     anvil_memory_access_t memory_access;
     anvil_atomic_info_t atomic;
+    /* ADD/SUB/MUL on integers: the exact result fits the result type under
+     * its signedness; TRUNC: exact, the source is the result extended
+     * (anvil_set_no_wrap). */
+    bool no_wrap;
+    /* LOAD of a signed integer narrower than 64 bits whose sign no reader
+     * observes (anvil_opt_prepare_codegen): a backend may load it
+     * zero-extended instead. */
+    bool sign_unobserved;
     anvil_value_t *result;
     anvil_value_t **operands;
     size_t num_operands;
@@ -223,6 +231,8 @@ struct anvil_block {
     /* Header of a loop that already has a vector copy (it now runs the
      * remaining iterations); the loop vectorizer leaves it alone. */
     bool vectorized;
+    /* Header of a loop runtime unrolling already handled (both loops). */
+    bool unrolled;
     /* Rarely runs (anvil_block_set_cold). */
     bool cold;
 };
@@ -456,6 +466,8 @@ void anvil_instr_discard_new(anvil_ctx_t *ctx, anvil_instr_t *instr);
 /* Copies an instruction's non-operand attributes (predicate, convention,
  * memory and atomic info, aux type, call-site argument attributes). */
 bool anvil_instr_copy_attributes(anvil_instr_t *copy, const anvil_instr_t *original);
+/* No flag, or one on an integer ADD/SUB/MUL or TRUNC. */
+bool anvil_instr_no_wrap_valid(const anvil_instr_t *instr);
 /* Attribute of a call's argument `index`: the callee type's for declared
  * parameters, the call site's for unnamed (variadic) arguments. */
 anvil_param_attr_t anvil_call_arg_attr(const anvil_instr_t *call, const anvil_type_t *fn_type, size_t index);
@@ -501,6 +513,9 @@ anvil_type_t *anvil_sem_memory_object_type(const anvil_value_t *value);
 bool anvil_sem_operand_is_address(anvil_op_t op, size_t index);
 bool anvil_sem_global_operand_allowed(const anvil_value_t *value, anvil_op_t op, size_t index);
 anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee);
+/* The target's convention for internal functions called only directly
+ * (anvil_backend_ops_t.local_call_convention), ANVIL_CC_DEFAULT if none. */
+anvil_cc_t anvil_ctx_local_call_convention(anvil_ctx_t *ctx);
 bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
                       anvil_cc_t *effective);
 typedef enum {

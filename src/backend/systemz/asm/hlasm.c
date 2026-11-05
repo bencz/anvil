@@ -254,32 +254,68 @@ static const char *systemz_store_op(systemz_emit_t *emit, uint16_t size_bits, an
     return emit->desc->has_64bit_gprs ? "STG" : "ST";
 }
 
+/* Narrow loads leave the register extended by the value's signedness (the
+ * isel facts' convention), unless every reader needs only the value's own
+ * bits (anvil_mir_isel_low_bits_only). */
+static bool systemz_narrow_needs_extension(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info, anvil_mir_vreg_t dst)
+{
+    return info && info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits <= 16 && !anvil_mir_isel_low_bits_only(&emit->isel, dst);
+}
+
 static void systemz_emit_narrow_load_prefix(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info, anvil_mir_vreg_t dst)
 {
-    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || info->size_bits > 8)
+    /* IC inserts the byte: the rest of the register is cleared first. */
+    if (!systemz_narrow_needs_extension(emit, info, dst) || info->size_bits > 8)
         return;
     anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", emit->desc->has_64bit_gprs ? "XGR" : "XR", systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, dst));
 }
 
 static void systemz_emit_narrow_load_suffix(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info, anvil_mir_vreg_t dst)
 {
-    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || info->size_bits > 16)
+    if (!systemz_narrow_needs_extension(emit, info, dst))
         return;
     const char *reg = systemz_vreg_reg_name(emit, dst);
-    if (info->size_bits <= 8 && info->is_signed) {
+    bool wide = emit->desc->has_64bit_gprs;
+    if (info->size_bits <= 8 && !info->is_signed)
+        return;  /* inserted into a cleared register: zero above already */
+    if (info->size_bits <= 8)
         anvil_strbuf_appendf(&emit->code, "         SLL   %s,24\n         SRA   %s,24\n", reg, reg);
-    } else if (info->size_bits <= 16 && !info->is_signed) {
+    else if (!info->is_signed)
         anvil_strbuf_appendf(&emit->code, "         N     %s,=X'0000FFFF'\n", reg);
-    }
-    if (emit->desc->has_64bit_gprs) {
+    /* The 32-bit forms leave the upper half of a 64-bit register. */
+    if (wide)
         anvil_strbuf_appendf(&emit->code, "         %s %s,%s\n", info->is_signed ? "LGFR " : "LLGFR", reg, reg);
-    }
+}
+
+/* The z/Architecture load that extends a narrow value itself (LLGC, LGB,
+ * LLGH, LGH with the extended-immediate facility), or NULL. */
+static const char *systemz_extending_load(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info)
+{
+    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || info->size_bits > 16 || !emit->desc->has_64bit_gprs ||
+        !(emit->features & ANVIL_FEATURE_ZARCH_EIMM))
+        return NULL;
+    if (info->size_bits <= 8)
+        return info->is_signed ? "LGB" : "LLGC";
+    return info->is_signed ? "LGH" : "LLGH";
+}
+
+/* A narrow load printed without its extension (IC into an uncleared
+ * register: every reader needs only the value's bits), whatever the facts'
+ * width says of loads. */
+static bool systemz_load_left_unextended(systemz_emit_t *emit, anvil_mir_vreg_t vreg)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, vreg);
+    return info && anvil_mir_isel_def_op(&emit->isel, vreg) == ANVIL_MIR_OP_LOAD && !systemz_extending_load(emit, info) &&
+           info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits <= 16 && anvil_mir_isel_low_bits_only(&emit->isel, vreg);
 }
 
 static void systemz_emit_copy(systemz_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
 {
     const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, dst);
     if (!info)
+        return;
+    /* Into its own register: nothing moves. */
+    if (strcmp(systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, src)) == 0)
         return;
     if (info->reg_class == ANVIL_MIR_REG_FPR) {
         anvil_strbuf_appendf(&emit->code, "         %s   %s,%s\n", info->size_bits == 32 ? "LER" : "LDR", systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, src));
@@ -378,6 +414,14 @@ static bool systemz_cmp_unsigned(anvil_mir_opcode_t op)
     return op == ANVIL_MIR_OP_CMP_ULT || op == ANVIL_MIR_OP_CMP_ULE || op == ANVIL_MIR_OP_CMP_UGT || op == ANVIL_MIR_OP_CMP_UGE;
 }
 
+/* Whether the CPU has RISBG (rotate then insert selected bits, z10's
+ * general-instructions extension) and it computes `rm` (one run of mask
+ * bits; the others are zeroed). */
+static bool systemz_rotate_mask_form(const systemz_emit_t *emit, const anvil_rotate_mask_t *rm, unsigned *begin, unsigned *end)
+{
+    return (emit->features & ANVIL_FEATURE_ZARCH_GIE) && emit->desc->has_64bit_gprs && rm->width == 64 && anvil_rotate_mask_run(rm, begin, end);
+}
+
 /* Mirrors the forms chosen by systemz_emit_binary and systemz_emit_cmp. */
 static bool systemz_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
 {
@@ -396,7 +440,12 @@ static bool systemz_takes_immediate(void *ctx, size_t index, const anvil_mir_ins
         return immrel && systemz_simm16(-v);
     case ANVIL_MIR_OP_MUL:
         return systemz_pow2_shift(v, wide) >= 0 || (immrel && systemz_simm16(v));
-    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_AND: {
+        /* A contiguous 64-bit mask: RISBG. */
+        anvil_rotate_mask_t rm;
+        unsigned begin, end;
+        return !wide || (anvil_rotate_mask_of(info->op, v, 64, 64, &rm) && systemz_rotate_mask_form(emit, &rm, &begin, &end));
+    }
     case ANVIL_MIR_OP_OR:
     case ANVIL_MIR_OP_XOR:
         return !wide;
@@ -426,6 +475,115 @@ static bool systemz_rhs_immediate(const systemz_emit_t *emit, size_t index, cons
     return true;
 }
 
+static void systemz_emit_risbg(systemz_emit_t *emit, anvil_mir_vreg_t def, anvil_mir_vreg_t source, const anvil_rotate_mask_t *rm, unsigned begin,
+                               unsigned end)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, def);
+    /* I4 + 128: the bits outside the run become zero. */
+    anvil_strbuf_appendf(&emit->code, "         RISBG %s,%s,%u,%u,%u\n", systemz_vreg_reg_name(emit, def), systemz_vreg_reg_name(emit, source), begin,
+                         end + 128, rm->rotate);
+    /* Condition code 0 exactly when the (zero-extended) result is zero. */
+    anvil_print_flags_set(&emit->flags, systemz_phys_reg(emit, def), info && info->size_bits > 32 ? 8 : 4);
+}
+
+/* A shift by a constant or an AND with one as RISBG: the one reading
+ * another such (which printed nothing), one whose only reader shortly
+ * after is such (printing nothing), or one alone (below). */
+static bool systemz_emit_rotate_mask(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs)
+{
+    unsigned begin, end;
+    if (index == emit->rotate_target) {
+        emit->rotate_target = SIZE_MAX;
+        if (!systemz_rotate_mask_form(emit, &emit->rotate, &begin, &end))
+            return false;
+        systemz_emit_risbg(emit, instr.def, emit->rotate_source, &emit->rotate, begin, end);
+        return true;
+    }
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, instr.def);
+    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || !(emit->features & ANVIL_FEATURE_ZARCH_GIE) || !emit->desc->has_64bit_gprs)
+        return false;
+    unsigned bits = systemz_operand_wide(emit, lhs) ? 64 : 32;
+    size_t reader, between;
+    anvil_mir_vreg_t source;
+    anvil_rotate_mask_t rm;
+    bool counter = emit->counter_roles && emit->counter_roles[index] != ANVIL_MIR_COUNTER_NONE;
+    if (emit->rotate_target == SIZE_MAX && !counter && anvil_mir_rotate_mask_pair(emit->mir, &emit->isel, index, 64, &rm, &reader, &between, &source) &&
+        systemz_rotate_mask_form(emit, &rm, &begin, &end)) {
+        emit->rotate_target = reader;
+        emit->rotate_skip = between;
+        emit->rotate_source = source;
+        emit->rotate = rm;
+        return true;
+    }
+    /* One operation alone: a 64-bit AND with a contiguous mask (no other
+     * immediate form), or one writing a register other than its operand's
+     * (RISBG needs no copy first). */
+    int64_t imm;
+    if (systemz_rhs_immediate(emit, index, &instr, &imm) && anvil_rotate_mask_of(instr.op, imm, bits, 64, &rm) &&
+        ((instr.op == ANVIL_MIR_OP_AND && bits == 64) || systemz_phys_reg(emit, instr.def) != systemz_phys_reg(emit, lhs)) &&
+        systemz_rotate_mask_form(emit, &rm, &begin, &end)) {
+        systemz_emit_risbg(emit, instr.def, lhs, &rm, begin, end);
+        return true;
+    }
+    return false;
+}
+
+/* dst = lhs OP rhs with dst not lhs's register, without copying lhs
+ * first: the distinct-operands forms (z196: ALRK, AHIK, NRK, SLLK...) and
+ * the 64-bit shifts, which name their source on every z/Architecture
+ * model. */
+static bool systemz_emit_distinct(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, instr.def);
+    int def_reg = systemz_phys_reg(emit, instr.def);
+    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || def_reg == systemz_phys_reg(emit, lhs))
+        return false;
+    bool wide = systemz_operand_wide(emit, lhs);
+    bool distinct = (emit->features & ANVIL_FEATURE_ZARCH_DISTINCT) != 0;
+    bool shift = instr.op == ANVIL_MIR_OP_SHL || instr.op == ANVIL_MIR_OP_SHR || instr.op == ANVIL_MIR_OP_SAR;
+    const char *dst = systemz_vreg_reg_name(emit, instr.def), *src = systemz_vreg_reg_name(emit, lhs);
+    const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (wide ? "SLLG" : "SLLK") : instr.op == ANVIL_MIR_OP_SHR ? (wide ? "SRLG" : "SRLK")
+                                                                                                                    : (wide ? "SRAG" : "SRAK");
+    int64_t imm;
+    if (systemz_rhs_immediate(emit, index, &instr, &imm)) {
+        if (shift && (wide || distinct)) {
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", shift_op, dst, src, (int)(imm & (wide ? 63 : 31)));
+            return true;
+        }
+        if (distinct && (instr.op == ANVIL_MIR_OP_ADD || instr.op == ANVIL_MIR_OP_SUB)) {
+            int64_t addend = instr.op == ANVIL_MIR_OP_ADD ? imm : -imm;
+            if (!systemz_simm16(addend))
+                return false;
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%lld\n", wide ? "AGHIK" : "AHIK", dst, src, (long long)addend);
+            /* As AHI: a nonzero immediate cannot overflow to zero. */
+            if (addend != 0)
+                anvil_print_flags_set(&emit->flags, def_reg, wide ? 8 : 4);
+            return true;
+        }
+        return false;
+    }
+    const char *count = systemz_vreg_reg_name(emit, rhs);
+    if (shift && (wide || distinct)) {
+        /* The count is a base register (R0 would mean none). */
+        if (systemz_phys_reg(emit, rhs) == 0)
+            return false;
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,0(%s)\n", shift_op, dst, src, count);
+        return true;
+    }
+    if (!distinct)
+        return false;
+    const char *op = instr.op == ANVIL_MIR_OP_ADD ? (wide ? "ALGRK" : "ALRK") : instr.op == ANVIL_MIR_OP_SUB ? (wide ? "SLGRK" : "SLRK")
+                   : instr.op == ANVIL_MIR_OP_AND ? (wide ? "NGRK" : "NRK")   : instr.op == ANVIL_MIR_OP_OR  ? (wide ? "OGRK" : "ORK")
+                   : instr.op == ANVIL_MIR_OP_XOR ? (wide ? "XGRK" : "XRK")
+                                                  : NULL;
+    if (!op)
+        return false;
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%s\n", op, dst, src, count);
+    if (instr.op == ANVIL_MIR_OP_AND || instr.op == ANVIL_MIR_OP_OR || instr.op == ANVIL_MIR_OP_XOR)
+        anvil_print_flags_set(&emit->flags, def_reg, wide ? 8 : 4);
+    return true;
+}
+
 /* dst = lhs OP imm, two-address. */
 static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs)
 {
@@ -433,6 +591,24 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
     if (!systemz_rhs_immediate(emit, index, &instr, &imm))
         return false;
     bool wide = systemz_operand_wide(emit, lhs);
+    /* x & c (within one halfword of the low word) only tested against zero
+     * by the next branch: test under mask, no copy and no write; condition
+     * code 0 when the bits are all zero. */
+    uint64_t bits = (uint64_t)imm;
+    if (instr.op == ANVIL_MIR_OP_AND && (emit->features & ANVIL_FEATURE_ZARCH_IMMREL) && emit->tm_at == SIZE_MAX && bits != 0 &&
+        ((bits & ~UINT64_C(0xFFFF)) == 0 || (bits & ~UINT64_C(0xFFFF0000)) == 0)) {
+        size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, index, 4, false);
+        anvil_mir_instr_info_t next;
+        int64_t zero = 1;
+        if (reader != SIZE_MAX && anvil_mir_get_instr_info(emit->mir, reader, &next) && (next.op == ANVIL_MIR_OP_CMP_EQ || next.op == ANVIL_MIR_OP_CMP_NE) &&
+            systemz_rhs_immediate(emit, reader, &next, &zero) && zero == 0 && anvil_mir_isel_feeds_next_branch(&emit->isel, reader, &next)) {
+            bool low = (bits & ~UINT64_C(0xFFFF)) == 0;
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,X'%04llX'\n", low ? "TMLL" : "TMLH", systemz_vreg_reg_name(emit, lhs),
+                                 (unsigned long long)(low ? bits : bits >> 16));
+            emit->tm_at = reader;
+            return true;
+        }
+    }
     const char *dst = systemz_vreg_reg_name(emit, instr.def);
     if (systemz_phys_reg(emit, instr.def) != systemz_phys_reg(emit, lhs))
         systemz_emit_copy(emit, instr.def, lhs);
@@ -441,6 +617,10 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
     case ANVIL_MIR_OP_SUB:
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", wide ? "AGHI" : "AHI", dst,
                              (long long)(instr.op == ANVIL_MIR_OP_ADD ? imm : -imm));
+        /* Condition code 0 exactly when the result is zero: adding a
+         * nonzero 16-bit immediate cannot overflow to zero. */
+        if (imm != 0)
+            anvil_print_flags_set(&emit->flags, systemz_phys_reg(emit, instr.def), wide ? 8 : 4);
         break;
     case ANVIL_MIR_OP_MUL: {
         int shift = systemz_pow2_shift(imm, wide);
@@ -464,6 +644,8 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
             anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", eimm, dst, (long long)(uint32_t)imm);
         else
             anvil_strbuf_appendf(&emit->code, "         %-5s %s,=F'%lld'\n", literal, dst, (long long)imm);
+        /* Condition code 0: the 32-bit result is zero, 1: it is not. */
+        anvil_print_flags_set(&emit->flags, systemz_phys_reg(emit, instr.def), 4);
         break;
     }
     case ANVIL_MIR_OP_SHL:
@@ -603,12 +785,39 @@ static void systemz_emit_binary(systemz_emit_t *emit, anvil_mir_instr_info_t ins
     }
     if (op) {
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", op, systemz_vreg_reg_name(emit, instr.def), rhs_name);
+        /* The logical operations set condition code 0 for a zero result
+         * (adds and subtracts can overflow to zero: not here). */
+        if (instr.op == ANVIL_MIR_OP_AND || instr.op == ANVIL_MIR_OP_OR || instr.op == ANVIL_MIR_OP_XOR)
+            anvil_print_flags_set(&emit->flags, systemz_phys_reg(emit, instr.def), wide ? 8 : 4);
         return;
     }
 
     if (instr.op == ANVIL_MIR_OP_SHL || instr.op == ANVIL_MIR_OP_SHR || instr.op == ANVIL_MIR_OP_SAR) {
         const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (wide ? "SLLG" : "SLL") : instr.op == ANVIL_MIR_OP_SHR ? (wide ? "SRLG" : "SRL") : (wide ? "SRAG" : "SRA");
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,0(%s)\n", shift_op, systemz_vreg_reg_name(emit, instr.def), rhs_name);
+    }
+}
+
+/* The condition-code mask of systemz_cmp_branch's branch. */
+static unsigned systemz_cmp_mask(anvil_mir_opcode_t op)
+{
+    switch (op) {
+    case ANVIL_MIR_OP_CMP_EQ:
+        return 8;
+    case ANVIL_MIR_OP_CMP_LT:
+    case ANVIL_MIR_OP_CMP_ULT:
+        return 4;
+    case ANVIL_MIR_OP_CMP_LE:
+    case ANVIL_MIR_OP_CMP_ULE:
+        return 13;
+    case ANVIL_MIR_OP_CMP_GT:
+    case ANVIL_MIR_OP_CMP_UGT:
+        return 2;
+    case ANVIL_MIR_OP_CMP_GE:
+    case ANVIL_MIR_OP_CMP_UGE:
+        return 11;
+    default:
+        return 7;
     }
 }
 
@@ -639,6 +848,12 @@ static const char *systemz_cmp_branch(anvil_mir_opcode_t op)
 
 static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
+    if (index == emit->tm_at) {
+        /* The test under mask before it set the condition code. */
+        emit->tm_at = SIZE_MAX;
+        emit->fused_branch = systemz_cmp_branch(instr.op);
+        return;
+    }
     const anvil_mir_vreg_info_t *lhs_info = systemz_emit_vreg_info(emit, lhs);
     const anvil_mir_vreg_info_t *dst_info = systemz_emit_vreg_info(emit, instr.def);
     if (!lhs_info || !dst_info)
@@ -659,7 +874,27 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         const char *cmp = unsigned_cmp ? (wide ? "CLGR" : "CLR") : (wide ? "CGR" : "CR");
         int64_t imm;
         const char *a = systemz_vreg_reg_name(emit, lhs);
-        if (systemz_rhs_immediate(emit, index, &instr, &imm)) {
+        bool immediate = systemz_rhs_immediate(emit, index, &instr, &imm);
+        /* == 0 or != 0 of the value just computed: its condition code
+         * tells. */
+        if (immediate && imm == 0 && (instr.op == ANVIL_MIR_OP_CMP_EQ || instr.op == ANVIL_MIR_OP_CMP_NE) &&
+            anvil_mir_isel_feeds_next_branch(&emit->isel, index, &instr) &&
+            anvil_print_flags_take(&emit->flags, &emit->code, systemz_phys_reg(emit, lhs), wide ? 8 : 4)) {
+            emit->fused_branch = systemz_cmp_branch(instr.op);
+            return;
+        }
+        /* A narrow value tested against zero: its own bits alone, which a
+         * narrow load may leave all a reader sees (IC inserts the byte,
+         * anvil_mir_isel_low_bits_only).  Condition code 0 exactly when
+         * they are zero, as a compare's equal. */
+        bool zero_test = immediate && imm == 0 && (instr.op == ANVIL_MIR_OP_CMP_EQ || instr.op == ANVIL_MIR_OP_CMP_NE);
+        if (zero_test && lhs_info->size_bits <= 16) {
+            bool byte = lhs_info->size_bits <= 8;
+            if (emit->features & ANVIL_FEATURE_ZARCH_IMMREL)
+                anvil_strbuf_appendf(&emit->code, "         TMLL  %s,X'%s'\n", a, byte ? "00FF" : "FFFF");
+            else
+                anvil_strbuf_appendf(&emit->code, "         CLM   %s,B'%s',=X'%s'\n", a, byte ? "0001" : "0011", byte ? "00" : "0000");
+        } else if (immediate) {
             if (!unsigned_cmp && (emit->features & ANVIL_FEATURE_ZARCH_IMMREL) && systemz_simm16(imm))
                 anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", wide ? "CGHI" : "CHI", a, (long long)imm);
             else
@@ -673,9 +908,18 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         }
     }
     const char *dst = systemz_vreg_reg_name(emit, instr.def);
+    /* With load on condition, no branch: 0, then 1 where the condition
+     * holds (the branch's mask). */
+    static const unsigned fcmp_masks[] = {0, 8, 2, 10, 4, 12, 6, 14, 9, 3, 11, 5, 13, 7, 1, 15};
+    if ((emit->features & ANVIL_FEATURE_ZARCH_LOADSTORE) && emit->desc->has_64bit_gprs &&
+        (instr.op != ANVIL_MIR_OP_FCMP || (unsigned)instr.imm <= ANVIL_FCMP_TRUE)) {
+        unsigned mask = instr.op == ANVIL_MIR_OP_FCMP ? fcmp_masks[(unsigned)instr.imm] : systemz_cmp_mask(instr.op);
+        anvil_strbuf_appendf(&emit->code, "         LA    %s,0\n         LA    R1,1\n         LOCGR %s,R1,%u\n", dst, dst, mask);
+        return;
+    }
     anvil_strbuf_appendf(&emit->code, "         LA    %s,1\n", dst);
     if (instr.op == ANVIL_MIR_OP_FCMP) {
-        static const unsigned masks[] = {0, 8, 2, 10, 4, 12, 6, 14, 9, 3, 11, 5, 13, 7, 1, 15};
+        const unsigned *masks = fcmp_masks;
         unsigned pred = (unsigned)instr.imm;
         if (pred > ANVIL_FCMP_TRUE)
             return;
@@ -707,7 +951,7 @@ static const char *systemz_inverse_branch(const char *branch)
 static void systemz_emit_cond_branch(systemz_emit_t *emit, const char *taken, anvil_mir_block_t true_block, anvil_mir_block_t false_block)
 {
     const char *inverse = systemz_inverse_branch(taken);
-    if (true_block == emit->block + 1 && inverse) {
+    if (anvil_mir_layout_falls_into(&emit->layout, emit->block, true_block) && inverse) {
         anvil_strbuf_appendf(&emit->code, "         %-5s ", inverse);
         systemz_emit_branch_target(emit, false_block);
         anvil_strbuf_append(&emit->code, "\n");
@@ -716,7 +960,7 @@ static void systemz_emit_cond_branch(systemz_emit_t *emit, const char *taken, an
     anvil_strbuf_appendf(&emit->code, "         %-5s ", taken);
     systemz_emit_branch_target(emit, true_block);
     anvil_strbuf_append(&emit->code, "\n");
-    if (false_block != emit->block + 1) {
+    if (!anvil_mir_layout_falls_into(&emit->layout, emit->block, false_block)) {
         anvil_strbuf_append(&emit->code, "         B     ");
         systemz_emit_branch_target(emit, false_block);
         anvil_strbuf_append(&emit->code, "\n");
@@ -1005,11 +1249,25 @@ static void systemz_emit_cast(systemz_emit_t *emit, anvil_mir_instr_info_t instr
     bool numeric_fp_cast = instr.op == ANVIL_MIR_OP_SITOFP || instr.op == ANVIL_MIR_OP_UITOFP || instr.op == ANVIL_MIR_OP_FPTOSI || instr.op == ANVIL_MIR_OP_FPTOUI || instr.op == ANVIL_MIR_OP_FPEXT ||
                            instr.op == ANVIL_MIR_OP_FPTRUNC;
     if (!numeric_fp_cast && dst_info->reg_class == src_info->reg_class) {
+        /* A word extended to the 64-bit register: LGFR/LLGFR read the
+         * source directly. */
+        if (emit->desc->has_64bit_gprs && dst_info->reg_class == ANVIL_MIR_REG_GPR && src_info->size_bits == 32 && dst_info->size_bits > 32 &&
+            (instr.op == ANVIL_MIR_OP_SEXT || instr.op == ANVIL_MIR_OP_ZEXT)) {
+            anvil_strbuf_appendf(&emit->code, "         %s %s,%s\n", instr.op == ANVIL_MIR_OP_SEXT ? "LGFR " : "LLGFR", systemz_vreg_reg_name(emit, instr.def),
+                                 systemz_vreg_reg_name(emit, src));
+            return;
+        }
         systemz_emit_copy(emit, instr.def, src);
         /* Extensions define every bit of the result (TRUNC needs none: a
          * narrow value's high bits are ignored by its users). */
         bool extend = dst_info->reg_class == ANVIL_MIR_REG_GPR && (instr.op == ANVIL_MIR_OP_SEXT || instr.op == ANVIL_MIR_OP_ZEXT) &&
                       src_info->size_bits < dst_info->size_bits;
+        /* A value already zero above its width needs none, within the 32
+         * bits whose operations here leave the rest zero (the 64-bit
+         * models' 32-bit forms keep the upper half). */
+        if (extend && instr.op == ANVIL_MIR_OP_ZEXT && (!emit->desc->has_64bit_gprs || dst_info->size_bits <= 32) &&
+            anvil_mir_isel_zero_extended(&emit->isel, src) && !systemz_load_left_unextended(emit, src))
+            extend = false;
         if (extend) {
             const char *dst = systemz_vreg_reg_name(emit, instr.def);
             bool sign = instr.op == ANVIL_MIR_OP_SEXT;
@@ -1066,38 +1324,57 @@ static bool systemz_get_uses(const anvil_mir_func_t *mir, size_t index, anvil_mi
     return true;
 }
 
+/* D(X,B) of a LOAD/STORE whose base is use `base_use` (an index, when
+ * present, follows it); sets *uses_reg when `reg` is the base or index. */
+static void systemz_memory_operand(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, size_t base_use, int reg, bool *uses_reg,
+                                   char *out, size_t out_len)
+{
+    anvil_mir_vreg_t base = anvil_mir_get_instr_use(emit->mir, index, base_use);
+    anvil_mir_vreg_t indexed = instr.index_scale ? anvil_mir_get_instr_use(emit->mir, index, base_use + 1) : ANVIL_MIR_NO_VREG;
+    *uses_reg = systemz_phys_reg(emit, base) == reg || (indexed != ANVIL_MIR_NO_VREG && systemz_phys_reg(emit, indexed) == reg);
+    snprintf(out, out_len, "%lld(%s,%s)", instr.has_imm ? (long long)instr.imm : 0LL, indexed != ANVIL_MIR_NO_VREG ? systemz_vreg_reg_name(emit, indexed) : "",
+             systemz_vreg_reg_name(emit, base));
+}
+
 static void systemz_emit_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
-    anvil_mir_vreg_t addr = ANVIL_MIR_NO_VREG;
-    systemz_get_uses(emit->mir, index, &addr, NULL, NULL);
     const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, instr.def);
     if (!info)
         return;
-    if (info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits <= 8 && systemz_phys_reg(emit, instr.def) == systemz_phys_reg(emit, addr)) {
-        /* IC inserts into a cleared register; when the destination is the
+    char address[64];
+    bool overlaps;
+    systemz_memory_operand(emit, instr, index, 0, systemz_phys_reg(emit, instr.def), &overlaps, address, sizeof(address));
+    const char *extending = systemz_extending_load(emit, info);
+    if (extending) {
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", extending, systemz_vreg_reg_name(emit, instr.def), address);
+        return;
+    }
+    if (info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits <= 8 && overlaps && systemz_narrow_needs_extension(emit, info, instr.def)) {
+        /* IC inserts into a cleared register; when the destination is an
          * address register, clear R1 instead and move the byte over. */
-        anvil_strbuf_appendf(&emit->code, "         %s    R1,R1\n         IC    R1,%lld(,%s)\n         %s    %s,R1\n",
-                             emit->desc->has_64bit_gprs ? "XGR" : "XR", instr.has_imm ? (long long)instr.imm : 0LL,
-                             systemz_vreg_reg_name(emit, addr), emit->desc->has_64bit_gprs ? "LGR" : "LR", systemz_vreg_reg_name(emit, instr.def));
+        anvil_strbuf_appendf(&emit->code, "         %s    R1,R1\n         IC    R1,%s\n         %s    %s,R1\n",
+                             emit->desc->has_64bit_gprs ? "XGR" : "XR", address, emit->desc->has_64bit_gprs ? "LGR" : "LR",
+                             systemz_vreg_reg_name(emit, instr.def));
         systemz_emit_narrow_load_suffix(emit, info, instr.def);
         return;
     }
     systemz_emit_narrow_load_prefix(emit, info, instr.def);
-    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld(,%s)\n", systemz_load_op(emit, info->size_bits, info->reg_class), systemz_vreg_reg_name(emit, instr.def),
-                         instr.has_imm ? (long long)instr.imm : 0LL, systemz_vreg_reg_name(emit, addr));
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_load_op(emit, info->size_bits, info->reg_class), systemz_vreg_reg_name(emit, instr.def),
+                         address);
     systemz_emit_narrow_load_suffix(emit, info, instr.def);
 }
 
 static void systemz_emit_store(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
-    anvil_mir_vreg_t value = ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t addr = ANVIL_MIR_NO_VREG;
-    systemz_get_uses(emit->mir, index, &value, &addr, NULL);
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, index, 0);
     const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, value);
     if (!info)
         return;
-    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld(,%s)\n", systemz_store_op(emit, info->size_bits, info->reg_class), systemz_vreg_reg_name(emit, value),
-                         instr.has_imm ? (long long)instr.imm : 0LL, systemz_vreg_reg_name(emit, addr));
+    char address[64];
+    bool overlaps;
+    systemz_memory_operand(emit, instr, index, 1, -1, &overlaps, address, sizeof(address));
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_store_op(emit, info->size_bits, info->reg_class), systemz_vreg_reg_name(emit, value),
+                         address);
 }
 
 /* Register `reg` = R11 + offset (any offset: LA's displacement is 12 bits). */
@@ -1274,12 +1551,78 @@ static void systemz_emit_dynamic_alloca(systemz_emit_t *emit, anvil_mir_instr_in
 
 static void systemz_emit_branch_target(systemz_emit_t *emit, anvil_mir_block_t block)
 {
+    block = anvil_mir_layout_target(&emit->layout, block);
     char label[SYSTEMZ_INTERNAL_LABEL_CAP];
     systemz_block_label(emit, block, label, sizeof(label));
     anvil_strbuf_appendf(&emit->code, "%s", label);
 }
 
+static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index);
+
+/* Before allocation: constants every reader takes as an immediate, and
+ * integer compares only the next branch reads, need no register. */
+bool anvil_systemz_mark_registerless(anvil_mir_func_t *mir, const anvil_mainframe_target_desc_t *desc, anvil_cpu_features_t features)
+{
+    systemz_emit_t probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.mir = mir;
+    probe.desc = desc;
+    probe.features = features;
+    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&probe.isel, mir, systemz_takes_immediate, NULL, &probe))
+        return false;
+    bool ok = anvil_mir_isel_mark_registerless(mir, &probe.isel);
+    anvil_mir_isel_facts_destroy(&probe.isel);
+    return ok;
+}
+
+/* A counter loop (anvil_mir_counter_loops) counts -j down in j's own
+ * register: negated after j's first value (the zero tests before the loop
+ * see the same zero-ness), the step and its test become BRCT/BRCTG (BCT
+ * or BCTG on based-branch models). */
 static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
+{
+    if (!anvil_mir_isel_registerless_ok(emit->mir, &emit->isel, index, &instr)) {
+        emit->code.failed = true;
+        return;
+    }
+    uint8_t role = emit->counter_roles ? emit->counter_roles[index] : ANVIL_MIR_COUNTER_NONE;
+    if (role == ANVIL_MIR_COUNTER_STEP)
+        return;
+    if (index == emit->rotate_skip) {
+        /* A zero extension the RISBG after it does. */
+        emit->rotate_skip = SIZE_MAX;
+        return;
+    }
+    if (role == ANVIL_MIR_COUNTER_TEST) {
+        emit->counter_vreg = anvil_mir_get_instr_use(emit->mir, index, 0);
+        emit->counter_branch = systemz_vreg_reg_name(emit, emit->counter_vreg);
+        return;
+    }
+    if (role == ANVIL_MIR_COUNTER_BRANCH && emit->counter_branch) {
+        const anvil_mir_vreg_info_t *counter = systemz_emit_vreg_info(emit, emit->counter_vreg);
+        bool wide = emit->desc->has_64bit_gprs && counter && counter->size_bits > 32;
+        bool immrel = (emit->features & ANVIL_FEATURE_ZARCH_IMMREL) != 0;
+        const char *op = immrel ? (wide ? "BRCTG" : "BRCT") : (wide ? "BCTG" : "BCT");
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,", op, emit->counter_branch);
+        systemz_emit_branch_target(emit, instr.true_block);
+        anvil_strbuf_append(&emit->code, "\n");
+        if (!anvil_mir_layout_falls_into(&emit->layout, emit->block, instr.false_block)) {
+            anvil_strbuf_append(&emit->code, "         B     ");
+            systemz_emit_branch_target(emit, instr.false_block);
+            anvil_strbuf_append(&emit->code, "\n");
+        }
+        emit->counter_branch = NULL;
+        emit->fused_branch = NULL;
+        return;
+    }
+    systemz_emit_instr_body(emit, instr, index);
+    if (role == ANVIL_MIR_COUNTER_INIT) {
+        const char *reg = systemz_vreg_reg_name(emit, instr.def);
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", emit->desc->has_64bit_gprs ? "LCGR" : "LCR", reg, reg);
+    }
+}
+
+static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
     anvil_mir_vreg_t u0 = ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t u1 = ANVIL_MIR_NO_VREG;
@@ -1309,7 +1652,8 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR:
     case ANVIL_MIR_OP_FDIV:
-        if (!systemz_emit_binary_imm(emit, instr, index, u0))
+        if (!systemz_emit_rotate_mask(emit, instr, index, u0) && !systemz_emit_distinct(emit, instr, index, u0, u1) &&
+            !systemz_emit_binary_imm(emit, instr, index, u0))
             systemz_emit_binary(emit, instr, u0, u1);
         break;
     case ANVIL_MIR_OP_CMP:
@@ -1364,7 +1708,7 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
         systemz_emit_call(emit, instr, index);
         break;
     case ANVIL_MIR_OP_BR:
-        if (instr.true_block == emit->block + 1)
+        if (anvil_mir_layout_falls_into(&emit->layout, emit->block, instr.true_block))
             break;
         anvil_strbuf_append(&emit->code, "         B     ");
         systemz_emit_branch_target(emit, instr.true_block);
@@ -1765,6 +2109,7 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 
     systemz_emit_t emit;
     memset(&emit, 0, sizeof(emit));
+    emit.rotate_target = emit.rotate_skip = emit.tm_at = SIZE_MAX;
     emit.desc = desc;
     emit.ret_low_word = ANVIL_MIR_NO_VREG;
     emit.mir = mir;
@@ -1778,17 +2123,24 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
     }
     systemz_symbol_name(emit.func_label, sizeof(emit.func_label), mir_name);
 
-    bool ok = systemz_prepare_frame(&emit) && anvil_mir_isel_facts_build(&emit.isel, mir, systemz_takes_immediate, &emit);
+    emit.counter_roles = malloc(anvil_mir_num_instrs(mir) ? anvil_mir_num_instrs(mir) : 1);
+    bool ok = emit.counter_roles && systemz_prepare_frame(&emit) && anvil_mir_isel_facts_build(&emit.isel, mir, systemz_takes_immediate, NULL, &emit) &&
+              anvil_mir_counter_loops(mir, &emit.isel, false, true, emit.counter_roles) && anvil_mir_layout_build(&emit.layout, mir);
     if (ok) {
         systemz_emit_header(&emit);
         desc->abi_ops->emit_prologue(&emit);
         for (size_t b = 0; b < anvil_mir_num_blocks(mir) && !emit.code.failed; b++) {
+            if (emit.layout.skip[b])
+                continue;  /* prints only a jump: branches go where it leads */
             if (b != 0) {
                 char label[SYSTEMZ_INTERNAL_LABEL_CAP];
                 systemz_block_label(&emit, (anvil_mir_block_t)b, label, sizeof(label));
                 anvil_strbuf_appendf(&emit.code, "%-8s DS    0H\n", label);
             }
             emit.block = (anvil_mir_block_t)b;
+            /* A block may be entered from elsewhere: the condition code
+             * tells nothing yet. */
+            anvil_print_flags_reset(&emit.flags);
             for (size_t instr_index = 0; instr_index < anvil_mir_num_instrs(mir) && !emit.code.failed; instr_index++) {
                 anvil_mir_instr_info_t instr;
                 if (!anvil_mir_get_instr_info(mir, instr_index, &instr)) {
@@ -1797,7 +2149,9 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
                 }
                 if (instr.block != (anvil_mir_block_t)b)
                     continue;
+                size_t printed = emit.code.len;
                 systemz_emit_instr(&emit, instr, instr_index);
+                anvil_print_flags_after(&emit.flags, mir, instr_index, &instr, emit.code.len != printed);
             }
             if (!ok || emit.code.failed)
                 break;
@@ -1826,6 +2180,8 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
     }
 
     anvil_mir_isel_facts_destroy(&emit.isel);
+    anvil_mir_layout_destroy(&emit.layout);
+    free(emit.counter_roles);
     free(emit.frame_offsets);
     free(emit.spill_offsets);
     free(emit.call_arg_value_offsets);

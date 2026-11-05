@@ -1,6 +1,9 @@
-/* x86-64 128-bit vector instructions (SSE through SSE4.1) as data: the cost
- * hook, MIR legality and the printer all read this table. */
-#include "x86_64_internal.h"
+/* x86 128-bit vector instructions (SSE through SSE4.2, FMA3) as data: the
+ * i386 and x86-64 cost hooks, MIR legality and the shared printer
+ * (asm/x86_sse_vector.c) all read this table.  The scalar rows on general
+ * registers (rotates, MULH) are x86-64's; i386 prices its scalar operations
+ * in x86_32_scalar.c. */
+#include "asm/x86_sse_vector.h"
 
 #define SSE ANVIL_FEATURE_X86_SSE
 #define SSE2 ANVIL_FEATURE_X86_SSE2
@@ -18,7 +21,7 @@
 #define FP ANVIL_VECTOR_LANES_FP
 #define ANY ANVIL_VECTOR_LANES_ANY
 
-const anvil_vector_isa_t x64_vector_isa[] = {
+const anvil_vector_isa_t x86_sse_isa[] = {
     {ANVIL_OP_LOAD, 0, ANY, L, SSE2, 1, "movups"},
     {ANVIL_OP_STORE, 0, ANY, L, SSE2, 1, "movups"},
 
@@ -182,9 +185,4 @@ const anvil_vector_isa_t x64_vector_isa[] = {
     {ANVIL_OP_ACCUM_SEXT, 32, INT, W4, SSSE3, 5, "pmaddubsw"},
 };
 
-const size_t x64_vector_isa_count = sizeof(x64_vector_isa) / sizeof(x64_vector_isa[0]);
-
-unsigned x64_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape)
-{
-    return anvil_vector_isa_cost(x64_vector_isa, x64_vector_isa_count, 16, be->ctx, operation, type, shape);
-}
+const size_t x86_sse_isa_count = sizeof(x86_sse_isa) / sizeof(x86_sse_isa[0]);

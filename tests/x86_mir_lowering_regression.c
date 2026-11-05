@@ -113,10 +113,13 @@ static void test_cdecl_stack_args_add_ret(void)
                 CHECK(anvil_x86_emit_mir(mir, &asm_text, &asm_len),
                       "integer add MIR should emit x86 assembly");
                 if (asm_text) {
-                    check_contains(asm_text, "\tpushl %ebp\n",
-                                   "function should emit a prologue");
-                    check_contains(asm_text, "8(%ebp)",
-                                   "stack args should be read off ebp");
+                    /* No dynamic allocation: no frame pointer; a leaf
+                     * with nothing to save or spill needs no frame. */
+                    CHECK(!strstr(asm_text, "\tsubl $") && !strstr(asm_text, "\taddl $"),
+                          "a leaf with nothing to save allocates no frame");
+                    CHECK(!strstr(asm_text, "pushl %ebp"), "a function without dynamic allocation keeps no frame pointer");
+                    check_contains(asm_text, "(%esp), %",
+                                   "stack args should be read off esp");
                     check_contains(asm_text, "\tret\n",
                                    "function should emit a return");
                     assemble_check(asm_text,
@@ -840,8 +843,10 @@ static void test_calling_conventions_and_platforms(void)
                                            "stdcall callee should pop its args");
                         }
                         if (ccs[c].cc == ANVIL_CC_FASTCALL) {
-                            check_contains(t, "%ecx",
-                                           "fastcall should use ecx for an arg");
+                            /* Both arguments arrive in ECX/EDX and pass on
+                             * in them: nothing reads them from the stack. */
+                            CHECK(strstr(t, "8(%ebp)") == NULL && strstr(t, "12(%ebp)") == NULL,
+                                  "fastcall arguments should come in registers");
                         }
                         free(t);
                     }

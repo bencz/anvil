@@ -1464,6 +1464,11 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
     if (systemz_unary_op(instr->op, &op)) {
         if (!instr->result || instr->num_operands < 1)
             return false;
+        /* A pointer reinterpreted as another pointer is the same value. */
+        if (anvil_cast_keeps_value(instr)) {
+            anvil_mir_vreg_t same = systemz_lower_value(lower, instr->operands[0]);
+            return same != ANVIL_MIR_NO_VREG && systemz_map_put(lower, instr->result, same);
+        }
         if (systemz_needs_pair(lower, instr->result->type) || systemz_needs_pair(lower, instr->operands[0]->type))
             return systemz_lower_wide_cast(lower, instr, op);
         anvil_mir_vreg_t src = systemz_lower_value(lower, instr->operands[0]);
@@ -1522,6 +1527,9 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
         anvil_mir_vreg_t addr = systemz_lower_value(lower, instr->operands[0]);
         anvil_mir_vreg_t def = systemz_add_vreg_for_type(lower, instr->result->type);
         if (addr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
+            return false;
+        /* Its sign unobserved: loaded zero-extended. */
+        if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
             return false;
         bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
         anvil_mir_vreg_t loaded = is_i1 ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false) : def;

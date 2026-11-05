@@ -8,6 +8,8 @@
 #include "anvil/anvil_analysis.h"
 #include "../common/aggregate_mir.h"
 #include "../common/mir_isel.h"
+#include "../common/print_flags.h"
+#include "../common/rotate_mask.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -39,8 +41,23 @@ typedef struct {
     /* RET_VALUE_PART's vreg (the low word of a pair result), moved by RET. */
     anvil_mir_vreg_t ret_low_word;
     anvil_mir_isel_facts_t isel;
+    anvil_mir_layout_t layout;   /* blocks printed, and where branches land */
     anvil_mir_block_t block;     /* being emitted (blocks print in order) */
     const char *fused_branch;    /* set by a compare folded into the next BR_COND */
+    anvil_print_flags_t flags;   /* what the condition code tells */
+    /* anvil_mir_counter_loops roles: counters for BRCT/BRCTG, and the
+     * counter register of the branch being printed. */
+    uint8_t *counter_roles;
+    const char *counter_branch;
+    anvil_mir_vreg_t counter_vreg;
+    /* A shift or mask folded into the one reading it, which prints both
+     * as one RISBG of `rotate_source`. */
+    size_t rotate_target, rotate_skip;  /* rotate_skip: a zero extension between */
+    /* x & c read only by `== 0` / `!= 0` feeding the branch: TMLL/TMLH,
+     * the compare at tm_at prints nothing (SIZE_MAX: none). */
+    size_t tm_at;
+    anvil_mir_vreg_t rotate_source;
+    anvil_rotate_mask_t rotate;
 } systemz_emit_t;
 
 /* These linkage emitters require the HLASM printer and a caller-owned arena.
@@ -79,11 +96,11 @@ extern const systemz_abi_ops_t systemz_mvs_arena_31_abi_ops;
 extern const systemz_abi_ops_t systemz_mvs_arena_64_abi_ops;
 extern const systemz_asm_ops_t systemz_hlasm_ops;
 
-extern const int systemz_alloc_gprs[7];
-extern const int systemz_scratch_gprs[2];
-extern const int systemz_s370_fprs[1];
+extern const int systemz_alloc_gprs[9];
+extern const int systemz_scratch_gprs[3];
+extern const int systemz_s370_fprs[3];
 extern const int systemz_s370_scratch_fprs[2];
-extern const int systemz_s390_fprs[13];
+extern const int systemz_s390_fprs[15];
 extern const int systemz_s390_scratch_fprs[2];
 /* R12 setup for the function entry (R15 = entry point) and the label of
  * its literal pool (emitted at the function's end). */
@@ -116,5 +133,7 @@ void systemz_emit_load_imm(systemz_emit_t *emit, int reg, int64_t imm);
 bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t variant, anvil_fp_format_t fp_format,
                          anvil_cpu_features_t features, char **output, size_t *len);
 bool systemz_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, anvil_fp_format_t fp_format, size_t pointer_size);
+
+bool anvil_systemz_mark_registerless(anvil_mir_func_t *mir, const anvil_mainframe_target_desc_t *desc, anvil_cpu_features_t features);
 
 #endif

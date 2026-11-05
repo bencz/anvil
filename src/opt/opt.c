@@ -51,8 +51,10 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
     ANVIL_PASS_TAIL_RECURSION,     /* recursive returns become loops LICM sees */
     ANVIL_PASS_LICM,
     ANVIL_PASS_UNROLL,
+    ANVIL_PASS_LOOP_TABLE,         /* after unrolling: inner loops are straight code */
     ANVIL_PASS_LOOP_VECTORIZE,
     ANVIL_PASS_LOOP_STRENGTH,      /* after vectorization: it keeps i-indexed lanes */
+    ANVIL_PASS_RUNTIME_UNROLL,     /* on loops counting to zero (loop_strength) */
     ANVIL_PASS_INLINE,
     ANVIL_PASS_VECTORIZE,
     ANVIL_PASS_DCE,                /* 7. DCE mops up everything NOP'd above */
@@ -65,7 +67,7 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
  *   Og (DEBUG)      - Debug-friendly: copy_prop, store_load_prop (minimal IR cleanup)
  *   O1 (BASIC)      - Scalar SSA promotion, constant folding, DCE and Og passes
  *   O2 (STANDARD)   - O1 + SROA, SCCP, GVN, known bits, CFG, arithmetic and memory passes, LICM
- *   O3 (AGGRESSIVE) - O2 + bounded unrolling, leaf inlining and explicitly enabled SLP
+ *   O3 (AGGRESSIVE) - O2 + leaf inlining and explicitly enabled SLP (complete unrolling of small loops runs from O2)
  */
 static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
     {
@@ -185,7 +187,7 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "unroll",
         .description = "Completely unroll small loops with proven trip counts",
         .run = anvil_pass_unroll,
-        .min_level = ANVIL_OPT_AGGRESSIVE,
+        .min_level = ANVIL_OPT_STANDARD,
     },
     {
         .id = ANVIL_PASS_VECTORIZE,
@@ -199,7 +201,7 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "loop-vectorize",
         .description = "Vector copies of counted unit-stride loops, using target vector costs",
         .run = anvil_pass_loop_vectorize,
-        .min_level = ANVIL_OPT_AGGRESSIVE,
+        .min_level = ANVIL_OPT_STANDARD,
     },
     {
         .id = ANVIL_PASS_LOOP_STRENGTH,
@@ -213,6 +215,20 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "tail-recursion",
         .description = "Recursive returns as loops, with an accumulator",
         .run = anvil_pass_tail_recursion,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_RUNTIME_UNROLL,
+        .name = "runtime-unroll",
+        .description = "Small counted loops run several body copies per test",
+        .run = anvil_pass_runtime_unroll,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_LOOP_TABLE,
+        .name = "loop-table",
+        .description = "Loops storing constants per index become read-only tables",
+        .run = anvil_pass_loop_table,
         .min_level = ANVIL_OPT_STANDARD,
     }
 };

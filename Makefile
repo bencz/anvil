@@ -52,7 +52,9 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/va_cursor.c \
 	$(SRC_DIR)/backend/common/ir_lower.c \
 	$(SRC_DIR)/backend/common/vector_isa.c \
-	$(SRC_DIR)/backend/x86/x86_64_vector.c \
+	$(SRC_DIR)/backend/common/print_flags.c \
+	$(SRC_DIR)/backend/common/rotate_mask.c \
+	$(SRC_DIR)/backend/x86/x86_sse_isa.c \
 	$(SRC_DIR)/backend/x86/x86_32_scalar.c \
 	$(SRC_DIR)/backend/arm64/arm64_vector.c \
 	$(SRC_DIR)/backend/ppc/ppc_vector.c \
@@ -76,6 +78,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/x86/asm/gas32_x87.c \
 	$(SRC_DIR)/backend/x86/asm/gas64.c \
 	$(SRC_DIR)/backend/x86/asm/x86_gas.c \
+	$(SRC_DIR)/backend/x86/asm/x86_sse_vector.c \
 	$(SRC_DIR)/backend/systemz/systemz_target.c \
 	$(SRC_DIR)/backend/systemz/systemz_lower.c \
 	$(SRC_DIR)/backend/systemz/systemz_legal.c \
@@ -125,6 +128,9 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/loop_vectorize.c \
 	$(SRC_DIR)/opt/loop_strength.c \
 	$(SRC_DIR)/opt/tail_recursion.c \
+	$(SRC_DIR)/opt/runtime_unroll.c \
+	$(SRC_DIR)/opt/loop_table.c \
+	$(SRC_DIR)/opt/codegen_prepare.c \
 	$(SRC_DIR)/opt/mem2reg.c \
 	$(SRC_DIR)/opt/sroa.c \
 	$(SRC_DIR)/opt/licm.c \
@@ -189,6 +195,9 @@ TESTS = \
 	$(BUILD_DIR)/tests/loop_vectorize_regression \
 	$(BUILD_DIR)/tests/scalar_operation_regression \
 	$(BUILD_DIR)/tests/loop_preheader_regression \
+	$(BUILD_DIR)/tests/no_wrap_regression \
+	$(BUILD_DIR)/tests/count_loop_regression \
+	$(BUILD_DIR)/tests/operand_fold_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \
 	$(BUILD_DIR)/tests/core_arm64_regression \
@@ -260,13 +269,24 @@ TESTS = \
 	$(BUILD_DIR)/tests/smalltalk_application_samples_regression \
 	$(BUILD_DIR)/tests/smalltalk_dispatch_regression
 
-.PHONY: all clean lib examples tests smalltalk-aotc smalltalk-aot-link \
+.PHONY: all clean lib examples tests bench-ir smalltalk-aotc smalltalk-aot-link \
 	smalltalk-runtime smalltalk-app test-win64-abi test-fcmp-i1-runtime test-aggregate-abi \
 	test-sanitize test-valgrind install examples-runtime test-examples \
 	clean-examples-runtime examples-advanced test-examples-advanced \
 	clean-examples-advanced
 
 all: lib examples
+
+# Benchmark kernels built with the ANVIL API (bench/ir/run.sh compares them
+# with clang compiling the same algorithms in C).
+BENCH_IR_SRCS = $(wildcard bench/ir/*.c bench/ir/kernels/*.c)
+BENCH_IR_GEN = $(BUILD_DIR)/bench_ir/anvil-bench-gen
+
+bench-ir: $(BENCH_IR_GEN)
+
+$(BENCH_IR_GEN): $(BENCH_IR_SRCS) bench/ir/kit.h $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(BENCH_IR_SRCS) -o $@ $(LDFLAGS) -lanvil -lm
 
 lib: $(LIB_PATH)
 

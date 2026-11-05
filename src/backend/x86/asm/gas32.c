@@ -1,6 +1,7 @@
 #include "gas32_internal.h"
 #include "../../common/parallel_move.h"
 #include "x86_gas.h"
+#include "x86_sse_vector.h"
 #include "anvil/anvil_analysis.h"
 
 #include <limits.h>
@@ -42,6 +43,11 @@ static bool x86_use_takes_immediate(void *ctx, size_t index, const anvil_mir_ins
     const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(emit->mir, info->def) : NULL;
     int64_t other;
     (void)value;
+    /* A stored integer: mov $imm, mem. */
+    if (info->op == ANVIL_MIR_OP_STORE && use == 0) {
+        const anvil_mir_vreg_info_t *stored = anvil_mir_get_vreg_info(emit->mir, anvil_mir_get_instr_use(emit->mir, index, 0));
+        return stored && stored->reg_class == ANVIL_MIR_REG_GPR && stored->size_bits <= 32;
+    }
     if (!def || def->reg_class != ANVIL_MIR_REG_GPR || info->num_uses != 2)
         return false;
     switch (info->op) {
@@ -64,6 +70,17 @@ static bool x86_use_takes_immediate(void *ctx, size_t index, const anvil_mir_ins
         }
         return false;
     }
+}
+
+/* Position-dependent code addresses a symbol absolutely: the base of a
+ * load or store becomes the displacement (x86_memory_operand). */
+static bool x86_use_takes_symbol(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset)
+{
+    const x86_mir_emit_t *emit = ctx;
+    (void)index;
+    (void)symbol;
+    return emit->reloc == ANVIL_RELOC_STATIC && offset >= INT32_MIN && offset <= INT32_MAX &&
+           ((info->op == ANVIL_MIR_OP_LOAD && use == 0) || (info->op == ANVIL_MIR_OP_STORE && use == 1));
 }
 
 /* GPRs the emitters below write before reading all of an instruction's
@@ -105,17 +122,26 @@ static uint64_t x86_printer_gpr_clobbers(const anvil_mir_instr_info_t *info)
     }
 }
 
+/* XMM registers of the shared SSE printer: XMM4, never allocated, and
+ * XMM7, the scratch that reductions and accumulations declare
+ * (x86_annotate_printer_registers). */
+#define X86_SSE_TEMP 4
+#define X86_SSE_TEMP2 7
+
 bool x86_annotate_printer_registers(anvil_mir_func_t *mir)
 {
     anvil_mir_isel_facts_t facts;
-    if (!anvil_mir_isel_facts_build(&facts, mir, NULL, NULL))
+    if (!anvil_mir_isel_facts_build(&facts, mir, NULL, NULL, NULL))
         return false;
     bool ok = true;
     for (size_t index = 0; ok && index < anvil_mir_num_instrs(mir); index++) {
         anvil_mir_instr_info_t info;
         ok = anvil_mir_get_instr_info(mir, index, &info);
         uint64_t clobbers = ok ? x86_printer_gpr_clobbers(&info) : 0;
-        ok = ok && anvil_mir_set_instr_scratch(mir, index, ANVIL_MIR_REG_GPR, x86_printer_gpr_scratch(mir, &facts, index, &info)) &&
+        /* Reductions and accumulations fold through a second XMM temp. */
+        bool second_temp = ok && info.op == ANVIL_MIR_OP_VECTOR && (anvil_op_is_reduction(info.ir_op) || info.widening);
+        ok = ok && (!second_temp || anvil_mir_set_instr_scratch(mir, index, ANVIL_MIR_REG_FPR, UINT64_C(1) << X86_SSE_TEMP2)) &&
+             anvil_mir_set_instr_scratch(mir, index, ANVIL_MIR_REG_GPR, x86_printer_gpr_scratch(mir, &facts, index, &info)) &&
              (!clobbers || anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_GPR, info.clobbers[ANVIL_MIR_REG_GPR] | clobbers));
     }
     anvil_mir_isel_facts_destroy(&facts);
@@ -219,29 +245,40 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
     emit->fp_returns = x86_func_returns_fp(emit->mir);
 
     int offset = 0;
-    static const int callee_saved[] = {X86_EBX, X86_ESI, X86_EDI};
+    emit->frame_pointer = x86_keeps_frame_pointer(emit->mir);
+    /* Without a frame pointer the saves are pushes, the first into EBP's
+     * would-be slot (offset 0). */
+    int first_save = emit->frame_pointer ? 4 : 0;
+    emit->num_pushes = 0;
+    static const int callee_saved[] = {X86_EBX, X86_ESI, X86_EDI, X86_EBP};
     for (size_t c = 0; c < sizeof(callee_saved) / sizeof(callee_saved[0]); c++) {
         int reg = callee_saved[c];
-        bool used = false;
-        for (size_t i = 0; i < anvil_mir_num_vregs(emit->mir); i++) {
-            const anvil_regalloc_assignment_t *assignment = anvil_mir_get_assignment(emit->mir, (anvil_mir_vreg_t)i);
-            if (!assignment || assignment->spilled)
-                continue;
-            if (assignment->reg_class == ANVIL_MIR_REG_GPR && assignment->phys_reg == reg) {
-                used = true;
-                break;
-            }
-        }
-        if (used) {
-            offset += 4;
-            emit->gpr_save_offsets[reg] = offset;
-        }
+        if (!anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, reg))
+            continue;
+        emit->gpr_save_offsets[reg] = offset = first_save + 4 * emit->num_pushes;
+        emit->num_pushes++;
     }
 
-    offset += 4;
-    emit->scratch_a_off = offset;
-    offset += 4;
-    emit->scratch_b_off = offset;
+    /* Calls (and runtime helpers) need the stack aligned; floating point
+     * moves values through two scratch words. */
+    bool calls = false, floating = false;
+    for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
+        anvil_mir_instr_info_t info;
+        if (!anvil_mir_get_instr_info(emit->mir, i, &info))
+            return false;
+        calls |= info.op == ANVIL_MIR_OP_CALL || info.clobbers[ANVIL_MIR_REG_GPR] != 0;
+    }
+    for (size_t i = 0; i < anvil_mir_num_vregs(emit->mir); i++) {
+        const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, (anvil_mir_vreg_t)i);
+        floating |= info && info->reg_class == ANVIL_MIR_REG_FPR;
+    }
+    emit->scratch_a_off = emit->scratch_b_off = -1;
+    if (floating || emit->fp_returns) {
+        offset += 4;
+        emit->scratch_a_off = offset;
+        offset += 4;
+        emit->scratch_b_off = offset;
+    }
 
     int fp_bytes = emit->fp->frame_bytes(emit);
     if (fp_bytes > 0) {
@@ -278,9 +315,14 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
 
     offset += emit->outgoing_size;
     /* Entry leaves ESP 4 bytes below an aligned boundary and the EBP push
-     * another 4: the frame restores the alignment for calls. */
+     * (or its slot) another 4: the frame restores the alignment for calls.
+     * A function calling nothing with no aligned locals needs no
+     * alignment, and without saves or a frame no EBP slot either. */
     int align = emit->plat->stack_alignment;
-    emit->frame_size = x86_align_int(offset + 8, align) - 8;
+    if (emit->frame_pointer || calls || emit->num_frame_slot_offsets > 0)
+        emit->frame_size = x86_align_int(offset + 8, align) - 8;
+    else
+        emit->frame_size = offset == 0 && emit->num_pushes == 0 ? -4 : offset;
     return true;
 }
 
@@ -314,24 +356,55 @@ static void x86_emit_func_header(x86_mir_emit_t *emit)
     }
 }
 
+static void x86_emit_frame_entry(x86_mir_emit_t *emit);
+
 static void x86_emit_prologue(x86_mir_emit_t *emit)
 {
     bool cfi = emit->plat->format->cfi;
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_startproc\n");
-    anvil_strbuf_append(&emit->code, "\tpushl %ebp\n");
-    if (cfi)
-        anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_offset 8\n\t.cfi_offset %ebp, -8\n");
-    anvil_strbuf_append(&emit->code, "\tmovl %esp, %ebp\n");
-    if (cfi)
-        anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_register %ebp\n");
-    if (emit->frame_size > 0) {
-        anvil_strbuf_appendf(&emit->code, "\tsubl $%d, %%esp\n", emit->frame_size);
+    if (!emit->wrapped)
+        x86_emit_frame_entry(emit);
+}
+
+/* The frame: pushes or EBP, locals (at the entry, or at the frame block). */
+static void x86_emit_frame_entry(x86_mir_emit_t *emit)
+{
+    bool cfi = emit->plat->format->cfi;
+    if (emit->frame_pointer) {
+        anvil_strbuf_append(&emit->code, "\tpushl %ebp\n");
+        if (cfi)
+            anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_offset 8\n\t.cfi_offset %ebp, -8\n");
+        anvil_strbuf_append(&emit->code, "\tmovl %esp, %ebp\n");
+        if (cfi)
+            anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_register %ebp\n");
+        if (emit->frame_size > 0)
+            anvil_strbuf_appendf(&emit->code, "\tsubl $%d, %%esp\n", emit->frame_size);
+    } else {
+        /* The same layout from ESP: the saves pushed, from EBP's would-be
+         * slot down, then the rest. */
+        for (int pushed = 0; pushed < emit->num_pushes; pushed++) {
+            for (int reg = 0; reg < 8; reg++) {
+                if (emit->gpr_save_offsets[reg] != 4 * pushed)
+                    continue;
+                anvil_strbuf_appendf(&emit->code, "\tpushl %%%s\n", x86_reg32_names[reg]);
+                if (cfi)
+                    anvil_strbuf_appendf(&emit->code, "\t.cfi_def_cfa_offset %d\n\t.cfi_offset %%%s, %d\n", 8 + 4 * pushed, x86_reg32_names[reg],
+                                         -emit->gpr_save_offsets[reg] - 8);
+            }
+        }
+        int rest = emit->frame_size + 4 - 4 * emit->num_pushes;
+        if (rest > 0) {
+            anvil_strbuf_appendf(&emit->code, "\tsubl $%d, %%esp\n", rest);
+            if (cfi)
+                anvil_strbuf_appendf(&emit->code, "\t.cfi_def_cfa_offset %d\n", emit->frame_size + 8);
+        }
+        return;
     }
 
     for (int reg = 0; reg < 8; reg++) {
         if (emit->gpr_save_offsets[reg] >= 0) {
-            anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, -%d(%%ebp)\n", x86_reg32_names[reg], emit->gpr_save_offsets[reg]);
+            anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %s\n", x86_reg32_names[reg], x86_frame(emit, -(emit->gpr_save_offsets[reg])));
             if (cfi)
                 anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %%%s, %d\n", x86_reg32_names[reg], -emit->gpr_save_offsets[reg] - 8);
         }
@@ -345,13 +418,24 @@ static void x86_emit_epilogue(x86_mir_emit_t *emit, int64_t pop_bytes)
     bool cfi = emit->plat->format->cfi;
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_remember_state\n");
-    for (int reg = 7; reg >= 0; reg--) {
-        if (emit->gpr_save_offsets[reg] >= 0) {
-            anvil_strbuf_appendf(&emit->code, "\tmovl -%d(%%ebp), %%%s\n", emit->gpr_save_offsets[reg], x86_reg32_names[reg]);
+    if (emit->frame_pointer) {
+        for (int reg = 7; reg >= 0; reg--) {
+            if (emit->gpr_save_offsets[reg] >= 0)
+                anvil_strbuf_appendf(&emit->code, "\tmovl %s, %%%s\n", x86_frame(emit, -(emit->gpr_save_offsets[reg])), x86_reg32_names[reg]);
+        }
+        anvil_strbuf_append(&emit->code, "\tmovl %ebp, %esp\n");
+        anvil_strbuf_append(&emit->code, "\tpopl %ebp\n");
+    } else {
+        int rest = emit->frame_size + 4 - 4 * emit->num_pushes;
+        if (rest > 0)
+            anvil_strbuf_appendf(&emit->code, "\taddl $%d, %%esp\n", rest);
+        for (int popped = emit->num_pushes - 1; popped >= 0; popped--) {
+            for (int reg = 0; reg < 8; reg++) {
+                if (emit->gpr_save_offsets[reg] == 4 * popped)
+                    anvil_strbuf_appendf(&emit->code, "\tpopl %%%s\n", x86_reg32_names[reg]);
+            }
         }
     }
-    anvil_strbuf_append(&emit->code, "\tmovl %ebp, %esp\n");
-    anvil_strbuf_append(&emit->code, "\tpopl %ebp\n");
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa %esp, 4\n");
     if (pop_bytes > 0) {
@@ -361,6 +445,20 @@ static void x86_emit_epilogue(x86_mir_emit_t *emit, int64_t pop_bytes)
     }
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_restore_state\n");
+}
+
+/* The epilogue, or before the frame block (nothing saved) only the
+ * return. */
+static void x86_emit_return(x86_mir_emit_t *emit, int64_t pop_bytes)
+{
+    if (emit->wrapped && emit->block < anvil_mir_frame_block(emit->mir)) {
+        if (pop_bytes > 0)
+            anvil_strbuf_appendf(&emit->code, "\tret $%lld\n", (long long)pop_bytes);
+        else
+            anvil_strbuf_append(&emit->code, "\tret\n");
+        return;
+    }
+    x86_emit_epilogue(emit, pop_bytes);
 }
 
 /* EAX <- lo, EDX <- hi as one parallel move; the sources may sit in
@@ -477,6 +575,7 @@ static void x86_emit_gpr_binary(x86_mir_emit_t *emit, size_t index, const anvil_
             if (dst_phys != a_phys)
                 anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n", a, dst);
             anvil_strbuf_appendf(&emit->code, "\t%s%s $%lld, %%%s\n", mnemonic, wsuf, (long long)imm, dst);
+            anvil_print_flags_set(&emit->flags, dst_phys, wsize);
         }
         return;
     }
@@ -495,6 +594,11 @@ static void x86_emit_gpr_binary(x86_mir_emit_t *emit, size_t index, const anvil_
             /* dst holds the subtrahend: a - b == -b + a. */
             anvil_strbuf_appendf(&emit->code, "\tnegl %%%s\n\taddl %%%s, %%%s\n", dst, a, dst);
         }
+        /* Every form but lea (and imul's) ends with the operation into
+         * dst, which sets ZF from the (doubleword) result. */
+        bool lea = dst_phys != a_phys && dst_phys != b_phys && info->op == ANVIL_MIR_OP_ADD;
+        if (!lea && info->op != ANVIL_MIR_OP_MUL)
+            anvil_print_flags_set(&emit->flags, dst_phys, wsize);
         return;
     }
 
@@ -552,6 +656,24 @@ static void x86_emit_gpr_binary(x86_mir_emit_t *emit, size_t index, const anvil_
     }
 }
 
+/* A lane-wise operation (SSE2 CPUs), through the printer x86-64 shares. */
+static void x86_emit_vector(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+{
+    x86_sse_printer_t printer = {
+        .code = &emit->code,
+        .mir = emit->mir,
+        .xmm = x86_xmm_names,
+        .num_xmm = 8,
+        .gpr32 = x86_reg32_names,
+        .gpr64 = NULL,
+        .temp = x86_xmm_names[X86_SSE_TEMP],
+        .temp2 = x86_xmm_names[X86_SSE_TEMP2],
+    };
+    x86_sse_emit_vector(&printer, anvil_vector_isa_for_mir(x86_sse_isa, x86_sse_isa_count, emit->mir, instr_index, info, emit->features),
+                        instr_index, info);
+    emit->failed |= printer.failed;
+}
+
 /* A scalar operation the table prices: an FP unit instruction, or the high
  * half of a product (EDX:EAX, which the instruction clobbers). */
 static void x86_emit_scalar(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -587,6 +709,8 @@ static void x86_emit_scalar(x86_mir_emit_t *emit, size_t instr_index, const anvi
         anvil_strbuf_appendf(&emit->code, "\tmovl %%edx, %%%s\n", x86_reg32_names[dst_phys]);
 }
 
+static bool x86_fuses(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info);
+
 static void x86_emit_binary(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
@@ -605,24 +729,91 @@ static void x86_emit_binary(x86_mir_emit_t *emit, size_t instr_index, const anvi
         return;
     }
 
+    if (instr_index == emit->fold_target) {
+        /* The folded load's operand: the other one comes first. */
+        emit->fold_target = SIZE_MAX;
+        anvil_mir_instr_info_t load;
+        anvil_mir_get_instr_info(emit->mir, emit->fold_load, &load);
+        anvil_mir_vreg_t other = rhs == load.def ? lhs : rhs;
+        const char *op = info->op == ANVIL_MIR_OP_ADD ? "addl" : info->op == ANVIL_MIR_OP_SUB ? "subl" : info->op == ANVIL_MIR_OP_MUL ? "imull"
+                       : info->op == ANVIL_MIR_OP_AND ? "andl" : info->op == ANVIL_MIR_OP_OR ? "orl" : "xorl";
+        int dst = x86_phys_of(emit, info->def), keep = x86_phys_of(emit, other);
+        if (emit->failed)
+            return;
+        if (dst != keep)
+            anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n", x86_reg32_names[keep], x86_reg32_names[dst]);
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", op, emit->fold_address, x86_reg32_names[dst]);
+        if (info->op != ANVIL_MIR_OP_MUL)
+            anvil_print_flags_set(&emit->flags, dst, 4);
+        return;
+    }
+
     int size = x86_size_bytes(def_info->size_bits);
     int dst_phys = x86_phys_of(emit, info->def);
     int a_phys = x86_phys_of(emit, lhs);
     int b_phys = x86_phys_of(emit, rhs);
     if (emit->failed)
         return;
+    /* x & c only tested against zero by the next branch: test (32-bit:
+     * the mask reaches only the value's own bits), which keeps x. */
+    int64_t mask;
+    uint64_t width_mask = size >= 4 ? UINT32_MAX : (UINT64_C(1) << (8 * size)) - 1;
+    if (info->op == ANVIL_MIR_OP_AND && size <= 4 && x86_known_imm(&emit->isel, rhs, &mask) && ((uint64_t)mask & ~width_mask) == 0 &&
+        emit->test_at == SIZE_MAX) {
+        size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 4, false);
+        anvil_mir_instr_info_t next;
+        int64_t zero = 1;
+        if (reader != SIZE_MAX && anvil_mir_get_instr_info(emit->mir, reader, &next) && (next.op == ANVIL_MIR_OP_CMP_EQ || next.op == ANVIL_MIR_OP_CMP_NE) &&
+            next.num_uses == 2 && x86_known_imm(&emit->isel, anvil_mir_get_instr_use(emit->mir, reader, 1), &zero) && zero == 0 &&
+            x86_fuses(emit, reader, &next)) {
+            anvil_strbuf_appendf(&emit->code, "\ttestl $%lld, %%%s\n", (long long)mask, x86_reg32_names[a_phys]);
+            emit->test_at = reader;
+            return;
+        }
+    }
     x86_emit_gpr_binary(emit, instr_index, info, dst_phys, a_phys, b_phys, size);
 }
 
-/* Whether the compare at `instr_index` hands its flags to the BR_COND right
- * after it (fused_jcc) instead of materializing a boolean. */
+/* Whether the compare at `instr_index` hands its flags to the BR_COND or
+ * SELECT right after it (fused_jcc) instead of materializing a boolean. */
 static bool x86_fuses(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
-    return anvil_mir_isel_feeds_next_branch(&emit->isel, instr_index, info);
+    return anvil_mir_isel_feeds_next_branch(&emit->isel, instr_index, info) || anvil_mir_isel_feeds_next_select(&emit->isel, instr_index, info);
+}
+
+/* dst = cond ? then : else (x86_gas_emit_cmov) on the flags of the fused
+ * compare right before, or a test of the boolean; on whole registers. */
+static void x86_emit_select(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t cond = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
+    anvil_mir_vreg_t then_v = anvil_mir_get_instr_use(emit->mir, instr_index, 1);
+    anvil_mir_vreg_t else_v = anvil_mir_get_instr_use(emit->mir, instr_index, 2);
+    if (cond == ANVIL_MIR_NO_VREG || then_v == ANVIL_MIR_NO_VREG || else_v == ANVIL_MIR_NO_VREG) {
+        emit->failed = true;
+        return;
+    }
+    int dst = x86_phys_of(emit, info->def), then_reg = x86_phys_of(emit, then_v), else_reg = x86_phys_of(emit, else_v);
+    const char *cc = emit->fused_jcc;
+    emit->fused_jcc = NULL;
+    if (!cc) {
+        int flag = x86_phys_of(emit, cond);
+        const char *name = x86_reg_has_byte(flag) ? x86_reg8_names[flag] : x86_gpr_name(flag, 4);
+        if (!emit->failed)
+            anvil_strbuf_appendf(&emit->code, "\ttest%s %%%s, %%%s\n", x86_reg_has_byte(flag) ? "b" : "l", name, name);
+        cc = "ne";
+    }
+    if (!emit->failed && !x86_gas_emit_cmov(&emit->code, cc, "l", x86_reg32_names[dst], x86_reg32_names[then_reg], x86_reg32_names[else_reg]))
+        emit->failed = true;
 }
 
 static void x86_emit_cmp(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
+    if (instr_index == emit->test_at) {
+        /* The test before it set the flags. */
+        emit->test_at = SIZE_MAX;
+        emit->fused_jcc = x86_gas_jcc(info->op);
+        return;
+    }
     anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
     anvil_mir_vreg_t rhs = anvil_mir_get_instr_use(emit->mir, instr_index, 1);
     if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG) {
@@ -670,6 +861,26 @@ static void x86_emit_cmp(x86_mir_emit_t *emit, size_t instr_index, const anvil_m
 
     int size = x86_size_bytes(lhs_info->size_bits);
     const char *suf = x86_size_suffix(size);
+    bool load_is_lhs;
+    anvil_mir_vreg_t compared;
+    anvil_mir_instr_info_t load;
+    int64_t imm = 0;
+    if (instr_index == emit->fold_target && anvil_mir_get_instr_info(emit->mir, emit->fold_load, &load) &&
+        x86_gas_compare_folds(emit->mir, instr_index, load.def, lhs_info->size_bits, &load_is_lhs, &compared)) {
+        /* The folded load is the memory operand. */
+        emit->fold_target = SIZE_MAX;
+        const char *other = x86_gpr_name(x86_phys_of(emit, compared), size);
+        if (emit->failed)
+            return;
+        x86_gas_emit_memory_compare(&emit->code, suf, emit->fold_address, load_is_lhs, other);
+        if (fuses) {
+            emit->fused_jcc = x86_gas_jcc(info->op);
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\t%s %%%s\n", x86_gas_setcc(info->op), dst8);
+        anvil_strbuf_appendf(&emit->code, "\tmovzbl %%%s, %%%s\n", dst8, dst32);
+        return;
+    }
     int a_phys = x86_phys_of(emit, lhs);
     int b_phys = x86_phys_of(emit, rhs);
     const char *a = x86_gpr_name(a_phys, size);
@@ -679,9 +890,14 @@ static void x86_emit_cmp(x86_mir_emit_t *emit, size_t instr_index, const anvil_m
         emit->failed = true;
         return;
     }
-    int64_t imm = 0;
     if (x86_known_imm(&emit->isel, rhs, &imm)) {
         imm = size == 1 ? (int8_t)imm : size == 2 ? (int16_t)imm : imm;
+        /* == 0 or != 0 of the value just computed: its flags tell. */
+        if (imm == 0 && fuses && (info->op == ANVIL_MIR_OP_CMP_EQ || info->op == ANVIL_MIR_OP_CMP_NE) &&
+            anvil_print_flags_take(&emit->flags, &emit->code, a_phys, size)) {
+            emit->fused_jcc = x86_gas_jcc(info->op);
+            return;
+        }
         if (imm == 0)
             anvil_strbuf_appendf(&emit->code, "\ttest%s %%%s, %%%s\n", suf, a, a);
         else
@@ -696,6 +912,19 @@ static void x86_emit_cmp(x86_mir_emit_t *emit, size_t instr_index, const anvil_m
 
     if (fuses) {
         emit->fused_jcc = x86_gas_jcc(info->op);
+        return;
+    }
+    /* x + (a u< b): the carry of the compare is the condition. */
+    size_t extension = SIZE_MAX, add = SIZE_MAX;
+    anvil_mir_vreg_t other = ANVIL_MIR_NO_VREG;
+    int64_t constant;
+    const anvil_mir_vreg_info_t *other_info = NULL;
+    if (info->op == ANVIL_MIR_OP_CMP_ULT && anvil_mir_isel_condition_add(emit->mir, &emit->isel, instr_index, &extension, &add, &other) &&
+        !anvil_mir_isel_constant(&emit->isel, other, &constant) && (other_info = anvil_mir_get_vreg_info(emit->mir, other)) &&
+        other_info->size_bits == 32) {
+        emit->adc_skip = extension;
+        emit->adc_at = add;
+        emit->adc_other = other;
         return;
     }
     anvil_strbuf_appendf(&emit->code, "\t%s %%%s\n", x86_gas_setcc(info->op), dst8);
@@ -773,9 +1002,11 @@ static void x86_emit_gpr_extend(x86_mir_emit_t *emit, size_t instr_index, const 
     if (dst_size < 4)
         dst_size = 4;
 
-    /* A 32-bit source, or a narrow load of the same signedness, which
-     * already extended the value (x86_emit_load). */
-    if (src_size >= 4 || (src_info->is_signed == sign_extend && anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD)) {
+    /* A 32-bit source, a narrow load of the same signedness (which already
+     * extended the value, x86_emit_load), or a value already zero above
+     * its width. */
+    if (src_size >= 4 || (src_info->is_signed == sign_extend && anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD) ||
+        (!sign_extend && anvil_mir_isel_zero_extended(&emit->isel, src))) {
         if (src_phys != dst_phys)
             anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n", x86_gpr_name(src_phys, 4), x86_gpr_name(dst_phys, 4));
         return;
@@ -856,7 +1087,7 @@ static void x86_emit_frame_addr(x86_mir_emit_t *emit, const anvil_mir_instr_info
         return;
 
     int offset = emit->frame_slot_offsets[info->frame_slot];
-    anvil_strbuf_appendf(&emit->code, "\tleal -%d(%%ebp), %%%s\n", offset, x86_gpr_name(dst_phys, 4));
+    anvil_strbuf_appendf(&emit->code, "\tleal %s, %%%s\n", x86_frame(emit, -(offset)), x86_gpr_name(dst_phys, 4));
 }
 
 static void x86_emit_dyn_alloca(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -906,6 +1137,8 @@ static void x86_emit_symbol_addr(x86_mir_emit_t *emit, const anvil_mir_instr_inf
         emit->failed = true;
         return;
     }
+    if (!anvil_mir_isel_materialize(&emit->isel, info->def))
+        return;
 
     int dst_phys = x86_phys_of(emit, info->def);
     if (emit->failed)
@@ -935,7 +1168,8 @@ static void x86_emit_symbol_addr(x86_mir_emit_t *emit, const anvil_mir_instr_inf
 }
 
 /* disp(%base) or disp(%base,%index,scale) of a LOAD/STORE whose base is use
- * `base_use` (an index, when present, follows it). */
+ * `base_use` (an index, when present, follows it); a base holding a symbol
+ * address the facts let it encode becomes symbol+disp. */
 static bool x86_memory_operand(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info, size_t base_use, char *out,
                                size_t out_len)
 {
@@ -945,23 +1179,119 @@ static bool x86_memory_operand(x86_mir_emit_t *emit, size_t instr_index, const a
         emit->failed = true;
         return false;
     }
-    const char *base_name = x86_gpr_name(x86_phys_of(emit, base), 4);
-    char disp[24] = "";
-    if (info->has_imm && info->imm != 0)
-        snprintf(disp, sizeof(disp), "%lld", (long long)info->imm);
+    int64_t imm = info->has_imm ? info->imm : 0, offset;
+    const char *symbol;
+    char disp[300] = "";
+    bool absolute = !anvil_mir_isel_materialize(&emit->isel, base) && anvil_mir_isel_symbol(&emit->isel, base, &symbol, &offset);
+    if (absolute && imm + offset)
+        snprintf(disp, sizeof(disp), "%s%s%+lld", x86_symbol_ref_prefix(emit, symbol), symbol, (long long)(imm + offset));
+    else if (absolute)
+        snprintf(disp, sizeof(disp), "%s%s", x86_symbol_ref_prefix(emit, symbol), symbol);
+    else if (imm)
+        snprintf(disp, sizeof(disp), "%lld", (long long)imm);
+    const char *base_name = absolute ? NULL : x86_gpr_name(x86_phys_of(emit, base), 4);
     if (info->index_scale)
-        snprintf(out, out_len, "%s(%%%s,%%%s,%u)", disp, base_name, x86_gpr_name(x86_phys_of(emit, index), 4), info->index_scale);
-    else
+        snprintf(out, out_len, "%s(%s%s,%%%s,%u)", disp, base_name ? "%" : "", base_name ? base_name : "",
+                 x86_gpr_name(x86_phys_of(emit, index), 4), info->index_scale);
+    else if (base_name)
         snprintf(out, out_len, "%s(%%%s)", disp, base_name);
+    else
+        snprintf(out, out_len, "%s", disp);
     return !emit->failed;
+}
+
+/* Whether register `phys` is one the address of access `address_index`
+ * reads. */
+static bool x86_address_reads(x86_mir_emit_t *emit, size_t address_index, const anvil_mir_instr_info_t *address, int phys)
+{
+    size_t uses = address->index_scale ? 2 : 1;
+    for (size_t u = 0; u < uses && u < address->num_uses; u++)
+        if (x86_phys_of(emit, anvil_mir_get_instr_use(emit->mir, address_index, u)) == phys)
+            return true;
+    return false;
+}
+
+/* A 32-bit integer load read only by an instruction shortly after (no
+ * store, call or address-register write between), an add/sub/and/or/xor
+ * or imul, as its second operand (either, when the operation commutes):
+ * that instruction reads the memory itself (`op mem, dst`), unless
+ * filling dst first would overwrite an address register. */
+static bool x86_fold_load(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info, const anvil_mir_vreg_info_t *def_info)
+{
+    /* One fold at a time: a pending one keeps its operand. */
+    if (emit->fold_target != SIZE_MAX || def_info->reg_class != ANVIL_MIR_REG_GPR || def_info->size_bits > 32 || info->memory_access.is_volatile ||
+        emit->isel.use_count[info->def] != 1)
+        return false;
+    /* The reader, a few instructions on in the block: nothing between may
+     * write memory or the address's registers. */
+    anvil_mir_instr_info_t next;
+    size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 8, true);
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, reader, &next))
+        return false;
+    /* An integer compare of the load's width with a register, either side
+     * (narrow loads too: the compare reads just their bytes); a byte
+     * compare's register is a byte register. */
+    bool load_is_lhs;
+    anvil_mir_vreg_t compared;
+    int64_t imm;
+    if (x86_gas_compare_folds(emit->mir, reader, info->def, def_info->size_bits, &load_is_lhs, &compared) &&
+        !x86_known_imm(&emit->isel, compared, &imm)) {
+        int phys = x86_phys_of(emit, compared);
+        if (emit->failed || (def_info->size_bits == 8 && !x86_reg_has_byte(phys)) ||
+            !x86_memory_operand(emit, instr_index, info, 0, emit->fold_address, sizeof(emit->fold_address)))
+            return false;
+        emit->fold_target = reader;
+        emit->fold_load = instr_index;
+        return true;
+    }
+    if (def_info->size_bits != 32)
+        return false;
+    if (next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
+        return false;
+    const anvil_mir_vreg_info_t *result = anvil_mir_get_vreg_info(emit->mir, next.def);
+    bool op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
+              next.op == ANVIL_MIR_OP_XOR || next.op == ANVIL_MIR_OP_MUL;
+    if (!result || result->reg_class != ANVIL_MIR_REG_GPR || result->size_bits != 32 || !op)
+        return false;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, reader, 0), rhs = anvil_mir_get_instr_use(emit->mir, reader, 1);
+    bool commutes = next.op != ANVIL_MIR_OP_SUB;
+    if (lhs == rhs || (rhs != info->def && !(commutes && lhs == info->def)))
+        return false;
+    anvil_mir_vreg_t other = rhs == info->def ? lhs : rhs;
+    int dst = x86_phys_of(emit, next.def), keep = x86_phys_of(emit, other);
+    if (emit->failed || x86_known_imm(&emit->isel, other, &imm) || (dst != keep && x86_address_reads(emit, instr_index, info, dst)))
+        return false;
+    if (!x86_memory_operand(emit, instr_index, info, 0, emit->fold_address, sizeof(emit->fold_address)))
+        return false;
+    emit->fold_target = reader;
+    emit->fold_load = instr_index;
+    return true;
+}
+
+bool anvil_x86_mark_registerless(anvil_mir_func_t *mir)
+{
+    /* Symbols stay materialized (their forms depend on the relocation
+     * model): only the immediate rules decide. */
+    x86_mir_emit_t probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.mir = mir;
+    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&probe.isel, mir, x86_use_takes_immediate, NULL, &probe))
+        return false;
+    bool ok = anvil_mir_isel_mark_registerless(mir, &probe.isel);
+    anvil_mir_isel_facts_destroy(&probe.isel);
+    return ok;
 }
 
 static void x86_emit_load(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     const anvil_mir_vreg_info_t *def_info = x86_vreg_info_checked(emit, info->def);
     int def_phys = x86_phys_of(emit, info->def);
-    char address[96];
-    if (!def_info || emit->failed || !x86_memory_operand(emit, instr_index, info, 0, address, sizeof(address)))
+    char address[400];
+    if (!def_info || emit->failed)
+        return;
+    if (x86_fold_load(emit, instr_index, info, def_info))
+        return;
+    if (!x86_memory_operand(emit, instr_index, info, 0, address, sizeof(address)))
         return;
 
     if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
@@ -979,7 +1309,7 @@ static void x86_emit_store(x86_mir_emit_t *emit, size_t instr_index, const anvil
 {
     anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
     const anvil_mir_vreg_info_t *value_info = value == ANVIL_MIR_NO_VREG ? NULL : x86_vreg_info_checked(emit, value);
-    char address[96];
+    char address[400];
     if (!value_info || emit->failed || !x86_memory_operand(emit, instr_index, info, 1, address, sizeof(address))) {
         emit->failed = true;
         return;
@@ -991,6 +1321,12 @@ static void x86_emit_store(x86_mir_emit_t *emit, size_t instr_index, const anvil
     }
 
     int size = x86_size_bytes(value_info->size_bits);
+    int64_t imm;
+    if (x86_known_imm(&emit->isel, value, &imm) && x86_use_takes_immediate(emit, instr_index, info, 0, imm)) {
+        uint64_t bits = (uint64_t)imm & (size == 1 ? 0xffu : size == 2 ? 0xffffu : 0xffffffffu);
+        anvil_strbuf_appendf(&emit->code, "\tmov%s $%llu, %s\n", x86_size_suffix(size), (unsigned long long)bits, address);
+        return;
+    }
     int value_phys = x86_phys_of(emit, value);
     if (emit->failed || (size == 1 && !x86_reg_has_byte(value_phys))) {
         emit->failed = true;
@@ -1016,7 +1352,7 @@ static void x86_emit_incoming_stack_arg(x86_mir_emit_t *emit, const anvil_mir_in
 
     if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
         char mem[32];
-        snprintf(mem, sizeof(mem), "%d(%%ebp)", frame_offset);
+        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, (int)(frame_offset)));
         emit->fp->load(emit, info->def, mem);
         return;
     }
@@ -1032,7 +1368,7 @@ static void x86_emit_incoming_stack_arg(x86_mir_emit_t *emit, const anvil_mir_in
         op = "movzwl";
     else
         op = "movl";
-    anvil_strbuf_appendf(&emit->code, "\t%s %d(%%ebp), %%%s\n", op, frame_offset, x86_gpr_name(def_phys, 4));
+    anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", op, x86_frame(emit, (int)(frame_offset)), x86_gpr_name(def_phys, 4));
 }
 
 static void x86_emit_call_stack_arg(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1162,12 +1498,12 @@ static void x86_emit_spill_load(x86_mir_emit_t *emit, const anvil_mir_instr_info
     int size = x86_size_bytes(slot.size_bits);
     if (slot.reg_class == ANVIL_MIR_REG_FPR) {
         char mem[32];
-        snprintf(mem, sizeof(mem), "-%d(%%ebp)", offset);
+        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, -(offset)));
         emit->fp->load(emit, info->def, mem);
     } else {
         if (size < 4)
             size = 4;
-        anvil_strbuf_appendf(&emit->code, "\tmov%s -%d(%%ebp), %%%s\n", x86_size_suffix(size), offset, x86_gpr_name(def_phys, size));
+        anvil_strbuf_appendf(&emit->code, "\tmov%s %s, %%%s\n", x86_size_suffix(size), x86_frame(emit, -(offset)), x86_gpr_name(def_phys, size));
     }
 }
 
@@ -1198,12 +1534,12 @@ static void x86_emit_spill_store(x86_mir_emit_t *emit, size_t instr_index, const
     int size = x86_size_bytes(slot.size_bits);
     if (slot.reg_class == ANVIL_MIR_REG_FPR) {
         char mem[32];
-        snprintf(mem, sizeof(mem), "-%d(%%ebp)", offset);
+        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, -(offset)));
         emit->fp->store(emit, src_vreg, mem);
     } else {
         if (size < 4)
             size = 4;
-        anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, -%d(%%ebp)\n", x86_size_suffix(size), x86_gpr_name(src_phys, size), offset);
+        anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %s\n", x86_size_suffix(size), x86_gpr_name(src_phys, size), x86_frame(emit, -(offset)));
     }
 }
 
@@ -1224,7 +1560,7 @@ static void x86_emit_ret(x86_mir_emit_t *emit, size_t instr_index, const anvil_m
     }
     emit->ret_hi_phys = -1;
     if (!emit->failed)
-        x86_emit_epilogue(emit, info->has_imm ? info->imm : 0);
+        x86_emit_return(emit, info->has_imm ? info->imm : 0);
 }
 
 static void x86_emit_other(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
@@ -1334,6 +1670,27 @@ static void x86_emit_atomic(x86_mir_emit_t *emit, size_t index, const anvil_mir_
 
 static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
+    if (!anvil_mir_isel_registerless_ok(emit->mir, &emit->isel, instr_index, info)) {
+        emit->failed = true;
+        return;
+    }
+    if (instr_index == emit->adc_skip) {
+        emit->adc_skip = SIZE_MAX;
+        return;
+    }
+    if (instr_index == emit->adc_at) {
+        /* mov keeps the carry. */
+        emit->adc_at = SIZE_MAX;
+        int to = x86_phys_of(emit, info->def), from = x86_phys_of(emit, emit->adc_other);
+        if (emit->failed || to < 0 || from < 0) {
+            emit->failed = true;
+            return;
+        }
+        if (to != from)
+            anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n", x86_reg32_names[from], x86_reg32_names[to]);
+        anvil_strbuf_appendf(&emit->code, "\tadcl $0, %%%s\n", x86_reg32_names[to]);
+        return;
+    }
     switch (info->op) {
     case ANVIL_MIR_OP_ATOMIC:
         x86_emit_atomic(emit, instr_index, info);
@@ -1374,6 +1731,9 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         break;
     case ANVIL_MIR_OP_SCALAR:
         x86_emit_scalar(emit, instr_index, info);
+        break;
+    case ANVIL_MIR_OP_VECTOR:
+        x86_emit_vector(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_ZEXT:
     case ANVIL_MIR_OP_SEXT:
@@ -1421,7 +1781,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         break;
     case ANVIL_MIR_OP_VA_START:
         /* Address of the first unnamed stack argument. */
-        anvil_strbuf_appendf(&emit->code, "\tleal %lld(%%ebp), %%%s\n", (long long)(8 + info->imm),
+        anvil_strbuf_appendf(&emit->code, "\tleal %s, %%%s\n", x86_frame(emit, (int)((8 + info->imm))),
                              x86_gpr_name(x86_phys_of(emit, info->def), 4));
         break;
     case ANVIL_MIR_OP_CALL:
@@ -1431,7 +1791,10 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         x86_emit_call_stack_arg(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_BR:
-        emit->failed |= !x86_gas_emit_jump(&emit->code, emit->plat->format->local_label_prefix, emit->mir, emit->block, info->true_block);
+        emit->failed |= !x86_gas_emit_jump(&emit->code, emit->plat->format->local_label_prefix, emit->mir, &emit->layout, emit->block, info->true_block);
+        break;
+    case ANVIL_MIR_OP_SELECT:
+        x86_emit_select(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_BR_COND: {
         const char *cc = emit->fused_jcc;
@@ -1450,7 +1813,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
             anvil_strbuf_appendf(&emit->code, "\ttest%s %%%s, %%%s\n", x86_size_suffix(size), reg, reg);
             cc = "ne";
         }
-        emit->failed |= !x86_gas_emit_cond_branch(&emit->code, emit->plat->format->local_label_prefix, emit->mir, emit->block, cc,
+        emit->failed |= !x86_gas_emit_cond_branch(&emit->code, emit->plat->format->local_label_prefix, emit->mir, &emit->layout, emit->block, cc,
                                                   info->true_block, info->false_block);
         break;
     }
@@ -1523,6 +1886,19 @@ static void x86_emit_rodata(x86_mir_emit_t *emit)
         x86_emit_escaped_string(&emit->code, info.value);
     }
 
+    /* The floating literal pool. */
+    if (emit->fp_pool_count) {
+        anvil_strbuf_append(&emit->code, format->rodata_section);
+        anvil_obj_emit_align(&emit->code, 8);
+    }
+    for (size_t i = 0; i < emit->fp_pool_count; i++) {
+        uint64_t bits = emit->fp_pool[i].bits;
+        anvil_strbuf_appendf(&emit->code, "%s%s_fpc%zu:\n\t.long %u", format->local_label_prefix, name, i, (uint32_t)bits);
+        if (emit->fp_pool[i].size > 4)
+            anvil_strbuf_appendf(&emit->code, ", %u", (uint32_t)(bits >> 32));
+        anvil_strbuf_append(&emit->code, "\n");
+    }
+
     /* Sign masks, per function so several functions can use them. */
     if (emit->emitted_fneg_mask || emit->emitted_fabs_mask) {
         anvil_strbuf_append(&emit->code, format->literal16_section);
@@ -1564,6 +1940,8 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
 
     x86_mir_emit_t emit;
     memset(&emit, 0, sizeof(emit));
+    emit.adc_skip = emit.adc_at = emit.test_at = SIZE_MAX;
+    emit.fold_target = SIZE_MAX;
     emit.mir = mir;
     emit.source_func = func;
     emit.desc = desc;
@@ -1579,14 +1957,15 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
     if (!emit.code.data)
         return false;
 
-    if (!x86_prepare_frame(&emit)) {
+    /* The facts first: the frame saves the registers printed code writes. */
+    if (!anvil_mir_isel_facts_build(&emit.isel, mir, x86_use_takes_immediate, x86_use_takes_symbol, &emit)) {
         anvil_strbuf_destroy(&emit.code);
-        free(emit.spill_offsets);
-        free(emit.frame_slot_offsets);
         return false;
     }
 
-    if (!anvil_mir_isel_facts_build(&emit.isel, mir, x86_use_takes_immediate, &emit)) {
+    if (!x86_prepare_frame(&emit) || !anvil_mir_layout_build(&emit.layout, mir)) {
+        anvil_mir_layout_destroy(&emit.layout);
+        anvil_mir_isel_facts_destroy(&emit.isel);
         anvil_strbuf_destroy(&emit.code);
         free(emit.spill_offsets);
         free(emit.frame_slot_offsets);
@@ -1594,6 +1973,10 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
     }
 
     x86_emit_func_header(&emit);
+    /* A frame (EBP kept or anything pushed or allocated) set up at the
+     * frame block when the blocks before it need none. */
+    emit.wrapped = (emit.frame_pointer || emit.num_pushes > 0 || emit.frame_size + 4 - 4 * emit.num_pushes > 0) &&
+                   anvil_mir_isel_frameless_prefix(mir, &emit.isel, anvil_mir_frame_block(mir));
     x86_emit_prologue(&emit);
 
     size_t num_blocks = anvil_mir_num_blocks(mir);
@@ -1603,6 +1986,8 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
     if (!loop_headers || !anvil_mir_loop_header_blocks(mir, loop_headers))
         emit.failed = true;
     for (size_t b = 0; b < num_blocks && !emit.failed && !emit.code.failed; b++) {
+        if (emit.layout.skip[b])
+            continue;  /* prints only a jump: branches go where it leads */
         if (loop_headers[b])
             anvil_strbuf_append(&emit.code, "\t.p2align 4\n");
         if (!x86_gas_emit_label(&emit.code, emit.plat->format->local_label_prefix, mir, (anvil_mir_block_t)b)) {
@@ -1610,6 +1995,10 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
             break;
         }
         emit.block = (anvil_mir_block_t)b;
+        if (emit.wrapped && b == anvil_mir_frame_block(mir))
+            x86_emit_frame_entry(&emit);
+        /* A block may be entered from elsewhere: no flags carry in. */
+        anvil_print_flags_reset(&emit.flags);
 
         for (size_t i = 0; i < num_instrs && !emit.failed && !emit.code.failed; i++) {
             anvil_mir_instr_info_t info;
@@ -1619,7 +2008,9 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
             }
             if (info.block != (anvil_mir_block_t)b)
                 continue;
+            size_t printed = emit.code.len;
             x86_emit_instr(&emit, i, &info);
+            anvil_print_flags_after(&emit.flags, mir, i, &info, emit.code.len != printed);
         }
     }
 
@@ -1635,7 +2026,9 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
     }
 
     free(loop_headers);
+    free(emit.fp_pool);
     anvil_mir_isel_facts_destroy(&emit.isel);
+    anvil_mir_layout_destroy(&emit.layout);
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);
     if (emit.failed || emit.code.failed) {

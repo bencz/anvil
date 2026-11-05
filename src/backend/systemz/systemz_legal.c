@@ -190,6 +190,23 @@ bool anvil_mainframe_verify_mir_legal(const anvil_mir_func_t *mir, anvil_mainfra
     return true;
 }
 
+/* RX forms: D(X,B), base + index + an unsigned 12-bit displacement. */
+static bool systemz_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
+{
+    (void)user;
+    (void)access_bits;
+    return extend == ANVIL_MIR_INDEX_PLAIN && scale == 1 && disp >= 0 && disp <= 4095;
+}
+
+/* LHI takes a signed 16-bit value; anything else (floating constants
+ * included) is a literal-pool load. */
+static bool systemz_expensive_constant(void *user, anvil_mir_reg_class_t reg_class, uint16_t size_bits, int64_t value)
+{
+    (void)user;
+    (void)size_bits;
+    return reg_class != ANVIL_MIR_REG_GPR || value < -32768 || value > 32767;
+}
+
 bool anvil_mainframe_regalloc_mir(anvil_mir_func_t *mir, anvil_mainframe_variant_t variant)
 {
     const anvil_mainframe_target_desc_t *desc = anvil_mainframe_get_target_desc(variant);
@@ -212,16 +229,24 @@ bool anvil_mainframe_regalloc_mir_features(anvil_mir_func_t *mir, anvil_mainfram
     int num_fprs = afp ? (int)(sizeof(systemz_s390_fprs) / sizeof(int)) : (int)(sizeof(systemz_s370_fprs) / sizeof(int));
     const int *scratch_fprs = afp ? systemz_s390_scratch_fprs : systemz_s370_scratch_fprs;
     int num_scratch_fprs = afp ? (int)(sizeof(systemz_s390_scratch_fprs) / sizeof(int)) : (int)(sizeof(systemz_s370_scratch_fprs) / sizeof(int));
-    anvil_regalloc_class_config_t configs[] = {{.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_alloc_gpr_regs, .phys_regs = desc->alloc_gpr_regs},
-                                               {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_fprs, .phys_regs = fprs}};
-    anvil_regalloc_class_config_t scratch_configs[] = {{.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_scratch_gpr_regs, .phys_regs = desc->scratch_gpr_regs},
-                                                       {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_scratch_fprs, .phys_regs = scratch_fprs}};
+    /* Arithmetic overwrites its first operand (AR/AGR/AHI, ADBR...). */
+    anvil_regalloc_class_config_t configs[] = {
+        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_alloc_gpr_regs, .phys_regs = desc->alloc_gpr_regs, .two_address = true},
+        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_fprs, .phys_regs = fprs, .two_address = true}};
+    /* hlasm.c's temporaries (R0, R1, R14, R15, F0) are outside the pools:
+     * it writes pool registers only as results or across calls. */
+    anvil_regalloc_class_config_t scratch_configs[] = {{.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_scratch_gpr_regs,
+                                                        .phys_regs = desc->scratch_gpr_regs, .printer_declares_writes = true},
+                                                       {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_scratch_fprs, .phys_regs = scratch_fprs,
+                                                        .printer_declares_writes = true}};
 
-    if (!anvil_mir_order_blocks(mir) || !anvil_regalloc_linear_scan_classes(mir, configs, sizeof(configs) / sizeof(configs[0]))) {
+    if (!anvil_mir_optimize_before_allocation(mir, systemz_address_mode, systemz_expensive_constant, NULL))
         return false;
-    }
-    if (!anvil_mir_materialize_spills(mir, scratch_configs, sizeof(scratch_configs) / sizeof(scratch_configs[0]))) {
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) || !anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0) ||
+        !anvil_systemz_mark_registerless(mir, desc, features) || !anvil_mir_hoist_materialized_constants(mir))
         return false;
-    }
+    if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
+                                 sizeof(scratch_configs) / sizeof(scratch_configs[0])))
+        return false;
     return anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0);
 }

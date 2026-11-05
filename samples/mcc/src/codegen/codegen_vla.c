@@ -231,5 +231,9 @@ anvil_value_t *codegen_pointer_diff(mcc_codegen_t *cg, mcc_type_t *pointer_type,
         if (unit <= 1) return bytes;
         size = codegen_const_int_for_type(cg, integer, (int64_t)unit);
     }
-    return anvil_build_sdiv(cg->anvil_ctx, bytes, size, "ptr.diff.elem");
+    /* Both pointers address the same array: the byte distance is a
+     * whole number of elements (an exact division). */
+    anvil_value_t *elements = anvil_build_sdiv(cg->anvil_ctx, bytes, size, "ptr.diff.elem");
+    anvil_set_no_wrap(elements, true);
+    return elements;
 }

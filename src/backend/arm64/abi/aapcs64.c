@@ -78,8 +78,8 @@ const arm64_abi_desc_t *arm64_get_abi_desc(anvil_abi_t abi)
     return NULL;
 }
 
-static const int aapcs64_gprs[] = {8, 7, 6, 5, 4, 3, 2, 1, 0, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28};
-static const int aapcs64_fprs[] = {20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13, 14, 15};
+static const int aapcs64_gprs[] = {9, 10, 11, 12, 13, 14, 15, 8, 7, 6, 5, 4, 3, 2, 1, 0, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28};
+static const int aapcs64_fprs[] = {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13, 14, 15};
 static const int aapcs64_scratch_gprs[] = {12, 13, 14, 15};
 static const int aapcs64_scratch_fprs[] = {16, 17, 18, 19};
 

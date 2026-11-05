@@ -137,6 +137,10 @@ typedef struct {
     bool is_live_in;
     bool has_fixed_reg;
     int fixed_phys_reg;
+    /* The printer never puts the value in a register (an immediate every
+     * reader takes, a compare only the next branch's condition flags
+     * read): the allocator names a register for it without reserving it. */
+    bool registerless;
 } anvil_mir_vreg_info_t;
 
 typedef struct {
@@ -226,6 +230,9 @@ typedef struct {
     /* LOAD/STORE with an index register: the address is base + index *
      * index_scale + imm, the index being the use after the base. 0: none. */
     uint8_t index_scale;
+    /* How a narrower index widens to the address width first
+     * (anvil_mir_index_extend_t). */
+    uint8_t index_extend;
     /* SYMBOL_ADDR: the address comes from the global offset table; CALL to
      * a symbol: through the PLT (see anvil_symbol_uses_got). */
     bool symbol_got;
@@ -236,13 +243,22 @@ typedef struct {
     uint8_t widening;
 } anvil_mir_instr_info_t;
 
+/* An index register narrower than the address, widened as part of it. */
+typedef enum {
+    ANVIL_MIR_INDEX_PLAIN = 0,  /* as wide as the address */
+    ANVIL_MIR_INDEX_SEXT32,     /* 32 bits, sign-extended */
+    ANVIL_MIR_INDEX_ZEXT32      /* 32 bits, zero-extended */
+} anvil_mir_index_extend_t;
+
 /* Target addressing: may a `access_bits` load/store use base + index *
- * scale + disp? Targets without indexed modes pass no hook. */
-typedef bool (*anvil_mir_address_mode_fn)(void *user, unsigned scale, int64_t disp, uint16_t access_bits);
+ * scale + disp, the index widened by `extend`? Targets without indexed
+ * modes pass no hook. */
+typedef bool (*anvil_mir_address_mode_fn)(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend);
 
 /* Folds base + index * scale (an ADD of a MUL/SHL by a constant, or of a
- * plain index) into the loads and stores that are its only users, and
- * deletes the address arithmetic left without uses. */
+ * plain index, possibly a 32-bit index extended) into the loads and stores
+ * that are its only users, and deletes the address arithmetic left without
+ * uses. */
 bool anvil_mir_fold_address_arithmetic(anvil_mir_func_t *func, anvil_mir_address_mode_fn legal, void *user);
 
 /* Within each block, a pure integer computation repeated with the same
@@ -253,6 +269,38 @@ bool anvil_mir_local_cse(anvil_mir_func_t *func);
  * pure instructions ending in a conditional branch with a copy of that
  * block (rotating top-tested loops). */
 bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instrs);
+/* Whether materializing `value` in a register of `reg_class` and
+ * `size_bits` costs the target more than one instruction. */
+typedef bool (*anvil_mir_expensive_constant_fn)(void *user, anvil_mir_reg_class_t reg_class, uint16_t size_bits, int64_t value);
+
+/* Moves the MOV of each expensive constant (with no other definition) out
+ * of the loops containing it, into the loops' outside predecessors. */
+bool anvil_mir_hoist_loop_constants(anvil_mir_func_t *func, anvil_mir_expensive_constant_fn expensive, void *user);
+/* After the registerless marking (constants the printer takes as
+ * immediates): the MOV of every other constant moves out of its innermost
+ * loop the same way, constants hoisted to one loop alike merged.  A
+ * register kept through the loop is the cost; under pressure the
+ * allocator spills it and rematerializes it where it is read. */
+bool anvil_mir_hoist_materialized_constants(anvil_mir_func_t *func);
+/* Moves each compare whose only reader is a later BR_COND or SELECT of its
+ * block down to just before it (the allocator does so first; a backend
+ * marking registerless compares runs it before). */
+bool anvil_mir_sink_compares(anvil_mir_func_t *func);
+/* An entry block of incoming-register copies ending in a compare and a
+ * branch to a block that only returns splits into the test, an early
+ * return and a frame block (the copies); anvil_mir_frame_block names that
+ * block (0: none), where a printer may place its prologue, returning from
+ * the blocks before it without an epilogue. */
+bool anvil_mir_split_early_return(anvil_mir_func_t *func);
+anvil_mir_block_t anvil_mir_frame_block(const anvil_mir_func_t *func);
+
+/* The optional passes every backend runs before allocation, in order:
+ * local value numbering (which also folds conversions of constants),
+ * address folding with the target's `legal` modes (NULL: none), hoisting
+ * of `expensive` constants out of loops (NULL: none), and loop rotation by
+ * branch-target duplication of what remains.  `user` goes to both hooks. */
+bool anvil_mir_optimize_before_allocation(anvil_mir_func_t *func, anvil_mir_address_mode_fn legal, anvil_mir_expensive_constant_fn expensive,
+                                          void *user);
 /* Renumbers blocks in the order of their first instructions (the lowering
  * order), which the printers then follow. */
 bool anvil_mir_order_blocks(anvil_mir_func_t *func);
@@ -313,6 +361,7 @@ bool anvil_mir_set_vreg_signed(anvil_mir_func_t *func,
                                bool is_signed);
 bool anvil_mir_set_live_in(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
                            bool is_live_in);
+bool anvil_mir_set_registerless(anvil_mir_func_t *func, anvil_mir_vreg_t vreg, bool registerless);
 bool anvil_mir_set_fixed_reg(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
                              int phys_reg);
 bool anvil_mir_clear_fixed_reg(anvil_mir_func_t *func, anvil_mir_vreg_t vreg);

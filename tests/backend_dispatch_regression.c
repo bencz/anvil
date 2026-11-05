@@ -141,7 +141,7 @@ int main(void)
 {
     const target_case_t targets[] = {{ANVIL_ARCH_PPC32, ANVIL_ABI_SYSV, ANVIL_SYNTAX_GAS, "probe:", "\t.text"},
                                      {ANVIL_ARCH_PPC64, ANVIL_ABI_SYSV, ANVIL_SYNTAX_GAS, ".quad .L.probe,.TOC.@tocbase,0", ".abiversion 1"},
-                                     {ANVIL_ARCH_PPC64LE, ANVIL_ABI_SYSV, ANVIL_SYNTAX_GAS, ".localentry probe", ".abiversion 2"},
+                                     {ANVIL_ARCH_PPC64LE, ANVIL_ABI_SYSV, ANVIL_SYNTAX_GAS, "probe:", ".abiversion 2"},
                                      {ANVIL_ARCH_S370, ANVIL_ABI_MVS, ANVIL_SYNTAX_HLASM, "STM   R14,R12,12(R13)", "AMODE 24"},
                                      {ANVIL_ARCH_S370_XA, ANVIL_ABI_MVS, ANVIL_SYNTAX_HLASM, "STM   R14,R12,12(R13)", "AMODE 31"},
                                      {ANVIL_ARCH_S390, ANVIL_ABI_MVS, ANVIL_SYNTAX_HLASM, "STM   R14,R12,12(R13)", "AMODE 31"},

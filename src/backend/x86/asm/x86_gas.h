@@ -6,8 +6,10 @@
 
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_machine.h"
+#include "../../common/mir_isel.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 /* The setcc mnemonic of an integer compare; the jcc suffix is the text
@@ -28,17 +30,37 @@ bool x86_gas_fcmp_branch(anvil_fcmp_pred_t pred, const char **cc, bool *swap);
 void x86_gas_emit_fcmp_bool(anvil_strbuf_t *code, const char *label_prefix, const char *function, size_t index,
                             anvil_fcmp_pred_t pred, const char *dst8);
 
+/* dst = cc ? then : else on the flags already set, through `cmov<cc>`
+ * with the mov suffix `suffix` (registers named without %): `else` moves in
+ * first (mov leaves the flags), or a dst already holding `then` takes
+ * `else` on the inverse condition.  False for a condition without one. */
+bool x86_gas_emit_cmov(anvil_strbuf_t *code, const char *cc, const char *suffix, const char *dst, const char *then_reg, const char *else_reg);
+
 /* "<prefix><function>_<block name>", as a definition or a reference. */
 bool x86_gas_emit_label(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, anvil_mir_block_t block);
 bool x86_gas_emit_branch_target(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, anvil_mir_block_t block);
 
 /* Jumps to true_block on `cc` and to false_block otherwise, from code in
- * block `current`: a target that is the next block falls through. */
-bool x86_gas_emit_cond_branch(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, anvil_mir_block_t current,
-                              const char *cc, anvil_mir_block_t true_block, anvil_mir_block_t false_block);
+ * block `current`: a target that is the next printed block falls through;
+ * targets land where `layout` forwards them. */
+bool x86_gas_emit_cond_branch(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, const anvil_mir_layout_t *layout,
+                              anvil_mir_block_t current, const char *cc, anvil_mir_block_t true_block, anvil_mir_block_t false_block);
 
-/* An unconditional jump, omitted to the next block. */
-bool x86_gas_emit_jump(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, anvil_mir_block_t current,
-                       anvil_mir_block_t target);
+/* An unconditional jump, omitted to the next printed block. */
+bool x86_gas_emit_jump(anvil_strbuf_t *code, const char *label_prefix, const anvil_mir_func_t *mir, const anvil_mir_layout_t *layout,
+                       anvil_mir_block_t current, anvil_mir_block_t target);
+
+/* An integer load of `load_bits` read only by the compare at `reader`
+ * of the same width: the compare can read the memory itself (`cmp %r,
+ * mem` with the load on the left, `cmp mem, %r` on the right).  `other`
+ * is the other operand.  Printers keep the load before a compare with an
+ * immediate: `cmp $imm, mem` does not fuse with the branch after it, a
+ * load and `test`/`cmp $imm, %r` do. */
+bool x86_gas_compare_folds(const anvil_mir_func_t *mir, size_t reader, anvil_mir_vreg_t load, unsigned load_bits, bool *load_is_lhs,
+                           anvil_mir_vreg_t *other);
+
+/* That compare, on the memory operand `address`, against the register
+ * `other_reg` (named without %). */
+void x86_gas_emit_memory_compare(anvil_strbuf_t *code, const char *suffix, const char *address, bool load_is_lhs, const char *other_reg);
 
 #endif

@@ -560,7 +560,8 @@ static anvil_mir_vreg_t lower_value(arm64_mir_lower_t *lower,
         if (!lower_add_const_offset(lower, base, offset, &materialized)) {
             return ANVIL_MIR_NO_VREG;
         }
-        if (!map_put(lower, value, materialized)) return ANVIL_MIR_NO_VREG;
+        /* Materialized where this use is, every time: a vreg from the
+         * first use need not dominate the others (the base does). */
         return materialized;
     }
 
@@ -1445,8 +1446,13 @@ static bool lower_cast(arm64_mir_lower_t *lower,
                        anvil_mir_opcode_t mir_op)
 {
     if (instr->num_operands != 1 || !instr->result) return false;
-    /* A pointer reinterpreted as another pointer is the same value. */
+    /* A pointer reinterpreted as another pointer is the same value (a
+     * constant offset from a base stays one, for the accesses to fold). */
     if (anvil_cast_keeps_value(instr)) {
+        anvil_mir_vreg_t offset_base = ANVIL_MIR_NO_VREG;
+        int64_t offset = 0;
+        if (addr_map_get(lower, instr->operands[0], &offset_base, &offset))
+            return addr_map_put(lower, instr->result, offset_base, offset);
         anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
         return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
     }
@@ -1758,6 +1764,9 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
             anvil_mir_vreg_t def = arm64_add_vreg_for_type(lower,
                                                            instr->result->type);
             if (ptr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) return false;
+            /* Its sign unobserved: loaded zero-extended. */
+            if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
+                return false;
             bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
             anvil_mir_vreg_t loaded = is_i1
                 ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false)
@@ -2017,6 +2026,13 @@ static const anvil_mir_vreg_info_t *arm64_legal_vreg_info(
     return info;
 }
 
+/* A 32-bit general register: an index the address extends (sxtw/uxtw). */
+static bool arm64_legal_word_index(const anvil_mir_func_t *mir, anvil_mir_vreg_t vreg)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, vreg);
+    return info && info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits == 32;
+}
+
 static bool arm64_legal_pointer_operand(const anvil_mir_func_t *mir,
                                         anvil_mir_vreg_t vreg,
                                         size_t instr_index,
@@ -2243,7 +2259,8 @@ static bool arm64_legal_instr(const anvil_mir_func_t *mir,
                    (!instr->index_scale ||
                     (!instr->has_imm || instr->imm == 0)) &&
                    (!instr->index_scale ||
-                    arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, base + 1), instr_index, error, error_len));
+                    (instr->index_extend ? arm64_legal_word_index(mir, anvil_mir_get_instr_use(mir, instr_index, base + 1))
+                                         : arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, base + 1), instr_index, error, error_len)));
         }
 
         case ANVIL_MIR_OP_SYMBOL_ADDR:
@@ -2386,11 +2403,33 @@ bool anvil_arm64_verify_mir_legal(const anvil_mir_func_t *mir,
 
 /* [base, index{, lsl #log2(size)}]: no displacement, the index scaled by
  * one or by the access size. */
-static bool arm64_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits)
+/* [base, index{, lsl|sxtw|uxtw #log2(size)}]: the scale is 1 or the
+ * access size, the index 64 bits or a 32-bit register extended. */
+static bool arm64_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
 {
     (void)user;
-    return disp == 0 && (scale == 1 || scale * 8 == access_bits) && access_bits <= 64;
+    (void)extend;
+    return disp == 0 && (scale == 1 || scale * 8 == access_bits) && access_bits <= 128;
 }
+
+/* One movz or movn builds an integer with at most one 16-bit chunk that
+ * differs from all zeros (or all ones); floating constants other than zero
+ * come through a general register or memory. */
+static bool arm64_expensive_constant(void *user, anvil_mir_reg_class_t reg_class, uint16_t size_bits, int64_t value)
+{
+    (void)user;
+    if (reg_class != ANVIL_MIR_REG_GPR)
+        return value != 0;
+    unsigned chunks = size_bits > 32 ? 4 : 2, zero_chunks = 0, one_chunks = 0;
+    for (unsigned c = 0; c < chunks; c++) {
+        uint16_t chunk = (uint16_t)((uint64_t)value >> (16 * c));
+        zero_chunks += chunk != 0;
+        one_chunks += chunk != 0xffff;
+    }
+    return zero_chunks > 1 && one_chunks > 1;
+}
+
+static bool arm64_mark_registerless(anvil_mir_func_t *mir);
 
 bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
 {
@@ -2403,12 +2442,11 @@ bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
         if (!anvil_mir_get_instr_info(mir, index, &instruction))
             return false;
 
-        if (instruction.op == ANVIL_MIR_OP_ATOMIC)
-        {
-            uint64_t scratch = (UINT64_C(1) << 9) | (UINT64_C(1) << 10) | (UINT64_C(1) << 11);
-            if (!anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_GPR, instruction.clobbers[ANVIL_MIR_REG_GPR] | scratch))
-                return false;
-        }
+        /* The exclusive loop rereads its operands after writing x9-x11
+         * (mir_emit_atomic): printer scratch, not merely clobbers. */
+        if (instruction.op == ANVIL_MIR_OP_ATOMIC &&
+            !anvil_mir_set_instr_scratch(mir, index, ANVIL_MIR_REG_GPR, (UINT64_C(1) << 9) | (UINT64_C(1) << 10) | (UINT64_C(1) << 11)))
+            return false;
 
         if (instruction.op == ANVIL_MIR_OP_VA_START &&
             !anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_GPR, instruction.clobbers[ANVIL_MIR_REG_GPR] | (UINT64_C(1) << 16) | (UINT64_C(1) << 17)))
@@ -2426,24 +2464,23 @@ bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
         { .reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_fprs, .phys_regs = registers->fprs,
           .partially_preserved = registers->fpr_partially_preserved, .preserved_bits = registers->fpr_preserved_bits },
     };
+    /* The printer writes pool registers only as results, declared scratch
+     * (atomics) or clobbers (calls); its own temporaries are outside. */
     anvil_regalloc_class_config_t scratch_configs[] = {
-        { .reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_scratch_gprs, .phys_regs = registers->scratch_gprs },
-        { .reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_scratch_fprs, .phys_regs = registers->scratch_fprs },
+        { .reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_scratch_gprs, .phys_regs = registers->scratch_gprs,
+          .printer_declares_writes = true },
+        { .reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_scratch_fprs, .phys_regs = registers->scratch_fprs,
+          .printer_declares_writes = true },
     };
 
     if (!anvil_arm64_verify_mir_legal(mir, NULL, 0)) return false;
-    if (!anvil_mir_duplicate_branch_targets(mir, 4) || !anvil_mir_local_cse(mir) || !anvil_mir_fold_address_arithmetic(mir, arm64_address_mode, NULL)) return false;
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir)) return false;
-    if (!anvil_arm64_verify_mir_legal(mir, NULL, 0)) return false;
-    if (!anvil_regalloc_linear_scan_classes(
-            mir, configs, sizeof(configs) / sizeof(configs[0]))) {
+    if (!anvil_mir_optimize_before_allocation(mir, arm64_address_mode, arm64_expensive_constant, NULL)) return false;
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir)) return false;
+    if (!anvil_arm64_verify_mir_legal(mir, NULL, 0) || !arm64_mark_registerless(mir) ||
+        !anvil_mir_hoist_materialized_constants(mir)) return false;
+    if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
+                                 sizeof(scratch_configs) / sizeof(scratch_configs[0])))
         return false;
-    }
-    if (!anvil_mir_materialize_spills(
-            mir, scratch_configs,
-            sizeof(scratch_configs) / sizeof(scratch_configs[0]))) {
-        return false;
-    }
     return anvil_arm64_verify_mir_legal(mir, NULL, 0);
 }
 
@@ -2459,10 +2496,46 @@ typedef struct {
     int outgoing_size;
     int frame_size;
     bool has_frame;
+    /* The prologue at the MIR's frame block: the blocks before it return
+     * without the frame (anvil_mir_isel_frameless_prefix). */
+    bool wrapped;
+    /* The frame holds only callee-saved pairs: pushed and popped with
+     * writeback (no sub/mov of sp). */
+    bool push_saves;
+    bool moves_sp;   /* dynamic allocation moves sp below the frame */
     const arm64_abi_desc_t *abi;
     anvil_mir_isel_facts_t isel;
+    anvil_mir_layout_t layout;    /* blocks printed, and where branches land */
     anvil_mir_block_t block;  /* being emitted (blocks print in order) */
     const char *fused_cond;   /* set by a compare folded into the next BR_COND or SELECT */
+    /* A compare of a register with zero folded into the next BR_COND:
+     * cbz (eq) or cbnz (ne) on that register. */
+    const char *fused_zero_reg;
+    bool fused_zero_eq;
+    /* An AND with one bit read only by an == / != 0 test feeding the branch:
+     * the test (at bit_test_at) branches on the bit of bit_source (tbz). */
+    size_t bit_test_at;
+    /* x + (a cmp b): the add at cinc_at prints cinc on the compare's flags. */
+    size_t cinc_at;
+    const char *cinc_cond;
+    anvil_mir_vreg_t cinc_other;
+    anvil_mir_vreg_t bit_source;
+    unsigned bit;
+    const char *fused_bit_reg;
+    unsigned fused_bit;
+    /* Adds a post-indexed access did already (printed as nothing), one
+     * flag per instruction. */
+    bool *skip;
+    /* A shift by a constant folded into its reader as a shifted register
+     * operand (`add d, a, s, lsl #k`): the reader, the shift and the
+     * shifted register. */
+    size_t shift_target;
+    anvil_mir_vreg_t shift_def, shift_source;
+    /* In-place adds printed as the pre-index writeback of the access after
+     * them (`ldr w0, [x1, #k]!`): k by access, 0 for none. */
+    int16_t *pre_disp;
+    const char *shift_kind;
+    unsigned shift_amount;
     bool failed;
 } arm64_mir_emit_t;
 
@@ -2553,6 +2626,18 @@ static bool mir_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_i
         return anvil_mir_isel_is_compare(info->op) && use == 1 && lhs_info && lhs_info->reg_class == ANVIL_MIR_REG_GPR && mir_arith_imm(v);
     }
     }
+}
+
+/* Before allocation: constants every reader takes as an immediate, and
+ * integer compares only the next branch reads, need no register. */
+static bool arm64_mark_registerless(anvil_mir_func_t *mir)
+{
+    anvil_mir_isel_facts_t facts;
+    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&facts, mir, mir_takes_immediate, NULL, mir))
+        return false;
+    bool ok = anvil_mir_isel_mark_registerless(mir, &facts);
+    anvil_mir_isel_facts_destroy(&facts);
+    return ok;
 }
 
 /* The immediate the selection uses for the right operand, if any. */
@@ -2781,6 +2866,7 @@ static bool mir_emit_label(arm64_mir_emit_t *emit, anvil_mir_block_t block)
 static bool mir_emit_branch_target(arm64_mir_emit_t *emit,
                                    anvil_mir_block_t block)
 {
+    block = anvil_mir_layout_target(&emit->layout, block);
     anvil_mir_block_info_t info;
     if (!anvil_mir_get_block_info(emit->mir, block, &info)) return false;
     const char *name = info.name && info.name[0] ? info.name : "block";
@@ -2858,24 +2944,15 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
 
     if (!mir_scan_outgoing_stack_args(emit)) return false;
 
+    /* Callee-saved registers the function uses, given slots in register
+     * order so that neighbours pair up (mir_emit_saves). */
     int offset = 0;
-    for (size_t i = 0; i < anvil_mir_num_vregs(emit->mir); i++) {
-        const anvil_regalloc_assignment_t *assignment =
-            anvil_mir_get_assignment(emit->mir, (anvil_mir_vreg_t)i);
-        if (!assignment || assignment->spilled) continue;
-
-        if (assignment->reg_class == ANVIL_MIR_REG_GPR &&
-            assignment->phys_reg >= 19 && assignment->phys_reg <= 28 &&
-            emit->gpr_save_offsets[assignment->phys_reg] < 0) {
-            offset += 8;
-            emit->gpr_save_offsets[assignment->phys_reg] = offset;
-        } else if (assignment->reg_class == ANVIL_MIR_REG_FPR &&
-                   assignment->phys_reg >= 8 && assignment->phys_reg <= 15 &&
-                   emit->fpr_save_offsets[assignment->phys_reg] < 0) {
-            offset += 8;
-            emit->fpr_save_offsets[assignment->phys_reg] = offset;
-        }
-    }
+    for (int reg = 19; reg <= 28; reg++)
+        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, reg))
+            emit->gpr_save_offsets[reg] = offset += 8;
+    for (int reg = 8; reg <= 15; reg++)
+        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, reg))
+            emit->fpr_save_offsets[reg] = offset += 8;
 
     emit->num_spill_offsets = anvil_mir_num_spills(emit->mir);
     emit->num_frame_slot_offsets = anvil_mir_num_frame_slots(emit->mir);
@@ -2907,7 +2984,48 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
     offset += emit->outgoing_size;
     emit->frame_size = align_int(offset, 16);
     emit->has_frame = emit->frame_size > 0 || anvil_mir_needs_frame_record(emit->mir);
+    /* Only saves, in whole pairs per class, and sp never moves otherwise:
+     * each pair goes with a pre-indexed stp. */
+    int gprs = 0, fprs = 0;
+    for (int reg = 0; reg < 32; reg++) {
+        gprs += emit->gpr_save_offsets[reg] >= 0;
+        fprs += emit->fpr_save_offsets[reg] >= 0;
+    }
+    emit->push_saves = emit->frame_size > 0 && emit->frame_size == (gprs + fprs) * 8 && gprs % 2 == 0 && fprs % 2 == 0;
+    emit->moves_sp = false;
+    for (size_t index = 0; index < anvil_mir_num_instrs(emit->mir); index++) {
+        anvil_mir_instr_info_t info;
+        if (!anvil_mir_get_instr_info(emit->mir, index, &info) || info.op == ANVIL_MIR_OP_DYN_ALLOCA)
+            emit->moves_sp = true;
+    }
+    for (size_t index = 0; emit->push_saves && index < anvil_mir_num_instrs(emit->mir); index++) {
+        anvil_mir_instr_info_t info;
+        emit->push_saves = anvil_mir_get_instr_info(emit->mir, index, &info) && info.op != ANVIL_MIR_OP_DYN_ALLOCA && info.op != ANVIL_MIR_OP_VA_START;
+    }
     return true;
+}
+
+/* Pushes (`store`) or pops the callee-saved pairs of a push_saves frame:
+ * pushed in slot order (the first pair lands at x29 - 16), popped in
+ * reverse. */
+static void mir_push_saves(arm64_mir_emit_t *emit, const int *offsets, const char *const *names, int first, int last, bool store, bool cfi)
+{
+    int regs[32], count = 0;
+    for (int reg = first; reg <= last; reg++)
+        if (offsets[reg] >= 0)
+            regs[count++] = reg;
+    for (int k = 0; k + 1 < count; k += 2) {
+        int pair = store ? k : count - 2 - k;
+        int reg = regs[pair], next = regs[pair + 1];
+        if (store) {
+            anvil_strbuf_appendf(&emit->code, "\tstp %s, %s, [sp, #-16]!\n", names[next], names[reg]);
+            if (cfi)
+                anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %s, %d\n\t.cfi_offset %s, %d\n", names[reg], -offsets[reg] - 16, names[next],
+                                     -offsets[next] - 16);
+        } else {
+            anvil_strbuf_appendf(&emit->code, "\tldp %s, %s, [sp], #16\n", names[next], names[reg]);
+        }
+    }
 }
 
 /* The ABI's prologue part of va_start, for each va_start with a register
@@ -2929,6 +3047,33 @@ static void mir_emit_variadic_register_save(arm64_mir_emit_t *emit)
     }
 }
 
+/* Saves (`store`) or restores the callee-saved registers first..last that
+ * have slots below x29: neighbouring slots as one stp/ldp, others singly. */
+static void mir_emit_saves(arm64_mir_emit_t *emit, const int *offsets, const char *const *names, int first, int last, bool store, bool cfi)
+{
+    for (int reg = first; reg <= last; reg++) {
+        if (offsets[reg] < 0)
+            continue;
+        int next = reg + 1;
+        while (next <= last && offsets[next] < 0)
+            next++;
+        /* The pair's lower slot (the later register) is its address. */
+        if (next <= last && offsets[next] == offsets[reg] + 8 && offsets[next] <= 512) {
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, [x29, #-%d]\n", store ? "stp" : "ldp", names[next], names[reg], offsets[next]);
+            if (cfi)
+                anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %s, %d\n\t.cfi_offset %s, %d\n", names[reg], -offsets[reg] - 16, names[next],
+                                     -offsets[next] - 16);
+            reg = next;
+            continue;
+        }
+        arm64_emit_frame_access(&emit->code, store ? "str" : "ldr", names[reg], offsets[reg]);
+        if (cfi)
+            anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %s, %d\n", names[reg], -offsets[reg] - 16);
+    }
+}
+
+static void mir_emit_frame_entry(arm64_mir_emit_t *emit);
+
 static void mir_emit_prologue(arm64_mir_emit_t *emit)
 {
     char symbol[512];
@@ -2938,14 +3083,25 @@ static void mir_emit_prologue(arm64_mir_emit_t *emit)
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_startproc\n");
 
-    if (!emit->has_frame) return;
+    if (!emit->has_frame || emit->wrapped) return;
+    mir_emit_frame_entry(emit);
+}
 
+/* The frame: record, saves, locals (at the entry, or at the frame block). */
+static void mir_emit_frame_entry(arm64_mir_emit_t *emit)
+{
+    bool cfi = emit->abi->format->cfi;
     anvil_strbuf_append(&emit->code, "\tstp x29, x30, [sp, #-16]!\n");
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_offset 16\n\t.cfi_offset x29, -16\n\t.cfi_offset x30, -8\n");
     anvil_strbuf_append(&emit->code, "\tmov x29, sp\n");
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa_register x29\n");
+    if (emit->push_saves) {
+        mir_push_saves(emit, emit->gpr_save_offsets, arm64_xreg_names, 19, 28, true, cfi);
+        mir_push_saves(emit, emit->fpr_save_offsets, arm64_dreg_names, 8, 15, true, cfi);
+        return;
+    }
     if (emit->frame_size > 0) {
         if (emit->frame_size <= 4095) {
             anvil_strbuf_appendf(&emit->code, "\tsub sp, sp, #%d\n",
@@ -2958,23 +3114,8 @@ static void mir_emit_prologue(arm64_mir_emit_t *emit)
     }
 
     mir_emit_variadic_register_save(emit);
-
-    for (int reg = 19; reg <= 28; reg++) {
-        if (emit->gpr_save_offsets[reg] >= 0) {
-            arm64_emit_frame_access(&emit->code, "str", arm64_xreg_names[reg],
-                                  emit->gpr_save_offsets[reg]);
-            if (cfi)
-                anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %s, %d\n", arm64_xreg_names[reg], -emit->gpr_save_offsets[reg] - 16);
-        }
-    }
-    for (int reg = 8; reg <= 15; reg++) {
-        if (emit->fpr_save_offsets[reg] >= 0) {
-            arm64_emit_frame_access(&emit->code, "str", arm64_dreg_names[reg],
-                                  emit->fpr_save_offsets[reg]);
-            if (cfi)
-                anvil_strbuf_appendf(&emit->code, "\t.cfi_offset %s, %d\n", arm64_dreg_names[reg], -emit->fpr_save_offsets[reg] - 16);
-        }
-    }
+    mir_emit_saves(emit, emit->gpr_save_offsets, arm64_xreg_names, 19, 28, true, cfi);
+    mir_emit_saves(emit, emit->fpr_save_offsets, arm64_dreg_names, 8, 15, true, cfi);
 }
 
 static void mir_emit_epilogue(arm64_mir_emit_t *emit)
@@ -2983,19 +3124,17 @@ static void mir_emit_epilogue(arm64_mir_emit_t *emit)
     if (cfi)
         anvil_strbuf_append(&emit->code, "\t.cfi_remember_state\n");
     if (emit->has_frame) {
-        for (int reg = 8; reg <= 15; reg++) {
-            if (emit->fpr_save_offsets[reg] >= 0) {
-                arm64_emit_frame_access(&emit->code, "ldr", arm64_dreg_names[reg],
-                                      emit->fpr_save_offsets[reg]);
-            }
+        if (emit->push_saves) {
+            mir_push_saves(emit, emit->fpr_save_offsets, arm64_dreg_names, 8, 15, false, false);
+            mir_push_saves(emit, emit->gpr_save_offsets, arm64_xreg_names, 19, 28, false, false);
+        } else {
+            mir_emit_saves(emit, emit->fpr_save_offsets, arm64_dreg_names, 8, 15, false, false);
+            mir_emit_saves(emit, emit->gpr_save_offsets, arm64_xreg_names, 19, 28, false, false);
+            /* sp is x29 already with nothing below the record and nothing
+             * allocated on the way. */
+            if (emit->frame_size > 0 || emit->moves_sp)
+                anvil_strbuf_append(&emit->code, "\tmov sp, x29\n");
         }
-        for (int reg = 28; reg >= 19; reg--) {
-            if (emit->gpr_save_offsets[reg] >= 0) {
-                arm64_emit_frame_access(&emit->code, "ldr", arm64_xreg_names[reg],
-                                      emit->gpr_save_offsets[reg]);
-            }
-        }
-        anvil_strbuf_append(&emit->code, "\tmov sp, x29\n");
         if (cfi)
             anvil_strbuf_append(&emit->code, "\t.cfi_def_cfa sp, 16\n");
         anvil_strbuf_append(&emit->code, "\tldp x29, x30, [sp], #16\n");
@@ -3361,6 +3500,66 @@ static void mir_emit_vector(arm64_mir_emit_t *emit, size_t instr_index, const an
     anvil_strbuf_appendf(&emit->code, "\t%s v%d.%s, v%d.%s, v%d.%s\n", isa->mnemonic, d->phys_reg, t, a->phys_reg, t, count, t);
 }
 
+static bool mir_pre_index(arm64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info);
+
+/* A shift of a register by a constant read only by an add, sub, and, orr
+ * or eor shortly after, as its second operand (either, when the operation
+ * commutes), with nothing writing the shifted register between: the
+ * reader shifts the operand itself.  Prints nothing when it folds. */
+static bool mir_fold_shift(arm64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info, anvil_mir_vreg_t source, int64_t imm)
+{
+    unsigned width = mir_gpr_width(emit->mir, source);
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(emit->mir, info->def);
+    const char *kind = info->op == ANVIL_MIR_OP_SHL || info->op == ANVIL_MIR_OP_MUL ? "lsl" : info->op == ANVIL_MIR_OP_SHR ? "lsr"
+                     : info->op == ANVIL_MIR_OP_SAR                                 ? "asr"
+                                                                                    : NULL;
+    unsigned amount = info->op == ANVIL_MIR_OP_MUL ? (unsigned)mir_pow2_shift(imm, width) : (unsigned)(imm & (int64_t)(width - 1));
+    if (!kind || emit->shift_target != SIZE_MAX || !def_info || mir_gpr_width(emit->mir, info->def) != width)
+        return false;
+    size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 8, false);
+    anvil_mir_instr_info_t next;
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, reader, &next) || next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
+        return false;
+    bool commutes = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR || next.op == ANVIL_MIR_OP_XOR;
+    const anvil_mir_vreg_info_t *result = anvil_mir_get_vreg_info(emit->mir, next.def);
+    if (!(commutes || next.op == ANVIL_MIR_OP_SUB) || !result || result->reg_class != ANVIL_MIR_REG_GPR || mir_gpr_width(emit->mir, next.def) != width)
+        return false;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, reader, 0), rhs = anvil_mir_get_instr_use(emit->mir, reader, 1);
+    int64_t other_imm;
+    if (lhs == rhs || (rhs != info->def && !(commutes && lhs == info->def)) || mir_rhs_immediate(emit, reader, &next, &other_imm))
+        return false;
+    emit->shift_target = reader;
+    emit->shift_def = info->def;
+    emit->shift_source = source;
+    emit->shift_kind = kind;
+    emit->shift_amount = amount;
+    return true;
+}
+
+/* x & 2^k read only by `== 0` / `!= 0` feeding the next branch: the branch
+ * tests the bit itself (tbz / tbnz), the AND prints nothing. */
+static bool mir_bit_test(arm64_mir_emit_t *emit, size_t instr_index, anvil_mir_vreg_t source, int64_t imm)
+{
+    unsigned width = mir_gpr_width(emit->mir, source);
+    if (imm <= 0 || (imm & (imm - 1)) || emit->bit_test_at != SIZE_MAX)
+        return false;
+    unsigned bit = 0;
+    while ((INT64_C(1) << bit) != imm)
+        bit++;
+    if (bit >= width)
+        return false;
+    size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 8, false);
+    anvil_mir_instr_info_t next;
+    int64_t zero = 1;
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, reader, &next) || (next.op != ANVIL_MIR_OP_CMP_EQ && next.op != ANVIL_MIR_OP_CMP_NE) ||
+        !mir_rhs_immediate(emit, reader, &next, &zero) || zero != 0 || !anvil_mir_isel_feeds_next_branch(&emit->isel, reader, &next))
+        return false;
+    emit->bit_test_at = reader;
+    emit->bit_source = source;
+    emit->bit = bit;
+    return true;
+}
+
 static void mir_emit_binary(arm64_mir_emit_t *emit,
                             size_t instr_index,
                             const anvil_mir_instr_info_t *info)
@@ -3374,6 +3573,14 @@ static void mir_emit_binary(arm64_mir_emit_t *emit,
 
     const anvil_mir_vreg_info_t *def_info = mir_vreg_info_checked(emit, info->def);
     if (!def_info) return;
+
+    if (instr_index == emit->cinc_at) {
+        emit->cinc_at = SIZE_MAX;
+        const char *to = mir_reg_name(emit, info->def), *from = mir_reg_name(emit, emit->cinc_other);
+        if (!emit->failed)
+            anvil_strbuf_appendf(&emit->code, "\tcinc %s, %s, %s\n", to, from, emit->cinc_cond);
+        return;
+    }
 
     const char *dst = mir_reg_name(emit, info->def);
     const char *a = mir_reg_name(emit, lhs);
@@ -3398,9 +3605,30 @@ static void mir_emit_binary(arm64_mir_emit_t *emit,
         return;
     }
 
+    if (instr_index == emit->shift_target) {
+        /* The folded shift's result is one operand: the other comes first. */
+        emit->shift_target = SIZE_MAX;
+        anvil_mir_vreg_t other = rhs == emit->shift_def ? lhs : rhs;
+        const char *op = info->op == ANVIL_MIR_OP_ADD ? "add" : info->op == ANVIL_MIR_OP_SUB ? "sub" : info->op == ANVIL_MIR_OP_AND ? "and"
+                       : info->op == ANVIL_MIR_OP_OR  ? "orr"
+                                                      : "eor";
+        const char *kept = mir_reg_name(emit, other);
+        const char *shifted = mir_reg_name(emit, emit->shift_source);
+        if (!emit->failed)
+            anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, %s, %s #%u\n", op, dst, kept, shifted, emit->shift_kind, emit->shift_amount);
+        return;
+    }
+
     int64_t imm;
     if (mir_rhs_immediate(emit, instr_index, info, &imm)) {
         unsigned width = mir_gpr_width(emit->mir, lhs);
+        bool shift = info->op == ANVIL_MIR_OP_SHL || info->op == ANVIL_MIR_OP_SHR || info->op == ANVIL_MIR_OP_SAR || info->op == ANVIL_MIR_OP_MUL;
+        if (shift && mir_fold_shift(emit, instr_index, info, lhs, imm))
+            return;
+        if (info->op == ANVIL_MIR_OP_AND && mir_bit_test(emit, instr_index, lhs, imm))
+            return;
+        if (info->op == ANVIL_MIR_OP_ADD && mir_pre_index(emit, instr_index, info))
+            return;
         switch (info->op) {
             case ANVIL_MIR_OP_ADD:
             case ANVIL_MIR_OP_SUB: {
@@ -3536,12 +3764,38 @@ static void mir_emit_cmp(arm64_mir_emit_t *emit,
         }
     } else {
         int64_t imm;
-        if (mir_rhs_immediate(emit, instr_index, info, &imm))
+        bool immediate = mir_rhs_immediate(emit, instr_index, info, &imm);
+        if (instr_index == emit->bit_test_at) {
+            emit->bit_test_at = SIZE_MAX;
+            emit->fused_bit_reg = mir_reg_name(emit, emit->bit_source);
+            emit->fused_bit = emit->bit;
+            emit->fused_zero_eq = info->op == ANVIL_MIR_OP_CMP_EQ;
+            return;
+        }
+        if (immediate && imm == 0 && (info->op == ANVIL_MIR_OP_CMP_EQ || info->op == ANVIL_MIR_OP_CMP_NE) &&
+            anvil_mir_isel_feeds_next_branch(&emit->isel, instr_index, info)) {
+            emit->fused_zero_reg = a;
+            emit->fused_zero_eq = info->op == ANVIL_MIR_OP_CMP_EQ;
+            return;
+        }
+        if (immediate)
             anvil_strbuf_appendf(&emit->code, "\t%s %s, #%lld\n", imm < 0 ? "cmn" : "cmp", a, (long long)(imm < 0 ? -imm : imm));
         else
             anvil_strbuf_appendf(&emit->code, "\tcmp %s, %s\n", a, b);
         if (anvil_mir_isel_feeds_next_branch(&emit->isel, instr_index, info) || anvil_mir_isel_feeds_next_select(&emit->isel, instr_index, info)) {
             emit->fused_cond = mir_cmp_cond(info->op);
+            return;
+        }
+        /* x + (a cmp b): cinc adds the condition (no cset, no extension). */
+        size_t extension = SIZE_MAX, add = SIZE_MAX;
+        anvil_mir_vreg_t other = ANVIL_MIR_NO_VREG;
+        int64_t constant;
+        if (emit->skip && anvil_mir_isel_condition_add(emit->mir, &emit->isel, instr_index, &extension, &add, &other) &&
+            !anvil_mir_isel_constant(&emit->isel, other, &constant)) {
+            emit->skip[extension] = true;
+            emit->cinc_at = add;
+            emit->cinc_cond = mir_cmp_cond(info->op);
+            emit->cinc_other = other;
             return;
         }
     }
@@ -3564,7 +3818,7 @@ static const char *mir_inverse_cond(const char *cond)
 static void mir_emit_cond_branch(arm64_mir_emit_t *emit, const char *taken, const char *inverse, anvil_mir_block_t true_block,
                                  anvil_mir_block_t false_block)
 {
-    if (true_block == emit->block + 1 && inverse) {
+    if (anvil_mir_layout_falls_into(&emit->layout, emit->block, true_block) && inverse) {
         anvil_strbuf_appendf(&emit->code, "\t%s", inverse);
         emit->failed |= !mir_emit_branch_target(emit, false_block);
         anvil_strbuf_append(&emit->code, "\n");
@@ -3573,7 +3827,7 @@ static void mir_emit_cond_branch(arm64_mir_emit_t *emit, const char *taken, cons
     anvil_strbuf_appendf(&emit->code, "\t%s", taken);
     emit->failed |= !mir_emit_branch_target(emit, true_block);
     anvil_strbuf_append(&emit->code, "\n");
-    if (false_block != emit->block + 1) {
+    if (!anvil_mir_layout_falls_into(&emit->layout, emit->block, false_block)) {
         anvil_strbuf_append(&emit->code, "\tb ");
         emit->failed |= !mir_emit_branch_target(emit, false_block);
         anvil_strbuf_append(&emit->code, "\n");
@@ -3724,7 +3978,7 @@ static void mir_emit_symbol_addr(arm64_mir_emit_t *emit,
 /* `op reg, [base, index, lsl #log2(scale)]`, the index being use
  * `index_use` (scale 1 or the access size; no displacement). */
 static void mir_emit_indexed_access(arm64_mir_emit_t *emit, size_t instr_index, size_t index_use, const char *op, const char *reg,
-                                    const char *base, unsigned scale)
+                                    const char *base, unsigned scale, anvil_mir_index_extend_t extend)
 {
     anvil_mir_vreg_t index = anvil_mir_get_instr_use(emit->mir, instr_index, index_use);
     if (index == ANVIL_MIR_NO_VREG) {
@@ -3737,10 +3991,159 @@ static void mir_emit_indexed_access(arm64_mir_emit_t *emit, size_t instr_index, 
         shift++;
     if (emit->failed)
         return;
-    if (shift)
+    /* A 32-bit index widens in the address. */
+    const char *widen = extend == ANVIL_MIR_INDEX_SEXT32 ? "sxtw" : extend == ANVIL_MIR_INDEX_ZEXT32 ? "uxtw" : NULL;
+    if (widen && shift)
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, %s, %s #%u]\n", op, reg, base, index_name, widen, shift);
+    else if (widen)
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, %s, %s]\n", op, reg, base, index_name, widen);
+    else if (shift)
         anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, %s, lsl #%u]\n", op, reg, base, index_name, shift);
     else
         anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, %s]\n", op, reg, base, index_name);
+}
+
+static bool mir_rhs_immediate(arm64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info, int64_t *out);
+
+/* An access at [base] whose register's next use in the block is
+ * `add base, base, #k` (k a `multiple` in low..high): the post-indexed
+ * form does both; a load's target is not the base.  Returns k and marks
+ * the add as printed. */
+static bool mir_post_index(arm64_mir_emit_t *emit, size_t instr_index, anvil_mir_vreg_t base, anvil_mir_vreg_t value, int64_t *disp, int64_t low,
+                           int64_t high, int64_t multiple)
+{
+    const anvil_regalloc_assignment_t *b = anvil_mir_get_assignment(emit->mir, base);
+    const anvil_regalloc_assignment_t *v = anvil_mir_get_assignment(emit->mir, value);
+    const anvil_mir_vreg_info_t *vi = anvil_mir_get_vreg_info(emit->mir, value);
+    if (!b || !v || !vi || b->spilled || v->spilled || (vi->reg_class == ANVIL_MIR_REG_GPR && v->phys_reg == b->phys_reg))
+        return false;
+    for (size_t at = instr_index + 1; at < anvil_mir_num_instrs(emit->mir); at++) {
+        anvil_mir_instr_info_t next;
+        if (!anvil_mir_get_instr_info(emit->mir, at, &next) || next.block != emit->block)
+            return false;
+        bool touches = false;
+        for (size_t u = 0; u < next.num_uses && !touches; u++) {
+            const anvil_regalloc_assignment_t *a = anvil_mir_get_assignment(emit->mir, anvil_mir_get_instr_use(emit->mir, at, u));
+            touches = a && !a->spilled && a->phys_reg == b->phys_reg && anvil_mir_get_vreg_info(emit->mir, anvil_mir_get_instr_use(emit->mir, at, u))->reg_class == ANVIL_MIR_REG_GPR;
+        }
+        const anvil_regalloc_assignment_t *d = next.def != ANVIL_MIR_NO_VREG ? anvil_mir_get_assignment(emit->mir, next.def) : NULL;
+        bool writes = d && !d->spilled && d->phys_reg == b->phys_reg && anvil_mir_get_vreg_info(emit->mir, next.def)->reg_class == ANVIL_MIR_REG_GPR;
+        if (next.op == ANVIL_MIR_OP_CALL || next.clobbers[ANVIL_MIR_REG_GPR] || next.scratch[ANVIL_MIR_REG_GPR])
+            return false;
+        if (!touches && !writes)
+            continue;
+        /* The first instruction to touch the register: the in-place add. */
+        if (next.op != ANVIL_MIR_OP_ADD || next.num_uses != 2 || !writes || !mir_rhs_immediate(emit, at, &next, disp) || *disp < low || *disp > high ||
+            *disp % multiple)
+            return false;
+        const anvil_regalloc_assignment_t *l = anvil_mir_get_assignment(emit->mir, anvil_mir_get_instr_use(emit->mir, at, 0));
+        if (!l || l->spilled || l->phys_reg != b->phys_reg)
+            return false;
+        if (!emit->skip || emit->skip[at])
+            return false;
+        emit->skip[at] = true;
+        return true;
+    }
+    return false;
+}
+
+/* An in-place `add p, p, #k` (-256..255) whose next reader or writer of
+ * p's register in the block is an access at [p] (not loading into p):
+ * the access writes p back first (pre-index), the add prints nothing. */
+static bool mir_pre_index(arm64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+{
+    int64_t disp;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
+    const anvil_regalloc_assignment_t *b = anvil_mir_get_assignment(emit->mir, info->def), *l = anvil_mir_get_assignment(emit->mir, lhs);
+    const anvil_mir_vreg_info_t *bi = anvil_mir_get_vreg_info(emit->mir, info->def);
+    if (!emit->pre_disp || !b || !l || b->spilled || l->spilled || b->phys_reg != l->phys_reg || !bi || bi->reg_class != ANVIL_MIR_REG_GPR ||
+        bi->size_bits != 64 || !mir_rhs_immediate(emit, instr_index, info, &disp) || disp < -256 || disp > 255)
+        return false;
+    for (size_t at = instr_index + 1; at < anvil_mir_num_instrs(emit->mir); at++) {
+        anvil_mir_instr_info_t next;
+        if (!anvil_mir_get_instr_info(emit->mir, at, &next) || next.block != emit->block || next.op == ANVIL_MIR_OP_CALL ||
+            next.clobbers[ANVIL_MIR_REG_GPR] || next.scratch[ANVIL_MIR_REG_GPR])
+            return false;
+        bool touches = false;
+        for (size_t u = 0; u < next.num_uses && !touches; u++) {
+            anvil_mir_vreg_t use = anvil_mir_get_instr_use(emit->mir, at, u);
+            const anvil_regalloc_assignment_t *a = anvil_mir_get_assignment(emit->mir, use);
+            touches = a && !a->spilled && a->phys_reg == b->phys_reg && anvil_mir_get_vreg_info(emit->mir, use)->reg_class == ANVIL_MIR_REG_GPR;
+        }
+        const anvil_regalloc_assignment_t *d = next.def != ANVIL_MIR_NO_VREG ? anvil_mir_get_assignment(emit->mir, next.def) : NULL;
+        bool writes = d && !d->spilled && d->phys_reg == b->phys_reg && anvil_mir_get_vreg_info(emit->mir, next.def)->reg_class == ANVIL_MIR_REG_GPR;
+        /* Accesses another base writes back, adds printed as nothing:
+         * passed over when they leave the register alone. */
+        if (!touches && !writes)
+            continue;
+        /* The first to touch it: an access through it alone. */
+        if ((next.op != ANVIL_MIR_OP_LOAD && next.op != ANVIL_MIR_OP_STORE) || next.index_scale || (next.has_imm && next.imm) || writes ||
+            (emit->skip && emit->skip[at]) || emit->pre_disp[at])
+            return false;
+        size_t pointer = next.op == ANVIL_MIR_OP_LOAD ? 0 : 1;
+        const anvil_regalloc_assignment_t *p = anvil_mir_get_assignment(emit->mir, anvil_mir_get_instr_use(emit->mir, at, pointer));
+        if (!p || p->spilled || p->phys_reg != b->phys_reg)
+            return false;
+        if (next.op == ANVIL_MIR_OP_STORE) {
+            anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, at, 0);
+            const anvil_regalloc_assignment_t *v = anvil_mir_get_assignment(emit->mir, value);
+            const anvil_mir_vreg_info_t *vi = anvil_mir_get_vreg_info(emit->mir, value);
+            /* The stored register is not the base (writeback over it). */
+            if (!v || !vi || (vi->reg_class == ANVIL_MIR_REG_GPR && v->phys_reg == b->phys_reg))
+                return false;
+        }
+        emit->pre_disp[at] = (int16_t)disp;
+        return true;
+    }
+    return false;
+}
+
+/* The access right after instruction `index` (base `base`, the loaded or
+ * stored `value`, `size` bytes at `offset`) when the two make one ldp/stp:
+ * the same kind, plain, through the same base register at offset + size,
+ * of the same class and width, and for loads into distinct registers
+ * other than the base.  Marks it printed and prints the pair, written back
+ * when it starts at [base] and an in-place add of the base follows. */
+static bool mir_emit_pair(arm64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info, anvil_mir_vreg_t base, anvil_mir_vreg_t value,
+                          int size, int64_t offset, bool load)
+{
+    size_t next_index = index + 1;
+    anvil_mir_instr_info_t next;
+    if (!emit->skip || (size != 4 && size != 8 && size != 16) || offset % size || offset / size < -64 || offset / size > 62 ||
+        next_index >= anvil_mir_num_instrs(emit->mir) || !anvil_mir_get_instr_info(emit->mir, next_index, &next) || next.block != info->block ||
+        next.op != info->op || next.index_scale || emit->skip[next_index] || (emit->pre_disp && emit->pre_disp[next_index]) ||
+        next.clobbers[ANVIL_MIR_REG_GPR] || next.scratch[ANVIL_MIR_REG_GPR] || (next.has_imm ? next.imm : 0) != offset + size)
+        return false;
+    anvil_mir_vreg_t next_base = anvil_mir_get_instr_use(emit->mir, next_index, load ? 0 : 1);
+    anvil_mir_vreg_t next_value = load ? next.def : anvil_mir_get_instr_use(emit->mir, next_index, 0);
+    const anvil_regalloc_assignment_t *b = anvil_mir_get_assignment(emit->mir, base), *nb = anvil_mir_get_assignment(emit->mir, next_base);
+    const anvil_regalloc_assignment_t *v = anvil_mir_get_assignment(emit->mir, value), *nv = anvil_mir_get_assignment(emit->mir, next_value);
+    const anvil_mir_vreg_info_t *vi = anvil_mir_get_vreg_info(emit->mir, value), *nvi = anvil_mir_get_vreg_info(emit->mir, next_value);
+    if (!b || !nb || !v || !nv || !vi || !nvi || b->spilled || nb->spilled || v->spilled || nv->spilled || b->phys_reg != nb->phys_reg ||
+        vi->reg_class != nvi->reg_class || mir_size_bytes(nvi->size_bits) != size)
+        return false;
+    bool gpr = vi->reg_class == ANVIL_MIR_REG_GPR;
+    /* Plain loads only (no sign extension); w/x by width. */
+    if (load && gpr && ((vi->is_signed && size < 8) || (nvi->is_signed && size < 8)))
+        return false;
+    if (load && (v->phys_reg == nv->phys_reg || (gpr && (v->phys_reg == b->phys_reg || nv->phys_reg == b->phys_reg))))
+        return false;
+    const char *first = mir_reg_name(emit, value), *second = mir_reg_name(emit, next_value), *base_name = mir_reg_name(emit, base);
+    if (emit->failed)
+        return false;
+    emit->skip[next_index] = true;
+    int64_t post = 0;
+    /* Writeback: neither register is the base. */
+    if (offset == 0 && !(gpr && (v->phys_reg == b->phys_reg || nv->phys_reg == b->phys_reg)) &&
+        mir_post_index(emit, next_index, base, next_value, &post, -64 * (int64_t)size, 63 * (int64_t)size, size)) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, [%s], #%lld\n", load ? "ldp" : "stp", first, second, base_name, (long long)post);
+        return true;
+    }
+    if (offset)
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, [%s, #%lld]\n", load ? "ldp" : "stp", first, second, base_name, (long long)offset);
+    else
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, [%s]\n", load ? "ldp" : "stp", first, second, base_name);
+    return true;
 }
 
 static void mir_emit_load(arm64_mir_emit_t *emit,
@@ -3766,7 +4169,20 @@ static void mir_emit_load(arm64_mir_emit_t *emit,
     }
     if (info->index_scale) {
         mir_emit_indexed_access(emit, instr_index, 1, mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
-                                info->index_scale);
+                                info->index_scale, (anvil_mir_index_extend_t)info->index_extend);
+        return;
+    }
+    if (emit->pre_disp && emit->pre_disp[instr_index]) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, #%d]!\n", mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
+                             emit->pre_disp[instr_index]);
+        return;
+    }
+    if (mir_emit_pair(emit, instr_index, info, ptr, info->def, size, info->has_imm ? info->imm : 0, true))
+        return;
+    int64_t post = 0;
+    if (!(info->has_imm && info->imm) && mir_post_index(emit, instr_index, ptr, info->def, &post, -256, 255, 1)) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s], #%lld\n", mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
+                             (long long)post);
         return;
     }
     mir_emit_base_offset_access(&emit->code,
@@ -3797,7 +4213,19 @@ static void mir_emit_store(arm64_mir_emit_t *emit, size_t instr_index)
         offset = info.imm;
     }
     if (info.index_scale) {
-        mir_emit_indexed_access(emit, instr_index, 2, mir_store_op(value_info->reg_class, size), src, base, info.index_scale);
+        mir_emit_indexed_access(emit, instr_index, 2, mir_store_op(value_info->reg_class, size), src, base, info.index_scale,
+                                (anvil_mir_index_extend_t)info.index_extend);
+        return;
+    }
+    if (emit->pre_disp && emit->pre_disp[instr_index]) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, #%d]!\n", mir_store_op(value_info->reg_class, size), src, base, emit->pre_disp[instr_index]);
+        return;
+    }
+    if (mir_emit_pair(emit, instr_index, &info, ptr, value, size, offset, false))
+        return;
+    int64_t post = 0;
+    if (offset == 0 && mir_post_index(emit, instr_index, ptr, value, &post, -256, 255, 1)) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s], #%lld\n", mir_store_op(value_info->reg_class, size), src, base, (long long)post);
         return;
     }
     mir_emit_base_offset_access(&emit->code,
@@ -3868,6 +4296,14 @@ static void mir_emit_gpr_extend(arm64_mir_emit_t *emit,
      * (ldrs[bh] w to 32 bits, ldr[bh] w to 64). */
     if (src_size < 4 && src_info->is_signed == sign_extend && (!sign_extend || dst_size <= 4) &&
         anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD) {
+        if (dst_assignment->phys_reg != src_assignment->phys_reg)
+            anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_w, src_w);
+        return;
+    }
+
+    /* Already zero above its width (a w-register write clears the upper
+     * half). */
+    if (!sign_extend && src_size <= 4 && anvil_mir_isel_zero_extended(&emit->isel, src)) {
         if (dst_assignment->phys_reg != src_assignment->phys_reg)
             anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_w, src_w);
         return;
@@ -4104,7 +4540,14 @@ static void mir_emit_ret(arm64_mir_emit_t *emit,
             }
         }
     }
-    if (!emit->failed) mir_emit_epilogue(emit);
+    if (emit->failed)
+        return;
+    /* Before the frame block nothing was saved: a plain return. */
+    if (emit->wrapped && emit->block < anvil_mir_frame_block(emit->mir)) {
+        anvil_strbuf_append(&emit->code, "\tret\n");
+        return;
+    }
+    mir_emit_epilogue(emit);
 }
 
 static void mir_emit_va_start(arm64_mir_emit_t *emit, const anvil_mir_instr_info_t *instruction)
@@ -4199,6 +4642,12 @@ static void mir_emit_instr(arm64_mir_emit_t *emit,
                            size_t instr_index,
                            const anvil_mir_instr_info_t *info)
 {
+    if (emit->skip && emit->skip[instr_index])
+        return;
+    if (!anvil_mir_isel_registerless_ok(emit->mir, &emit->isel, instr_index, info)) {
+        emit->failed = true;
+        return;
+    }
     switch (info->op) {
         case ANVIL_MIR_OP_VA_START:
             mir_emit_va_start(emit, info);
@@ -4320,7 +4769,7 @@ static void mir_emit_instr(arm64_mir_emit_t *emit,
             mir_emit_call_stack_arg(emit, instr_index, info);
             break;
         case ANVIL_MIR_OP_BR:
-            if (info->true_block == emit->block + 1)
+            if (anvil_mir_layout_falls_into(&emit->layout, emit->block, info->true_block))
                 break;
             anvil_strbuf_append(&emit->code, "\tb ");
             if (!mir_emit_branch_target(emit, info->true_block)) {
@@ -4337,7 +4786,15 @@ static void mir_emit_instr(arm64_mir_emit_t *emit,
                 break;
             }
             char taken[32], inverse[32];
-            if (emit->fused_cond) {
+            if (emit->fused_bit_reg) {
+                snprintf(taken, sizeof(taken), "%s %s, #%u, ", emit->fused_zero_eq ? "tbz" : "tbnz", emit->fused_bit_reg, emit->fused_bit);
+                snprintf(inverse, sizeof(inverse), "%s %s, #%u, ", emit->fused_zero_eq ? "tbnz" : "tbz", emit->fused_bit_reg, emit->fused_bit);
+                emit->fused_bit_reg = NULL;
+            } else if (emit->fused_zero_reg) {
+                snprintf(taken, sizeof(taken), "%s %s, ", emit->fused_zero_eq ? "cbz" : "cbnz", emit->fused_zero_reg);
+                snprintf(inverse, sizeof(inverse), "%s %s, ", emit->fused_zero_eq ? "cbnz" : "cbz", emit->fused_zero_reg);
+                emit->fused_zero_reg = NULL;
+            } else if (emit->fused_cond) {
                 snprintf(taken, sizeof(taken), "b.%s ", emit->fused_cond);
                 snprintf(inverse, sizeof(inverse), "b.%s ", mir_inverse_cond(emit->fused_cond));
                 emit->fused_cond = NULL;
@@ -4430,14 +4887,30 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
 
     arm64_mir_emit_t emit;
     memset(&emit, 0, sizeof(emit));
+    emit.shift_target = SIZE_MAX;
+    emit.bit_test_at = SIZE_MAX;
+    emit.cinc_at = SIZE_MAX;
+    emit.pre_disp = calloc(anvil_mir_num_instrs(mir) ? anvil_mir_num_instrs(mir) : 1, sizeof(*emit.pre_disp));
+    emit.skip = calloc(anvil_mir_num_instrs(mir) ? anvil_mir_num_instrs(mir) : 1, sizeof(*emit.skip));
     emit.mir = mir;
     emit.abi = arm64_get_abi_desc(abi);
     if (!emit.abi) return false;
     anvil_strbuf_init(&emit.code);
-    if (!emit.code.data) return false;
-
-    if (!mir_prepare_frame(&emit) || !anvil_mir_isel_facts_build(&emit.isel, mir, mir_takes_immediate, (void *)mir)) {
+    if (!emit.code.data || !emit.skip) {
+        free(emit.skip);
+    free(emit.pre_disp);
         anvil_strbuf_destroy(&emit.code);
+        return false;
+    }
+
+    /* The facts first: the frame saves the registers printed code writes. */
+    if (!anvil_mir_isel_facts_build(&emit.isel, mir, mir_takes_immediate, NULL, (void *)mir) || !mir_prepare_frame(&emit) ||
+        !anvil_mir_layout_build(&emit.layout, mir) ||
+        !((emit.wrapped = emit.has_frame && anvil_mir_isel_frameless_prefix(mir, &emit.isel, anvil_mir_frame_block(mir))), true)) {
+        anvil_mir_layout_destroy(&emit.layout);
+        anvil_strbuf_destroy(&emit.code);
+        free(emit.skip);
+    free(emit.pre_disp);
         free(emit.spill_offsets);
         free(emit.frame_slot_offsets);
         anvil_mir_isel_facts_destroy(&emit.isel);
@@ -4453,6 +4926,8 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
     if (!loop_headers || !anvil_mir_loop_header_blocks(mir, loop_headers))
         emit.failed = true;
     for (size_t b = 0; b < num_blocks && !emit.failed && !emit.code.failed; b++) {
+        if (emit.layout.skip[b])
+            continue;  /* prints only a jump: branches go where it leads */
         if (loop_headers && loop_headers[b])
             anvil_strbuf_append(&emit.code, "\t.p2align 4\n");
         if (!mir_emit_label(&emit, (anvil_mir_block_t)b)) {
@@ -4460,6 +4935,8 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
             break;
         }
         emit.block = (anvil_mir_block_t)b;
+        if (emit.wrapped && b == anvil_mir_frame_block(mir))
+            mir_emit_frame_entry(&emit);
 
         for (size_t i = 0; i < num_instrs && !emit.failed && !emit.code.failed; i++) {
             anvil_mir_instr_info_t info;
@@ -4486,7 +4963,10 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
 
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);
+    free(emit.skip);
+    free(emit.pre_disp);
     anvil_mir_isel_facts_destroy(&emit.isel);
+    anvil_mir_layout_destroy(&emit.layout);
     if (emit.failed || emit.code.failed) {
         anvil_strbuf_destroy(&emit.code);
         return false;

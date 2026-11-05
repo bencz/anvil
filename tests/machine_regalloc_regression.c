@@ -586,10 +586,110 @@ static void test_linear_scan_allocates_register_classes_independently(void)
     anvil_mir_func_destroy(fn);
 }
 
-static bool any_scale_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits)
+static bool any_scale_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
 {
     (void)user; (void)disp; (void)access_bits;
-    return scale == 1 || scale == 2 || scale == 4 || scale == 8;
+    return extend == ANVIL_MIR_INDEX_PLAIN && (scale == 1 || scale == 2 || scale == 4 || scale == 8);
+}
+
+/* A target whose addresses also extend a 32-bit index. */
+static bool extending_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
+{
+    (void)user; (void)disp; (void)access_bits; (void)extend;
+    return scale == 1 || scale == 4;
+}
+
+/* base + sext(i32) * 4 folds with the extension where the target allows it
+ * (the SEXT goes too) and keeps the extension where it does not. */
+static void test_address_folding_absorbs_index_extension(void)
+{
+    for (int extending = 0; extending < 2; extending++) {
+        anvil_mir_func_t *fn = anvil_mir_func_create("mir_fold_extended_index");
+        anvil_mir_vreg_t base = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t narrow = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 32, true);
+        anvil_mir_vreg_t wide = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 64, true);
+        anvil_mir_vreg_t two = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t scaled = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t address = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t value = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 32, true);
+        anvil_mir_vreg_t narrow_use[] = { narrow }, shl_uses[] = { wide, two }, add_uses[] = { base, scaled };
+        anvil_mir_vreg_t load_uses[] = { address }, ret_uses[] = { value };
+        CHECK(anvil_mir_set_fixed_reg(fn, base, 0) && anvil_mir_set_live_in(fn, base, true) && anvil_mir_set_fixed_reg(fn, narrow, 1) &&
+                  anvil_mir_set_live_in(fn, narrow, true) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_SEXT, wide, narrow_use, 1) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, two, 2) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_SHL, scaled, shl_uses, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, address, add_uses, 2) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_LOAD, value, load_uses, 1) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, ret_uses, 1),
+              "extended-index address should build");
+        CHECK(anvil_mir_fold_address_arithmetic(fn, extending ? extending_mode : any_scale_mode, NULL), "address folding should run");
+        char error[192] = { 0 };
+        CHECK(anvil_mir_verify(fn, error, sizeof(error)), "folded MachineIR should verify");
+        anvil_mir_instr_info_t load = {0};
+        bool sext_left = false;
+        for (size_t i = 0; i < anvil_mir_num_instrs(fn); i++) {
+            anvil_mir_instr_info_t info;
+            if (!anvil_mir_get_instr_info(fn, i, &info))
+                continue;
+            if (info.op == ANVIL_MIR_OP_LOAD) {
+                load = info;
+                CHECK(anvil_mir_get_instr_use(fn, i, 1) == (extending ? narrow : wide), "the index is the narrow value only when it extends in place");
+            }
+            sext_left |= info.op == ANVIL_MIR_OP_SEXT;
+        }
+        CHECK(load.index_scale == 4, "the shift folds as scale 4");
+        CHECK(load.index_extend == (extending ? ANVIL_MIR_INDEX_SEXT32 : ANVIL_MIR_INDEX_PLAIN), "the extension is recorded on the access");
+        CHECK(sext_left == !extending, "the absorbed SEXT is deleted");
+        anvil_mir_func_destroy(fn);
+    }
+}
+
+/* Two accesses scale one index by separately built constants: local CSE
+ * merges the scalings (equal constants, either operand order), and address
+ * folding still gives each access the scaled index and drops the shared
+ * arithmetic. */
+static void test_shared_scaled_index_folds_after_cse(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_shared_scale");
+    anvil_mir_vreg_t first = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t second = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t incoming = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), index = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t incoming_use[] = { incoming };
+    anvil_mir_vreg_t eight_a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), eight_b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t scaled_a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), scaled_b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t address_a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), address_b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t value_a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), value_b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t sum = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t mul_a[] = { index, eight_a }, mul_b[] = { eight_b, index };
+    anvil_mir_vreg_t add_a[] = { first, scaled_a }, add_b[] = { second, scaled_b };
+    anvil_mir_vreg_t load_a[] = { address_a }, load_b[] = { address_b }, sum_uses[] = { value_a, value_b }, ret_uses[] = { sum };
+    CHECK(anvil_mir_set_fixed_reg(fn, first, 0) && anvil_mir_set_live_in(fn, first, true) && anvil_mir_set_fixed_reg(fn, second, 1) &&
+              anvil_mir_set_live_in(fn, second, true) && anvil_mir_set_fixed_reg(fn, incoming, 2) && anvil_mir_set_live_in(fn, incoming, true) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, index, incoming_use, 1) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, eight_a, 8) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_MUL, scaled_a, mul_a, 2) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, address_a, add_a, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_LOAD, value_a, load_a, 1) &&
+              anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, eight_b, 8) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_MUL, scaled_b, mul_b, 2) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, address_b, add_b, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_LOAD, value_b, load_b, 1) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, sum, sum_uses, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, ret_uses, 1),
+          "shared-scale accesses should build");
+    CHECK(anvil_mir_local_cse(fn), "local CSE should run");
+    size_t multiplies = 0;
+    for (size_t i = 0; i < anvil_mir_num_instrs(fn); i++) {
+        anvil_mir_instr_info_t info;
+        multiplies += anvil_mir_get_instr_info(fn, i, &info) && info.op == ANVIL_MIR_OP_MUL;
+    }
+    CHECK(multiplies == 1, "local CSE merges index * 8 and 8 * index built from distinct constants");
+    CHECK(anvil_mir_fold_address_arithmetic(fn, any_scale_mode, NULL), "address folding should run");
+    char error[192] = { 0 };
+    CHECK(anvil_mir_verify(fn, error, sizeof(error)), "folded MachineIR should verify");
+    size_t scaled_loads = 0, left = 0;
+    for (size_t i = 0; i < anvil_mir_num_instrs(fn); i++) {
+        anvil_mir_instr_info_t info;
+        if (!anvil_mir_get_instr_info(fn, i, &info))
+            continue;
+        scaled_loads += info.op == ANVIL_MIR_OP_LOAD && info.index_scale == 8 && anvil_mir_get_instr_use(fn, i, 1) == index;
+        left += info.op == ANVIL_MIR_OP_MUL || (info.op == ANVIL_MIR_OP_COPY && anvil_mir_get_instr_use(fn, i, 0) != incoming);
+    }
+    CHECK(scaled_loads == 2, "both accesses read the index scaled by 8");
+    CHECK(left == 0, "the shared scaling and its copy go");
+    anvil_mir_func_destroy(fn);
 }
 
 static void test_address_arithmetic_folds_into_accesses(void)
@@ -643,15 +743,18 @@ static void test_address_arithmetic_folds_into_accesses(void)
 static void test_local_cse_reuses_pure_values_until_redefinition(void)
 {
     for (int redefine = 0; redefine < 2; redefine++) {
+        /* x is computed (an extension of a constant would fold). */
         anvil_mir_func_t *fn = anvil_mir_func_create("mir_local_cse");
+        anvil_mir_vreg_t p = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
         anvil_mir_vreg_t x = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
         anvil_mir_vreg_t a = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 64, true);
         anvil_mir_vreg_t b = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 64, true);
-        anvil_mir_vreg_t x_use[] = { x }, both[] = { a, b };
-        CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, x, 5) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_SEXT, a, x_use, 1),
+        anvil_mir_vreg_t x_use[] = { x }, both[] = { a, b }, pp[] = { p, p }, xp[] = { x, p };
+        CHECK(anvil_mir_set_live_in(fn, p, true) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, x, pp, 2) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_SEXT, a, x_use, 1),
               "first extension should build");
         if (redefine)
-            CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, x, 6), "redefinition should build");
+            CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, x, xp, 2), "redefinition should build");
         CHECK(anvil_mir_add_instr(fn, ANVIL_MIR_OP_SEXT, b, x_use, 1) &&
               anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, both, 2) &&
               anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0), "second extension should build");
@@ -664,6 +767,32 @@ static void test_local_cse_reuses_pure_values_until_redefinition(void)
             CHECK(second.op == ANVIL_MIR_OP_COPY && anvil_mir_get_instr_use(fn, 2, 0) == a, "the repeated extension copies the first");
         anvil_mir_func_destroy(fn);
     }
+}
+
+/* Extending or truncating a constant known in the block is a MOV of the
+ * converted constant: its users may take it as an immediate again. */
+static void test_local_cse_folds_conversions_of_constants(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_constant_conversions");
+    anvil_mir_vreg_t byte = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 8, true);
+    anvil_mir_vreg_t sext = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 32, true);
+    anvil_mir_vreg_t zext = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 32, false);
+    anvil_mir_vreg_t wide = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 32, false);
+    anvil_mir_vreg_t trunc = anvil_mir_add_vreg_typed(fn, ANVIL_MIR_REG_GPR, 8, false);
+    anvil_mir_vreg_t byte_use[] = { byte }, wide_use[] = { wide }, all[] = { sext, zext, trunc };
+    CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, byte, -2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_SEXT, sext, byte_use, 1) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_ZEXT, zext, byte_use, 1) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, wide, 0x1234) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_TRUNC, trunc, wide_use, 1) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, all, 3) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0),
+          "constant conversions should build");
+    CHECK(anvil_mir_local_cse(fn), "local CSE should run");
+    anvil_mir_instr_info_t s1, z1, t1;
+    CHECK(anvil_mir_get_instr_info(fn, 1, &s1) && anvil_mir_get_instr_info(fn, 2, &z1) && anvil_mir_get_instr_info(fn, 4, &t1),
+          "the conversions should be inspectable");
+    CHECK(s1.op == ANVIL_MIR_OP_MOV && s1.imm == -2, "SEXT of -2 (8 bits) is -2");
+    CHECK(z1.op == ANVIL_MIR_OP_MOV && z1.imm == 254, "ZEXT of -2 (8 bits) is 254");
+    CHECK(t1.op == ANVIL_MIR_OP_MOV && t1.imm == 0x34, "TRUNC of 0x1234 to 8 bits is 0x34");
+    anvil_mir_func_destroy(fn);
 }
 
 static void test_loop_tests_rotate_and_phi_copies_retarget(void)
@@ -694,21 +823,32 @@ static void test_loop_tests_rotate_and_phi_copies_retarget(void)
     CHECK(anvil_mir_duplicate_branch_targets(fn, 4) && anvil_mir_verify(fn, error, sizeof(error)), "rotation should keep valid MachineIR");
     CHECK(anvil_mir_coalesce_copies(fn) && anvil_mir_verify(fn, error, sizeof(error)), "coalescing should keep valid MachineIR");
 
-    size_t body_branches = 0, entry_jumps = 0, copies = 0;
+    /* Blocks renumber as the test block, now reached only from the entry,
+     * joins it: find the loop by its increment. */
+    anvil_mir_block_t loop = ANVIL_MIR_NO_BLOCK;
+    for (size_t k = 0; k < anvil_mir_num_instrs(fn); k++) {
+        anvil_mir_instr_info_t info;
+        if (anvil_mir_get_instr_info(fn, k, &info) && info.op == ANVIL_MIR_OP_ADD)
+            loop = info.block;
+    }
+    size_t body_branches = 0, entry_tests = 0, copies = 0;
     bool add_writes_i = false;
     for (size_t k = 0; k < anvil_mir_num_instrs(fn); k++) {
         anvil_mir_instr_info_t info;
         if (!anvil_mir_get_instr_info(fn, k, &info))
             continue;
-        if (info.block == body && info.op == ANVIL_MIR_OP_BR_COND && info.true_block == body && info.false_block == done)
+        if (info.block == loop && info.op == ANVIL_MIR_OP_BR_COND && info.true_block == loop && info.false_block != loop)
             body_branches++;
-        if (info.block == entry && info.op == ANVIL_MIR_OP_BR && info.true_block == cond)
-            entry_jumps++;
+        if (info.block == entry && info.op == ANVIL_MIR_OP_BR_COND && info.true_block == loop)
+            entry_tests++;
         copies += info.op == ANVIL_MIR_OP_COPY;
         add_writes_i |= info.op == ANVIL_MIR_OP_ADD && info.def == i;
     }
+    (void)cond;
+    (void)done;
+    (void)body;
     CHECK(body_branches == 1, "the latch tests the condition and branches back by itself");
-    CHECK(entry_jumps == 1, "the loop entry still reaches the original test");
+    CHECK(entry_tests == 1, "the loop entry tests the condition itself (the test block joined it)");
     CHECK(copies == 0 && add_writes_i, "the PHI copy disappears: the increment writes i directly");
     anvil_mir_func_destroy(fn);
 }
@@ -930,6 +1070,42 @@ static void test_linear_scan_extends_loop_carried_values_to_backedge_exit(void)
     CHECK(anvil_mir_num_spills(fn) > 0,
           "loop-carried value should remain live to the backedge block exit");
 
+    anvil_mir_func_destroy(fn);
+}
+
+/* A value live in a diamond's entry and right arm but dead in its left arm
+ * (a lifetime hole in block order) leaves its register to the left arm's
+ * values: two registers suffice where the interval alone needed three. */
+static void test_linear_scan_shares_registers_in_lifetime_holes(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_holes");
+    anvil_mir_block_t entry = anvil_mir_current_block(fn);
+    anvil_mir_block_t left = anvil_mir_add_block(fn, "left");
+    anvil_mir_block_t right = anvil_mir_add_block(fn, "right");
+    anvil_mir_block_t merge = anvil_mir_add_block(fn, "merge");
+    anvil_mir_vreg_t cond = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 8);
+    anvil_mir_vreg_t held = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t first = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t second = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+    anvil_mir_vreg_t held_use[] = {held}, pair[] = {first, second};
+    CHECK(anvil_mir_set_current_block(fn, entry) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, held, 7) &&
+              anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, cond, 1) && anvil_mir_add_cond_branch(fn, cond, left, right),
+          "hole entry should be valid");
+    /* left: the held value's last use, then two values live together. */
+    CHECK(anvil_mir_set_current_block(fn, left) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, held_use, 1) &&
+              anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, first, 1) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, second, 2) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, pair, 2) && anvil_mir_add_branch(fn, merge),
+          "hole left arm should be valid");
+    CHECK(anvil_mir_set_current_block(fn, right) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, held_use, 1) && anvil_mir_add_branch(fn, merge),
+          "hole right arm should be valid");
+    CHECK(anvil_mir_set_current_block(fn, merge) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0),
+          "hole merge should be valid");
+    CHECK(anvil_regalloc_linear_scan(fn, 2), "linear scan should allocate the diamond with two registers");
+    CHECK(anvil_mir_num_spills(fn) == 0, "the left arm's values take the held value's register in its hole");
+    const anvil_regalloc_assignment_t *a = anvil_mir_get_assignment(fn, first), *b = anvil_mir_get_assignment(fn, second);
+    CHECK(a && b && !a->spilled && !b->spilled && a->phys_reg != b->phys_reg, "values live together keep distinct registers");
     anvil_mir_func_destroy(fn);
 }
 
@@ -1317,6 +1493,11 @@ static void test_materialize_spills_counts_bundle_scratch_demand(void)
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, a, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_MOV, b, NULL, 0);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, all_uses, 3);
+    /* The register stays with `live`, the most used per instruction
+     * spanned (the spill weight), so both return parts spill. */
+    anvil_mir_vreg_t live_use[] = { live };
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, live_use, 1);
+    anvil_mir_add_instr(fn, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, live_use, 1);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET_VALUE_PART, ANVIL_MIR_NO_VREG, a_use, 1);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET_VALUE_PART, ANVIL_MIR_NO_VREG, b_use, 1);
     anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0);
@@ -1459,6 +1640,7 @@ static void test_machine_ir_rejects_non_boolean_compare_and_conditions(void)
 
 int main(void)
 {
+    test_linear_scan_shares_registers_in_lifetime_holes();
     test_machine_ir_tracks_vregs_and_instructions();
     test_strbuf_failure_is_sticky_and_detach_is_atomic();
     test_machine_ir_tracks_blocks_and_branch_targets();
@@ -1476,6 +1658,9 @@ int main(void)
     test_linear_scan_allocates_register_classes_independently();
     test_address_arithmetic_folds_into_accesses();
     test_local_cse_reuses_pure_values_until_redefinition();
+    test_local_cse_folds_conversions_of_constants();
+    test_address_folding_absorbs_index_extension();
+    test_shared_scaled_index_folds_after_cse();
     test_loop_tests_rotate_and_phi_copies_retarget();
     test_linear_scan_respects_fixed_physical_registers();
     test_linear_scan_moves_values_displaced_by_fixed_registers();

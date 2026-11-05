@@ -373,11 +373,22 @@ static bool ppc_add_call_clobbers(anvil_mir_func_t *mir, const anvil_ppc_target_
 }
 
 /* X-form accesses: base + index, unscaled, no displacement. */
-static bool ppc_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits)
+static bool ppc_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
 {
     (void)user;
     (void)access_bits;
-    return scale == 1 && disp == 0;
+    return extend == ANVIL_MIR_INDEX_PLAIN && scale == 1 && disp == 0;
+}
+
+/* li takes a signed 16-bit value, lis one whose low half is zero within
+ * 32 signed bits; floating constants go through r11 and the frame. */
+static bool ppc_expensive_constant(void *user, anvil_mir_reg_class_t reg_class, uint16_t size_bits, int64_t value)
+{
+    (void)user;
+    (void)size_bits;
+    if (reg_class != ANVIL_MIR_REG_GPR)
+        return true;
+    return !(value >= -32768 && value <= 32767) && !((value & 0xffff) == 0 && value >= INT32_MIN && value <= INT32_MAX);
 }
 
 bool anvil_ppc_regalloc_mir(anvil_mir_func_t *mir, anvil_ppc_variant_t variant)
@@ -401,23 +412,25 @@ bool anvil_ppc_regalloc_mir_features(anvil_mir_func_t *mir, anvil_ppc_variant_t 
          .partially_preserved = ~UINT64_C(0) << 14 & UINT64_C(0xFFFFFFFF), .preserved_bits = 64},
         {.reg_class = ANVIL_MIR_REG_VECTOR, .num_phys_regs = PPC_NUM_ALLOC_VECTOR_REGS, .phys_regs = ppc_alloc_vector_regs},
     };
+    /* ppc_emit.c declares every write to the GPR and FPR scratch registers
+     * (ppc_annotate_printer_scratch, call and atomic clobbers). */
     anvil_regalloc_class_config_t scratch_configs[] = {
-        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_scratch_gpr_regs, .phys_regs = desc->scratch_gpr_regs},
-        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = (int)desc->num_scratch_fpr_regs, .phys_regs = desc->scratch_fpr_regs},
+        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = (int)desc->num_scratch_gpr_regs, .phys_regs = desc->scratch_gpr_regs,
+         .printer_declares_writes = true},
+        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = (int)desc->num_scratch_fpr_regs, .phys_regs = desc->scratch_fpr_regs,
+         .printer_declares_writes = true},
         {.reg_class = ANVIL_MIR_REG_VECTOR, .num_phys_regs = PPC_NUM_SCRATCH_VECTOR_REGS, .phys_regs = ppc_scratch_vector_regs},
     };
 
-    if (!anvil_ppc_verify_mir_legal(mir, variant, NULL, 0) || !anvil_mir_duplicate_branch_targets(mir, 4) || !anvil_mir_local_cse(mir) || !anvil_mir_fold_address_arithmetic(mir, ppc_address_mode, NULL))
+    if (!anvil_ppc_verify_mir_legal(mir, variant, NULL, 0) || !anvil_mir_optimize_before_allocation(mir, ppc_address_mode, ppc_expensive_constant, NULL))
         return false;
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir))
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) || !ppc_annotate_printer_scratch(mir, features))
         return false;
-    if (!anvil_ppc_verify_mir_legal(mir, variant, NULL, 0))
+    if (!anvil_ppc_verify_mir_legal(mir, variant, NULL, 0) || !anvil_ppc_mark_registerless(mir, desc, features) ||
+        !anvil_mir_hoist_materialized_constants(mir))
         return false;
-    if (!anvil_regalloc_linear_scan_classes(mir, configs, sizeof(configs) / sizeof(configs[0]))) {
+    if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
+                                 sizeof(scratch_configs) / sizeof(scratch_configs[0])))
         return false;
-    }
-    if (!anvil_mir_materialize_spills(mir, scratch_configs, sizeof(scratch_configs) / sizeof(scratch_configs[0]))) {
-        return false;
-    }
     return anvil_ppc_verify_mir_legal(mir, variant, NULL, 0);
 }

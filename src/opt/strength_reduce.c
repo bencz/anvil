@@ -10,6 +10,12 @@
  * - (x << k) | (x >> (width - k)) -> rotate left, where the target has it
  * - a*b + c -> fused multiply-add, where the function permits contraction
  *   and the target has it
+ * - ext(a op b) -> ext(a) op ext(b) for a no-wrap add, sub or mul whose
+ *   extension (sign for a signed type, zero for an unsigned one) is its
+ *   only reader: the wide operation is exact as well, and the pieces it
+ *   exposes (an invariant part of an index, an induction variable's own
+ *   extension) are what loop passes and address modes take apart
+ * - compares and extensions of exact truncations -> the wide values
  */
 
 #include "anvil/anvil_internal.h"
@@ -77,6 +83,59 @@ static anvil_instr_t *prepare_binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type
         return NULL;
 
     return instr;
+}
+
+/* An exact division (no-wrap: no remainder) by a constant d = 2^k * o,
+ * o odd: shift right by k (arithmetically for SDIV: the quotient's sign),
+ * then multiply by o's inverse modulo 2^width. */
+static bool reduce_exact_division(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    anvil_value_t *n = instr->operands[0], *divisor = instr->operands[1];
+    anvil_type_t *type = n->type;
+    unsigned bits = type && anvil_type_is_integer(type) ? anvil_type_bit_width(type) : 0;
+    if (!instr->no_wrap || divisor->kind != ANVIL_VAL_CONST_INT || bits < 8 || bits > 64)
+        return false;
+    uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    uint64_t d = anvil_const_int_unsigned_value(divisor) & mask;
+    bool is_signed = instr->op == ANVIL_OP_SDIV;
+    /* Negative divisors keep the general forms. */
+    if (d == 0 || (is_signed && (d >> (bits - 1)) & 1))
+        return false;
+    unsigned k = 0;
+    while (!((d >> k) & 1))
+        k++;
+    uint64_t odd = d >> k;
+    if (odd == 1 && k == 0)
+        return false;
+    uint64_t inverse = odd;  /* Newton: each step doubles the correct bits */
+    for (int step = 0; step < 6; step++)
+        inverse *= 2 - odd * inverse;
+    inverse &= mask;
+    anvil_value_t *value = n;
+    anvil_instr_t *shift = NULL;
+    if (k) {
+        anvil_value_t *amount = make_shift_const(ctx, type, (int)k);
+        if (!amount || !(shift = prepare_binary(ctx, is_signed ? ANVIL_OP_SAR : ANVIL_OP_SHR, type, n, amount)))
+            return false;
+    }
+    anvil_value_t *factor = odd == 1 ? NULL : anvil_opt_make_const_int(ctx, type, (int64_t)inverse);
+    if (odd != 1 && !factor)
+        return false;
+    if (shift) {
+        if (odd == 1) {
+            instr->op = shift->op;
+            instr->operands[1] = shift->operands[1];
+            instr->no_wrap = false;
+            return true;
+        }
+        anvil_opt_insert_before(instr, shift);
+        value = shift->result;
+    }
+    instr->op = ANVIL_OP_MUL;
+    instr->operands[0] = value;
+    instr->operands[1] = factor;
+    instr->no_wrap = false;
+    return true;
 }
 
 static bool reduce_signed_power(anvil_ctx_t *ctx, anvil_instr_t *instr, unsigned shift)
@@ -346,6 +405,7 @@ static bool contract(anvil_instr_t *add, int side)
     if (!anvil_instr_reserve_operands(add, 3))
         return false;
     add->op = ANVIL_OP_FMA;
+    add->no_wrap = false;
     add->operands[0] = multiply->operands[0];
     add->operands[1] = multiply->operands[1];
     add->operands[2] = addend;
@@ -354,7 +414,361 @@ static bool contract(anvil_instr_t *add, int side)
     return true;
 }
 
-/* Strength reduction pass */
+enum { SR_EXTEND_DEPTH = 4 };
+
+/* `value` extended by `ext` to `wide` ahead of `position`: a constant
+ * directly, an extension of a single-reader no-wrap operation distributed
+ * in turn. */
+static anvil_value_t *extend_operand(anvil_ctx_t *ctx, const anvil_def_use_t *uses, anvil_instr_t *position, anvil_op_t ext,
+                                     anvil_type_t *wide, anvil_value_t *value, unsigned depth);
+
+/* The no-wrap operation `ext` (an extension) may distribute over. */
+static anvil_instr_t *distributable(const anvil_def_use_t *uses, anvil_op_t ext, const anvil_value_t *value)
+{
+    anvil_instr_t *narrow = value->kind == ANVIL_VAL_INSTR ? value->data.instr : NULL;
+    if (!narrow || !narrow->no_wrap || narrow->num_operands != 2 || !narrow->result || !anvil_type_is_integer(narrow->result->type) ||
+        (narrow->op != ANVIL_OP_ADD && narrow->op != ANVIL_OP_SUB && narrow->op != ANVIL_OP_MUL) ||
+        narrow->result->type->is_signed != (ext == ANVIL_OP_SEXT))
+        return NULL;
+    size_t definition = anvil_def_use_definition(uses, value);
+    return definition != SIZE_MAX && uses->use_offsets[definition + 1] - uses->use_offsets[definition] == 1 ? narrow : NULL;
+}
+
+/* Rewrites `instr` (ext of a distributable operation) in place into the
+ * wide operation over extended operands; the narrow one goes. */
+static bool distribute_extension(anvil_ctx_t *ctx, const anvil_def_use_t *uses, anvil_instr_t *instr, unsigned depth)
+{
+    anvil_instr_t *narrow = instr->operands[0]->data.instr;
+    anvil_type_t *wide = instr->result->type;
+    anvil_value_t *left = extend_operand(ctx, uses, instr, instr->op, wide, narrow->operands[0], depth + 1);
+    anvil_value_t *right = left ? extend_operand(ctx, uses, instr, instr->op, wide, narrow->operands[1], depth + 1) : NULL;
+    if (!right || !anvil_instr_reserve_operands(instr, 2))
+        return false;
+    instr->op = narrow->op;
+    instr->no_wrap = true;
+    instr->operands[0] = left;
+    instr->operands[1] = right;
+    instr->num_operands = 2;
+    anvil_opt_erase_instr(narrow);
+    return true;
+}
+
+static anvil_value_t *extend_operand(anvil_ctx_t *ctx, const anvil_def_use_t *uses, anvil_instr_t *position, anvil_op_t ext,
+                                     anvil_type_t *wide, anvil_value_t *value, unsigned depth)
+{
+    if (value->kind == ANVIL_VAL_CONST_INT)
+        return anvil_opt_make_const_int(ctx, wide, ext == ANVIL_OP_SEXT ? value->data.i : (int64_t)anvil_const_int_unsigned_value(value));
+    anvil_instr_t *extension = anvil_instr_create(ctx, ext, wide, value->name);
+    if (!extension || !anvil_instr_add_operand(extension, value))
+        return NULL;
+    anvil_opt_insert_before(position, extension);
+    if (depth < SR_EXTEND_DEPTH && distributable(uses, ext, value) && !distribute_extension(ctx, uses, extension, depth))
+        return NULL;
+    return extension->result;
+}
+
+/* Every extension of a single-reader no-wrap operation, distributed. */
+static anvil_pass_result_t distribute_extensions(anvil_func_t *func, anvil_ctx_t *ctx)
+{
+    bool any = false;
+    for (anvil_block_t *block = func->blocks; block && !any; block = block->next)
+        for (anvil_instr_t *instr = block->first; instr && !any; instr = instr->next)
+            any = instr->no_wrap;
+    if (!any)
+        return ANVIL_PASS_RUN_UNCHANGED;
+    anvil_def_use_t uses;
+    if (!anvil_def_use_build(func, &uses))
+        return ANVIL_PASS_RUN_ERROR;
+    bool changed = false, ok = true;
+    for (anvil_block_t *block = func->blocks; block && ok; block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr && ok; instr = instr->next) {
+            if ((instr->op != ANVIL_OP_SEXT && instr->op != ANVIL_OP_ZEXT) || instr->num_operands != 1 || !instr->result ||
+                !anvil_type_is_integer(instr->result->type) || !distributable(&uses, instr->op, instr->operands[0]))
+                continue;
+            ok = distribute_extension(ctx, &uses, instr, 0);
+            changed = true;
+        }
+    }
+    anvil_def_use_destroy(&uses);
+    return !ok ? ANVIL_PASS_RUN_ERROR : changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
+}
+
+/* `value` as an exact truncation (no-wrap TRUNC): its wide source. */
+static anvil_value_t *exact_source(const anvil_value_t *value)
+{
+    const anvil_instr_t *trunc = value->kind == ANVIL_VAL_INSTR ? value->data.instr : NULL;
+    return trunc && trunc->op == ANVIL_OP_TRUNC && trunc->no_wrap && trunc->num_operands == 1 ? trunc->operands[0] : NULL;
+}
+
+/* `value` extended to `wide` (sign or zero) right where it is defined (a
+ * parameter: at the function's start), so the extension runs once, outside
+ * any loop the value is invariant in. */
+static anvil_value_t *extended_once(anvil_func_t *func, anvil_ctx_t *ctx, anvil_value_t *value, anvil_type_t *wide, bool sign)
+{
+    anvil_instr_t *position = NULL;
+    if (value->kind == ANVIL_VAL_PARAM) {
+        position = func->blocks ? func->blocks->first : NULL;
+        while (position && position->op == ANVIL_OP_PHI)
+            position = position->next;
+    } else if (value->kind == ANVIL_VAL_INSTR && value->data.instr->parent) {
+        position = value->data.instr->next;
+        while (position && position->op == ANVIL_OP_PHI)
+            position = position->next;
+    }
+    if (!position)
+        return NULL;
+    anvil_instr_t *extension = anvil_instr_create(ctx, sign ? ANVIL_OP_SEXT : ANVIL_OP_ZEXT, wide, value->name);
+    if (!extension || !anvil_instr_add_operand(extension, value))
+        return NULL;
+    anvil_opt_insert_before(position, extension);
+    return extension->result;
+}
+
+/* Exact truncations fold away where the wide value serves: a compare of
+ * two, or of one and another value (a constant, or a value extended once
+ * where it is defined), compares the wide values, the narrow
+ * values being their extensions by the narrow type's signedness, which is
+ * the compare's; an extension of one by that signedness back to the wide
+ * type is the wide value. */
+static bool fold_exact_truncations(anvil_func_t *func, anvil_ctx_t *ctx)
+{
+    bool changed = false;
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
+            bool compare = instr->op >= ANVIL_OP_CMP_EQ && instr->op <= ANVIL_OP_CMP_UGE && instr->num_operands == 2;
+            if (compare) {
+                anvil_value_t *left = exact_source(instr->operands[0]), *right = exact_source(instr->operands[1]);
+                anvil_value_t *wide = left ? left : right;
+                if (!wide || !anvil_type_is_integer(instr->operands[0]->type))
+                    continue;
+                bool is_signed = instr->operands[0]->type->is_signed;
+                anvil_value_t *sides[2] = {left, right};
+                for (size_t side = 0; side < 2; side++) {
+                    anvil_value_t *operand = instr->operands[side];
+                    if (!sides[side] && operand->kind == ANVIL_VAL_CONST_INT)
+                        sides[side] = anvil_opt_make_const_int(ctx, wide->type, is_signed ? operand->data.i : (int64_t)anvil_const_int_unsigned_value(operand));
+                    else if (!sides[side])
+                        sides[side] = extended_once(func, ctx, operand, wide->type, is_signed);
+                }
+                if (!sides[0] || !sides[1] || !anvil_types_equal(sides[0]->type, sides[1]->type))
+                    continue;
+                instr->operands[0] = sides[0];
+                instr->operands[1] = sides[1];
+                changed = true;
+                continue;
+            }
+            if ((instr->op == ANVIL_OP_SEXT || instr->op == ANVIL_OP_ZEXT) && instr->num_operands == 1 && instr->result) {
+                anvil_value_t *wide = exact_source(instr->operands[0]);
+                if (wide && anvil_types_equal(wide->type, instr->result->type) &&
+                    instr->operands[0]->type->is_signed == (instr->op == ANVIL_OP_SEXT) &&
+                    anvil_opt_replace_uses_in_func(func, instr->result, wide) > 0)
+                    changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/* A compare of extensions of one narrow type (or of one and a constant it
+ * represents) compares the narrow values: ext(a) == ext(b) is a == b,
+ * sext(c) != 0 is c != 0, sext(a) < sext(b) is a < b (zext and unsigned
+ * orders alike).  The extensions often go then, and the narrow values'
+ * loads with them (a C char promoted to int only to be compared).  Exact
+ * truncations are left to fold_exact_truncations, which widens them. */
+static bool narrow_extended_compare(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    if (instr->op < ANVIL_OP_CMP_EQ || instr->op > ANVIL_OP_CMP_UGE || instr->num_operands != 2)
+        return false;
+    bool equality = instr->op == ANVIL_OP_CMP_EQ || instr->op == ANVIL_OP_CMP_NE;
+    bool unsigned_order = instr->op >= ANVIL_OP_CMP_ULT && instr->op <= ANVIL_OP_CMP_UGE;
+    anvil_op_t kind = ANVIL_OP_NOP;
+    anvil_type_t *narrow = NULL;
+    anvil_value_t *sides[2] = {NULL, NULL};
+    for (size_t side = 0; side < 2; side++) {
+        anvil_value_t *operand = instr->operands[side];
+        if (operand->kind != ANVIL_VAL_INSTR || !operand->data.instr)
+            continue;
+        const anvil_instr_t *ext = operand->data.instr;
+        if ((ext->op != ANVIL_OP_SEXT && ext->op != ANVIL_OP_ZEXT) || ext->num_operands != 1)
+            continue;
+        anvil_value_t *source = ext->operands[0];
+        if (!anvil_type_is_integer(source->type) || source->type->kind == ANVIL_TYPE_I1 || exact_source(source))
+            return false;
+        if ((kind != ANVIL_OP_NOP && kind != ext->op) || (narrow && !anvil_types_equal(narrow, source->type)))
+            return false;
+        kind = ext->op;
+        narrow = source->type;
+        sides[side] = source;
+    }
+    if (!narrow)
+        return false;
+    /* An order keeps its meaning on narrow values of its own signedness
+     * (sext of signed, zext of unsigned); a signed order of zero-extended
+     * values is the unsigned order of the narrow ones. */
+    anvil_op_t op = instr->op;
+    if (!equality && kind == ANVIL_OP_ZEXT && !unsigned_order && !narrow->is_signed)
+        op = (anvil_op_t)(ANVIL_OP_CMP_ULT + (op - ANVIL_OP_CMP_LT));
+    else if (!equality && narrow->is_signed == unsigned_order)
+        return false;
+    unsigned bits = anvil_type_bit_width(narrow);
+    for (size_t side = 0; side < 2; side++) {
+        if (sides[side])
+            continue;
+        anvil_value_t *operand = instr->operands[side];
+        if (operand->kind != ANVIL_VAL_CONST_INT || bits >= 64)
+            return false;
+        int64_t value = operand->data.i;
+        bool fits = kind == ANVIL_OP_SEXT ? value >= -(INT64_C(1) << (bits - 1)) && value < (INT64_C(1) << (bits - 1))
+                                          : (uint64_t)anvil_const_int_unsigned_value(operand) < (UINT64_C(1) << bits);
+        if (!fits || !(sides[side] = anvil_opt_make_const_int(ctx, narrow, value)))
+            return false;
+    }
+    instr->op = op;
+    instr->operands[0] = sides[0];
+    instr->operands[1] = sides[1];
+    return true;
+}
+
+/* Strength reduction pass *//* Strength reduction pass */
+/* One side of a range test on x: x >= lo (lower) or x <= hi, from x op c
+ * or c op x with a constant c, in the signedness of the compare. */
+typedef struct {
+    anvil_value_t *x;
+    int64_t bound;
+    bool lower, is_unsigned;
+} range_side_t;
+
+static bool range_side(const anvil_value_t *value, range_side_t *side)
+{
+    if (value->kind != ANVIL_VAL_INSTR || !value->data.instr || value->data.instr->num_operands != 2)
+        return false;
+    const anvil_instr_t *cmp = value->data.instr;
+    anvil_op_t op = cmp->op;
+    anvil_value_t *a = cmp->operands[0], *b = cmp->operands[1];
+    bool constant_left = a->kind == ANVIL_VAL_CONST_INT && b->kind != ANVIL_VAL_CONST_INT;
+    if (constant_left) {
+        /* c op x is x op' c. */
+        switch (op) {
+        case ANVIL_OP_CMP_LT: op = ANVIL_OP_CMP_GT; break;
+        case ANVIL_OP_CMP_LE: op = ANVIL_OP_CMP_GE; break;
+        case ANVIL_OP_CMP_GT: op = ANVIL_OP_CMP_LT; break;
+        case ANVIL_OP_CMP_GE: op = ANVIL_OP_CMP_LE; break;
+        case ANVIL_OP_CMP_ULT: op = ANVIL_OP_CMP_UGT; break;
+        case ANVIL_OP_CMP_ULE: op = ANVIL_OP_CMP_UGE; break;
+        case ANVIL_OP_CMP_UGT: op = ANVIL_OP_CMP_ULT; break;
+        case ANVIL_OP_CMP_UGE: op = ANVIL_OP_CMP_ULE; break;
+        default: return false;
+        }
+        anvil_value_t *t = a;
+        a = b;
+        b = t;
+    }
+    if (b->kind != ANVIL_VAL_CONST_INT || a->kind == ANVIL_VAL_CONST_INT || !anvil_type_is_integer(a->type) || a->type->kind == ANVIL_TYPE_I1)
+        return false;
+    unsigned bits = anvil_type_bit_width(a->type);
+    if (bits == 0 || bits > 64)
+        return false;
+    side->x = a;
+    side->is_unsigned = op >= ANVIL_OP_CMP_ULT && op <= ANVIL_OP_CMP_UGE;
+    if (side->is_unsigned == a->type->is_signed)
+        return false;
+    /* The constant as a value of x's width and signedness. */
+    uint64_t mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    int64_t c = side->is_unsigned ? (int64_t)(b->data.u & mask)
+                                  : bits == 64 ? b->data.i : (int64_t)(((b->data.u & mask) ^ (UINT64_C(1) << (bits - 1))) - (UINT64_C(1) << (bits - 1)));
+    int64_t smin = bits == 64 ? INT64_MIN : -(INT64_C(1) << (bits - 1)), smax = bits == 64 ? INT64_MAX : (INT64_C(1) << (bits - 1)) - 1;
+    switch (op) {
+    case ANVIL_OP_CMP_GE: case ANVIL_OP_CMP_UGE: side->lower = true; side->bound = c; return true;
+    case ANVIL_OP_CMP_LE: case ANVIL_OP_CMP_ULE: side->lower = false; side->bound = c; return true;
+    case ANVIL_OP_CMP_GT:
+        side->lower = true; side->bound = c + 1; return c < smax;
+    case ANVIL_OP_CMP_LT:
+        side->lower = false; side->bound = c - 1; return c > smin;
+    case ANVIL_OP_CMP_UGT:
+        side->lower = true; side->bound = c + 1; return (uint64_t)c < mask;
+    case ANVIL_OP_CMP_ULT:
+        side->lower = false; side->bound = c - 1; return c != 0;
+    default:
+        return false;
+    }
+}
+
+static anvil_type_t *unsigned_of_width(anvil_ctx_t *ctx, unsigned bits)
+{
+    return bits == 8 ? anvil_type_u8(ctx) : bits == 16 ? anvil_type_u16(ctx) : bits == 32 ? anvil_type_u32(ctx) : bits == 64 ? anvil_type_u64(ctx) : NULL;
+}
+
+/* lo <= x && x <= hi (an `and` of the two tests, or select(t1, t2, false))
+ * with constants lo <= hi is one unsigned compare, (x - lo) u<= hi - lo:
+ * values below lo wrap above hi - lo. */
+static bool reduce_range_check(anvil_ctx_t *ctx, anvil_instr_t *instr)
+{
+    if (!instr->result)
+        return false;
+    anvil_value_t *first = NULL, *second = NULL;
+    /* select(t1, zext(t2), 0): the C value of t1 && t2. */
+    bool widened = false;
+    if (instr->op == ANVIL_OP_SELECT && instr->num_operands == 3 && instr->result->type->kind != ANVIL_TYPE_I1 &&
+        anvil_type_is_integer(instr->result->type) && anvil_opt_is_zero(instr->operands[2]) && instr->operands[1]->kind == ANVIL_VAL_INSTR &&
+        instr->operands[1]->data.instr->op == ANVIL_OP_ZEXT && instr->operands[1]->data.instr->num_operands == 1 &&
+        instr->operands[1]->data.instr->operands[0]->type->kind == ANVIL_TYPE_I1) {
+        first = instr->operands[0];
+        second = instr->operands[1]->data.instr->operands[0];
+        widened = true;
+    } else if (instr->result->type->kind != ANVIL_TYPE_I1) {
+        return false;
+    } else if (instr->op == ANVIL_OP_AND && instr->num_operands == 2) {
+        first = instr->operands[0];
+        second = instr->operands[1];
+    } else if (instr->op == ANVIL_OP_SELECT && instr->num_operands == 3 && instr->operands[2]->kind == ANVIL_VAL_CONST_INT &&
+               instr->operands[2]->data.i == 0) {
+        first = instr->operands[0];
+        second = instr->operands[1];
+    } else {
+        return false;
+    }
+    range_side_t a, b;
+    if (!range_side(first, &a) || !range_side(second, &b) || a.x != b.x || a.lower == b.lower || a.is_unsigned != b.is_unsigned)
+        return false;
+    const range_side_t *low = a.lower ? &a : &b, *high = a.lower ? &b : &a;
+    if (low->is_unsigned ? (uint64_t)low->bound > (uint64_t)high->bound : low->bound > high->bound)
+        return false;
+    anvil_type_t *type = low->x->type, *unsigned_type = unsigned_of_width(ctx, anvil_type_bit_width(type));
+    if (!unsigned_type)
+        return false;
+    anvil_value_t *lo = anvil_opt_make_const_int(ctx, type, low->bound);
+    anvil_value_t *span = anvil_opt_make_const_int(ctx, unsigned_type, (int64_t)((uint64_t)high->bound - (uint64_t)low->bound));
+    anvil_instr_t *offset = lo && span ? prepare_binary(ctx, ANVIL_OP_SUB, type, low->x, lo) : NULL;
+    if (!offset)
+        return false;
+    anvil_opt_insert_before(instr, offset);
+    anvil_value_t *distance = offset->result;
+    if (type != unsigned_type && !anvil_types_equal(type, unsigned_type)) {
+        anvil_instr_t *cast = anvil_instr_create(ctx, ANVIL_OP_BITCAST, unsigned_type, "range");
+        if (!cast || !anvil_instr_add_operand(cast, offset->result))
+            return false;
+        anvil_opt_insert_before(instr, cast);
+        distance = cast->result;
+    }
+    if (widened) {
+        anvil_instr_t *inside = anvil_instr_create(ctx, ANVIL_OP_CMP_ULE, anvil_type_i1(ctx), "range");
+        if (!inside || !anvil_instr_add_operand(inside, distance) || !anvil_instr_add_operand(inside, span))
+            return false;
+        anvil_opt_insert_before(instr, inside);
+        instr->op = ANVIL_OP_ZEXT;
+        instr->operands[0] = inside->result;
+        instr->num_operands = 1;
+        instr->no_wrap = false;
+        return true;
+    }
+    instr->op = ANVIL_OP_CMP_ULE;
+    instr->operands[0] = distance;
+    instr->operands[1] = span;
+    instr->num_operands = 2;
+    instr->no_wrap = false;
+    return true;
+}
+
 anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
 {
     if (!func || !func->parent || !func->parent->ctx)
@@ -362,7 +776,11 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
     
     anvil_ctx_t *ctx = func->parent->ctx;
     anvil_ctx_clear_error(ctx);
-    bool changed = false;
+    anvil_pass_result_t distributed = distribute_extensions(func, ctx);
+    if (distributed == ANVIL_PASS_RUN_ERROR)
+        return distributed;
+    bool changed = distributed == ANVIL_PASS_RUN_CHANGED;
+    changed |= fold_exact_truncations(func, ctx);
     
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
@@ -372,6 +790,14 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
             anvil_value_t *lhs = instr->operands[0];
             anvil_value_t *rhs = instr->operands[1];
             int shift;
+            if ((instr->op == ANVIL_OP_AND || instr->op == ANVIL_OP_SELECT) && reduce_range_check(ctx, instr)) {
+                changed = true;
+                continue;
+            }
+            if (narrow_extended_compare(ctx, instr)) {
+                changed = true;
+                continue;
+            }
             
             switch (instr->op) {
                 case ANVIL_OP_MUL:
@@ -381,6 +807,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                             ctx, lhs->type, shift);
                         if (!amount) break;
                         instr->op = ANVIL_OP_SHL;
+                        instr->no_wrap = false;
                         instr->operands[1] = amount;
                         changed = true;
                     } else if (is_power_of_2(lhs, &shift)) {
@@ -389,6 +816,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                             ctx, rhs->type, shift);
                         if (!amount) break;
                         instr->op = ANVIL_OP_SHL;
+                        instr->no_wrap = false;
                         instr->operands[0] = rhs;
                         instr->operands[1] = amount;
                         changed = true;
@@ -397,7 +825,10 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                     
                 case ANVIL_OP_UDIV:
                     /* x / 2^n -> x >> n (unsigned) */
-                    if (is_power_of_2(rhs, &shift)) {
+                    if (!is_power_of_2(rhs, &shift) && reduce_exact_division(ctx, instr)) {
+                        changed = true;
+                    } else if (is_power_of_2(rhs, &shift)) {
+                        instr->no_wrap = false;
                         anvil_value_t *amount = make_shift_const(
                             ctx, lhs->type, shift);
                         if (!amount) break;
@@ -405,15 +836,18 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                         instr->operands[1] = amount;
                         changed = true;
                     } else if (reduce_constant_division(ctx, instr)) {
+                        instr->no_wrap = false;
                         changed = true;
                     }
                     break;
                     
                 case ANVIL_OP_SDIV:
                 case ANVIL_OP_SMOD:
-                    if ((is_power_of_2(rhs, &shift) && reduce_signed_power(ctx, instr, (unsigned)shift)) ||
-                        reduce_constant_division(ctx, instr))
+                    if (reduce_exact_division(ctx, instr) || (is_power_of_2(rhs, &shift) && reduce_signed_power(ctx, instr, (unsigned)shift)) ||
+                        reduce_constant_division(ctx, instr)) {
+                        instr->no_wrap = false;
                         changed = true;
+                    }
 
                     break;
                     

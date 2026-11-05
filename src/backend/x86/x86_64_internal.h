@@ -172,11 +172,13 @@ anvil_error_t x64_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char 
 
 anvil_error_t x64_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len);
 
-/* SSE vector instructions (x86_64_vector.c). */
-extern const anvil_vector_isa_t x64_vector_isa[];
-extern const size_t x64_vector_isa_count;
+/* The shared SSE table's cost (x86_sse_isa.c, read in x86_64_legal.c). */
 unsigned x64_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
 
 anvil_error_t x64_classify_abi_value(anvil_backend_t *be, anvil_type_t *type, bool is_return, anvil_abi_value_plan_t *plan);
+
+/* Before allocation: the values gas64.c never puts in a register
+ * (anvil_mir_isel_mark_registerless under its immediate rules). */
+bool anvil_x64_mark_registerless(anvil_mir_func_t *mir);
 
 #endif

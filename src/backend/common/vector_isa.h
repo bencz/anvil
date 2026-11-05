@@ -55,6 +55,12 @@ bool anvil_vector_mir_key(const anvil_mir_func_t *mir, size_t index, const anvil
  * printer may then reduce it with a shorter idiom. */
 bool anvil_vector_mir_is_mask(const anvil_mir_func_t *mir, size_t index, anvil_mir_vreg_t vreg);
 
+/* Whether MIR instruction `index` may touch a vreg of `vector_bits` bits (a
+ * vector held in a register of the general FP class): only vector
+ * operations, accesses, copies, spill code and keep-alives do.  True when
+ * none of its operands is one. */
+bool anvil_vector_mir_operands_legal(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, uint16_t vector_bits);
+
 /* Appends "\tMNEMONIC r0, r1, ..." for a three-address target, the
  * destination first; false when an operand name is missing (count <= 4). */
 bool anvil_vector_isa_print(anvil_strbuf_t *code, const char *mnemonic, const char *const *operands, size_t count);

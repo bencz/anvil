@@ -752,8 +752,8 @@ static anvil_mir_vreg_t lower_value(ppc_mir_lower_t *lower, anvil_value_t *value
         if (!lower_add_const_offset(lower, base, offset, &materialized)) {
             return ANVIL_MIR_NO_VREG;
         }
-        if (!map_put(lower, value, materialized))
-            return ANVIL_MIR_NO_VREG;
+        /* Materialized where this use is, every time: a vreg from the
+         * first use need not dominate the others (the base does). */
         return materialized;
     }
 
@@ -1763,8 +1763,13 @@ static bool lower_cast(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_o
 {
     if (instr->num_operands != 1 || !instr->result)
         return false;
-    /* A pointer reinterpreted as another pointer is the same value. */
+    /* A pointer reinterpreted as another pointer is the same value (a
+     * constant offset from a base stays one, for the accesses to fold). */
     if (anvil_cast_keeps_value(instr)) {
+        anvil_mir_vreg_t offset_base = ANVIL_MIR_NO_VREG;
+        int64_t offset = 0;
+        if (addr_map_get(lower, instr->operands[0], &offset_base, &offset))
+            return addr_map_put(lower, instr->result, offset_base, offset);
         anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
         return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
     }
@@ -2350,9 +2355,9 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
             !anvil_mir_add_atomic(lower->mir, instr->op, def, uses, instr->num_operands, &instr->atomic))
             return false;
 
-        /* r0 and r5-r10 are the reservation loop's temporaries, r3/r4 stage
-         * the operands (r11 too, a spill scratch register). */
-        uint64_t temporaries = UINT64_C(1) | (UINT64_C(0xff) << 3);
+        /* r0 and r5-r10 are the reservation loop's temporaries; r3, r4 and
+         * r11 stage the operands (one parallel move, reading them first). */
+        uint64_t temporaries = UINT64_C(1) | (UINT64_C(0xff) << 3) | (UINT64_C(1) << 11);
         if (!anvil_mir_set_instr_clobbers(lower->mir, anvil_mir_num_instrs(lower->mir) - 1, ANVIL_MIR_REG_GPR, temporaries))
             return false;
         return !instr->result || map_put(lower, instr->result, def);
@@ -2386,6 +2391,9 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         }
         anvil_mir_vreg_t def = ppc_add_vreg_for_type(lower, instr->result->type);
         if (def == ANVIL_MIR_NO_VREG)
+            return false;
+        /* Its sign unobserved: loaded zero-extended. */
+        if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
             return false;
         bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
         anvil_mir_vreg_t loaded = is_i1 ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false) : def;

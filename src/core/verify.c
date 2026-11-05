@@ -1345,6 +1345,8 @@ static bool verify_instr(const anvil_module_t *mod,
 
     if (instr->atomic.order || instr->atomic.failure_order || instr->atomic.rmw)
         return anvil_format_failure(error, error_len, "atomic metadata requires an atomic instruction");
+    if (!anvil_instr_no_wrap_valid(instr))
+        return anvil_format_failure(error, error_len, "no-wrap requires an integer add, sub, mul, trunc, sdiv or udiv");
 
     switch (instr->op) {
         case ANVIL_OP_ADD:

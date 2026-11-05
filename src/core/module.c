@@ -401,6 +401,10 @@ anvil_error_t anvil_module_codegen(anvil_module_t *mod, char **output, size_t *l
 
     anvil_error_t opt_err = anvil_module_optimize(mod);
     if (opt_err != ANVIL_OK) return opt_err;
+    if (anvil_ctx_get_opt_level(ctx) >= ANVIL_OPT_BASIC && !anvil_opt_prepare_codegen(mod)) {
+        anvil_set_error(ctx, ANVIL_ERR_NOMEM, "out of memory preparing IR for code generation");
+        return ANVIL_ERR_NOMEM;
+    }
 
     verify_err = verify_codegen_stage(mod, "after optimization");
     if (verify_err != ANVIL_OK) return verify_err;

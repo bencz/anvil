@@ -73,6 +73,7 @@ struct mcc_options {
     bool fp_contraction;           /* Permit fusing a*b+c (-ffp-contract=fast). */
     bool no_builtin;               /* Library names are ordinary functions (-fno-builtin, -ffreestanding). */
     bool no_math_errno;            /* Math routines need not set errno (-fno-math-errno). */
+    bool wrapv;                    /* Signed integer overflow wraps (-fwrapv). */
     int reloc_model;               /* anvil_reloc_model_t: -fPIC, -fPIE, -fno-pic (0: target default) */
     mcc_c_std_t c_std;              /* C language standard (-std=) */
     

@@ -162,10 +162,11 @@ int arm64_aapcs64_take_regs(size_t *next, unsigned limit, unsigned count);
 
 /* AAPCS64 register convention (Linux and Darwin alike): the allocatable
  * pools, caller-saved first so values that do not cross a call need no
- * save, the spill scratch registers, and what a call clobbers. x9-x11 are
- * atomic-sequence temporaries, x16/x17 printer temporaries, x18 the
- * platform register, v30/v31 the printer's vector temporaries (never an
- * operand: spill reloads use the scratch registers): none is allocated. */
+ * save, the spill scratch registers (part of the pools, reserved only for
+ * a function whose reloads cannot be placed otherwise), and what a call
+ * clobbers.  x9-x11 are an atomic sequence's printer scratch (declared on
+ * the instruction); x16/x17 (printer temporaries), x18 (platform register)
+ * and v30/v31 (vector temporaries) are never allocated. */
 typedef struct {
     const int *gprs;
     int num_gprs;

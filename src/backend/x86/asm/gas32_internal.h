@@ -5,10 +5,13 @@
 #define ANVIL_X86_GAS32_INTERNAL_H
 
 #include "../x86_32_internal.h"
+#include "x86_gas.h"
+#include "../../common/print_flags.h"
 #include "../../common/mir_isel.h"
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 typedef struct x86_fp_unit x86_fp_unit_t;
 
@@ -33,16 +36,44 @@ typedef struct {
     int fp_area_off;    /* the FP unit's frame area, at -fp_area_off(%ebp) */
     int outgoing_size;
     int frame_size;
+    int num_pushes;     /* callee-saved registers pushed (no frame pointer) */
+    /* Without a frame pointer EBP is allocated and the frame is addressed
+     * from ESP, which stays frame_size bytes below where EBP would be
+     * (the prologue reserves EBP's push slot too). */
+    bool frame_pointer;
+    /* The prologue at the MIR's frame block (anvil_mir_isel_frameless_prefix). */
+    bool wrapped;
+    /* A load folded into a later instruction as its memory operand. */
+    size_t fold_target, fold_load;
+    char fold_address[400];
+    char frame_text[8][24];
+    unsigned frame_next;
     bool fp_returns;
     /* RET_VALUE_PART's register, moved to EDX together with RET's EAX. */
     int ret_hi_phys;
     /* The CALL already moved EDX into the following CALL_RESULT. */
     bool call_hi_moved;
     anvil_mir_isel_facts_t isel;
+    anvil_mir_layout_t layout;    /* blocks printed, and where branches land */
     anvil_mir_block_t block;     /* being emitted */
     const char *fused_jcc;       /* set by a compare folded into the next BR_COND */
+    /* x + (a u< b): the extension at adc_skip prints nothing, the add at
+     * adc_at is adc $0 on the compare's carry (SIZE_MAX: none). */
+    size_t adc_skip, adc_at;
+    /* x & c read only by `== 0` / `!= 0` feeding the branch: printed as
+     * test, the compare at test_at prints nothing (SIZE_MAX: none). */
+    size_t test_at;
+    anvil_mir_vreg_t adc_other;
+    anvil_print_flags_t flags;   /* what the flags tell */
     bool emitted_fneg_mask;
     bool emitted_fabs_mask;
+    /* Floating constants the function reads from its literal pool
+     * (position-dependent code), `size` bytes of `bits` each. */
+    struct {
+        uint64_t bits;
+        int size;
+    } *fp_pool;
+    size_t fp_pool_count, fp_pool_cap;
     bool failed;
 } x86_mir_emit_t;
 
@@ -84,6 +115,8 @@ static inline int x86_size_bytes(uint16_t size_bits)
     int size = (int)((size_bits + 7) / 8);
     if (size <= 0)
         return 4;
+    if (size == 16)
+        return 16;  /* a vector in an XMM register */
     if (size > 8)
         return 8;
     return size;
@@ -121,7 +154,21 @@ static inline const char *x86_gpr_name(int phys_reg, int size)
     }
 }
 
-/* Width in bytes of an FPR vreg (4 or 8), or 0 after marking failure. */
+/* Width in bytes of an FPR vreg (4, 8, or 16 for a vector), or 0 after
+ * marking failure. */
+/* The frame operand `offset` bytes from where EBP points with a frame
+ * pointer (negative: locals, spills, saves; 8 and up: incoming
+ * arguments), from a small ring of buffers (several per instruction). */
+static inline const char *x86_frame(x86_mir_emit_t *emit, int offset)
+{
+    char *text = emit->frame_text[emit->frame_next++ % 8];
+    if (emit->frame_pointer)
+        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%ebp)", offset);
+    else
+        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%esp)", offset + emit->frame_size);
+    return text;
+}
+
 static inline int x86_fp_size(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
 {
     const anvil_mir_vreg_info_t *info = x86_vreg_info_checked(emit, vreg);

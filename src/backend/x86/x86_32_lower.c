@@ -90,9 +90,10 @@ static bool x86_type_is_signed(anvil_type_t *type)
     return type && type->is_signed && !x86_type_is_float(type);
 }
 
+/* Vectors (SSE2 CPUs) share the XMM registers with scalar FP values. */
 static anvil_mir_reg_class_t x86_reg_class_for_type(anvil_type_t *type)
 {
-    return x86_type_is_float(type) ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR;
+    return x86_type_is_float(type) || (type && type->kind == ANVIL_TYPE_VECTOR) ? ANVIL_MIR_REG_FPR : ANVIL_MIR_REG_GPR;
 }
 
 static uint16_t x86_bits_for_type(anvil_type_t *type)
@@ -104,6 +105,8 @@ static uint16_t x86_bits_for_type(anvil_type_t *type)
     if (x86_type_is_float(type)) {
         return type->kind == ANVIL_TYPE_F64 ? 64 : 32;
     }
+    if (type->kind == ANVIL_TYPE_VECTOR)
+        return (uint16_t)(anvil_type_size(type) * 8);
 
     size_t size = anvil_type_size(type);
     if (size == 0)
@@ -131,6 +134,8 @@ static uint16_t x86_align_for_type(anvil_type_t *type)
 
 static anvil_mir_vreg_t x86_add_vreg_for_type(x86_mir_lower_t *lower, anvil_type_t *type)
 {
+    if (type && type->kind == ANVIL_TYPE_VECTOR && !anvil_vector_operation_cost(lower->func->owner_ctx, ANVIL_OP_LOAD, type))
+        return ANVIL_MIR_NO_VREG;
     return anvil_mir_add_vreg_typed(lower->mir, x86_reg_class_for_type(type), x86_bits_for_type(type), x86_type_is_signed(type));
 }
 
@@ -718,8 +723,8 @@ static anvil_mir_vreg_t lower_value(x86_mir_lower_t *lower, anvil_value_t *value
         if (!lower_add_const_offset(lower, base, offset, &materialized)) {
             return ANVIL_MIR_NO_VREG;
         }
-        if (!map_put(lower, value, materialized))
-            return ANVIL_MIR_NO_VREG;
+        /* Materialized where this use is, every time: a vreg from the
+         * first use need not dominate the others (the base does). */
         return materialized;
     }
 
@@ -953,43 +958,63 @@ static bool add_ret(x86_mir_lower_t *lower, anvil_mir_vreg_t value)
                               : anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, uses, num_uses);
 }
 
+/* A general register result as a copy in the register the convention
+ * returns it in (copy hints then compute it there); a floating one leaves
+ * through ST(0) as it is. */
+static anvil_mir_vreg_t x86_in_return_reg(x86_mir_lower_t *lower, anvil_mir_vreg_t value, int reg)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(lower->mir, value);
+    if (!info || info->reg_class != ANVIL_MIR_REG_GPR)
+        return value;
+    anvil_mir_reg_class_t reg_class = info->reg_class;
+    uint16_t bits = info->size_bits;
+    bool is_signed = info->is_signed;
+    anvil_mir_vreg_t fixed = anvil_mir_add_vreg_typed(lower->mir, reg_class, bits, is_signed);
+    return fixed != ANVIL_MIR_NO_VREG && anvil_mir_set_fixed_reg(lower->mir, fixed, reg) && emit_vreg_copy(lower->mir, fixed, value) ? fixed
+                                                                                                                                  : ANVIL_MIR_NO_VREG;
+}
+
+/* RET of `lo` (EAX or ST(0)), after RET_VALUE_PART of `hi` (EDX) when
+ * given; both copies come before the pair, which stays adjacent. */
+static bool add_ret_values(x86_mir_lower_t *lower, anvil_mir_vreg_t lo, anvil_mir_vreg_t hi)
+{
+    if (lo == ANVIL_MIR_NO_VREG)
+        return false;
+    anvil_mir_vreg_t lo_ret = x86_in_return_reg(lower, lo, lower->desc->int_ret_reg);
+    anvil_mir_vreg_t hi_ret = hi != ANVIL_MIR_NO_VREG ? x86_in_return_reg(lower, hi, lower->desc->int_ret_hi_reg) : ANVIL_MIR_NO_VREG;
+    if (lo_ret == ANVIL_MIR_NO_VREG || (hi != ANVIL_MIR_NO_VREG && hi_ret == ANVIL_MIR_NO_VREG))
+        return false;
+    if (hi_ret != ANVIL_MIR_NO_VREG && !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET_VALUE_PART, ANVIL_MIR_NO_VREG, &hi_ret, 1))
+        return false;
+    return add_ret(lower, lo_ret);
+}
+
 static bool add_return(x86_mir_lower_t *lower, anvil_value_t *value)
 {
     if (!value && lower->sret_in_regs) {
         /* EAX[:EDX] or ST(0), loaded from the local result object. */
         const x86_agg_plan_t *plan = &lower->sret_plan;
-        anvil_mir_vreg_t parts[2];
+        anvil_mir_vreg_t parts[2] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
         for (unsigned part = 0; part < plan->num_parts; part++) {
             parts[part] = anvil_agg_load_part(lower->mir, &plan->parts[part], lower->sret_object, x86_agg_target);
             if (parts[part] == ANVIL_MIR_NO_VREG)
                 return false;
         }
-        if (plan->num_parts == 2 && !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET_VALUE_PART, ANVIL_MIR_NO_VREG, &parts[1], 1))
-            return false;
-        return add_ret(lower, parts[0]);
+        return add_ret_values(lower, parts[0], parts[1]);
     }
     if (!value) {
         /* A hidden result pointer comes back in EAX. */
-        return add_ret(lower, lower->sret_pointer);
+        return lower->sret_pointer == ANVIL_MIR_NO_VREG ? add_ret(lower, ANVIL_MIR_NO_VREG)
+                                                         : add_ret_values(lower, lower->sret_pointer, ANVIL_MIR_NO_VREG);
     }
 
     if (x86_needs_pair(value->type)) {
         anvil_mir_vreg_t hi = ANVIL_MIR_NO_VREG;
         anvil_mir_vreg_t lo = ANVIL_MIR_NO_VREG;
-        if (!ensure_i64_pair(lower, value, &hi, &lo, NULL))
-            return false;
-
-        anvil_mir_vreg_t hi_use[] = {hi};
-        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET_VALUE_PART, ANVIL_MIR_NO_VREG, hi_use, 1)) {
-            return false;
-        }
-        return add_ret(lower, lo);
+        return ensure_i64_pair(lower, value, &hi, &lo, NULL) && add_ret_values(lower, lo, hi);
     }
 
-    anvil_mir_vreg_t src = lower_value(lower, value);
-    if (src == ANVIL_MIR_NO_VREG)
-        return false;
-    return add_ret(lower, src);
+    return add_ret_values(lower, lower_value(lower, value), ANVIL_MIR_NO_VREG);
 }
 
 static bool block_starts_with_phi(anvil_block_t *block)
@@ -1215,6 +1240,13 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
     size_t num_call_uses = 0;
     int64_t stack_offset = 0;
     bool ok = true;
+    /* Where each register argument sits among the call's uses. */
+    enum { X86_MAX_REG_ARGS = 4 };
+    size_t reg_arg_at[X86_MAX_REG_ARGS];
+    if (desc->num_reg_int_args > X86_MAX_REG_ARGS) {
+        free(call_uses);
+        return false;
+    }
 
     if (!direct_call) {
         anvil_mir_vreg_t target_src = lower_value(lower, callee);
@@ -1285,6 +1317,7 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
         }
 
         if (x86_arg_uses_int_reg(desc, arg->type, int_reg_count)) {
+            reg_arg_at[int_reg_count] = num_call_uses;
             call_uses[num_call_uses++] = src;
             int_reg_count++;
             continue;
@@ -1298,6 +1331,19 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
         stack_offset += x86_stack_arg_slot_size(arg->type);
     }
 
+    /* Register arguments, last: each into a value in its register, so
+     * the allocator places them there (copy hints) and the call's moves
+     * have nothing left to do. */
+    for (size_t r = 0; ok && r < int_reg_count && r < X86_MAX_REG_ARGS; r++) {
+        anvil_mir_vreg_t value = call_uses[reg_arg_at[r]];
+        const anvil_mir_vreg_info_t *value_info = anvil_mir_get_vreg_info(lower->mir, value);
+        anvil_mir_vreg_t fixed = value_info ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, value_info->size_bits, value_info->is_signed)
+                                            : ANVIL_MIR_NO_VREG;
+        anvil_mir_vreg_t uses[] = {value};
+        ok = fixed != ANVIL_MIR_NO_VREG && anvil_mir_set_fixed_reg(lower->mir, fixed, desc->reg_int_args[r]) &&
+             anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, fixed, uses, 1);
+        call_uses[reg_arg_at[r]] = fixed;
+    }
     if (!ok) {
         free(call_uses);
         return false;
@@ -1314,15 +1360,11 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
             free(call_uses);
             return false;
         }
-    } else if (result_is_int) {
-        call_def = x86_add_vreg_for_type(lower, instr->result->type);
-        if (call_def == ANVIL_MIR_NO_VREG) {
-            free(call_uses);
-            return false;
-        }
-    } else if (result_is_pair) {
-        call_def = x86_add_i32_vreg(lower, false);
-        if (call_def == ANVIL_MIR_NO_VREG) {
+    } else if (result_is_int || result_is_pair) {
+        /* The result register itself, copied out after the call (copy
+         * hints then keep the value there when they can). */
+        call_def = result_is_int ? x86_add_vreg_for_type(lower, instr->result->type) : x86_add_i32_vreg(lower, false);
+        if (call_def == ANVIL_MIR_NO_VREG || !anvil_mir_set_fixed_reg(lower->mir, call_def, desc->int_ret_reg)) {
             free(call_uses);
             return false;
         }
@@ -1366,12 +1408,15 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
     if (result_is_pair) {
         bool is_unsigned = instr->result->type->kind == ANVIL_TYPE_U64;
         anvil_mir_vreg_t hi = x86_add_i32_vreg(lower, !is_unsigned);
-        if (hi == ANVIL_MIR_NO_VREG)
+        anvil_mir_vreg_t lo_local = x86_add_i32_vreg(lower, false), hi_local = x86_add_i32_vreg(lower, !is_unsigned);
+        if (hi == ANVIL_MIR_NO_VREG || lo_local == ANVIL_MIR_NO_VREG || hi_local == ANVIL_MIR_NO_VREG ||
+            !anvil_mir_set_fixed_reg(lower->mir, hi, desc->int_ret_hi_reg))
             return false;
-        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT, hi, NULL, 0)) {
+        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_CALL_RESULT, hi, NULL, 0) || !emit_vreg_copy(lower->mir, lo_local, call_def) ||
+            !emit_vreg_copy(lower->mir, hi_local, hi)) {
             return false;
         }
-        return pair_put(lower, instr->result, hi, call_def, is_unsigned);
+        return pair_put(lower, instr->result, hi_local, lo_local, is_unsigned);
     }
 
     if (result_is_fp) {
@@ -1384,7 +1429,8 @@ static bool lower_call(x86_mir_lower_t *lower, anvil_instr_t *instr)
         return map_put(lower, instr->result, local_result);
     }
 
-    return map_put(lower, instr->result, call_def);
+    anvil_mir_vreg_t local = x86_add_vreg_for_type(lower, instr->result->type);
+    return local != ANVIL_MIR_NO_VREG && emit_vreg_copy(lower->mir, local, call_def) && map_put(lower, instr->result, local);
 }
 
 static anvil_mir_vreg_t lower_widen_gpr_to_32(x86_mir_lower_t *lower, anvil_mir_vreg_t src, bool sign_extend)
@@ -1642,6 +1688,16 @@ static bool lower_cast(x86_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_o
 {
     if (instr->num_operands != 1 || !instr->result)
         return false;
+    /* A pointer reinterpreted as another pointer is the same value (a
+     * constant offset from a base stays one, for the accesses to fold). */
+    if (anvil_cast_keeps_value(instr)) {
+        anvil_mir_vreg_t offset_base = ANVIL_MIR_NO_VREG;
+        int64_t offset = 0;
+        if (addr_map_get(lower, instr->operands[0], &offset_base, &offset))
+            return addr_map_put(lower, instr->result, offset_base, offset);
+        anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
+        return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
+    }
 
     bool dst_pair = x86_needs_pair(instr->result->type);
     bool src_pair = x86_needs_pair(instr->operands[0]->type);
@@ -1756,6 +1812,18 @@ static bool lower_select(x86_mir_lower_t *lower, anvil_instr_t *instr)
     }
     if (cond == ANVIL_MIR_NO_VREG || then_v == ANVIL_MIR_NO_VREG || else_v == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) {
         return false;
+    }
+
+    /* General registers on a CPU with CMOVcc: a conditional move per word
+     * (both values exist already). */
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(lower->mir, def);
+    if (def_info && def_info->reg_class == ANVIL_MIR_REG_GPR && (anvil_mir_func_cpu_features(lower->mir) & ANVIL_FEATURE_X86_CMOV)) {
+        anvil_mir_vreg_t uses[] = {cond, then_v, else_v};
+        anvil_mir_vreg_t hi_uses[] = {cond, then_pair.hi, else_pair.hi};
+        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, def, uses, 3) ||
+            (wide && !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, def_pair.hi, hi_uses, 3)))
+            return false;
+        return wide ? wide_put(lower, instr->result, def_pair) : map_put(lower, instr->result, def);
     }
 
     anvil_mir_block_t source = anvil_mir_current_block(lower->mir);
@@ -1984,7 +2052,8 @@ static bool lower_instr(x86_mir_lower_t *lower, anvil_instr_t *instr)
     if (instr->op == ANVIL_OP_PHI)
         return true;
 
-    /* The scalar operations the target's table prices (FSQRT). */
+    /* Vector arithmetic and broadcasts, and the scalar operations the
+     * target's tables price (FSQRT, MULH). */
     anvil_vector_mir_form_t form;
     if (anvil_vector_mir_form(lower->func->owner_ctx, instr, &form)) {
         anvil_mir_vreg_t uses[ANVIL_VECTOR_MAX_USES] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
@@ -2107,6 +2176,9 @@ static bool lower_instr(x86_mir_lower_t *lower, anvil_instr_t *instr)
         }
         anvil_mir_vreg_t def = x86_add_vreg_for_type(lower, instr->result->type);
         if (ptr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
+            return false;
+        /* Its sign unobserved: loaded zero-extended. */
+        if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
             return false;
         bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
         anvil_mir_vreg_t loaded = is_i1 ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false) : def;

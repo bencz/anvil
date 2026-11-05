@@ -112,3 +112,27 @@ const anvil_vector_isa_t *anvil_vector_isa_for_mir(const anvil_vector_isa_t *tab
     anvil_vector_key_t key;
     return anvil_vector_mir_key(mir, index, info, &key) ? anvil_vector_isa_find(table, count, &key, features) : NULL;
 }
+
+bool anvil_vector_mir_operands_legal(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, uint16_t vector_bits)
+{
+    const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(mir, info->def) : NULL;
+    bool vector = def && def->size_bits == vector_bits;
+    for (size_t operand = 0; operand < info->num_uses && !vector; operand++) {
+        const anvil_mir_vreg_info_t *use = anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, index, operand));
+        vector = use && use->size_bits == vector_bits;
+    }
+    if (!vector)
+        return true;
+    switch (info->op) {
+    case ANVIL_MIR_OP_VECTOR:
+    case ANVIL_MIR_OP_LOAD:
+    case ANVIL_MIR_OP_STORE:
+    case ANVIL_MIR_OP_COPY:
+    case ANVIL_MIR_OP_SPILL_LOAD:
+    case ANVIL_MIR_OP_SPILL_STORE:
+    case ANVIL_MIR_OP_KEEPALIVE:
+        return true;
+    default:
+        return false;
+    }
+}

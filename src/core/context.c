@@ -27,7 +27,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* base + index * 1/2/4/8 */
+        .index_scales = 0x0F,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = false,
+        .index_displacement = true,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_X86_64] = {
         .arch = ANVIL_ARCH_X86_64,
@@ -45,7 +53,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* base + index * 1/2/4/8 */
+        .index_scales = 0x0F,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = false,
+        .index_displacement = true,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S370] = {
         .arch = ANVIL_ARCH_S370,
@@ -63,7 +79,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP),
         .ieee_features = 0,
-        .access_fault_granularity = 2048 /* 2 KB storage-key blocks */
+        .access_fault_granularity = 2048, /* 2 KB storage-key blocks */
+        /* D(X,B): an unscaled index */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S370_XA] = {
         .arch = ANVIL_ARCH_S370_XA,
@@ -81,7 +105,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP),
         .ieee_features = 0,
-        .access_fault_granularity = 2048 /* 2 KB storage-key blocks */
+        .access_fault_granularity = 2048, /* 2 KB storage-key blocks */
+        /* D(X,B): an unscaled index */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S390] = {
         .arch = ANVIL_ARCH_S390,
@@ -99,7 +131,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = ANVIL_FEATURE_ZARCH_BFP,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* D(X,B): an unscaled index */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_ZARCH] = {
         .arch = ANVIL_ARCH_ZARCH,
@@ -117,7 +157,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754) | ANVIL_FP_FORMAT_BIT(ANVIL_FP_HFP_IEEE),
         .ieee_features = ANVIL_FEATURE_ZARCH_BFP,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* D(X,B): an unscaled index */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = 0,
+        .address_increment_bytes = 0,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 1
     },
     [ANVIL_ARCH_PPC32] = {
         .arch = ANVIL_ARCH_PPC32,
@@ -135,7 +183,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* indexed forms unscaled; update forms */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
+        .address_increment_bytes = 8,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 4
     },
     [ANVIL_ARCH_PPC64] = {
         .arch = ANVIL_ARCH_PPC64,
@@ -153,7 +209,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* indexed forms unscaled; update forms */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
+        .address_increment_bytes = 8,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 4
     },
     [ANVIL_ARCH_PPC64LE] = {
         .arch = ANVIL_ARCH_PPC64LE,
@@ -171,7 +235,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* indexed forms unscaled; update forms */
+        .index_scales = 0x01,
+        .index_scale_access = false,
+        .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
+        .address_increment_bytes = 8,
+        .counter_branches = true,
+        .index_displacement = false,
+        .small_loop_unroll = 4
     },
     [ANVIL_ARCH_ARM64] = {
         .arch = ANVIL_ARCH_ARM64,
@@ -189,7 +261,15 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .has_delay_slots = false,
         .fp_formats = ANVIL_FP_FORMAT_BIT(ANVIL_FP_IEEE754),
         .ieee_features = 0,
-        .access_fault_granularity = 4096 /* 4 KB pages */
+        .access_fault_granularity = 4096, /* 4 KB pages */
+        /* register offset scaled by the access size; pre/post-index */
+        .index_scales = 0x01,
+        .index_scale_access = true,
+        .address_increments = ANVIL_ADDRESS_PRE_INCREMENT | ANVIL_ADDRESS_POST_INCREMENT,
+        .address_increment_bytes = 16,
+        .counter_branches = false,
+        .index_displacement = false,
+        .small_loop_unroll = 1
     }
 };
 

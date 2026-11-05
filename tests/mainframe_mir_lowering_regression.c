@@ -965,6 +965,11 @@ static void test_mainframe_narrow_loads_extend_exactly(void)
               anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, i16, address_use, 1) &&
               anvil_mir_add_instr(mir, ANVIL_MIR_OP_LOAD, u16, address_use, 1),
               "all signed/unsigned narrow loads should be represented");
+        /* Readers of the whole register (an unread value need not be
+         * extended at all). */
+        anvil_mir_vreg_t loaded[] = { i8, u8, i16, u16 };
+        for (size_t k = 0; k < 4; k++)
+            CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, &loaded[k], 1), "narrow loads should be kept alive");
         CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                                   ANVIL_MIR_NO_VREG, NULL, 0),
               "narrow-load MIR should terminate");

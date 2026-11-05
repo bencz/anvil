@@ -15,6 +15,24 @@ typedef struct {
     bool live;
 } live_interval_t;
 
+/* A value's live positions as sorted, disjoint closed ranges: per block
+ * from its live-in start (or first reference) to its live-out end (or last
+ * reference).  The interval spans them all; between them (lifetime holes)
+ * its register holds nothing.  `valid` false: the intervals stand alone. */
+typedef struct {
+    size_t start, end;
+} live_segment_t;
+
+typedef struct {
+    bool valid;
+    size_t *first, *count;  /* per vreg: its ranges[first .. first + count) */
+    live_segment_t *ranges;
+    const live_interval_t *intervals;
+} live_segments_t;
+
+/* Limit on the ranges kept (beyond it, intervals alone). */
+enum { LIVE_SEGMENT_LIMIT = 1 << 22 };
+
 enum { CLOBBER_REGISTERS = 64, CLOBBER_KEYS = ANVIL_MIR_REG_CLASS_COUNT * CLOBBER_REGISTERS };
 
 typedef struct {
@@ -307,9 +325,137 @@ static void note_live_range(live_interval_t *intervals,
     if (index > interval->end) interval->end = index;
 }
 
+static void live_segments_destroy(live_segments_t *segments)
+{
+    free(segments->first);
+    free(segments->count);
+    free(segments->ranges);
+    segments->first = segments->count = NULL;
+    segments->ranges = NULL;
+    segments->valid = false;
+}
+
+/* Each value's ranges per block (see live_segments_t), blocks visited in
+ * layout order; ranges of adjacent blocks merge.  Without memory (or past
+ * LIVE_SEGMENT_LIMIT) `segments` stays invalid: intervals alone. */
+static void build_live_segments(const anvil_mir_func_t *func, const anvil_mir_liveness_t *liveness, live_segments_t *segments)
+{
+    size_t n = func->num_vregs, blocks = func->num_blocks;
+    size_t *order = malloc(blocks * sizeof(*order));
+    size_t *low = malloc(n * sizeof(*low)), *high = malloc(n * sizeof(*high)), *stamp = malloc(n * sizeof(*stamp));
+    segments->first = calloc(n, sizeof(size_t));
+    segments->count = calloc(n, sizeof(size_t));
+    bool ok = order && low && high && stamp && segments->first && segments->count;
+    size_t num_order = 0, total = 0;
+    for (size_t b = 0; ok && b < blocks; b++) {
+        if (liveness->first_instr[b] == SIZE_MAX)
+            continue;
+        size_t at = num_order++;
+        while (at > 0 && liveness->first_instr[order[at - 1]] > liveness->first_instr[b]) {
+            order[at] = order[at - 1];
+            at--;
+        }
+        order[at] = b;
+    }
+    /* Upper bound per value: one range per block it is live or named in. */
+    for (size_t v = 0; ok && v < n; v++)
+        stamp[v] = SIZE_MAX;
+    for (int pass = 0; ok && pass < 2; pass++) {
+        if (pass == 1) {
+            if (total > LIVE_SEGMENT_LIMIT || !(segments->ranges = malloc((total ? total : 1) * sizeof(live_segment_t)))) {
+                ok = false;
+                break;
+            }
+            size_t offset = 0;
+            for (size_t v = 0; v < n; v++) {
+                size_t bound = segments->count[v];
+                segments->first[v] = offset;
+                segments->count[v] = 0;
+                offset += bound;
+                stamp[v] = SIZE_MAX;
+            }
+        }
+        for (size_t o = 0; o < num_order; o++) {
+            size_t block = order[o];
+            for (size_t i = liveness->first_instr[block]; i <= liveness->last_instr[block] && i < func->num_instrs; i++) {
+                const anvil_mir_instr_t *instr = &func->instrs[i];
+                if (instr->block != block)
+                    continue;
+                anvil_mir_vreg_t refs[1 + 16];
+                size_t positions[1 + 16], num_refs = 0;
+                if (instr->def != ANVIL_MIR_NO_VREG && instr->def < n) {
+                    refs[num_refs] = instr->def;
+                    positions[num_refs++] = i * 2 + 1;
+                }
+                for (size_t u = 0; u < instr->num_uses; u++) {
+                    anvil_mir_vreg_t use = instr->uses[u];
+                    if (use >= n)
+                        continue;
+                    if (stamp[use] != block) {
+                        stamp[use] = block;
+                        low[use] = high[use] = i * 2;
+                    } else {
+                        if (i * 2 < low[use]) low[use] = i * 2;
+                        if (i * 2 > high[use]) high[use] = i * 2;
+                    }
+                }
+                for (size_t r = 0; r < num_refs; r++) {
+                    anvil_mir_vreg_t v = refs[r];
+                    if (stamp[v] != block) {
+                        stamp[v] = block;
+                        low[v] = high[v] = positions[r];
+                    } else {
+                        if (positions[r] < low[v]) low[v] = positions[r];
+                        if (positions[r] > high[v]) high[v] = positions[r];
+                    }
+                }
+            }
+            /* Live out ends with the block's last instruction (2i + 1), so
+             * a value live out of a block and one live into the next do
+             * not meet. */
+            size_t start = liveness->first_instr[block] * 2, end = liveness->last_instr[block] * 2 + 1;
+            size_t row = block * liveness->words_per_block;
+            for (size_t v = 0; v < n; v++) {
+                uint64_t bit = UINT64_C(1) << (v % 64);
+                bool in = (liveness->live_in[row + v / 64] & bit) != 0, out = (liveness->live_out[row + v / 64] & bit) != 0;
+                bool named = stamp[v] == block;
+                if (!in && !out && !named)
+                    continue;
+                if (pass == 0) {
+                    segments->count[v]++;
+                    total++;
+                    continue;
+                }
+                live_segment_t range = {.start = in || !named ? start : low[v], .end = out || !named ? end : high[v]};
+                live_segment_t *ranges = &segments->ranges[segments->first[v]];
+                size_t *count = &segments->count[v];
+                if (*count && range.start <= ranges[*count - 1].end + 1) {
+                    if (range.end > ranges[*count - 1].end)
+                        ranges[*count - 1].end = range.end;
+                } else {
+                    ranges[(*count)++] = range;
+                }
+            }
+        }
+    }
+    free(order);
+    free(low);
+    free(high);
+    free(stamp);
+    if (!ok) {
+        live_segments_destroy(segments);
+        return;
+    }
+    for (size_t v = 0; v < n; v++)
+        if (func->vregs[v].is_live_in && segments->count[v])
+            segments->ranges[segments->first[v]].start = 0;
+    segments->valid = true;
+}
+
 /* Extends intervals over the blocks their values are live into or out of,
- * and records in `clobbers` the values live across each clobber. */
-static bool note_cfg_live_ranges(anvil_mir_func_t *func, live_interval_t *intervals, clobber_map_t *clobbers)
+ * records in `clobbers` the values live across each clobber, and builds
+ * the values' `segments`. */
+static bool note_cfg_live_ranges(anvil_mir_func_t *func, live_interval_t *intervals, clobber_map_t *clobbers, live_segments_t *segments)
 {
     if (func->num_blocks == 0 || func->num_vregs == 0)
         return true;
@@ -317,6 +463,7 @@ static bool note_cfg_live_ranges(anvil_mir_func_t *func, live_interval_t *interv
     anvil_mir_liveness_t liveness;
     if (!anvil_mir_compute_liveness(func, &liveness))
         return false;
+    build_live_segments(func, &liveness, segments);
 
     for (size_t block = 0; block < func->num_blocks; block++)
     {
@@ -416,11 +563,48 @@ static void expire_old_intervals(anvil_mir_vreg_t *active,
     *num_active = write;
 }
 
+/* Whether values a and b are live at a common position. */
+static bool live_overlap(const live_segments_t *segments, anvil_mir_vreg_t a, anvil_mir_vreg_t b)
+{
+    const live_interval_t *ia = &segments->intervals[a], *ib = &segments->intervals[b];
+    if (!ia->live || !ib->live || ia->start > ib->end || ib->start > ia->end)
+        return false;
+    if (!segments->valid)
+        return true;
+    size_t x = segments->first[a], x_end = x + segments->count[a];
+    size_t y = segments->first[b], y_end = y + segments->count[b];
+    while (x < x_end && y < y_end) {
+        const live_segment_t *p = &segments->ranges[x], *q = &segments->ranges[y];
+        if (p->start <= q->end && q->start <= p->end)
+            return true;
+        if (p->end < q->end)
+            x++;
+        else
+            y++;
+    }
+    return false;
+}
+
+/* Whether an active value other than `except` holds `reg` of `reg_class`
+ * where `current` lives. */
+static bool register_held(const anvil_mir_func_t *func, const anvil_mir_vreg_t *active, size_t num_active, const live_segments_t *segments,
+                          anvil_mir_reg_class_t reg_class, int reg, anvil_mir_vreg_t current, anvil_mir_vreg_t except)
+{
+    for (size_t a = 0; a < num_active; a++) {
+        const anvil_regalloc_assignment_t *assignment = &func->assignments[active[a]];
+        if (active[a] != except && !assignment->spilled && assignment->reg_class == reg_class && assignment->phys_reg == reg &&
+            live_overlap(segments, active[a], current))
+            return true;
+    }
+    return false;
+}
+
 /* The first free pool register for `interval`; `avoid` (or -1) is taken
  * only when nothing else is free. */
 static int find_free_phys_reg(const anvil_mir_func_t *func,
                               const anvil_mir_vreg_t *active,
                               size_t num_active,
+                              const live_segments_t *segments,
                               const anvil_regalloc_class_config_t *config,
                               const clobber_map_t *clobbers,
                               const live_interval_t *interval,
@@ -434,18 +618,7 @@ static int find_free_phys_reg(const anvil_mir_func_t *func,
         if (!register_survives(clobbers, config->reg_class, candidate, interval))
             continue;
 
-        bool used = false;
-
-        for (size_t a = 0; a < num_active; a++) {
-            const anvil_regalloc_assignment_t *assignment =
-                &func->assignments[active[a]];
-            if (!assignment->spilled &&
-                assignment->reg_class == config->reg_class &&
-                assignment->phys_reg == candidate) {
-                used = true;
-                break;
-            }
-        }
+        bool used = register_held(func, active, num_active, segments, config->reg_class, candidate, interval->vreg, ANVIL_MIR_NO_VREG);
 
         if (!used && candidate != avoid) {
             return candidate;
@@ -462,7 +635,7 @@ static int find_free_phys_reg(const anvil_mir_func_t *func,
  * of spilling it. Intervals already processed are the only ones holding
  * registers, so one pass over them finds the registers it overlaps. */
 static int relocation_register(const anvil_mir_func_t *func, const anvil_mir_vreg_t *order, size_t processed,
-                               const live_interval_t *intervals, const anvil_regalloc_class_config_t *config,
+                               const live_interval_t *intervals, const live_segments_t *segments, const anvil_regalloc_class_config_t *config,
                                const clobber_map_t *clobbers, anvil_mir_vreg_t displaced, int taken)
 {
     if (!config || config->num_phys_regs <= 0)
@@ -475,8 +648,7 @@ static int relocation_register(const anvil_mir_func_t *func, const anvil_mir_vre
         anvil_mir_vreg_t other = order[index];
         const anvil_regalloc_assignment_t *assignment = &func->assignments[other];
         if (other == displaced || assignment->spilled || assignment->phys_reg < 0 || assignment->phys_reg >= 64 ||
-            assignment->reg_class != config->reg_class || !intervals[other].live ||
-            intervals[other].start > range->end || intervals[other].end < range->start)
+            assignment->reg_class != config->reg_class || !live_overlap(segments, other, displaced))
             continue;
 
         busy |= UINT64_C(1) << assignment->phys_reg;
@@ -659,11 +831,38 @@ static void assign_phys_reg(anvil_mir_func_t *func,
 /* The active value to give up its register for `current`: a recomputable
  * one first (a spill of it costs a recomputation per use, no memory
  * traffic), else the one ending last. */
+/* Spill weights: anvil_mir_use_weights over the positions the value holds
+ * (the interval without lifetime holes).  NULL without memory. */
+
+static double *spill_weights(const anvil_mir_func_t *func, const live_interval_t *intervals, const live_segments_t *segments)
+{
+    double *weights = anvil_mir_use_weights(func);
+    if (!weights)
+        return NULL;
+    for (size_t value = 0; value < func->num_vregs; value++) {
+        if (!intervals[value].live)
+            continue;
+        /* The positions it holds a register at: its holes hold none. */
+        size_t length = intervals[value].end - intervals[value].start;
+        if (segments->valid && segments->count[value]) {
+            length = 0;
+            for (size_t k = 0; k < segments->count[value]; k++)
+                length += segments->ranges[segments->first[value] + k].end - segments->ranges[segments->first[value] + k].start;
+        }
+        weights[value] /= (double)(length + 2);
+    }
+    return weights;
+}
+
+/* The active value of `reg_class` to spill for `current`: recomputable
+ * ones first, then the lightest (with `weights`) or the one ending last. */
 static bool active_with_latest_end_in_class(const anvil_mir_func_t *func,
                                             const anvil_mir_vreg_t *active,
                                             size_t num_active,
+                                            const live_segments_t *segments,
                                             const live_interval_t *intervals,
                                             const bool *recomputable,
+                                            const double *weights,
                                             anvil_mir_reg_class_t reg_class,
                                             const clobber_map_t *clobbers,
                                             const live_interval_t *current,
@@ -678,10 +877,16 @@ static bool active_with_latest_end_in_class(const anvil_mir_func_t *func,
         if (func->vregs[vreg].has_fixed_reg) continue;
         if (!register_survives(clobbers, reg_class, func->assignments[vreg].phys_reg, current))
             continue;
+        /* Its register, shared in lifetime holes, must come free. */
+        if (register_held(func, active, num_active, segments, reg_class, func->assignments[vreg].phys_reg, current->vreg, vreg))
+            continue;
 
-        bool cheaper = found && recomputable && recomputable[vreg] && !recomputable[active[latest]];
-        bool dearer = found && recomputable && !recomputable[vreg] && recomputable[active[latest]];
-        if (!found || cheaper || (!dearer && intervals[vreg].end > intervals[active[latest]].end)) {
+        anvil_mir_vreg_t best = active[latest];
+        bool cheaper = found && recomputable && recomputable[vreg] && !recomputable[best];
+        bool dearer = found && recomputable && !recomputable[vreg] && recomputable[best];
+        bool later = intervals[vreg].end > intervals[best].end;
+        bool better = weights ? weights[vreg] < weights[best] || (weights[vreg] == weights[best] && later) : later;
+        if (!found || cheaper || (!dearer && better)) {
             latest = i;
             found = true;
         }
@@ -717,8 +922,10 @@ static bool *recomputable_values(const anvil_mir_func_t *func)
 static bool active_with_phys_reg_in_class(const anvil_mir_func_t *func,
                                           const anvil_mir_vreg_t *active,
                                           size_t num_active,
+                                          const live_segments_t *segments,
                                           anvil_mir_reg_class_t reg_class,
                                           int phys_reg,
+                                          anvil_mir_vreg_t current,
                                           size_t *out_index)
 {
     for (size_t i = 0; i < num_active; i++) {
@@ -726,7 +933,7 @@ static bool active_with_phys_reg_in_class(const anvil_mir_func_t *func,
             &func->assignments[active[i]];
         if (!assignment->spilled &&
             assignment->reg_class == reg_class &&
-            assignment->phys_reg == phys_reg) {
+            assignment->phys_reg == phys_reg && live_overlap(segments, active[i], current)) {
             *out_index = i;
             return true;
         }
@@ -752,11 +959,25 @@ config_for_class(const anvil_regalloc_class_config_t *configs,
  * one register, so each value remembers the register or the partner its
  * copies want.  In a two-address class an arithmetic result also wants its
  * first operand's register (free once that operand dies there). */
+enum { COPY_PARTNERS = 4 };
+
 typedef struct {
     int fixed;
-    anvil_mir_vreg_t partner;
+    /* Copy partners in the order their registers are tried (a two-address
+     * result's first operand first). */
+    anvil_mir_vreg_t partners[COPY_PARTNERS];
+    uint8_t num_partners;
     anvil_mir_vreg_t avoid;     /* two-address: the second operand */
 } copy_hint_t;
+
+static void add_partner(copy_hint_t *hint, anvil_mir_vreg_t partner)
+{
+    for (size_t k = 0; k < hint->num_partners; k++)
+        if (hint->partners[k] == partner)
+            return;
+    if (hint->num_partners < COPY_PARTNERS)
+        hint->partners[hint->num_partners++] = partner;
+}
 
 static bool overwrites_first_operand(anvil_mir_opcode_t op)
 {
@@ -781,14 +1002,65 @@ static bool overwrites_first_operand(anvil_mir_opcode_t op)
     }
 }
 
+/* A definition standing for all of each value's (NULL: none, or ones of
+ * different kinds): every one a load, or every one an integer compare. */
+static bool same_kind(const anvil_mir_instr_t *a, const anvil_mir_instr_t *b)
+{
+    bool ca = a->op >= ANVIL_MIR_OP_CMP_EQ && a->op <= ANVIL_MIR_OP_CMP_UGE, cb = b->op >= ANVIL_MIR_OP_CMP_EQ && b->op <= ANVIL_MIR_OP_CMP_UGE;
+    return (a->op == ANVIL_MIR_OP_LOAD && b->op == ANVIL_MIR_OP_LOAD) || (ca && cb);
+}
+
+static const anvil_mir_instr_t **single_definitions(const anvil_mir_func_t *func)
+{
+    const anvil_mir_instr_t **defs = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(*defs));
+    uint8_t *count = calloc(func->num_vregs ? func->num_vregs : 1, 1);
+    for (size_t i = 0; defs && count && i < func->num_instrs; i++) {
+        anvil_mir_vreg_t d = func->instrs[i].def;
+        if (d == ANVIL_MIR_NO_VREG || d >= func->num_vregs || count[d] == 2)
+            continue;
+        if (count[d]++ == 0)
+            defs[d] = &func->instrs[i];
+        else if (!defs[d] || !same_kind(defs[d], &func->instrs[i]))
+            count[d] = 2, defs[d] = NULL;
+        else
+            count[d] = 1;
+    }
+    bool counted = count != NULL;
+    free(count);
+    if (!counted) {
+        free(defs);
+        return NULL;
+    }
+    return defs;
+}
+
+/* An extension to 32 bits or less of a value its definition leaves so
+ * extended in the whole register (every printer: a compare's 0/1, a narrow
+ * load extended by its signedness): the source's register already holds
+ * the result, like a copy's. */
+static bool extension_view(const anvil_mir_func_t *func, const anvil_mir_instr_t *const *defs, const anvil_mir_instr_t *instr)
+{
+    if (!defs || (instr->op != ANVIL_MIR_OP_ZEXT && instr->op != ANVIL_MIR_OP_SEXT) || instr->num_uses != 1 || instr->def == ANVIL_MIR_NO_VREG ||
+        instr->def >= func->num_vregs || instr->uses[0] >= func->num_vregs)
+        return false;
+    const anvil_mir_vreg_info_t *d = &func->vregs[instr->def], *u = &func->vregs[instr->uses[0]];
+    const anvil_mir_instr_t *source = defs[instr->uses[0]];
+    if (!source || d->reg_class != ANVIL_MIR_REG_GPR || u->reg_class != ANVIL_MIR_REG_GPR || d->size_bits > 32 || u->size_bits >= d->size_bits)
+        return false;
+    bool compare = source->op >= ANVIL_MIR_OP_CMP_EQ && source->op <= ANVIL_MIR_OP_CMP_UGE && instr->op == ANVIL_MIR_OP_ZEXT && !u->registerless;
+    bool load = source->op == ANVIL_MIR_OP_LOAD && u->size_bits <= 16 && u->is_signed == (instr->op == ANVIL_MIR_OP_SEXT);
+    return compare || load;
+}
+
 static copy_hint_t *build_copy_hints(const anvil_mir_func_t *func, const anvil_regalloc_class_config_t *configs, size_t num_configs)
 {
     copy_hint_t *hints = malloc(func->num_vregs * sizeof(*hints));
     if (!hints)
         return NULL;
+    const anvil_mir_instr_t **defs = single_definitions(func);
     for (size_t value = 0; value < func->num_vregs; value++) {
         hints[value].fixed = -1;
-        hints[value].partner = ANVIL_MIR_NO_VREG;
+        hints[value].num_partners = 0;
         hints[value].avoid = ANVIL_MIR_NO_VREG;
     }
     for (size_t index = 0; index < func->num_instrs; index++) {
@@ -797,8 +1069,8 @@ static copy_hint_t *build_copy_hints(const anvil_mir_func_t *func, const anvil_r
             anvil_mir_vreg_t def = instr->def, first = instr->uses[0];
             const anvil_regalloc_class_config_t *config = config_for_class(configs, num_configs, func->vregs[def].reg_class);
             if (config && config->two_address && func->vregs[first].reg_class == func->vregs[def].reg_class &&
-                !func->vregs[def].has_fixed_reg && hints[def].partner == ANVIL_MIR_NO_VREG) {
-                hints[def].partner = first;
+                !func->vregs[def].has_fixed_reg && hints[def].num_partners == 0) {
+                add_partner(&hints[def], first);
                 /* A result in the second operand's register makes the
                  * printer go through a temporary when the first lives on. */
                 if (instr->num_uses >= 2 && instr->uses[1] != first)
@@ -806,10 +1078,24 @@ static copy_hint_t *build_copy_hints(const anvil_mir_func_t *func, const anvil_r
             }
             continue;
         }
+        /* A fused multiply-add's result prefers the addend's register:
+         * accumulating forms write the addend, so the printer needs no copy
+         * into the destination (four-operand forms take any register). */
+        if ((instr->op == ANVIL_MIR_OP_VECTOR || instr->op == ANVIL_MIR_OP_SCALAR) && instr->ir_op == ANVIL_OP_FMA &&
+            instr->def != ANVIL_MIR_NO_VREG && instr->num_uses == 3) {
+            anvil_mir_vreg_t def = instr->def, addend = instr->uses[2];
+            if (func->vregs[addend].reg_class == func->vregs[def].reg_class && !func->vregs[def].has_fixed_reg &&
+                hints[def].num_partners == 0) {
+                add_partner(&hints[def], addend);
+                hints[def].avoid = instr->uses[1];
+            }
+            continue;
+        }
         /* A truncation defines only the low bits, which the source's
          * register already holds (readers needing more extend explicitly). */
-        bool truncation = instr->op == ANVIL_MIR_OP_TRUNC && instr->def != ANVIL_MIR_NO_VREG && instr->num_uses == 1 &&
-                          func->vregs[instr->def].reg_class == ANVIL_MIR_REG_GPR;
+        bool truncation = (instr->op == ANVIL_MIR_OP_TRUNC && instr->def != ANVIL_MIR_NO_VREG && instr->num_uses == 1 &&
+                           func->vregs[instr->def].reg_class == ANVIL_MIR_REG_GPR) ||
+                          extension_view(func, defs, instr);
         if ((instr->op != ANVIL_MIR_OP_COPY && !truncation) || instr->def == ANVIL_MIR_NO_VREG || instr->num_uses != 1)
             continue;
         anvil_mir_vreg_t def = instr->def, use = instr->uses[0];
@@ -823,18 +1109,17 @@ static copy_hint_t *build_copy_hints(const anvil_mir_func_t *func, const anvil_r
             if (hints[def].fixed < 0)
                 hints[def].fixed = u->fixed_phys_reg;
         } else if (!d->has_fixed_reg && !u->has_fixed_reg) {
-            if (hints[def].partner == ANVIL_MIR_NO_VREG)
-                hints[def].partner = use;
-            if (hints[use].partner == ANVIL_MIR_NO_VREG)
-                hints[use].partner = def;
+            add_partner(&hints[def], use);
+            add_partner(&hints[use], def);
         }
     }
+    free(defs);
     return hints;
 }
 
 /* `candidate` is in the class pool, survives the interval's clobbers and
  * no active interval holds it. */
-static bool phys_reg_available(const anvil_mir_func_t *func, const anvil_mir_vreg_t *active, size_t num_active,
+static bool phys_reg_available(const anvil_mir_func_t *func, const anvil_mir_vreg_t *active, size_t num_active, const live_segments_t *segments,
                                const anvil_regalloc_class_config_t *config, const clobber_map_t *clobbers,
                                const live_interval_t *interval, int candidate)
 {
@@ -845,12 +1130,173 @@ static bool phys_reg_available(const anvil_mir_func_t *func, const anvil_mir_vre
         in_pool = phys_reg_at(config, i) == candidate;
     if (!in_pool || !register_survives(clobbers, config->reg_class, candidate, interval))
         return false;
-    for (size_t a = 0; a < num_active; a++) {
-        const anvil_regalloc_assignment_t *assignment = &func->assignments[active[a]];
-        if (!assignment->spilled && assignment->reg_class == config->reg_class && assignment->phys_reg == candidate)
-            return false;
+    return !register_held(func, active, num_active, segments, config->reg_class, candidate, interval->vreg, ANVIL_MIR_NO_VREG);
+}
+
+/* A copy or truncation d = s reads s's register instead of its own when s
+ * holds its value there throughout d's life: every definition of d copies
+ * s, d lives only within s's interval, no clobber of the register
+ * interrupts it and no definition of s does unless d is redefined from the
+ * new s right after, unread in between (and the register can hold d:
+ * narrow restrictions).  Only s and such views occupy the register then,
+ * all with s's bits, and the copies move nothing. */
+static void share_view_registers(anvil_mir_func_t *func, const live_interval_t *intervals, const live_segments_t *segments,
+                                 const anvil_regalloc_class_config_t *configs, size_t num_configs, const clobber_map_t *clobbers)
+{
+    size_t n = func->num_vregs;
+    /* The values in each register (by class), and the source each view
+     * moved in reads: another value may hold s's register in s's lifetime
+     * holes. */
+    size_t *by_reg_offsets = calloc(CLOBBER_KEYS + 1, sizeof(size_t));
+    anvil_mir_vreg_t *by_reg = malloc((n ? n : 1) * sizeof(*by_reg));
+    anvil_mir_vreg_t *view_of = malloc((n ? n : 1) * sizeof(*view_of));
+    anvil_mir_vreg_t *moved = malloc((n ? n : 1) * sizeof(*moved));
+    size_t num_moved = 0;
+    if (!by_reg_offsets || !by_reg || !view_of || !moved) {
+        free(by_reg_offsets);
+        free(by_reg);
+        free(view_of);
+        free(moved);
+        return;
     }
-    return true;
+    for (size_t v = 0; v < n; v++) {
+        const anvil_regalloc_assignment_t *a = &func->assignments[v];
+        view_of[v] = ANVIL_MIR_NO_VREG;
+        if (!a->spilled && a->phys_reg >= 0 && a->phys_reg < CLOBBER_REGISTERS && !func->vregs[v].registerless)
+            by_reg_offsets[(size_t)a->reg_class * CLOBBER_REGISTERS + (size_t)a->phys_reg + 1]++;
+    }
+    for (size_t k = 0; k < CLOBBER_KEYS; k++)
+        by_reg_offsets[k + 1] += by_reg_offsets[k];
+    {
+        size_t *fill = calloc(CLOBBER_KEYS, sizeof(size_t));
+        if (!fill) {
+            free(by_reg_offsets);
+            free(by_reg);
+            free(view_of);
+            free(moved);
+            return;
+        }
+        for (size_t v = 0; v < n; v++) {
+            const anvil_regalloc_assignment_t *a = &func->assignments[v];
+            if (!a->spilled && a->phys_reg >= 0 && a->phys_reg < CLOBBER_REGISTERS && !func->vregs[v].registerless) {
+                size_t key = (size_t)a->reg_class * CLOBBER_REGISTERS + (size_t)a->phys_reg;
+                by_reg[by_reg_offsets[key] + fill[key]++] = (anvil_mir_vreg_t)v;
+            }
+        }
+        free(fill);
+    }
+    size_t *offsets = calloc(n + 1, sizeof(*offsets));
+    size_t *positions = func->num_instrs ? malloc(func->num_instrs * sizeof(*positions)) : NULL;
+    if (!offsets || (func->num_instrs && !positions)) {
+        free(offsets);
+        free(positions);
+        free(by_reg_offsets);
+        free(by_reg);
+        free(view_of);
+        free(moved);
+        return;
+    }
+    /* The definition positions of every vreg. */
+    for (size_t i = 0; i < func->num_instrs; i++)
+        if (func->instrs[i].def != ANVIL_MIR_NO_VREG)
+            offsets[func->instrs[i].def + 1]++;
+    for (size_t v = 0; v < n; v++)
+        offsets[v + 1] += offsets[v];
+    size_t *fill = calloc(n ? n : 1, sizeof(*fill));
+    if (!fill) {
+        free(offsets);
+        free(positions);
+        free(by_reg_offsets);
+        free(by_reg);
+        free(view_of);
+        free(moved);
+        return;
+    }
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        anvil_mir_vreg_t def = func->instrs[i].def;
+        if (def != ANVIL_MIR_NO_VREG)
+            positions[offsets[def] + fill[def]++] = i * 2 + 1;
+    }
+    free(fill);
+
+    const anvil_mir_instr_t **defs = single_definitions(func);
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        if ((instr->op != ANVIL_MIR_OP_COPY && instr->op != ANVIL_MIR_OP_TRUNC && !extension_view(func, defs, instr)) || instr->num_uses != 1 ||
+            instr->def == ANVIL_MIR_NO_VREG)
+            continue;
+        anvil_mir_vreg_t d = instr->def, src = instr->uses[0];
+        const anvil_mir_vreg_info_t *vd = &func->vregs[d], *vs = &func->vregs[src];
+        anvil_regalloc_assignment_t *ad = &func->assignments[d];
+        const anvil_regalloc_assignment_t *as = &func->assignments[src];
+        if (d == src || vd->reg_class != vs->reg_class || vd->has_fixed_reg || vd->is_live_in || vd->registerless || vs->registerless || ad->spilled ||
+            as->spilled || ad->phys_reg < 0 ||
+            as->phys_reg < 0 || ad->phys_reg == as->phys_reg)
+            continue;
+        const live_interval_t *id = &intervals[d], *is = &intervals[src];
+        if (!id->live || !is->live || is->start > id->start || is->end < id->end)
+            continue;
+        /* Every definition of d copies s (a test block copied into a loop
+         * latch repeats it). */
+        bool views = true;
+        for (size_t at = offsets[d]; at < offsets[d + 1] && views; at++) {
+            const anvil_mir_instr_t *def = &func->instrs[positions[at] / 2];
+            views = (def->op == ANVIL_MIR_OP_COPY || def->op == ANVIL_MIR_OP_TRUNC || extension_view(func, defs, def)) && def->num_uses == 1 &&
+                    def->uses[0] == src;
+        }
+        /* s keeps its value while d lives, but for redefinitions of s that
+         * d follows from the new s in the same block, unread in between:
+         * the register then holds s's bits again before d is read. */
+        bool redefined = !views;
+        for (size_t at = offsets[src]; at < offsets[src + 1] && !redefined; at++) {
+            if (positions[at] <= id->start || positions[at] > id->end)
+                continue;
+            size_t j = positions[at] / 2 + 1;
+            redefined = true;
+            for (; j < func->num_instrs && func->instrs[j].block == func->instrs[j - 1].block; j++) {
+                const anvil_mir_instr_t *next = &func->instrs[j];
+                bool reads = false;
+                for (size_t u = 0; u < next->num_uses; u++)
+                    reads |= next->uses[u] == d;
+                if (next->def == d) {
+                    redefined = reads || !((next->op == ANVIL_MIR_OP_COPY || next->op == ANVIL_MIR_OP_TRUNC) && next->uses[0] == src);
+                    break;
+                }
+                if (reads || next->def == src)
+                    break;
+            }
+        }
+        const anvil_regalloc_class_config_t *config = config_for_class(configs, num_configs, vd->reg_class);
+        bool narrow_ok = !config || !config->narrow_bits || vd->size_bits > config->narrow_bits ||
+                         (as->phys_reg < 64 && ((config->narrow_regs >> as->phys_reg) & 1));
+        if (redefined || !narrow_ok || !register_survives(clobbers, vd->reg_class, as->phys_reg, id) || as->phys_reg >= CLOBBER_REGISTERS)
+            continue;
+        size_t key = (size_t)vd->reg_class * CLOBBER_REGISTERS + (size_t)as->phys_reg;
+        bool taken = false;
+        for (size_t k = by_reg_offsets[key]; k < by_reg_offsets[key + 1] && !taken; k++) {
+            anvil_mir_vreg_t other = by_reg[k];
+            taken = other != src && other != d && view_of[other] != src && func->assignments[other].phys_reg == as->phys_reg &&
+                    !func->assignments[other].spilled && live_overlap(segments, other, d);
+        }
+        /* Views moved here earlier are not in the lists. */
+        for (size_t k = 0; k < num_moved && !taken; k++) {
+            anvil_mir_vreg_t other = moved[k];
+            taken = other != d && view_of[other] != src && func->assignments[other].reg_class == vd->reg_class &&
+                    func->assignments[other].phys_reg == as->phys_reg && live_overlap(segments, other, d);
+        }
+        if (taken)
+            continue;
+        ad->phys_reg = as->phys_reg;
+        view_of[d] = src;
+        moved[num_moved++] = d;
+    }
+    free(offsets);
+    free(positions);
+    free(by_reg_offsets);
+    free(by_reg);
+    free(view_of);
+    free(moved);
+    free(defs);
 }
 
 static bool linear_scan_classes_once(
@@ -863,9 +1309,11 @@ static bool linear_scan_classes_once(
     if (func->num_vregs == 0) return true;
 
     clobber_map_t clobbers = { 0 };
+    live_segments_t segments = { 0 };
     if (!build_clobber_map(func, &clobbers) || !clobber_map_add_partial(&clobbers, func, configs, num_configs))
     {
         clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
         anvil_mir_clear_allocations(func);
         return false;
     }
@@ -874,16 +1322,19 @@ static bool linear_scan_classes_once(
      * proceeds unhinted. */
     copy_hint_t *hints = build_copy_hints(func, configs, num_configs);
     bool *recomputable = recomputable_values(func);
+    double *weights = NULL;
     live_interval_t *intervals = calloc(func->num_vregs, sizeof(*intervals));
     anvil_mir_vreg_t *order = malloc(func->num_vregs * sizeof(*order));
     anvil_mir_vreg_t *active = malloc(func->num_vregs * sizeof(*active));
     if (!intervals || !order || !active) {
         free(intervals);
         clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
         free(order);
         free(active);
         free(hints);
         free(recomputable);
+        free(weights);
         anvil_mir_clear_allocations(func);
         return false;
     }
@@ -905,13 +1356,17 @@ static bool linear_scan_classes_once(
         }
     }
 
-    if (!note_cfg_live_ranges(func, intervals, &clobbers)) {
+    segments.intervals = intervals;
+    bool noted = note_cfg_live_ranges(func, intervals, &clobbers, &segments);
+    if (!noted) {
         free(intervals);
         clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
         free(order);
         free(active);
         free(hints);
         free(recomputable);
+        free(weights);
         anvil_mir_clear_allocations(func);
         return false;
     }
@@ -923,6 +1378,8 @@ static bool linear_scan_classes_once(
     }
 
     sort_vregs_by_start(order, func->num_vregs, intervals);
+    /* Without memory for them the furthest end decides alone. */
+    weights = spill_weights(func, intervals, &segments);
 
     size_t num_active = 0;
     for (size_t i = 0; i < func->num_vregs; i++) {
@@ -937,74 +1394,107 @@ static bool linear_scan_classes_once(
         const anvil_regalloc_class_config_t *config =
             config_for_class(configs, num_configs, reg_class);
 
+        /* Never in a register: a name, holding nothing. */
+        if (func->vregs[current].registerless && !func->vregs[current].has_fixed_reg && config && config->num_phys_regs > 0) {
+            assign_phys_reg(func, current, config->phys_regs[0]);
+            continue;
+        }
+
         if (func->vregs[current].has_fixed_reg) {
             int fixed_reg = func->vregs[current].fixed_phys_reg;
             if (!register_survives(&clobbers, reg_class, fixed_reg, current_interval)) {
                 anvil_mir_clear_allocations(func);
                 free(intervals);
                 clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                 free(order);
                 free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                 return false;
             }
 
+            /* Each active holder of the register live where this value
+             * is (others share it in their lifetime holes). */
             size_t conflict_index = 0;
-            if (active_with_phys_reg_in_class(func, active, num_active,
-                                              reg_class, fixed_reg,
-                                              &conflict_index)) {
+            bool displaced = false;
+            while (active_with_phys_reg_in_class(func, active, num_active, &segments,
+                                                 reg_class, fixed_reg, current,
+                                                 &conflict_index)) {
                 anvil_mir_vreg_t conflict = active[conflict_index];
                 if (func->vregs[conflict].has_fixed_reg) {
                     anvil_mir_clear_allocations(func);
                     free(intervals);
                     clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                     free(order);
                     free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                     return false;
                 }
 
-                int moved = relocation_register(func, order, i, intervals, config, &clobbers, conflict, fixed_reg);
+                int moved = relocation_register(func, order, i, intervals, &segments, config, &clobbers, conflict, fixed_reg);
                 if (moved >= 0)
                     assign_phys_reg(func, conflict, moved);
-                else if (!mark_spilled(func, conflict)) {
+                else if (mark_spilled(func, conflict)) {
+                    active[conflict_index] = active[--num_active];
+                } else {
                     anvil_mir_clear_allocations(func);
                     free(intervals);
                     clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                     free(order);
                     free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                     return false;
                 }
-                assign_phys_reg(func, current, fixed_reg);
-                if (moved >= 0)
-                    active[num_active++] = current;
-                else
-                    active[conflict_index] = current;
-            } else {
-                assign_phys_reg(func, current, fixed_reg);
-                active[num_active++] = current;
+                displaced = true;
             }
+            (void)displaced;
+            assign_phys_reg(func, current, fixed_reg);
+            active[num_active++] = current;
             continue;
         }
 
         int free_reg = -1;
         if (hints) {
             const copy_hint_t *hint = &hints[current];
-            if (phys_reg_available(func, active, num_active, config, &clobbers, current_interval, hint->fixed))
+            if (phys_reg_available(func, active, num_active, &segments, config, &clobbers, current_interval, hint->fixed))
                 free_reg = hint->fixed;
-            else if (hint->partner != ANVIL_MIR_NO_VREG && !func->assignments[hint->partner].spilled &&
-                     phys_reg_available(func, active, num_active, config, &clobbers, current_interval,
-                                        func->assignments[hint->partner].phys_reg))
-                free_reg = func->assignments[hint->partner].phys_reg;
+            for (size_t k = 0; free_reg < 0 && k < hint->num_partners; k++) {
+                anvil_mir_vreg_t partner = hint->partners[k];
+                if (!func->assignments[partner].spilled &&
+                    phys_reg_available(func, active, num_active, &segments, config, &clobbers, current_interval, func->assignments[partner].phys_reg))
+                    free_reg = func->assignments[partner].phys_reg;
+                /* The register a partner the value flows straight into
+                 * wants (a compare extended for a return). */
+                else if (hints[partner].fixed >= 0 && func->vregs[partner].reg_class == reg_class && intervals[partner].live &&
+                         intervals[partner].start + 2 >= current_interval->end && intervals[partner].start <= current_interval->end + 2 &&
+                         phys_reg_available(func, active, num_active, &segments, config, &clobbers, current_interval, hints[partner].fixed))
+                    free_reg = hints[partner].fixed;
+            }
+            /* A chain of copies (a PHI's value moved on into another
+             * PHI): the partners' partners. */
+            for (size_t k = 0; free_reg < 0 && k < hint->num_partners; k++) {
+                const copy_hint_t *next = &hints[hint->partners[k]];
+                for (size_t m = 0; free_reg < 0 && m < next->num_partners; m++) {
+                    anvil_mir_vreg_t partner = next->partners[m];
+                    if (partner != current && !func->assignments[partner].spilled &&
+                        func->vregs[partner].reg_class == reg_class &&
+                        phys_reg_available(func, active, num_active, &segments, config, &clobbers, current_interval, func->assignments[partner].phys_reg))
+                        free_reg = func->assignments[partner].phys_reg;
+                }
+            }
         }
         if (free_reg < 0) {
             anvil_mir_vreg_t avoid = hints ? hints[current].avoid : ANVIL_MIR_NO_VREG;
             int avoid_reg = avoid != ANVIL_MIR_NO_VREG && !func->assignments[avoid].spilled ? func->assignments[avoid].phys_reg : -1;
-            free_reg = find_free_phys_reg(func, active, num_active, config, &clobbers, current_interval, avoid_reg);
+            free_reg = find_free_phys_reg(func, active, num_active, &segments, config, &clobbers, current_interval, avoid_reg);
         }
         if (free_reg >= 0) {
             assign_phys_reg(func, current, free_reg);
@@ -1012,19 +1502,46 @@ static bool linear_scan_classes_once(
             continue;
         }
 
+        /* A value only some registers can hold (narrow) and all of those
+         * taken: move a holder that can live elsewhere to a register free
+         * over its whole interval, rather than spill anything. */
+        if (config && config->narrow_bits && func->vregs[current].size_bits <= config->narrow_bits) {
+            for (size_t a = 0; a < num_active && free_reg < 0; a++) {
+                anvil_mir_vreg_t holder = active[a];
+                int reg = func->assignments[holder].phys_reg;
+                if (func->assignments[holder].spilled || func->assignments[holder].reg_class != reg_class || func->vregs[holder].has_fixed_reg ||
+                    func->vregs[holder].size_bits <= config->narrow_bits || reg < 0 || reg >= 64 || !((config->narrow_regs >> reg) & 1) ||
+                    !register_survives(&clobbers, reg_class, reg, current_interval))
+                    continue;
+                bool shared = register_held(func, active, num_active, &segments, reg_class, reg, current, holder);
+                int moved = shared ? -1 : relocation_register(func, order, i, intervals, &segments, config, &clobbers, holder, reg);
+                if (moved < 0 || ((config->narrow_regs >> moved) & 1))
+                    continue;
+                assign_phys_reg(func, holder, moved);
+                free_reg = reg;
+            }
+            if (free_reg >= 0) {
+                assign_phys_reg(func, current, free_reg);
+                active[num_active++] = current;
+                continue;
+            }
+        }
+
         size_t spill_index = 0;
         if ((recomputable && recomputable[current]) ||
-            !active_with_latest_end_in_class(func, active, num_active,
-                                             intervals, recomputable, reg_class, &clobbers, current_interval,
+            !active_with_latest_end_in_class(func, active, num_active, &segments,
+                                             intervals, recomputable, weights, reg_class, &clobbers, current_interval,
                                              &spill_index)) {
             if (!mark_spilled(func, current)) {
                 anvil_mir_clear_allocations(func);
                 free(intervals);
                 clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                 free(order);
                 free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                 return false;
             }
             continue;
@@ -1032,16 +1549,20 @@ static bool linear_scan_classes_once(
 
         anvil_mir_vreg_t spill_candidate = active[spill_index];
         int reclaimed_reg = func->assignments[spill_candidate].phys_reg;
-
-        if (intervals[spill_candidate].end > current_interval->end || (recomputable && recomputable[spill_candidate])) {
+        bool spill_other = weights ? weights[spill_candidate] < weights[current] ||
+                                         (weights[spill_candidate] == weights[current] && intervals[spill_candidate].end > current_interval->end)
+                                   : intervals[spill_candidate].end > current_interval->end;
+        if (spill_other || (recomputable && recomputable[spill_candidate])) {
             if (!mark_spilled(func, spill_candidate)) {
                 anvil_mir_clear_allocations(func);
                 free(intervals);
                 clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                 free(order);
                 free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                 return false;
             }
             assign_phys_reg(func, current, reclaimed_reg);
@@ -1051,22 +1572,27 @@ static bool linear_scan_classes_once(
                 anvil_mir_clear_allocations(func);
                 free(intervals);
                 clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
                 free(order);
                 free(active);
         free(hints);
         free(recomputable);
+        free(weights);
                 return false;
             }
         }
     }
 
+    share_view_registers(func, intervals, &segments, configs, num_configs, &clobbers);
     bool compacted = reuse_spill_slots(func, intervals, order);
     free(intervals);
     clobber_map_destroy(&clobbers);
+        live_segments_destroy(&segments);
     free(order);
     free(active);
         free(hints);
         free(recomputable);
+        free(weights);
     if (!compacted)
         anvil_mir_clear_allocations(func);
 

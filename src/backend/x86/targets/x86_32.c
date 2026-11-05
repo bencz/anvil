@@ -73,6 +73,12 @@ static bool x86_reloc_model_supported(anvil_backend_t *be, anvil_reloc_model_t m
     return plat && plat->format->got_relocations && (model == ANVIL_RELOC_PIE || model == ANVIL_RELOC_PIC);
 }
 
+static anvil_cc_t x86_local_call_convention(anvil_backend_t *be)
+{
+    const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
+    return plat ? plat->local_cc : ANVIL_CC_DEFAULT;
+}
+
 const anvil_backend_ops_t anvil_backend_x86 = {
     .name = "x86",
     .arch = ANVIL_ARCH_X86,
@@ -88,6 +94,7 @@ const anvil_backend_ops_t anvil_backend_x86 = {
     .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
     .atomic_is_lock_free = x86_atomic_is_lock_free,
     .reloc_model_supported = x86_reloc_model_supported,
-    .vector_operation_cost = x86_scalar_operation_cost,
+    .vector_operation_cost = x86_operation_cost,
+    .local_call_convention = x86_local_call_convention,
     .abi_support = (1u << ANVIL_ABI_SYSV) | (1u << ANVIL_ABI_DARWIN) | (1u << ANVIL_ABI_WIN64)
 };

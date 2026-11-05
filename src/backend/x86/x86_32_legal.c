@@ -1,5 +1,6 @@
 #include "x86_32_internal.h"
 #include "x86_address.h"
+#include "asm/x86_sse_vector.h"
 #include "anvil/anvil_analysis.h"
 
 #include <limits.h>
@@ -16,7 +17,9 @@ static bool x86_legal_size_for_class(const anvil_mir_vreg_info_t *info)
         return info->size_bits == 8 || info->size_bits == 16 || info->size_bits == 32;
     }
     if (info->reg_class == ANVIL_MIR_REG_FPR) {
-        return info->size_bits == 32 || info->size_bits == 64;
+        /* 128 bits: a vector in an XMM register (SSE2 CPUs, checked per
+         * instruction). */
+        return info->size_bits == 32 || info->size_bits == 64 || info->size_bits == 128;
     }
     return false;
 }
@@ -186,6 +189,9 @@ static bool x86_legal_instr(const anvil_mir_func_t *mir, size_t instr_index, con
         }
     }
 
+    if (!anvil_vector_mir_operands_legal(mir, instr_index, instr, 128))
+        return anvil_format_failure(error, error_len, "x86 MIR instruction %zu has no legal vector form", instr_index);
+
     switch (instr->op) {
     case ANVIL_MIR_OP_ADD:
     case ANVIL_MIR_OP_SUB:
@@ -258,13 +264,24 @@ static bool x86_legal_instr(const anvil_mir_func_t *mir, size_t instr_index, con
     case ANVIL_MIR_OP_CALL:
         return x86_legal_call(mir, instr_index, instr, error, error_len);
 
-    case ANVIL_MIR_OP_SELECT:
-        return anvil_format_failure(error, error_len, "x86 MIR select %zu must be lowered to a branch", instr_index);
+    case ANVIL_MIR_OP_SELECT: {
+        /* cmov: general registers, P6 family and later. */
+        const anvil_mir_vreg_info_t *def = x86_legal_vreg_info(mir, instr->def, instr_index, error, error_len);
+        if (def && def->reg_class == ANVIL_MIR_REG_GPR && instr->num_uses == 3 && (anvil_mir_func_cpu_features(mir) & ANVIL_FEATURE_X86_CMOV))
+            return true;
+        return anvil_format_failure(error, error_len, "x86 MIR select %zu needs general registers and CMOVcc (else a branch)", instr_index);
+    }
 
     case ANVIL_MIR_OP_SCALAR:
         if (anvil_vector_isa_for_mir(x86_scalar_isa, x86_scalar_isa_count, mir, instr_index, instr, anvil_mir_func_cpu_features(mir)))
             return true;
         return anvil_format_failure(error, error_len, "x86 MIR instruction %zu has no form on this CPU", instr_index);
+
+    case ANVIL_MIR_OP_VECTOR:
+        if (x86_has_vectors(anvil_mir_func_cpu_features(mir)) &&
+            anvil_vector_isa_for_mir(x86_sse_isa, x86_sse_isa_count, mir, instr_index, instr, anvil_mir_func_cpu_features(mir)))
+            return true;
+        return anvil_format_failure(error, error_len, "x86 MIR vector instruction %zu has no SSE2 form on this CPU", instr_index);
 
     case ANVIL_MIR_OP_SPILL_LOAD:
     case ANVIL_MIR_OP_SPILL_STORE:
@@ -328,6 +345,16 @@ bool anvil_x86_verify_mir_legal(const anvil_mir_func_t *mir, char *error, size_t
     return true;
 }
 
+bool x86_keeps_frame_pointer(const anvil_mir_func_t *mir)
+{
+    for (size_t index = 0; index < anvil_mir_num_instrs(mir); index++) {
+        anvil_mir_instr_info_t info;
+        if (anvil_mir_get_instr_info(mir, index, &info) && info.op == ANVIL_MIR_OP_DYN_ALLOCA)
+            return true;
+    }
+    return false;
+}
+
 bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
 {
     if (!mir)
@@ -339,8 +366,16 @@ bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
 
     /* Bytes (and booleans) only in the registers with a byte form. */
     const uint64_t byte_regs = (UINT64_C(1) << X86_EAX) | (UINT64_C(1) << X86_ECX) | (UINT64_C(1) << X86_EDX) | (UINT64_C(1) << X86_EBX);
+    /* EBP joins the pool (last: callee-saved, no byte form) when the
+     * function keeps no frame pointer. */
+    int gprs[16];
+    int num_gprs = 0;
+    for (int r = 0; r < desc->num_alloc_gpr_regs && num_gprs < 15; r++)
+        gprs[num_gprs++] = desc->alloc_gpr_regs[r];
+    if (!x86_keeps_frame_pointer(mir))
+        gprs[num_gprs++] = X86_EBP;
     anvil_regalloc_class_config_t configs[] = {
-        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = desc->num_alloc_gpr_regs, .phys_regs = desc->alloc_gpr_regs,
+        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = num_gprs, .phys_regs = gprs,
          .two_address = true, .narrow_bits = 8, .narrow_regs = byte_regs},
         {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = desc->num_alloc_fpr_regs, .phys_regs = desc->alloc_fpr_regs, .two_address = true},
     };
@@ -353,8 +388,7 @@ bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
          .printer_declares_writes = true},
     };
 
-    if (!anvil_x86_verify_mir_legal(mir, NULL, 0) || !anvil_mir_duplicate_branch_targets(mir, 4) || !anvil_mir_local_cse(mir) ||
-        !anvil_mir_fold_address_arithmetic(mir, x86_address_mode, NULL))
+    if (!anvil_x86_verify_mir_legal(mir, NULL, 0) || !anvil_mir_optimize_before_allocation(mir, x86_address_mode, NULL, NULL))
         return false;
 
     /* What calls and atomics change: the callee's convention, and the
@@ -378,9 +412,9 @@ bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
             return false;
     }
 
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !x86_annotate_printer_registers(mir))
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) || !x86_annotate_printer_registers(mir))
         return false;
-    if (!anvil_x86_verify_mir_legal(mir, NULL, 0))
+    if (!anvil_x86_verify_mir_legal(mir, NULL, 0) || !anvil_x86_mark_registerless(mir) || !anvil_mir_hoist_materialized_constants(mir))
         return false;
     if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
                                  sizeof(scratch_configs) / sizeof(scratch_configs[0])))

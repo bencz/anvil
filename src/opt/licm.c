@@ -1,5 +1,11 @@
 /* Speculate only nontrapping integer and address operations into loop
- * preheaders. */
+ * preheaders.
+ *
+ * An address `gep T p, a + b` in a loop, with p and a invariant and b not,
+ * splits into `gep T (gep T p, a), b`: the invariant part leaves the loop,
+ * and the access left inside indexes an invariant base by b alone (the form
+ * loop passes and indexed address modes take).  The index is pointer-wide,
+ * so the split is exact in address arithmetic. */
 #include "anvil/anvil_analysis.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
@@ -112,6 +118,41 @@ static bool has_hoistable_root(const anvil_opt_cfg_t *cfg, const anvil_loop_anal
     return false;
 }
 
+static bool defined_outside(const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t loop, size_t preheader,
+                            const anvil_value_t *value)
+{
+    if (value->kind != ANVIL_VAL_INSTR)
+        return true;
+    size_t definition = anvil_opt_cfg_index(cfg, value->data.instr->parent);
+    return !anvil_loop_contains(loops, loop, definition) && anvil_opt_cfg_dominates(cfg, definition, preheader);
+}
+
+/* Splits `gep` (see the header) with its invariant part placed in the
+ * preheader; false when it has no such form. */
+static bool split_invariant_index(anvil_ctx_t *ctx, const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t loop,
+                                  size_t preheader, size_t pointer_bits, anvil_instr_t *gep)
+{
+    if (gep->op != ANVIL_OP_GEP || gep->num_operands != 2 || !gep->result ||
+        !defined_outside(cfg, loops, loop, preheader, gep->operands[0]))
+        return false;
+    anvil_value_t *index = gep->operands[1];
+    anvil_instr_t *sum = index->kind == ANVIL_VAL_INSTR ? index->data.instr : NULL;
+    if (!sum || sum->op != ANVIL_OP_ADD || sum->num_operands != 2 || anvil_type_bit_width(index->type) != pointer_bits)
+        return false;
+    size_t side = defined_outside(cfg, loops, loop, preheader, sum->operands[0]) ? 0
+                : defined_outside(cfg, loops, loop, preheader, sum->operands[1]) ? 1 : 2;
+    if (side == 2 || defined_outside(cfg, loops, loop, preheader, sum->operands[1 - side]))
+        return false;
+    anvil_instr_t *base = anvil_instr_create(ctx, ANVIL_OP_GEP, gep->result->type, gep->result->name);
+    if (!base || !anvil_instr_copy_attributes(base, gep) || !anvil_instr_add_operand(base, gep->operands[0]) ||
+        !anvil_instr_add_operand(base, sum->operands[side]))
+        return false;
+    anvil_opt_insert_before(cfg->blocks[preheader]->last, base);
+    gep->operands[0] = base->result;
+    gep->operands[1] = sum->operands[1 - side];
+    return true;
+}
+
 anvil_pass_result_t anvil_pass_licm(anvil_func_t *func)
 {
     if (!func || !func->parent)
@@ -123,6 +164,8 @@ anvil_pass_result_t anvil_pass_licm(anvil_func_t *func)
         return ANVIL_PASS_RUN_UNCHANGED;
 
     bool changed = false;
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
+    size_t pointer_bits = arch ? arch->ptr_size * 8 : 64;
     anvil_opt_cfg_t cfg;
     anvil_loop_analysis_t loops;
 
@@ -175,6 +218,16 @@ rebuild:
                         move_before_terminator(instr, cfg.blocks[preheader]);
                         moved = true;
                         changed = true;
+                    }
+                    else if (split_invariant_index(ctx, &cfg, &loops, loop, preheader, pointer_bits, instr))
+                    {
+                        changed = true;
+                    }
+                    else if (anvil_ctx_get_last_error(ctx) != ANVIL_OK)
+                    {
+                        anvil_loop_analysis_destroy(&loops);
+                        anvil_opt_cfg_destroy(&cfg);
+                        return ANVIL_PASS_RUN_ERROR;
                     }
 
                     instr = next;

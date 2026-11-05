@@ -369,6 +369,19 @@ anvil_value_t *codegen_convert_value(mcc_codegen_t *cg,
     return NULL;
 }
 
+/* `value`, an integer add, sub or mul computed in `type`, marked no-wrap
+ * when C makes its overflow undefined: a signed type of int's rank or
+ * above (narrower operands are promoted first, so a narrower type here is
+ * an increment of a char or short object, which wraps on conversion), and
+ * no -fwrapv. */
+static anvil_value_t *codegen_signed_arith(mcc_codegen_t *cg, anvil_value_t *value, mcc_type_t *type)
+{
+    if (value && type && !cg->mcc_ctx->options.wrapv && type->kind != TYPE_BOOL && mcc_type_is_integer(type) && !type->is_unsigned &&
+        mcc_type_sizeof(type) >= mcc_type_sizeof(mcc_type_int(cg->types)))
+        anvil_set_no_wrap(value, true);
+    return value;
+}
+
 static anvil_value_t *codegen_fold_integer_binary(mcc_codegen_t *cg,
                                                   mcc_binop_t op,
                                                   anvil_value_t *lhs,
@@ -663,13 +676,13 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
 
                     switch (op) {
                         case BINOP_ADD_ASSIGN:
-                            result = floating ? anvil_build_fadd(cg->anvil_ctx, lhs, rhs, "add") : anvil_build_add(cg->anvil_ctx, lhs, rhs, "add");
+                            result = floating ? anvil_build_fadd(cg->anvil_ctx, lhs, rhs, "add") : codegen_signed_arith(cg, anvil_build_add(cg->anvil_ctx, lhs, rhs, "add"), op_lhs_type);
                             break;
                         case BINOP_SUB_ASSIGN:
-                            result = floating ? anvil_build_fsub(cg->anvil_ctx, lhs, rhs, "sub") : anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub");
+                            result = floating ? anvil_build_fsub(cg->anvil_ctx, lhs, rhs, "sub") : codegen_signed_arith(cg, anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub"), op_lhs_type);
                             break;
                         case BINOP_MUL_ASSIGN:
-                            result = floating ? anvil_build_fmul(cg->anvil_ctx, lhs, rhs, "mul") : anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul");
+                            result = floating ? anvil_build_fmul(cg->anvil_ctx, lhs, rhs, "mul") : codegen_signed_arith(cg, anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul"), op_lhs_type);
                             break;
                         case BINOP_DIV_ASSIGN:
                             if (floating)
@@ -845,17 +858,17 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     if (expr->type && mcc_type_is_floating(expr->type)) {
                         return anvil_build_fadd(cg->anvil_ctx, lhs, rhs, "fadd");
                     }
-                    return anvil_build_add(cg->anvil_ctx, lhs, rhs, "add");
+                    return codegen_signed_arith(cg, anvil_build_add(cg->anvil_ctx, lhs, rhs, "add"), expr->type);
                 case BINOP_SUB:
                     if (expr->type && mcc_type_is_floating(expr->type)) {
                         return anvil_build_fsub(cg->anvil_ctx, lhs, rhs, "fsub");
                     }
-                    return anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub");
+                    return codegen_signed_arith(cg, anvil_build_sub(cg->anvil_ctx, lhs, rhs, "sub"), expr->type);
                 case BINOP_MUL:
                     if (expr->type && mcc_type_is_floating(expr->type)) {
                         return anvil_build_fmul(cg->anvil_ctx, lhs, rhs, "fmul");
                     }
-                    return anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul");
+                    return codegen_signed_arith(cg, anvil_build_mul(cg->anvil_ctx, lhs, rhs, "mul"), expr->type);
                 case BINOP_DIV:
                     if (expr->type && mcc_type_is_floating(expr->type)) {
                         return anvil_build_fdiv(cg->anvil_ctx, lhs, rhs, "fdiv");
@@ -1059,9 +1072,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     } else {
                         anvil_value_t *one = codegen_const_int_for_mcc_type(cg,
                             operand_type, 1);
-                        result = (op == UNOP_PRE_INC) ?
+                        result = codegen_signed_arith(cg, (op == UNOP_PRE_INC) ?
                             anvil_build_add(cg->anvil_ctx, val, one, "inc") :
-                            anvil_build_sub(cg->anvil_ctx, val, one, "dec");
+                            anvil_build_sub(cg->anvil_ctx, val, one, "dec"), operand_type);
                     }
                     codegen_store_object(cg, operand_type, result, ptr);
                     return result;
@@ -1079,9 +1092,9 @@ anvil_value_t *codegen_expr(mcc_codegen_t *cg, mcc_ast_node_t *expr)
                     } else {
                         anvil_value_t *one = codegen_const_int_for_mcc_type(cg,
                             operand_type, 1);
-                        result = (op == UNOP_POST_INC) ?
+                        result = codegen_signed_arith(cg, (op == UNOP_POST_INC) ?
                             anvil_build_add(cg->anvil_ctx, val, one, "inc") :
-                            anvil_build_sub(cg->anvil_ctx, val, one, "dec");
+                            anvil_build_sub(cg->anvil_ctx, val, one, "dec"), operand_type);
                     }
                     codegen_store_object(cg, operand_type, result, ptr);
                     return val; /* Return original value */

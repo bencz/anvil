@@ -31,6 +31,7 @@ typedef struct anvil_mir_instr {
     int spill_slot;
     int frame_slot;
     uint8_t index_scale;
+    uint8_t index_extend;
     bool symbol_got;
     anvil_fcmp_pred_t fcmp_pred;
     uint8_t widening;
@@ -57,6 +58,9 @@ struct anvil_mir_func {
     size_t num_blocks;
     size_t cap_blocks;
     anvil_mir_block_t current_block;
+    /* The block whose start holds the prologue (anvil_mir_split_early_return);
+     * 0: the entry.  Blocks before it run without the frame. */
+    anvil_mir_block_t frame_block;
 
     anvil_mir_instr_t *instrs;
     size_t num_instrs;
@@ -97,6 +101,10 @@ typedef struct
 } anvil_mir_liveness_t;
 
 bool anvil_mir_compute_liveness(const anvil_mir_func_t *func, anvil_mir_liveness_t *result);
+/* Spill weights' numerators: each vreg's definitions and uses, each counted
+ * 8 per loop level around it (up to three levels; loops are the back edges
+ * of the block order).  NULL without memory. */
+double *anvil_mir_use_weights(const anvil_mir_func_t *func);
 void anvil_mir_liveness_destroy(anvil_mir_liveness_t *result);
 bool anvil_mir_verify_clobbers(const anvil_mir_func_t *func, char *error, size_t error_len);
 bool anvil_mir_split_spilled_intervals(anvil_mir_func_t *func, bool *changed);
@@ -108,6 +116,5 @@ bool anvil_mir_spill_for_scratch(anvil_mir_func_t *func, const anvil_regalloc_cl
 /* split_class[c]: whether values of class c are split (no allocatable
  * register of the class survives the cold calls). */
 bool anvil_mir_split_around_cold_calls(anvil_mir_func_t *func, const bool *split_class);
-bool anvil_mir_sink_compares(anvil_mir_func_t *func);
 
 #endif /* ANVIL_MACHINE_INTERNAL_H */

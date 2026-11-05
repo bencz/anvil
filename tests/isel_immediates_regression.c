@@ -18,7 +18,7 @@ typedef struct {
     const char *name;
     const char *cross_target; /* host cross-assembler target, NULL to skip */
     const char *present[5];
-    const char *absent[2];
+    const char *absent[3];
 } isel_case_t;
 
 static anvil_module_t *build_module(anvil_ctx_t *ctx)
@@ -43,7 +43,7 @@ static anvil_module_t *build_module(anvil_ctx_t *ctx)
 int main(void)
 {
     static const isel_case_t cases[] = {
-        { ANVIL_ARCH_X86_64, "x86-64", NULL, { "cmpl $100,", "shll $3,", "$7", "andl $65280,", "\tjge " }, { "setl", "movl $100," } },
+        { ANVIL_ARCH_X86_64, "x86-64", NULL, { "cmpl $100,", "shll $3,", "7(%", "andl $65280,", "\tjge " }, { "setl", "movl $100,", "movl $7," } },
         { ANVIL_ARCH_ARM64, "ARM64", "aarch64-linux-gnu", { "#100", "lsl w", "#7", "#0xff00", "\tb.ge " }, { "cset", "mov w9, #100" } },
         { ANVIL_ARCH_PPC64, "PPC64", "powerpc64-linux-gnu", { "cmpwi 0,", "slwi ", "addi ", "andi. ", "\tbge " }, { "cmp_true", "li %r0, 100" } },
     };
@@ -64,7 +64,7 @@ int main(void)
                     failures++;
                 }
             }
-            for (size_t a = 0; a < 2; a++)
+            for (size_t a = 0; a < 3 && cases[c].absent[a]; a++)
                 CHECK(strstr(text, cases[c].absent[a]) == NULL, "a folded constant or boolean must not be materialized");
             if (cases[c].cross_target)
                 CHECK(anvil_test_host.cross_assemble(text, cases[c].cross_target) <= 0, "selected code should assemble");

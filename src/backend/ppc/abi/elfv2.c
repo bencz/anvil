@@ -11,6 +11,9 @@ static void emit_function_header(ppc_mir_emit_t *emit)
     anvil_obj_emit_binding(&emit->code, &anvil_obj_format_elf, anvil_mir_func_linkage(emit->mir), name);
     anvil_strbuf_appendf(&emit->code, "\t.type %s, @function\n", name);
     anvil_strbuf_appendf(&emit->code, "%s:\n", name);
+    /* A function that never reads r2 has one entry point. */
+    if (!emit->uses_toc)
+        return;
     anvil_strbuf_append(&emit->code, "0:\taddis %r2, %r12, (.TOC.-0b)@ha\n");
     anvil_strbuf_append(&emit->code, "\taddi %r2, %r2, (.TOC.-0b)@l\n");
     anvil_strbuf_appendf(&emit->code, "\t.localentry %s, .-0b\n", name);

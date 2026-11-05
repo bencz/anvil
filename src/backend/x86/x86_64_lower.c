@@ -519,8 +519,8 @@ static anvil_mir_vreg_t lower_value(x64_mir_lower_t *lower, anvil_value_t *value
         if (!lower_add_const_offset(lower, base, offset, &materialized)) {
             return ANVIL_MIR_NO_VREG;
         }
-        if (!map_put(lower, value, materialized))
-            return ANVIL_MIR_NO_VREG;
+        /* Materialized where this use is, every time: a vreg from the
+         * first use need not dominate the others (the base does). */
         return materialized;
     }
 
@@ -757,6 +757,8 @@ static int agg_return_reg(const anvil_x64_abi_desc_t *desc, const x64_agg_plan_t
     return before == 0 ? desc->int_ret_reg : desc->int_ret_hi_reg;
 }
 
+static bool emit_vreg_copy(anvil_mir_func_t *mir, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
+
 static bool add_return(x64_mir_lower_t *lower, anvil_value_t *value)
 {
     if (!value && lower->sret_in_regs) {
@@ -789,10 +791,24 @@ static bool add_return(x64_mir_lower_t *lower, anvil_value_t *value)
     }
 
     anvil_mir_vreg_t src = lower_value(lower, value);
-    if (src == ANVIL_MIR_NO_VREG)
+    const anvil_mir_vreg_info_t *info = src != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(lower->mir, src) : NULL;
+    if (!info)
         return false;
 
+    /* The result as a copy in its return register (copy hints then compute
+     * it there). */
+    anvil_mir_reg_class_t reg_class = info->reg_class;
+    uint16_t bits = info->size_bits;
+    bool is_signed = info->is_signed;
     anvil_mir_vreg_t ret_uses[] = {src};
+    if (reg_class == ANVIL_MIR_REG_GPR || reg_class == ANVIL_MIR_REG_FPR) {
+        anvil_mir_vreg_t fixed = anvil_mir_add_vreg_typed(lower->mir, reg_class, bits, is_signed);
+        if (fixed == ANVIL_MIR_NO_VREG ||
+            !anvil_mir_set_fixed_reg(lower->mir, fixed, reg_class == ANVIL_MIR_REG_GPR ? lower->desc->int_ret_reg : lower->desc->fp_ret_reg) ||
+            !emit_vreg_copy(lower->mir, fixed, src))
+            return false;
+        ret_uses[0] = fixed;
+    }
     return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, ret_uses, 1);
 }
 
@@ -1464,8 +1480,13 @@ static bool lower_cast(x64_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_o
 {
     if (instr->num_operands != 1 || !instr->result)
         return false;
-    /* A pointer reinterpreted as another pointer is the same value. */
+    /* A pointer reinterpreted as another pointer is the same value (a
+     * constant offset from a base stays one, for the accesses to fold). */
     if (anvil_cast_keeps_value(instr)) {
+        anvil_mir_vreg_t offset_base = ANVIL_MIR_NO_VREG;
+        int64_t offset = 0;
+        if (addr_map_get(lower, instr->operands[0], &offset_base, &offset))
+            return addr_map_put(lower, instr->result, offset_base, offset);
         anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
         return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
     }
@@ -1791,6 +1812,9 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
         }
         anvil_mir_vreg_t def = x64_add_vreg_for_type(lower, instr->result->type);
         if (ptr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
+            return false;
+        /* Its sign unobserved: loaded zero-extended. */
+        if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
             return false;
         bool is_i1 = instr->result->type->kind == ANVIL_TYPE_I1;
         anvil_mir_vreg_t loaded = is_i1 ? anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false) : def;

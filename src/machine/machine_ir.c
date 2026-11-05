@@ -266,6 +266,7 @@ anvil_mir_vreg_t anvil_mir_add_vreg_typed(anvil_mir_func_t *func,
     func->vregs[vreg].is_live_in = false;
     func->vregs[vreg].has_fixed_reg = false;
     func->vregs[vreg].fixed_phys_reg = -1;
+    func->vregs[vreg].registerless = false;
     return vreg;
 }
 
@@ -303,6 +304,15 @@ bool anvil_mir_set_live_in(anvil_mir_func_t *func, anvil_mir_vreg_t vreg,
     if (!anvil_mir_valid_vreg(func, vreg)) return false;
     anvil_mir_clear_allocations(func);
     func->vregs[vreg].is_live_in = is_live_in;
+    return true;
+}
+
+bool anvil_mir_set_registerless(anvil_mir_func_t *func, anvil_mir_vreg_t vreg, bool registerless)
+{
+    if (!anvil_mir_valid_vreg(func, vreg))
+        return false;
+    anvil_mir_clear_allocations(func);
+    func->vregs[vreg].registerless = registerless;
     return true;
 }
 
@@ -710,6 +720,7 @@ bool anvil_mir_get_instr_info(const anvil_mir_func_t *func, size_t index,
     out_info->has_imm = instr->has_imm;
     out_info->imm = instr->imm;
     out_info->index_scale = instr->index_scale;
+    out_info->index_extend = instr->index_extend;
     out_info->symbol_got = instr->symbol_got;
     out_info->fcmp_pred = instr->fcmp_pred;
     out_info->widening = instr->widening;
@@ -902,36 +913,167 @@ static void remove_instr_at(anvil_mir_func_t *func, size_t index);
  * is earlier in the same block, every use of t lies between it and the copy,
  * and x is neither read nor written strictly between them, the definition
  * writes x instead and the copy goes. */
-static bool mir_retarget_copy_source(anvil_mir_func_t *func, size_t copy)
+static bool mir_op_is_terminator(anvil_mir_opcode_t op);
+
+/* The index of `block`'s last instruction (blocks may interleave in the
+ * array; within one, array order is execution order), or SIZE_MAX. */
+static size_t mir_block_last(const anvil_mir_func_t *func, anvil_mir_block_t block)
+{
+    for (size_t i = func->num_instrs; i-- > 0;)
+        if (func->instrs[i].block == block)
+            return i;
+    return SIZE_MAX;
+}
+
+static size_t mir_block_first(const anvil_mir_func_t *func, anvil_mir_block_t block)
+{
+    for (size_t i = 0; i < func->num_instrs; i++)
+        if (func->instrs[i].block == block)
+            return i;
+    return SIZE_MAX;
+}
+
+/* The block whose only successor is `block` and which is `block`'s only
+ * predecessor (an unconditional branch into it, or falling into it: a
+ * block without a terminator continues with the next non-empty one), or
+ * NO_BLOCK: the two then run as one straight line. */
+static anvil_mir_block_t mir_straight_predecessor(const anvil_mir_func_t *func, anvil_mir_block_t block)
+{
+    anvil_mir_block_t found = ANVIL_MIR_NO_BLOCK;
+    size_t edges = 0;
+    anvil_mir_block_t previous = ANVIL_MIR_NO_BLOCK;
+    for (size_t b = 0; b < func->num_blocks; b++) {
+        size_t last = mir_block_last(func, (anvil_mir_block_t)b);
+        if (last == SIZE_MAX)
+            continue;
+        const anvil_mir_instr_t *instr = &func->instrs[last];
+        if (instr->op == ANVIL_MIR_OP_BR && instr->true_block == block) {
+            edges++;
+            found = (anvil_mir_block_t)b;
+        } else if (instr->op == ANVIL_MIR_OP_BR_COND && (instr->true_block == block || instr->false_block == block)) {
+            edges += 2;
+        }
+        if (b < block)
+            previous = (anvil_mir_block_t)b;
+    }
+    /* Falling in from the nearest non-empty block before. */
+    if (previous != ANVIL_MIR_NO_BLOCK && !mir_op_is_terminator(func->instrs[mir_block_last(func, previous)].op)) {
+        bool between_targeted = false;
+        for (size_t i = 0; i < func->num_instrs; i++) {
+            const anvil_mir_instr_t *instr = &func->instrs[i];
+            if (instr->op == ANVIL_MIR_OP_BR || instr->op == ANVIL_MIR_OP_BR_COND)
+                between_targeted |= (instr->true_block > previous && instr->true_block < block) ||
+                                    (instr->op == ANVIL_MIR_OP_BR_COND && instr->false_block > previous && instr->false_block < block);
+        }
+        edges += between_targeted ? 2 : 1;
+        found = previous;
+    }
+    return edges == 1 && block != 0 && found != block ? found : ANVIL_MIR_NO_BLOCK;
+}
+
+/* The block whose conditional branch is `block`'s only way in (named
+ * once, no other branch or fall-through reaching it), and the branch's
+ * other target; NO_BLOCK when there is none. */
+static anvil_mir_block_t mir_branch_predecessor(const anvil_mir_func_t *func, anvil_mir_block_t block, anvil_mir_block_t *other)
+{
+    anvil_mir_block_t found = ANVIL_MIR_NO_BLOCK, previous = ANVIL_MIR_NO_BLOCK;
+    size_t edges = 0;
+    for (size_t b = 0; b < func->num_blocks; b++) {
+        size_t last = mir_block_last(func, (anvil_mir_block_t)b);
+        if (last == SIZE_MAX)
+            continue;
+        const anvil_mir_instr_t *instr = &func->instrs[last];
+        if (instr->op == ANVIL_MIR_OP_BR && instr->true_block == block)
+            edges += 2;
+        else if (instr->op == ANVIL_MIR_OP_BR_COND && (instr->true_block == block || instr->false_block == block)) {
+            edges += instr->true_block == instr->false_block ? 2 : 1;
+            found = (anvil_mir_block_t)b;
+            *other = instr->true_block == block ? instr->false_block : instr->true_block;
+        }
+        if (b < block)
+            previous = (anvil_mir_block_t)b;
+    }
+    if (previous != ANVIL_MIR_NO_BLOCK && !mir_op_is_terminator(func->instrs[mir_block_last(func, previous)].op))
+        edges += 2;
+    return edges == 1 && block != 0 && found != block ? found : ANVIL_MIR_NO_BLOCK;
+}
+
+/* Whether `block` (reached from `from`) ends jumping back to a block laid
+ * out no later than `from`: a loop's back edge. */
+static bool mir_back_edge_block(const anvil_mir_func_t *func, anvil_mir_block_t block, anvil_mir_block_t from)
+{
+    size_t last = mir_block_last(func, block);
+    return last != SIZE_MAX && func->instrs[last].op == ANVIL_MIR_OP_BR && func->instrs[last].true_block <= from;
+}
+
+static bool mir_block_defines(const anvil_mir_func_t *func, anvil_mir_block_t block, anvil_mir_vreg_t vreg)
+{
+    for (size_t i = 0; i < func->num_instrs; i++)
+        if (func->instrs[i].block == block && func->instrs[i].def == vreg)
+            return true;
+    return false;
+}
+
+/* `liveness` (NULL: unknown) admits a predecessor ending in a conditional
+ * branch, when x is not live into the branch's other target: x then takes
+ * t's value on that path too, harmlessly (a loop's back-edge copy of its
+ * step, where only the edge block reads x).  Only for a back edge whose
+ * branch's other target does not define x: x then joins no other PHI
+ * move's source in that block. */
+static bool mir_retarget_copy_source(anvil_mir_func_t *func, size_t copy, const anvil_mir_liveness_t *liveness)
 {
     const anvil_mir_instr_t *move = &func->instrs[copy];
     anvil_mir_vreg_t dst = move->def, src = move->uses[0];
     anvil_mir_block_t block = move->block;
+    /* The window from t's definition to the copy: within the copy's block,
+     * or from a straight predecessor into it. */
     size_t def = SIZE_MAX;
     for (size_t j = copy; j-- > 0;) {
-        if (func->instrs[j].block != block)
-            continue;
-        if (func->instrs[j].def == src) {
+        if (func->instrs[j].block == block && func->instrs[j].def == src) {
             def = j;
             break;
         }
     }
-    if (def == SIZE_MAX || func->vregs[src].is_live_in || instr_has_clobbers(&func->instrs[def]))
+    anvil_mir_block_t before = ANVIL_MIR_NO_BLOCK;
+    if (def == SIZE_MAX) {
+        before = mir_straight_predecessor(func, block);
+        anvil_mir_block_t other = ANVIL_MIR_NO_BLOCK;
+        if (before == ANVIL_MIR_NO_BLOCK && liveness && liveness->words_per_block && block < func->num_blocks &&
+            (before = mir_branch_predecessor(func, block, &other)) != ANVIL_MIR_NO_BLOCK &&
+            (other >= func->num_blocks || ((liveness->live_in[other * liveness->words_per_block + dst / 64] >> (dst % 64)) & 1) ||
+             !mir_back_edge_block(func, block, before) || mir_block_defines(func, other, dst)))
+            before = ANVIL_MIR_NO_BLOCK;
+        if (before == ANVIL_MIR_NO_BLOCK)
+            return false;
+        for (size_t j = func->num_instrs; j-- > 0;) {
+            if (func->instrs[j].block == before && func->instrs[j].def == src) {
+                def = j;
+                break;
+            }
+        }
+        if (def == SIZE_MAX)
+            return false;
+    }
+    if (func->vregs[src].is_live_in || instr_has_clobbers(&func->instrs[def]))
         return false;
+#define IN_WINDOW(j)                                                                                     \
+    (before == ANVIL_MIR_NO_BLOCK ? func->instrs[j].block == block && (j) > def && (j) <= copy          \
+                                  : (func->instrs[j].block == before && (j) > def) ||                    \
+                                        (func->instrs[j].block == block && (j) <= copy))
 
-    /* t is read nowhere outside (def, copy]. */
+    /* t is read nowhere outside the window. */
     for (size_t j = 0; j < func->num_instrs; j++) {
         const anvil_mir_instr_t *other = &func->instrs[j];
-        bool inside = other->block == block && j > def && j <= copy;
+        bool inside = IN_WINDOW(j);
         for (size_t u = 0; u < other->num_uses && !inside; u++)
             if (other->uses[u] == src)
                 return false;
     }
     /* x keeps its old value until the copy: nothing in between touches it. */
-    for (size_t j = def + 1; j < copy; j++) {
-        const anvil_mir_instr_t *other = &func->instrs[j];
-        if (other->block != block)
+    for (size_t j = 0; j < func->num_instrs; j++) {
+        if (j == copy || j == def || !IN_WINDOW(j))
             continue;
+        const anvil_mir_instr_t *other = &func->instrs[j];
         if (other->def == dst)
             return false;
         for (size_t u = 0; u < other->num_uses; u++)
@@ -940,22 +1082,97 @@ static bool mir_retarget_copy_source(anvil_mir_func_t *func, size_t copy)
     }
 
     func->instrs[def].def = dst;
-    for (size_t j = def + 1; j < copy; j++) {
-        anvil_mir_instr_t *other = &func->instrs[j];
-        if (other->block != block)
+    for (size_t j = 0; j < func->num_instrs; j++) {
+        if (j == copy || !IN_WINDOW(j))
             continue;
+        anvil_mir_instr_t *other = &func->instrs[j];
         for (size_t u = 0; u < other->num_uses; u++)
             if (other->uses[u] == src)
                 other->uses[u] = dst;
     }
+#undef IN_WINDOW
     remove_instr_at(func, copy);
     return true;
 }
 
-bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
+/* A block reached only from the block laid out before it (falling into
+ * it, or that block's final unconditional branch, which goes) joins that
+ * block when all of the earlier block's instructions come first in the
+ * array: one straight line for the block-local passes and the printers (a
+ * loop test copied into the latch, say). */
+static bool mir_merge_straight_blocks(anvil_mir_func_t *func)
+{
+    bool merged = false;
+    for (size_t b = 1; b < func->num_blocks; b++) {
+        size_t first = mir_block_first(func, (anvil_mir_block_t)b);
+        anvil_mir_block_t before = mir_straight_predecessor(func, (anvil_mir_block_t)b);
+        if (first == SIZE_MAX || before == ANVIL_MIR_NO_BLOCK || before > b || func->blocks[before].cold != func->blocks[b].cold)
+            continue;
+        size_t last = mir_block_last(func, before);
+        if (last == SIZE_MAX || last > first)
+            continue;
+        for (size_t i = first; i < func->num_instrs; i++)
+            if (func->instrs[i].block == (anvil_mir_block_t)b)
+                func->instrs[i].block = before;
+        if (func->instrs[last].op == ANVIL_MIR_OP_BR)
+            remove_instr_at(func, last);
+        merged = true;
+    }
+    if (!merged)
+        return true;
+    /* The emptied blocks go (MachineIR blocks are all reachable and
+     * non-empty); the rest keep their order, the entry first. */
+    anvil_mir_block_t *renumber = malloc(func->num_blocks * sizeof(*renumber));
+    bool *used = calloc(func->num_blocks, sizeof(*used));
+    if (!renumber || !used) {
+        free(renumber);
+        free(used);
+        return false;
+    }
+    used[0] = true;
+    for (size_t i = 0; i < func->num_instrs; i++)
+        if (mir_valid_block(func, func->instrs[i].block))
+            used[func->instrs[i].block] = true;
+    size_t kept = 0;
+    for (size_t b = 0; b < func->num_blocks; b++) {
+        if (!used[b]) {
+            free(func->blocks[b].name);
+            renumber[b] = ANVIL_MIR_NO_BLOCK;
+            continue;
+        }
+        renumber[b] = (anvil_mir_block_t)kept;
+        func->blocks[kept++] = func->blocks[b];
+    }
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        anvil_mir_instr_t *instr = &func->instrs[i];
+        if (mir_valid_block(func, instr->block))
+            instr->block = renumber[instr->block];
+        if (instr->op == ANVIL_MIR_OP_BR || instr->op == ANVIL_MIR_OP_BR_COND) {
+            if (instr->true_block != ANVIL_MIR_NO_BLOCK)
+                instr->true_block = renumber[instr->true_block];
+            if (instr->op == ANVIL_MIR_OP_BR_COND && instr->false_block != ANVIL_MIR_NO_BLOCK)
+                instr->false_block = renumber[instr->false_block];
+        }
+    }
+    if (mir_valid_block(func, func->current_block))
+        func->current_block = renumber[func->current_block] != ANVIL_MIR_NO_BLOCK ? renumber[func->current_block] : 0;
+    if (mir_valid_block(func, func->frame_block))
+        func->frame_block = renumber[func->frame_block] != ANVIL_MIR_NO_BLOCK ? renumber[func->frame_block] : 0;
+    func->num_blocks = kept;
+    free(renumber);
+    free(used);
+    recompute_block_instr_ranges(func);
+    anvil_mir_clear_allocations(func);
+    return true;
+}
+
+static bool mir_coalesce(anvil_mir_func_t *func, bool phi_moves_only)
 {
     if (!func) return false;
     if (func->num_vregs == 0 || func->num_instrs == 0) return true;
+    /* Blocks in layout order by now (callers order them first). */
+    if (!phi_moves_only && !mir_merge_straight_blocks(func))
+        return false;
 
     size_t *def_counts = calloc(func->num_vregs, sizeof(*def_counts));
     if (!def_counts) return false;
@@ -968,6 +1185,8 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
     }
 
     bool changed = false;
+    anvil_mir_liveness_t liveness;
+    bool have_liveness = false, no_liveness = false, liveness_stale = false;
     for (size_t i = 0; i < func->num_instrs; i++) {
         anvil_mir_instr_t *instr = &func->instrs[i];
         if (instr->op != ANVIL_MIR_OP_COPY || instr->num_uses != 1) continue;
@@ -981,13 +1200,22 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
         /* `t = op ...; x = COPY t` with x defined elsewhere too (a PHI move):
          * op may write x directly when t lives only from op to the copy and
          * nothing in between reads or writes x. */
-        if (def_counts[src] == 1 && def_counts[dst] > 1 && mir_retarget_copy_source(func, i)) {
+        if (def_counts[src] == 1 && def_counts[dst] > 1 && (!have_liveness || liveness_stale) && !no_liveness) {
+            /* Block live-ins, for copies after a conditional branch, as
+             * of now: every rewrite moves some value's live range. */
+            if (have_liveness)
+                anvil_mir_liveness_destroy(&liveness);
+            have_liveness = anvil_mir_compute_liveness(func, &liveness);
+            no_liveness = !have_liveness;
+            liveness_stale = false;
+        }
+        if (def_counts[src] == 1 && def_counts[dst] > 1 && mir_retarget_copy_source(func, i, have_liveness ? &liveness : NULL)) {
             def_counts[src] = 0;
             i--;
-            changed = true;
+            changed = liveness_stale = true;
             continue;
         }
-        if (def_counts[dst] != 1 || def_counts[src] != 1) continue;
+        if (phi_moves_only || def_counts[dst] != 1 || def_counts[src] != 1) continue;
 
         /*
          * Without dominator information, a textual instruction order is not
@@ -1023,13 +1251,20 @@ bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
         if (rewrote_use) {
             remove_instr_at(func, i);
             i--;
-            changed = true;
+            changed = liveness_stale = true;
         }
     }
 
     free(def_counts);
+    if (have_liveness)
+        anvil_mir_liveness_destroy(&liveness);
     if (changed) anvil_mir_clear_allocations(func);
     return true;
+}
+
+bool anvil_mir_coalesce_copies(anvil_mir_func_t *func)
+{
+    return mir_coalesce(func, false);
 }
 
 static bool mir_verify_index_scale(const anvil_mir_instr_t *instr, size_t index, char *error, size_t error_len)
@@ -2098,7 +2333,7 @@ static bool build_scratch_occupancy(const anvil_mir_func_t *func, const anvil_re
     for (size_t value = 0; value < func->num_vregs; value++) {
         const anvil_regalloc_assignment_t *assignment = &func->assignments[value];
         slot[value] = SIZE_MAX;
-        if (!assignment->spilled && assignment->phys_reg >= 0 &&
+        if (!func->vregs[value].registerless && !assignment->spilled && assignment->phys_reg >= 0 &&
             config_has_phys(spill_config_for_class(configs, num_configs, assignment->reg_class), assignment->phys_reg))
             slot[value] = count++;
     }
@@ -2375,6 +2610,7 @@ static anvil_mir_vreg_t add_spill_temp_vreg(anvil_mir_func_t *func,
     func->vregs[vreg].is_live_in = false;
     func->vregs[vreg].has_fixed_reg = true;
     func->vregs[vreg].fixed_phys_reg = phys_reg;
+    func->vregs[vreg].registerless = false;
 
     func->assignments[vreg].reg_class = reg_class;
     func->assignments[vreg].spilled = false;
@@ -3371,12 +3607,54 @@ bool anvil_mir_materialize_spills(
     return true;
 }
 
+
+enum { SPILL_DEPTH_LIMIT = 3, SPILL_DEPTH_FACTOR = 8 };
+
+double *anvil_mir_use_weights(const anvil_mir_func_t *func)
+{
+    double *weights = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(*weights));
+    unsigned *depth = calloc(func->num_blocks ? func->num_blocks : 1, sizeof(*depth));
+    if (!weights || !depth) {
+        free(weights);
+        free(depth);
+        return NULL;
+    }
+    /* A jump to a block at or before its own spans a loop. */
+    for (size_t index = 0; index < func->num_instrs; index++) {
+        const anvil_mir_instr_t *instr = &func->instrs[index];
+        if ((instr->op != ANVIL_MIR_OP_BR && instr->op != ANVIL_MIR_OP_BR_COND) || instr->block >= func->num_blocks || func->blocks[instr->block].cold)
+            continue;
+        anvil_mir_block_t targets[] = {instr->true_block, instr->false_block};
+        for (size_t t = 0; t < 2; t++) {
+            if (targets[t] >= func->num_blocks || targets[t] > instr->block)
+                continue;
+            for (anvil_mir_block_t block = targets[t]; block <= instr->block; block++)
+                depth[block]++;
+        }
+    }
+    for (size_t index = 0; index < func->num_instrs; index++) {
+        const anvil_mir_instr_t *instr = &func->instrs[index];
+        unsigned level = instr->block < func->num_blocks ? depth[instr->block] : 0;
+        double count = 1;
+        for (unsigned l = 0; l < level && l < SPILL_DEPTH_LIMIT; l++)
+            count *= SPILL_DEPTH_FACTOR;
+        if (instr->def != ANVIL_MIR_NO_VREG && instr->def < func->num_vregs)
+            weights[instr->def] += count;
+        for (size_t u = 0; u < instr->num_uses; u++)
+            if (instr->uses[u] < func->num_vregs)
+                weights[instr->uses[u]] += count;
+    }
+    free(depth);
+    return weights;
+}
+
 typedef struct {
     anvil_mir_func_t *func;
     const anvil_regalloc_class_config_t *configs;
     size_t num_configs;
     scratch_occupancy_t *occupancy;
     const rematerialization_t *rematerialize;
+    const double *weights;  /* anvil_mir_use_weights, or NULL */
     bool spilled;
     bool failed;
 } scratch_relief_t;
@@ -3395,7 +3673,7 @@ static bool bundle_references(const anvil_mir_func_t *func, size_t start, size_t
 }
 
 /* Spills values that sit in the bundle's free-able scratch registers, live
- * across it: recomputable ones first, then the longest-lived. */
+ * across it: recomputable ones first, then the lightest (spill weight). */
 static void relieve_scratch_shortage(void *ctx, size_t start, size_t end, anvil_mir_reg_class_t reg_class, size_t missing,
                                      size_t narrow_missing)
 {
@@ -3414,7 +3692,13 @@ static void relieve_scratch_shortage(void *ctx, size_t start, size_t end, anvil_
                 continue;
             bool cheap = relief->rematerialize[item->vreg].instruction != NULL;
             bool best_cheap = best && relief->rematerialize[best->vreg].instruction != NULL;
-            if (!best || (cheap && !best_cheap) || (cheap == best_cheap && item->last - item->first > best->last - best->first))
+            /* The fewest (loop-weighted) uses per instruction spanned; the
+             * longest-lived without weights or on ties. */
+            double density = relief->weights ? relief->weights[item->vreg] / (double)(item->last - item->first + 2) : 0;
+            double best_density = best && relief->weights ? relief->weights[best->vreg] / (double)(best->last - best->first + 2) : 0;
+            bool longer = best && item->last - item->first > best->last - best->first;
+            bool lighter = relief->weights ? density < best_density || (density == best_density && longer) : longer;
+            if (!best || (cheap && !best_cheap) || (cheap == best_cheap && lighter))
                 best = item;
         }
         if (!best)
@@ -3447,10 +3731,12 @@ bool anvil_mir_spill_for_scratch(anvil_mir_func_t *func, const anvil_regalloc_cl
     if (!build_scratch_occupancy(func, scratch_configs, num_scratch_configs, &occupancy))
         return false;
     rematerialization_t *rematerialize = find_rematerializable_values(func);
-    scratch_relief_t relief = {func, scratch_configs, num_scratch_configs, &occupancy, rematerialize, false, !rematerialize};
+    double *weights = anvil_mir_use_weights(func);
+    scratch_relief_t relief = {func, scratch_configs, num_scratch_configs, &occupancy, rematerialize, weights, false, !rematerialize};
     if (rematerialize)
         scratch_configs_cover_spills(func, scratch_configs, num_scratch_configs, &occupancy, relieve_scratch_shortage, &relief);
     free(rematerialize);
+    free(weights);
     free(occupancy.items);
     *changed = relief.spilled;
     return !relief.failed;
@@ -3540,9 +3826,26 @@ static bool mir_address_constant(const anvil_mir_func_t *func, const mir_address
 static bool mir_address_scaled(const anvil_mir_func_t *func, const mir_address_facts_t *facts, anvil_mir_vreg_t value,
                                anvil_mir_block_t block, anvil_mir_vreg_t *index, unsigned *scale)
 {
-    if (!mir_address_single(func, facts, value) || facts->uses[value] != 1)
+    /* The scaled value may have other readers (the same index scaled for
+     * several accesses, merged by CSE, possibly through a copy): each
+     * access reads the index scaled itself, and the scaling stays only
+     * while something else needs it. */
+    if (!mir_address_single(func, facts, value))
         return false;
     const anvil_mir_instr_t *def = &func->instrs[facts->def_at[value]];
+    if (def->op == ANVIL_MIR_OP_COPY && def->num_uses == 1 && def->block == block && mir_address_single(func, facts, def->uses[0])) {
+        size_t copy_at = facts->def_at[value], source_at = facts->def_at[def->uses[0]];
+        const anvil_mir_instr_t *source = &func->instrs[source_at];
+        /* The access reads the source's operands later than the copy did:
+         * none may change in between. */
+        bool redefined = source_at > copy_at;
+        for (size_t j = source_at + 1; j < copy_at && !redefined; j++)
+            for (size_t u = 0; u < source->num_uses && !redefined; u++)
+                redefined = func->instrs[j].block == block && func->instrs[j].def == source->uses[u];
+        if (redefined)
+            return false;
+        def = source;
+    }
     if (def->num_uses != 2 || def->has_imm || def->block != block)
         return false;
     int64_t amount;
@@ -3567,6 +3870,7 @@ static bool mir_address_removable(const anvil_mir_func_t *func, const anvil_mir_
     if (instr->def == ANVIL_MIR_NO_VREG || facts->uses[instr->def] != 0 || func->vregs[instr->def].has_fixed_reg)
         return false;
     return instr->op == ANVIL_MIR_OP_ADD || instr->op == ANVIL_MIR_OP_MUL || instr->op == ANVIL_MIR_OP_SHL ||
+           instr->op == ANVIL_MIR_OP_SEXT || instr->op == ANVIL_MIR_OP_ZEXT || (instr->op == ANVIL_MIR_OP_COPY && instr->num_uses == 1) ||
            (instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && instr->num_uses == 0);
 }
 
@@ -3640,17 +3944,32 @@ bool anvil_mir_fold_address_arithmetic(anvil_mir_func_t *func, anvil_mir_address
         uint16_t width = func->vregs[address].size_bits;
         anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG, index = ANVIL_MIR_NO_VREG;
         unsigned scale = 0;
-        for (size_t option = 0; option < num_options && !scale; option++) {
-            anvil_mir_vreg_t b_reg = options[option].base, i_reg = options[option].index;
-            if (func->vregs[b_reg].size_bits != width || func->vregs[i_reg].size_bits != width ||
-                func->vregs[b_reg].reg_class != ANVIL_MIR_REG_GPR || func->vregs[i_reg].reg_class != ANVIL_MIR_REG_GPR ||
-                !legal(user, options[option].scale, access->has_imm ? access->imm : 0, func->vregs[accessed].size_bits))
-                continue;
-            /* base and index are read at the access now: neither may be
-             * redefined after the arithmetic that read them. */
+        anvil_mir_index_extend_t extend = ANVIL_MIR_INDEX_PLAIN;
+        /* Each option twice: with the extension of a 32-bit index folded
+         * too (where the target has that form), then as it is. */
+        for (size_t attempt = 0; attempt < 2 * num_options && !scale; attempt++) {
+            const mir_address_option_t *option = &options[attempt / 2];
+            anvil_mir_vreg_t b_reg = option->base, i_reg = option->index;
+            anvil_mir_index_extend_t kind = ANVIL_MIR_INDEX_PLAIN;
+            /* Where the index is read: the arithmetic that consumed it. */
             size_t from = facts.def_at[address];
             if (i_reg != add->uses[0] && i_reg != add->uses[1])
                 from = facts.def_at[add->uses[b_reg == add->uses[0] ? 1 : 0]];
+            if (attempt % 2 == 0) {
+                const anvil_mir_instr_t *ext = mir_address_single(func, &facts, i_reg) && facts.uses[i_reg] == 1 ? &func->instrs[facts.def_at[i_reg]] : NULL;
+                if (!ext || (ext->op != ANVIL_MIR_OP_SEXT && ext->op != ANVIL_MIR_OP_ZEXT) || ext->num_uses != 1 || ext->block != access->block ||
+                    func->vregs[ext->uses[0]].size_bits != 32 || func->vregs[ext->uses[0]].reg_class != ANVIL_MIR_REG_GPR || width != 64)
+                    continue;
+                kind = ext->op == ANVIL_MIR_OP_SEXT ? ANVIL_MIR_INDEX_SEXT32 : ANVIL_MIR_INDEX_ZEXT32;
+                from = facts.def_at[i_reg];
+                i_reg = ext->uses[0];
+            }
+            if (func->vregs[b_reg].size_bits != width || (kind == ANVIL_MIR_INDEX_PLAIN && func->vregs[i_reg].size_bits != width) ||
+                func->vregs[b_reg].reg_class != ANVIL_MIR_REG_GPR || func->vregs[i_reg].reg_class != ANVIL_MIR_REG_GPR ||
+                !legal(user, option->scale, access->has_imm ? access->imm : 0, func->vregs[accessed].size_bits, kind))
+                continue;
+            /* base and index are read at the access now: neither may be
+             * redefined after the arithmetic that read them. */
             bool redefined = from > i;
             for (size_t j = from + 1; j < i && !redefined; j++)
                 redefined = func->instrs[j].block == access->block && (func->instrs[j].def == b_reg || func->instrs[j].def == i_reg);
@@ -3658,7 +3977,8 @@ bool anvil_mir_fold_address_arithmetic(anvil_mir_func_t *func, anvil_mir_address
                 continue;
             base = b_reg;
             index = i_reg;
-            scale = options[option].scale;
+            scale = option->scale;
+            extend = kind;
         }
         if (!scale)
             continue;
@@ -3673,6 +3993,7 @@ bool anvil_mir_fold_address_arithmetic(anvil_mir_func_t *func, anvil_mir_address
         access->uses[pointer + 1] = index;
         access->num_uses++;
         access->index_scale = (uint8_t)scale;
+        access->index_extend = (uint8_t)extend;
         facts.uses[address]--;
         accesses[address]--;
         facts.uses[base]++;
@@ -3748,29 +4069,67 @@ static bool mir_cse_candidate(const anvil_mir_func_t *func, const anvil_mir_inst
     return true;
 }
 
-static bool mir_cse_same(const anvil_mir_func_t *func, const anvil_mir_instr_t *a, const anvil_mir_instr_t *b)
+/* Operands `x` and `y` hold the same value: one vreg, or constants of one
+ * value defined earlier in the block (`known`: block + 1 where so). */
+static bool mir_cse_same_operand(const anvil_mir_func_t *func, anvil_mir_vreg_t x, anvil_mir_vreg_t y, const size_t *known,
+                                 const int64_t *constant, size_t block)
+{
+    return x == y || (known[x] == block + 1 && known[y] == block + 1 && constant[x] == constant[y] &&
+                      func->vregs[x].size_bits == func->vregs[y].size_bits);
+}
+
+static bool mir_cse_commutes(anvil_mir_opcode_t op)
+{
+    return op == ANVIL_MIR_OP_ADD || op == ANVIL_MIR_OP_MUL || op == ANVIL_MIR_OP_AND || op == ANVIL_MIR_OP_OR || op == ANVIL_MIR_OP_XOR;
+}
+
+static bool mir_cse_same(const anvil_mir_func_t *func, const anvil_mir_instr_t *a, const anvil_mir_instr_t *b, const size_t *known,
+                         const int64_t *constant, size_t block)
 {
     if (a->op != b->op || a->num_uses != b->num_uses || a->has_imm != b->has_imm || (a->has_imm && a->imm != b->imm))
         return false;
     const anvil_mir_vreg_info_t *da = &func->vregs[a->def], *db = &func->vregs[b->def];
     if (da->size_bits != db->size_bits || da->is_signed != db->is_signed)
         return false;
-    for (size_t u = 0; u < a->num_uses; u++)
-        if (a->uses[u] != b->uses[u])
-            return false;
-    return true;
+    bool same = true;
+    for (size_t u = 0; u < a->num_uses && same; u++)
+        same = mir_cse_same_operand(func, a->uses[u], b->uses[u], known, constant, block);
+    if (!same && a->num_uses == 2 && mir_cse_commutes(a->op))
+        same = mir_cse_same_operand(func, a->uses[0], b->uses[1], known, constant, block) &&
+               mir_cse_same_operand(func, a->uses[1], b->uses[0], known, constant, block);
+    return same;
 }
 
 /* A repeated pure computation in a block becomes a copy of the first
  * (coalescing removes it) while neither its operands nor its result have
  * been redefined in between. */
+/* `value` (a constant of `from` bits) as the result of a ZEXT, SEXT or
+ * TRUNC to `to` bits. */
+static int64_t mir_convert_constant(anvil_mir_opcode_t op, int64_t value, uint16_t from, uint16_t to)
+{
+    uint16_t bits = op == ANVIL_MIR_OP_TRUNC ? to : from;
+    if (bits >= 64)
+        return value;
+    uint64_t low = (uint64_t)value & ((UINT64_C(1) << bits) - 1);
+    if (op == ANVIL_MIR_OP_SEXT && (low >> (bits - 1) & 1))
+        low |= ~((UINT64_C(1) << bits) - 1);
+    return (int64_t)low;
+}
+
 bool anvil_mir_local_cse(anvil_mir_func_t *func)
 {
     if (!func)
         return false;
     size_t *available = malloc((func->num_instrs ? func->num_instrs : 1) * sizeof(size_t));
-    if (!available)
+    /* Integer constants defined earlier in the block being scanned. */
+    size_t *constant_block = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(size_t));
+    int64_t *constant = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(int64_t));
+    if (!available || !constant_block || !constant) {
+        free(available);
+        free(constant_block);
+        free(constant);
         return false;
+    }
 
     bool changed = false;
     for (size_t block = 0; block < func->num_blocks; block++) {
@@ -3780,10 +4139,29 @@ bool anvil_mir_local_cse(anvil_mir_func_t *func)
             if (instr->block != (anvil_mir_block_t)block)
                 continue;
 
+            /* An extension or truncation of a known constant is that
+             * constant, converted (an immediate again for its users). */
+            if ((instr->op == ANVIL_MIR_OP_ZEXT || instr->op == ANVIL_MIR_OP_SEXT || instr->op == ANVIL_MIR_OP_TRUNC) && instr->num_uses == 1 &&
+                instr->def != ANVIL_MIR_NO_VREG && constant_block[instr->uses[0]] == block + 1 &&
+                func->vregs[instr->def].reg_class == ANVIL_MIR_REG_GPR && !func->vregs[instr->def].has_fixed_reg) {
+                instr->imm = mir_convert_constant(instr->op, constant[instr->uses[0]], func->vregs[instr->uses[0]].size_bits,
+                                                  func->vregs[instr->def].size_bits);
+                instr->op = ANVIL_MIR_OP_MOV;
+                instr->has_imm = true;
+                instr->num_uses = 0;
+                changed = true;
+            }
+            if (instr->def != ANVIL_MIR_NO_VREG) {
+                bool known = instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && instr->num_uses == 0 && !instr->symbol &&
+                             func->vregs[instr->def].reg_class == ANVIL_MIR_REG_GPR;
+                constant_block[instr->def] = known ? block + 1 : 0;
+                constant[instr->def] = instr->imm;
+            }
+
             size_t found = SIZE_MAX;
             if (mir_cse_candidate(func, instr))
                 for (size_t k = 0; k < count && found == SIZE_MAX; k++)
-                    if (mir_cse_same(func, &func->instrs[available[k]], instr))
+                    if (mir_cse_same(func, &func->instrs[available[k]], instr, constant_block, constant, block))
                         found = available[k];
 
             if (found != SIZE_MAX && func->instrs[found].def != instr->def) {
@@ -3818,6 +4196,8 @@ bool anvil_mir_local_cse(anvil_mir_func_t *func)
         }
     }
 
+    free(constant_block);
+    free(constant);
     free(available);
     if (changed)
         anvil_mir_clear_allocations(func);
@@ -3828,9 +4208,15 @@ bool anvil_mir_local_cse(anvil_mir_func_t *func)
  * Branch-target duplication (rotates top-tested loops).
  * ------------------------------------------------------------------ */
 
+/* Instructions a test block may contain to be copied into its latches.  A
+ * copy replaces the jump to the original, so every path still executes the
+ * test exactly once: memory accesses (a `while (*p)` or `do *d = *s;
+ * while (...)` test) qualify like any computation. */
 static bool mir_duplicable(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr)
 {
     switch (instr->op) {
+    case ANVIL_MIR_OP_STORE:
+    case ANVIL_MIR_OP_LOAD:
     case ANVIL_MIR_OP_MOV:
     case ANVIL_MIR_OP_COPY:
     case ANVIL_MIR_OP_ADD:
@@ -3838,6 +4224,9 @@ static bool mir_duplicable(const anvil_mir_func_t *func, const anvil_mir_instr_t
     case ANVIL_MIR_OP_AND:
     case ANVIL_MIR_OP_OR:
     case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
     case ANVIL_MIR_OP_SEXT:
     case ANVIL_MIR_OP_ZEXT:
     case ANVIL_MIR_OP_TRUNC:
@@ -3856,7 +4245,8 @@ static bool mir_duplicable(const anvil_mir_func_t *func, const anvil_mir_instr_t
     default:
         return false;
     }
-    if (instr->def == ANVIL_MIR_NO_VREG || func->vregs[instr->def].has_fixed_reg || instr->symbol)
+    if ((instr->op == ANVIL_MIR_OP_STORE) != (instr->def == ANVIL_MIR_NO_VREG) ||
+        (instr->def != ANVIL_MIR_NO_VREG && func->vregs[instr->def].has_fixed_reg) || instr->symbol)
         return false;
     for (size_t u = 0; u < instr->num_uses; u++)
         if (func->vregs[instr->uses[u]].has_fixed_reg)
@@ -3917,9 +4307,40 @@ bool anvil_mir_order_blocks(anvil_mir_func_t *func)
         }
         if (mir_valid_block(func, func->current_block))
             func->current_block = renumber[func->current_block];
+        if (mir_valid_block(func, func->frame_block))
+            func->frame_block = renumber[func->frame_block];
     }
     free(renumber);
     free(blocks);
+
+    /* Instructions in block order too (a stable sort: each block keeps its
+     * own order), so array positions follow the layout: passes that add
+     * instructions to a block append them at the end of the array. */
+    bool sorted = true;
+    for (size_t i = 1; i < func->num_instrs && sorted; i++)
+        sorted = func->instrs[i - 1].block <= func->instrs[i].block;
+    if (sorted)
+        return true;
+    size_t *start = calloc(count + 1, sizeof(*start));
+    anvil_mir_instr_t *ordered = malloc(func->num_instrs * sizeof(*ordered));
+    if (!start || !ordered) {
+        free(start);
+        free(ordered);
+        return false;
+    }
+    for (size_t i = 0; i < func->num_instrs; i++)
+        start[(mir_valid_block(func, func->instrs[i].block) ? func->instrs[i].block : count - 1) + 1]++;
+    for (size_t b = 0; b < count; b++)
+        start[b + 1] += start[b];
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        size_t b = mir_valid_block(func, func->instrs[i].block) ? func->instrs[i].block : count - 1;
+        ordered[start[b]++] = func->instrs[i];
+    }
+    memcpy(func->instrs, ordered, func->num_instrs * sizeof(*ordered));
+    free(ordered);
+    free(start);
+    recompute_block_instr_ranges(func);
+    anvil_mir_clear_allocations(func);
     return true;
 }
 
@@ -3935,13 +4356,18 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
     if (func->num_blocks < 2 || !func->num_instrs || max_instrs == 0)
         return true;
 
-    /* Per block: its instructions (array order), when it qualifies. */
-    size_t *members = malloc(func->num_blocks * (max_instrs + 1) * sizeof(size_t));
+    /* Per block: its instructions (array order), when it qualifies.  The
+     * size limit counts what a copy costs: immediate MOVs (constants the
+     * printers mostly fold into their users) count nothing, up to as many
+     * again as the limit. */
+    size_t capacity = 2 * max_instrs + 1;
+    size_t *members = malloc(func->num_blocks * capacity * sizeof(size_t));
     size_t *member_count = calloc(func->num_blocks, sizeof(size_t));
+    size_t *member_cost = calloc(func->num_blocks, sizeof(size_t));
     bool *candidate = calloc(func->num_blocks, sizeof(bool));
     size_t *uses = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(size_t));
     size_t *latches = malloc(func->num_blocks * sizeof(size_t));
-    bool ok = members && member_count && candidate && uses && latches;
+    bool ok = members && member_count && member_cost && candidate && uses && latches;
     for (size_t b = 0; ok && b < func->num_blocks; b++)
         candidate[b] = true;
     for (size_t i = 0; ok && i < func->num_instrs; i++) {
@@ -3951,11 +4377,12 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
             uses[instr->uses[u]]++;
         if (!candidate[b])
             continue;
-        if (member_count[b] > max_instrs) {
+        member_cost[b] += !(instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && instr->num_uses == 0);
+        if (member_cost[b] > max_instrs + 1 || member_count[b] == capacity) {
             candidate[b] = false;
             continue;
         }
-        members[b * (max_instrs + 1) + member_count[b]++] = i;
+        members[b * capacity + member_count[b]++] = i;
     }
 
     size_t num_latches = 0;
@@ -3965,10 +4392,10 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
             candidate[b] = false;
             continue;
         }
-        const anvil_mir_instr_t *last = &func->instrs[members[b * (max_instrs + 1) + n - 1]];
+        const anvil_mir_instr_t *last = &func->instrs[members[b * capacity + n - 1]];
         bool shape = last->op == ANVIL_MIR_OP_BR_COND && last->true_block != (anvil_mir_block_t)b && last->false_block != (anvil_mir_block_t)b;
         for (size_t k = 0; shape && k + 1 < n; k++)
-            shape = mir_duplicable(func, &func->instrs[members[b * (max_instrs + 1) + k]]);
+            shape = mir_duplicable(func, &func->instrs[members[b * capacity + k]]);
         candidate[b] = shape;
     }
     candidate[0] = false;   /* the entry block keeps its single copy */
@@ -4028,7 +4455,7 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
                 anvil_mir_vreg_t renamed_from[16], renamed_to[16];
                 size_t num_renamed = 0;
                 for (size_t k = 0; ok && k < n; k++) {
-                    const anvil_mir_instr_t *src = &func->instrs[members[target * (max_instrs + 1) + k]];
+                    const anvil_mir_instr_t *src = &func->instrs[members[target * capacity + k]];
                     anvil_mir_instr_t copy;
                     if (!clone_instr_for_materialization(src, &copy)) {
                         ok = false;
@@ -4043,7 +4470,7 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
                     if (copy.def != ANVIL_MIR_NO_VREG && num_renamed < 16) {
                         size_t inside = 0;
                         for (size_t q = k + 1; q < n; q++) {
-                            const anvil_mir_instr_t *later = &func->instrs[members[target * (max_instrs + 1) + q]];
+                            const anvil_mir_instr_t *later = &func->instrs[members[target * capacity + q]];
                             for (size_t u = 0; u < later->num_uses; u++)
                                 inside += later->uses[u] == src->def;
                         }
@@ -4089,6 +4516,7 @@ bool anvil_mir_duplicate_branch_targets(anvil_mir_func_t *func, size_t max_instr
     free(is_copy);
     free(members);
     free(member_count);
+    free(member_cost);
     free(candidate);
     free(uses);
     free(latches);
@@ -4118,4 +4546,626 @@ bool anvil_mir_set_instr_symbol_got(anvil_mir_func_t *func, size_t index, bool g
         return false;
     func->instrs[index].symbol_got = got;
     return true;
+}
+
+/* ------------------------------------------------------------------
+ * Loop-invariant constants out of loops.
+ * ------------------------------------------------------------------ */
+
+/* hoist_to: a constant merged into an earlier one hoisted alike. */
+#define MIR_HOIST_MERGED (SIZE_MAX - 1)
+
+/* A pure integer operation a loop may compute once before it. */
+static bool mir_hoistable_operation(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr)
+{
+    switch (instr->op) {
+    case ANVIL_MIR_OP_ZEXT:
+    case ANVIL_MIR_OP_SEXT:
+    case ANVIL_MIR_OP_TRUNC:
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+    case ANVIL_MIR_OP_NEG:
+    case ANVIL_MIR_OP_NOT:
+        break;
+    default:
+        return false;
+    }
+    if (instr->def == ANVIL_MIR_NO_VREG || !instr->num_uses || instr->symbol || instr->index_scale ||
+        func->vregs[instr->def].reg_class != ANVIL_MIR_REG_GPR)
+        return false;
+    for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+        if (instr->clobbers[c] || instr->scratch[c])
+            return false;
+    return true;
+}
+
+/* Whether every operand of `instr` is defined only outside blocks h..e. */
+static bool mir_operands_outside(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr, const size_t *def_offsets, const size_t *def_at,
+                                 size_t h, size_t e)
+{
+    for (size_t u = 0; u < instr->num_uses; u++) {
+        anvil_mir_vreg_t use = instr->uses[u];
+        if (use >= func->num_vregs || func->vregs[use].has_fixed_reg)
+            return false;
+        for (size_t k = def_offsets[use]; k < def_offsets[use + 1]; k++) {
+            size_t block = func->instrs[def_at[k]].block;
+            if (block >= h && block <= e)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* One round: each MOV of an `expensive` constant (NULL: of any constant
+ * printed into a register, one not registerless) whose value has no other
+ * definition, inside a loop (blocks h..e, laid out contiguously, with a
+ * branch back from e to h), moves to the end of the loop's outside
+ * predecessors (ahead of a compare feeding their branch).  Constants
+ * hoisted to one loop alike are one: the later ones' readers read the
+ * first. */
+static bool mir_hoist_constants_once(anvil_mir_func_t *func, anvil_mir_expensive_constant_fn expensive, void *user, bool *changed)
+{
+    size_t blocks = func->num_blocks;
+    size_t *loop_end = malloc(blocks * sizeof(size_t));
+    size_t *inner = malloc(blocks * sizeof(size_t));
+    size_t *insert_at = malloc(blocks * sizeof(size_t));
+    size_t *defs = calloc(func->num_vregs ? func->num_vregs : 1, sizeof(size_t));
+    size_t *hoist_to = malloc((func->num_instrs ? func->num_instrs : 1) * sizeof(size_t));
+    anvil_mir_vreg_t *renamed = malloc((func->num_vregs ? func->num_vregs : 1) * sizeof(anvil_mir_vreg_t));
+    const anvil_mir_instr_t *same = NULL;
+    /* Each value's definitions (instruction indexes), for invariants. */
+    size_t *def_offsets = expensive ? NULL : calloc(func->num_vregs + 1, sizeof(size_t));
+    size_t *def_at = expensive ? NULL : malloc((func->num_instrs ? func->num_instrs : 1) * sizeof(size_t));
+    bool ok = loop_end && inner && insert_at && defs && hoist_to && renamed && (expensive || (def_offsets && def_at));
+    for (size_t i = 0; ok && !expensive && i < func->num_instrs; i++)
+        if (func->instrs[i].def != ANVIL_MIR_NO_VREG && func->instrs[i].def < func->num_vregs)
+            def_offsets[func->instrs[i].def + 1]++;
+    for (size_t v = 0; ok && !expensive && v < func->num_vregs; v++)
+        def_offsets[v + 1] += def_offsets[v];
+    size_t *fill = ok && !expensive ? calloc(func->num_vregs ? func->num_vregs : 1, sizeof(size_t)) : NULL;
+    if (ok && !expensive && !fill)
+        ok = false;
+    for (size_t i = 0; fill && i < func->num_instrs; i++) {
+        anvil_mir_vreg_t d = func->instrs[i].def;
+        if (d != ANVIL_MIR_NO_VREG && d < func->num_vregs)
+            def_at[def_offsets[d] + fill[d]++] = i;
+    }
+    free(fill);
+    for (size_t v = 0; ok && v < func->num_vregs; v++)
+        renamed[v] = ANVIL_MIR_NO_VREG;
+    for (size_t b = 0; ok && b < blocks; b++) {
+        loop_end[b] = SIZE_MAX;
+        inner[b] = SIZE_MAX;
+        insert_at[b] = SIZE_MAX;
+    }
+    for (size_t i = 0; ok && i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        hoist_to[i] = SIZE_MAX;
+        if (instr->def != ANVIL_MIR_NO_VREG)
+            defs[instr->def]++;
+        if ((instr->op != ANVIL_MIR_OP_BR && instr->op != ANVIL_MIR_OP_BR_COND) || !mir_valid_block(func, instr->block) ||
+            func->blocks[instr->block].cold)
+            continue;
+        anvil_mir_block_t targets[] = {instr->true_block, instr->false_block};
+        for (size_t t = 0; t < 2; t++)
+            if (mir_valid_block(func, targets[t]) && targets[t] <= instr->block &&
+                (loop_end[targets[t]] == SIZE_MAX || loop_end[targets[t]] < instr->block))
+                loop_end[targets[t]] = instr->block;
+    }
+    /* The innermost loop of a block has the latest header containing it. */
+    for (size_t h = 0; ok && h < blocks; h++)
+        for (size_t b = h; loop_end[h] != SIZE_MAX && b <= loop_end[h]; b++)
+            inner[b] = h;
+    /* Where a block's hoisted constants go: before its terminator, or
+     * before the compare that feeds it. */
+    for (size_t b = 0; ok && b < blocks; b++) {
+        const anvil_mir_block_data_t *info = &func->blocks[b];
+        if (info->num_instrs == 0)
+            continue;
+        size_t last = info->first_instr + info->num_instrs - 1;
+        insert_at[b] = last;
+        const anvil_mir_instr_t *term = &func->instrs[last];
+        if (term->op == ANVIL_MIR_OP_BR_COND && info->num_instrs > 1 && func->instrs[last - 1].def != ANVIL_MIR_NO_VREG &&
+            term->num_uses && func->instrs[last - 1].def == term->uses[0])
+            insert_at[b] = last - 1;
+    }
+
+    size_t moved = 0;
+    for (size_t i = 0; ok && i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        size_t h = mir_valid_block(func, instr->block) ? inner[instr->block] : SIZE_MAX;
+        bool constant = instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && !instr->num_uses && !instr->symbol;
+        /* Without `expensive`, also a pure integer operation of values
+         * defined only outside the loop. */
+        bool invariant = !expensive && !constant && h != SIZE_MAX && mir_hoistable_operation(func, instr) &&
+                         mir_operands_outside(func, instr, def_offsets, def_at, h, loop_end[h]);
+        if (h == SIZE_MAX || !(constant || invariant) || instr->def == ANVIL_MIR_NO_VREG || defs[instr->def] != 1 ||
+            func->vregs[instr->def].has_fixed_reg || func->vregs[instr->def].registerless || func->vregs[instr->def].is_live_in ||
+            (constant && expensive && !expensive(user, func->vregs[instr->def].reg_class, func->vregs[instr->def].size_bits, instr->imm)))
+            continue;
+        /* It needs an outside predecessor to land in. */
+        bool landing = false;
+        for (size_t j = 0; j < func->num_instrs && !landing; j++) {
+            const anvil_mir_instr_t *branch = &func->instrs[j];
+            landing = (branch->op == ANVIL_MIR_OP_BR || branch->op == ANVIL_MIR_OP_BR_COND) &&
+                      (branch->true_block == h || (branch->op == ANVIL_MIR_OP_BR_COND && branch->false_block == h)) &&
+                      (branch->block < h || branch->block > loop_end[h]);
+        }
+        if (!landing)
+            continue;
+        /* The same constant already hoisted to this loop serves. */
+        for (size_t k = 0; constant && k < i && same == NULL; k++) {
+            const anvil_mir_instr_t *earlier = &func->instrs[k];
+            if (hoist_to[k] == h && earlier->op == ANVIL_MIR_OP_MOV && !earlier->num_uses && earlier->imm == instr->imm && func->vregs[earlier->def].reg_class == func->vregs[instr->def].reg_class &&
+                func->vregs[earlier->def].size_bits == func->vregs[instr->def].size_bits &&
+                func->vregs[earlier->def].is_signed == func->vregs[instr->def].is_signed)
+                same = earlier;
+        }
+        if (same) {
+            renamed[instr->def] = same->def;
+            hoist_to[i] = MIR_HOIST_MERGED;
+            same = NULL;
+            moved++;
+            continue;
+        }
+        hoist_to[i] = h;
+        moved++;
+    }
+
+    anvil_mir_instr_t *rebuilt = NULL;
+    size_t count = 0, capacity = func->num_instrs + moved * 4 + 1;
+    if (ok && moved) {
+        rebuilt = calloc(capacity, sizeof(*rebuilt));
+        ok = rebuilt != NULL;
+    }
+    for (size_t i = 0; ok && moved && i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        size_t b = instr->block;
+        if (mir_valid_block(func, b) && insert_at[b] == i) {
+            /* The constants hoisted to loops this block enters. */
+            const anvil_mir_block_data_t *info = &func->blocks[b];
+            const anvil_mir_instr_t *term = &func->instrs[info->first_instr + info->num_instrs - 1];
+            for (size_t k = 0; ok && k < func->num_instrs; k++) {
+                size_t h = hoist_to[k];
+                if (h == SIZE_MAX || h == MIR_HOIST_MERGED || (b >= h && b <= loop_end[h]) ||
+                    !((term->op == ANVIL_MIR_OP_BR || term->op == ANVIL_MIR_OP_BR_COND) &&
+                      (term->true_block == h || (term->op == ANVIL_MIR_OP_BR_COND && term->false_block == h))))
+                    continue;
+                if (count == capacity) {
+                    anvil_mir_instr_t *grown = realloc(rebuilt, 2 * capacity * sizeof(*rebuilt));
+                    ok = grown != NULL;
+                    if (!ok)
+                        break;
+                    rebuilt = grown;
+                    capacity *= 2;
+                }
+                ok = clone_instr_for_materialization(&func->instrs[k], &rebuilt[count]);
+                if (ok)
+                    rebuilt[count++].block = (anvil_mir_block_t)b;
+            }
+        }
+        if (!ok || hoist_to[i] != SIZE_MAX)
+            continue;
+        if (count == capacity) {
+            anvil_mir_instr_t *grown = realloc(rebuilt, 2 * capacity * sizeof(*rebuilt));
+            ok = grown != NULL;
+            if (!ok)
+                break;
+            rebuilt = grown;
+            capacity *= 2;
+        }
+        ok = clone_instr_for_materialization(instr, &rebuilt[count++]);
+    }
+    for (size_t at = 0; ok && moved && at < count; at++)
+        for (size_t u = 0; u < rebuilt[at].num_uses; u++)
+            if (rebuilt[at].uses[u] < func->num_vregs && renamed[rebuilt[at].uses[u]] != ANVIL_MIR_NO_VREG)
+                rebuilt[at].uses[u] = renamed[rebuilt[at].uses[u]];
+    if (ok && moved) {
+        free_instr_array(func->instrs, func->num_instrs);
+        func->instrs = rebuilt;
+        func->num_instrs = count;
+        func->cap_instrs = capacity;
+        recompute_block_instr_ranges(func);
+        anvil_mir_clear_allocations(func);
+        *changed = true;
+    } else if (rebuilt) {
+        free_instr_array(rebuilt, count);
+    }
+    free(loop_end);
+    free(inner);
+    free(insert_at);
+    free(defs);
+    free(hoist_to);
+    free(renamed);
+    free(def_offsets);
+    free(def_at);
+    return ok;
+}
+
+bool anvil_mir_hoist_loop_constants(anvil_mir_func_t *func, anvil_mir_expensive_constant_fn expensive, void *user)
+{
+    if (!func)
+        return false;
+    /* Each round moves constants out of one more loop level. */
+    for (int round = 0; expensive && round < 4; round++) {
+        bool changed = false;
+        if (!mir_hoist_constants_once(func, expensive, user, &changed))
+            return false;
+        if (!changed)
+            break;
+    }
+    return true;
+}
+
+bool anvil_mir_hoist_materialized_constants(anvil_mir_func_t *func)
+{
+    bool changed = false;
+    return func && mir_hoist_constants_once(func, NULL, NULL, &changed);
+}
+
+
+/* ------------------------------------------------------------------
+ * Exit copies.  A copy, truncation or extension that ends every
+ * predecessor of a block alike (the same definition from the same source,
+ * only the branch after it), its result live into no other successor of
+ * them, moves to that block's start: a loop exit's view of its counter
+ * (the narrow value of a widened index, a PHI move a rotated test copied
+ * into the latch) then costs nothing per iteration.
+ * ------------------------------------------------------------------ */
+
+static bool mir_movable_copy(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr)
+{
+    if ((instr->op != ANVIL_MIR_OP_COPY && instr->op != ANVIL_MIR_OP_TRUNC && instr->op != ANVIL_MIR_OP_SEXT && instr->op != ANVIL_MIR_OP_ZEXT) ||
+        instr->num_uses != 1 || instr->def == ANVIL_MIR_NO_VREG || instr->symbol || instr->has_imm)
+        return false;
+    if (func->vregs[instr->def].has_fixed_reg || func->vregs[instr->uses[0]].has_fixed_reg || instr->def == instr->uses[0])
+        return false;
+    for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+        if (instr->clobbers[c] || instr->scratch[c])
+            return false;
+    return true;
+}
+
+/* In block `block` (instructions first..last), the last copy like
+ * `model` before the branch, with nothing after it reading or writing its
+ * result, writing its source or clobbering registers (SIZE_MAX: none). */
+static size_t mir_trailing_copy(const anvil_mir_func_t *func, size_t first, size_t last, const anvil_mir_instr_t *model)
+{
+    const anvil_mir_instr_t *branch = &func->instrs[last];
+    if (branch->op != ANVIL_MIR_OP_BR && branch->op != ANVIL_MIR_OP_BR_COND)
+        return SIZE_MAX;
+    for (size_t u = 0; u < branch->num_uses; u++)
+        if (branch->uses[u] == model->def)
+            return SIZE_MAX;
+    for (size_t at = last; at-- > first;) {
+        const anvil_mir_instr_t *instr = &func->instrs[at];
+        if (instr->def == model->def)
+            return mir_movable_copy(func, instr) && instr->op == model->op && instr->uses[0] == model->uses[0] ? at : SIZE_MAX;
+        /* A later instruction leaves the value and its source alone. */
+        if (instr->def == model->uses[0] || instr->op == ANVIL_MIR_OP_CALL)
+            return SIZE_MAX;
+        for (size_t u = 0; u < instr->num_uses; u++)
+            if (instr->uses[u] == model->def)
+                return SIZE_MAX;
+        for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+            if (instr->clobbers[c])
+                return SIZE_MAX;
+    }
+    return SIZE_MAX;
+}
+
+static bool mir_sink_exit_copies(anvil_mir_func_t *func)
+{
+    if (!func || func->num_blocks < 2 || !func->num_instrs)
+        return true;
+    anvil_mir_liveness_t liveness;
+    if (!anvil_mir_compute_liveness(func, &liveness))
+        return false;
+    size_t blocks = func->num_blocks;
+    /* Each block's first and last instruction (array order). */
+    size_t *first = malloc(blocks * sizeof(size_t)), *last = malloc(blocks * sizeof(size_t));
+    bool *drop = calloc(func->num_instrs, sizeof(bool));
+    size_t *moved = malloc(func->num_instrs * sizeof(size_t));   /* the copies sunk, by origin */
+    size_t *moved_to = malloc(func->num_instrs * sizeof(size_t));
+    size_t num_moved = 0;
+    bool ok = first && last && drop && moved && moved_to;
+    for (size_t b = 0; ok && b < blocks; b++)
+        first[b] = last[b] = SIZE_MAX;
+    for (size_t i = 0; ok && i < func->num_instrs; i++) {
+        size_t b = func->instrs[i].block;
+        if (b >= blocks) {
+            ok = false;
+            break;
+        }
+        if (first[b] == SIZE_MAX)
+            first[b] = i;
+        last[b] = i;
+    }
+    /* Blocks must be contiguous in the array for "trailing" to mean the end. */
+    for (size_t i = 0; ok && i < func->num_instrs; i++)
+        ok = i >= first[func->instrs[i].block] && i <= last[func->instrs[i].block];
+    size_t words = liveness.words_per_block;
+    for (size_t target = 1; ok && words && target < blocks; target++) {
+        /* Its predecessors (each branch naming it). */
+        size_t preds[8], num_preds = 0;
+        bool too_many = false;
+        for (size_t b = 0; b < blocks && !too_many; b++) {
+            if (last[b] == SIZE_MAX)
+                continue;
+            const anvil_mir_instr_t *branch = &func->instrs[last[b]];
+            bool names = (branch->op == ANVIL_MIR_OP_BR || branch->op == ANVIL_MIR_OP_BR_COND) &&
+                         (branch->true_block == target || (branch->op == ANVIL_MIR_OP_BR_COND && branch->false_block == target));
+            /* Branches elsewhere in the block (none expected) end the search. */
+            for (size_t i = first[b]; i < last[b] && !too_many; i++)
+                too_many = func->instrs[i].op == ANVIL_MIR_OP_BR || func->instrs[i].op == ANVIL_MIR_OP_BR_COND ||
+                           func->instrs[i].true_block == target;
+            if (!names)
+                continue;
+            if (num_preds == 8 || b == target)
+                too_many = true;
+            else
+                preds[num_preds++] = b;
+        }
+        if (too_many || num_preds == 0)
+            continue;
+        /* Candidates: the trailing copies of the first predecessor. */
+        size_t p0 = preds[0];
+        for (size_t at = last[p0]; at-- > first[p0];) {
+            const anvil_mir_instr_t *model = &func->instrs[at];
+            if (!mir_movable_copy(func, model) || drop[at])
+                continue;
+            size_t found[8];
+            bool all = true;
+            for (size_t p = 0; p < num_preds && all; p++) {
+                found[p] = mir_trailing_copy(func, first[preds[p]], last[preds[p]], model);
+                all = found[p] != SIZE_MAX && !drop[found[p]];
+                /* Dead into the predecessor's other successor. */
+                const anvil_mir_instr_t *branch = &func->instrs[last[preds[p]]];
+                anvil_mir_block_t others[] = {branch->true_block, branch->op == ANVIL_MIR_OP_BR_COND ? branch->false_block : ANVIL_MIR_NO_BLOCK};
+                for (size_t o = 0; o < 2 && all; o++) {
+                    if (others[o] == ANVIL_MIR_NO_BLOCK || others[o] == target || others[o] >= blocks)
+                        continue;
+                    all = !((liveness.live_in[others[o] * words + model->def / 64] >> (model->def % 64)) & 1);
+                }
+            }
+            if (!all)
+                continue;
+            for (size_t p = 0; p < num_preds; p++)
+                drop[found[p]] = true;
+            moved[num_moved] = found[0];
+            moved_to[num_moved++] = target;
+        }
+    }
+
+    bool changed = false;
+    if (ok && num_moved) {
+        anvil_mir_instr_t *rebuilt = calloc(func->num_instrs, sizeof(*rebuilt));
+        ok = rebuilt != NULL;
+        size_t count = 0;
+        for (size_t i = 0; ok && i < func->num_instrs; i++) {
+            /* The block's sunk copies go before its first instruction. */
+            if (i == first[func->instrs[i].block]) {
+                for (size_t m = 0; m < num_moved; m++) {
+                    if (moved_to[m] != func->instrs[i].block)
+                        continue;
+                    rebuilt[count] = func->instrs[moved[m]];
+                    rebuilt[count++].block = (anvil_mir_block_t)moved_to[m];
+                }
+            }
+            if (!drop[i])
+                rebuilt[count++] = func->instrs[i];
+        }
+        if (ok) {
+            /* Copies dropped from the other predecessors are not carried. */
+            for (size_t i = 0; i < func->num_instrs; i++) {
+                bool kept = false;
+                for (size_t m = 0; m < num_moved && !kept; m++)
+                    kept = moved[m] == i;
+                if (drop[i] && !kept)
+                    free_instr_contents(&func->instrs[i]);
+            }
+            free(func->instrs);
+            func->instrs = rebuilt;
+            func->num_instrs = count;
+            func->cap_instrs = count;
+            recompute_block_instr_ranges(func);
+            anvil_mir_clear_allocations(func);
+            changed = true;
+        }
+    }
+    (void)changed;
+    anvil_mir_liveness_destroy(&liveness);
+    free(first);
+    free(last);
+    free(drop);
+    free(moved);
+    free(moved_to);
+    return ok;
+}
+
+/* ------------------------------------------------------------------
+ * Early returns before the frame.  An entry block made only of copies of
+ * incoming registers (and constants) ending in a compare and a branch to a
+ * block that only returns becomes: the compare on the incoming registers
+ * and the branch; a block that returns; and the frame block, holding the
+ * copies, then jumping on.  Printers that can place the prologue at the
+ * frame block (anvil_mir_frame_block) return from the early block without
+ * one: the guard of a recursive function costs no frame.  Others print the
+ * prologue first and return through their epilogue, as before.
+ * ------------------------------------------------------------------ */
+
+static bool mir_returns_only(const anvil_mir_func_t *func, anvil_mir_block_t block)
+{
+    size_t first = mir_block_first(func, block), last = mir_block_last(func, block);
+    return first != SIZE_MAX && first == last && func->instrs[first].op == ANVIL_MIR_OP_RET && func->instrs[first].num_uses == 0 &&
+           !instr_has_clobbers(&func->instrs[first]);
+}
+
+bool anvil_mir_split_early_return(anvil_mir_func_t *func)
+{
+    if (!func || func->num_blocks < 2 || func->frame_block != 0 || func->num_instrs < 2)
+        return func != NULL;
+    /* The compare next to its branch. */
+    if (!anvil_mir_sink_compares(func))
+        return false;
+    size_t first = mir_block_first(func, 0), last = mir_block_last(func, 0);
+    if (first != 0 || last == SIZE_MAX || last < 1)
+        return true;
+    for (size_t i = first; i <= last; i++)
+        if (func->instrs[i].block != 0)
+            return true;
+    const anvil_mir_instr_t *branch = &func->instrs[last], *compare = &func->instrs[last - 1];
+    if (branch->op != ANVIL_MIR_OP_BR_COND || branch->num_uses != 1 || !mir_op_is_compare(compare->op) || compare->op == ANVIL_MIR_OP_FCMP ||
+        compare->def != branch->uses[0] || instr_has_clobbers(compare) || branch->true_block == branch->false_block)
+        return true;
+    bool early_true = mir_returns_only(func, branch->true_block), early_false = mir_returns_only(func, branch->false_block);
+    if (early_true == early_false)
+        return true;
+    anvil_mir_block_t early = early_true ? branch->true_block : branch->false_block;
+    anvil_mir_block_t onward = early_true ? branch->false_block : branch->true_block;
+    /* The rest: copies of incoming registers and constants. */
+    for (size_t i = first; i + 1 < last; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        bool copy = instr->op == ANVIL_MIR_OP_COPY && instr->num_uses == 1 && anvil_mir_valid_vreg(func, instr->uses[0]) &&
+                    (func->vregs[instr->uses[0]].has_fixed_reg || func->vregs[instr->uses[0]].is_live_in);
+        bool constant = instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && instr->num_uses == 0 && !instr->symbol;
+        if ((!copy && !constant) || instr->def == ANVIL_MIR_NO_VREG || instr_has_clobbers(instr))
+            return true;
+    }
+    /* The compare reads the incoming registers (or constants, which stay in
+     * the entry, copied into the frame block too when read there). */
+    anvil_mir_vreg_t uses[2] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
+    size_t kept[2] = {SIZE_MAX, SIZE_MAX};
+    if (compare->num_uses > 2)
+        return true;
+    for (size_t u = 0; u < compare->num_uses; u++) {
+        anvil_mir_vreg_t use = compare->uses[u];
+        uses[u] = use;
+        for (size_t i = first; i + 1 < last; i++) {
+            const anvil_mir_instr_t *instr = &func->instrs[i];
+            if (instr->def != use)
+                continue;
+            if (instr->op == ANVIL_MIR_OP_COPY)
+                uses[u] = instr->uses[0];
+            else
+                kept[u] = i;
+        }
+        if (anvil_mir_valid_vreg(func, uses[u]) && uses[u] == use && kept[u] == SIZE_MAX && !func->vregs[use].has_fixed_reg &&
+            !func->vregs[use].is_live_in)
+            return true;
+    }
+
+    /* A returning block reached only from here moves up as the early one;
+     * otherwise its return is copied. */
+    size_t entries = 0;
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        if (instr->op == ANVIL_MIR_OP_BR || instr->op == ANVIL_MIR_OP_BR_COND)
+            entries += (instr->true_block == early) + (instr->op == ANVIL_MIR_OP_BR_COND && instr->false_block == early);
+    }
+    size_t moved = entries == 1 ? mir_block_first(func, early) : SIZE_MAX;
+    anvil_mir_block_t early_block = moved != SIZE_MAX ? early : anvil_mir_add_block(func, "early.return");
+    anvil_mir_block_t frame_block = early_block != ANVIL_MIR_NO_BLOCK ? anvil_mir_add_block(func, "frame") : ANVIL_MIR_NO_BLOCK;
+    if (early_block == ANVIL_MIR_NO_BLOCK || frame_block == ANVIL_MIR_NO_BLOCK)
+        return false;
+    size_t entry_count = last + 1, extra = 2;
+    anvil_mir_instr_t *rebuilt = calloc(func->num_instrs + extra + 2, sizeof(*rebuilt));
+    if (!rebuilt)
+        return false;
+    size_t count = 0;
+    bool ok = true;
+    /* Entry: constants the compare reads, the compare, the branch. */
+    for (size_t i = first; ok && i + 1 < last; i++)
+        if (i == kept[0] || i == kept[1])
+            ok = clone_instr_for_materialization(&func->instrs[i], &rebuilt[count++]);
+    ok = ok && clone_instr_for_materialization(compare, &rebuilt[count]);
+    if (ok) {
+        for (size_t u = 0; u < rebuilt[count].num_uses; u++)
+            rebuilt[count].uses[u] = uses[u];
+        count++;
+        ok = clone_instr_for_materialization(branch, &rebuilt[count]);
+    }
+    if (ok) {
+        rebuilt[count].true_block = early_true ? early_block : frame_block;
+        rebuilt[count].false_block = early_true ? frame_block : early_block;
+        count++;
+        ok = clone_instr_for_materialization(&func->instrs[mir_block_first(func, early)], &rebuilt[count]);
+    }
+    if (ok) {
+        rebuilt[count++].block = early_block;
+        /* The frame block: every copy and constant, then on. */
+        for (size_t i = first; ok && i + 1 < last; i++) {
+            ok = clone_instr_for_materialization(&func->instrs[i], &rebuilt[count]);
+            if (ok)
+                rebuilt[count++].block = frame_block;
+        }
+    }
+    if (ok) {
+        anvil_mir_instr_t *jump = &rebuilt[count++];
+        memset(jump, 0, sizeof(*jump));
+        jump->op = ANVIL_MIR_OP_BR;
+        jump->def = ANVIL_MIR_NO_VREG;
+        jump->block = frame_block;
+        jump->true_block = onward;
+        jump->false_block = ANVIL_MIR_NO_BLOCK;
+        jump->spill_slot = -1;
+        jump->frame_slot = -1;
+        for (size_t i = entry_count; ok && i < func->num_instrs; i++)
+            if (i != moved)
+                ok = clone_instr_for_materialization(&func->instrs[i], &rebuilt[count++]);
+    }
+    if (!ok) {
+        free_instr_array(rebuilt, count);
+        return false;
+    }
+    free_instr_array(func->instrs, func->num_instrs);
+    func->instrs = rebuilt;
+    func->num_instrs = count;
+    func->cap_instrs = func->num_instrs + extra + 2;
+    func->frame_block = frame_block;
+    recompute_block_instr_ranges(func);
+    anvil_mir_clear_allocations(func);
+    return anvil_mir_order_blocks(func);
+}
+
+anvil_mir_block_t anvil_mir_frame_block(const anvil_mir_func_t *func)
+{
+    return func ? func->frame_block : 0;
+}
+
+/* A BITCAST within one register class and width (a pointer read as an
+ * integer, a vector of other lanes) moves the register unchanged: a COPY,
+ * which coalescing and the allocator's copy hints know. */
+static void mir_bitcasts_to_copies(anvil_mir_func_t *func)
+{
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        anvil_mir_instr_t *instr = &func->instrs[i];
+        if (instr->op != ANVIL_MIR_OP_BITCAST || instr->num_uses != 1 || instr->def == ANVIL_MIR_NO_VREG || instr->has_imm || instr->symbol ||
+            instr->def >= func->num_vregs || instr->uses[0] >= func->num_vregs)
+            continue;
+        const anvil_mir_vreg_info_t *d = &func->vregs[instr->def], *u = &func->vregs[instr->uses[0]];
+        if (d->reg_class == u->reg_class && d->size_bits == u->size_bits)
+            instr->op = ANVIL_MIR_OP_COPY;
+    }
+}
+
+bool anvil_mir_optimize_before_allocation(anvil_mir_func_t *func, anvil_mir_address_mode_fn legal, anvil_mir_expensive_constant_fn expensive,
+                                          void *user)
+{
+    if (func)
+        mir_bitcasts_to_copies(func);
+    /* Blocks numbered in layout order (loops as contiguous ranges); test
+     * blocks shrink before they are measured for duplication. */
+    /* PHI moves fold into their sources before a test block's copy gives
+     * those sources a second definition. */
+    return anvil_mir_order_blocks(func) && anvil_mir_local_cse(func) && (!legal || anvil_mir_fold_address_arithmetic(func, legal, user)) &&
+           anvil_mir_hoist_loop_constants(func, expensive, user) && mir_coalesce(func, true) && anvil_mir_duplicate_branch_targets(func, 4) &&
+           mir_sink_exit_copies(func);
 }

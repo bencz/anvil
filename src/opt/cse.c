@@ -178,14 +178,21 @@ static uint64_t operand_identity(const anvil_value_t *value)
     return (uintptr_t)value;
 }
 
+/* A type's identity for hashing: types are compared structurally
+ * (anvil_types_equal) and not uniqued, so never by address, which would
+ * keep equal expressions apart depending on where their types live. */
+static uint64_t type_identity(const anvil_type_t *type)
+{
+    return type ? ((uint64_t)type->kind << 32 | (uint64_t)type->size) * 0xC2B2AE3D27D4EB4FULL : 0;
+}
+
 /* Mix function — good enough for pointer+small-integer inputs. */
 static uint64_t expr_hash(const expr_key_t *key)
 {
     uint64_t h = (uint64_t)key->op * 0x9E3779B185EBCA87ULL;
-    if (key->type)
-        h ^= ((uint64_t)key->type->kind << 32 | (uint64_t)key->type->size) * 0xC2B2AE3D27D4EB4FULL;
+    h ^= type_identity(key->type);
     h ^= (uint64_t)(unsigned)key->fcmp_pred * 0xD6E8FEB86659FD93ULL;
-    h ^= (uintptr_t)key->aux_type + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    h ^= type_identity(key->aux_type) + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     for (size_t operand = 0; operand < key->count; operand++)
         h ^= operand_identity(key->operands[operand]) + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     return h;
@@ -350,6 +357,9 @@ static bool cse_block(anvil_block_t *block)
              * SSA result may also be used by successor blocks or PHIs.  Replace
              * every use before deleting the duplicate; a block-local rewrite
              * can otherwise leave cross-block uses referring to a NOP. */
+            /* The survivor stands for both: a no-wrap guarantee only
+             * if both carried it. */
+            existing->data.instr->no_wrap &= instr->no_wrap;
             int replaced = anvil_opt_replace_uses_in_func(block->parent,
                                                           instr->result,
                                                           existing);
@@ -422,6 +432,7 @@ anvil_pass_result_t anvil_pass_gvn(anvil_func_t *func)
             size_t defining_block = existing ? anvil_opt_cfg_index(&cfg, existing->data.instr->parent) : SIZE_MAX;
             if (existing && anvil_types_equal(existing->type, instr->result->type) && anvil_opt_cfg_dominates(&cfg, defining_block, block_index))
             {
+                existing->data.instr->no_wrap &= instr->no_wrap;
                 anvil_opt_replace_uses_in_func(func, instr->result, existing);
                 anvil_opt_erase_instr(instr);
                 changed = true;

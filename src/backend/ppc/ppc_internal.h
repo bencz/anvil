@@ -11,6 +11,8 @@
 #include "../common/vector_isa.h"
 
 #include "../common/mir_isel.h"
+#include "../common/print_flags.h"
+#include "../common/rotate_mask.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -18,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ppc_mir_emit_t.update_disps: no update form. */
+#define PPC_NO_UPDATE INT32_MIN
 
 typedef struct {
     const anvil_ppc_target_desc_t *desc;
@@ -36,9 +41,30 @@ typedef struct {
     int fp_const_scratch_offset;
     size_t label_counter;
     bool has_frame;
+    /* r31 holds the caller's SP (dynamic allocation moves r1, va_start's
+     * homing addresses through it); otherwise frame accesses use r1. */
+    bool frame_pointer;
+    /* The prologue at the MIR's frame block (anvil_mir_isel_frameless_prefix). */
+    bool wrapped;
     anvil_mir_isel_facts_t isel;
+    anvil_mir_layout_t layout;    /* blocks printed, and where branches land */
     anvil_mir_block_t block;  /* being emitted (blocks print in order) */
     const char *fused_branch; /* set by a compare folded into the next BR_COND */
+    anvil_print_flags_t flags; /* what CR0 tells (record forms offered by arithmetic) */
+    /* Per instruction: an access printed in its update form, the base
+     * advanced by this displacement first (PPC_NO_UPDATE: none); the add
+     * before it printed nothing. */
+    int32_t *update_disps;
+    /* anvil_mir_counter_loops roles: counters kept in CTR. */
+    uint8_t *counter_roles;
+    /* A shift or mask folded into the one reading it, which prints both
+     * as one rotate-and-mask of `rotate_source`. */
+    /* Whether the code reads r2 (the TOC): calls, runtime helpers and symbol
+     * addresses; the ELFv2 global entry sets it up only then. */
+    bool uses_toc;
+    size_t rotate_target, rotate_skip;  /* rotate_skip: a zero extension between */
+    anvil_mir_vreg_t rotate_source;
+    anvil_rotate_mask_t rotate;
     /* Set by a compare folded into the next SELECT (isel): the CR0 bit
      * (LT 0, GT 1, EQ 2) and whether the condition is its negation. */
     int fused_select_bit;
@@ -185,6 +211,11 @@ static inline anvil_agg_target_t ppc_agg_target_of(const anvil_ppc_target_desc_t
 /* Whether a conversion at `index` calls a run-time helper on a CPU with
  * `features` (the printer expands it into a call). */
 bool ppc_conversion_calls_helper(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, anvil_cpu_features_t features);
+/* Records on each instruction the registers the printer overwrites before
+ * it has read every operand (anvil_mir_set_instr_scratch): r11 for a
+ * floating constant or a dynamic allocation, f0/f13 for an inline
+ * integer <-> floating conversion. */
+bool ppc_annotate_printer_scratch(anvil_mir_func_t *mir, anvil_cpu_features_t features);
 
 /* Backend operations shared by the three variants; the variant comes
  * from the backend's architecture. */
@@ -226,9 +257,9 @@ extern const ppc_abi_ops_t ppc_elfv2_abi_ops;
 extern const int ppc_gpr_arg_regs[8];
 extern const int ppc32_fpr_arg_regs[8];
 extern const int ppc64_fpr_arg_regs[13];
-extern const int ppc_alloc_gpr_regs[25];
-extern const int ppc_alloc_fpr_regs[30];
-extern const int ppc_scratch_gpr_regs[2];
+extern const int ppc_alloc_gpr_regs[27];
+extern const int ppc_alloc_fpr_regs[32];
+extern const int ppc_scratch_gpr_regs[3];
 extern const int ppc_scratch_fpr_regs[2];
 /* AltiVec registers (v n = VSX register 32 + n): allocatable, spill
  * scratch, and the printer's temporaries v0/v1, all volatile. */
@@ -238,5 +269,7 @@ extern const int ppc_scratch_vector_regs[PPC_NUM_SCRATCH_VECTOR_REGS];
 extern const anvil_ppc_target_desc_t ppc32_target_desc;
 extern const anvil_ppc_target_desc_t ppc64_target_desc;
 extern const anvil_ppc_target_desc_t ppc64le_target_desc;
+
+bool anvil_ppc_mark_registerless(anvil_mir_func_t *mir, const anvil_ppc_target_desc_t *desc, anvil_cpu_features_t features);
 
 #endif

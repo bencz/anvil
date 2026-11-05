@@ -57,7 +57,8 @@ bool anvil_mir_verify_clobbers(const anvil_mir_func_t *func, char *error, size_t
                 for (size_t operand = 0; operand < instr->num_uses && !touched; operand++)
                     touched = instr->uses[operand] == value;
                 const anvil_regalloc_assignment_t *assignment = &func->assignments[value];
-                if (!touched || assignment->spilled || assignment->phys_reg < 0 || assignment->phys_reg >= 64)
+                /* A registerless value names a register it never holds. */
+                if (!touched || assignment->spilled || assignment->phys_reg < 0 || assignment->phys_reg >= 64 || func->vregs[value].registerless)
                     continue;
                 if (instr->scratch[func->vregs[value].reg_class] >> assignment->phys_reg & 1)
                 {
@@ -81,7 +82,7 @@ bool anvil_mir_verify_clobbers(const anvil_mir_func_t *func, char *error, size_t
                 for (size_t value = 0; value < func->num_vregs; value++)
                 {
                     const anvil_regalloc_assignment_t *assignment = &func->assignments[value];
-                    if (!(live[value / 64] & (UINT64_C(1) << (value % 64))) || assignment->spilled ||
+                    if (!(live[value / 64] & (UINT64_C(1) << (value % 64))) || assignment->spilled || func->vregs[value].registerless ||
                         assignment->phys_reg < 0 || assignment->phys_reg >= 64)
                         continue;
 

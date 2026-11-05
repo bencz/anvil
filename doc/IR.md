@@ -197,6 +197,28 @@ Global variables are referenced by name:
 - Integer `add`, `sub`, `mul` and integer `neg` wrap modulo `2^N`, where `N`
   is the semantic bit width. Signed overflow is therefore not a separate IR
   event for these opcodes.
+- An integer `add`, `sub` or `mul` may carry the **no-wrap** flag
+  (`anvil_set_no_wrap`, dumped as `nowrap`): the frontend guarantees that
+  the exact mathematical result (per lane, for vectors) lies in the range
+  of the result type under its signedness — no signed overflow for a
+  signed type, no unsigned carry or borrow for an unsigned one. When the
+  guarantee fails the operation does not trap, but its result is
+  undefined, and so is every computation that depends on it; the
+  operation itself stays safe to execute speculatively. The optimizer may
+  therefore treat a flagged operation as exact arithmetic: the extension
+  of a flagged sum is the sum of the extensions, and a counter stepped by
+  a flagged increment widens to a register-width one. Passes that rewrite
+  or merge flagged operations drop the flag unless it still holds.
+- On an integer `trunc` the same flag means **exact**: the source equals
+  the result extended by the result type's signedness (sign for a signed
+  type, zero for an unsigned one), so no bits are lost. Otherwise the
+  result is undefined, as above. Compares and extensions of exact
+  truncations fold to the wide values.
+- On an integer `sdiv` or `udiv` the flag also means **exact**: the
+  dividend is a multiple of the divisor (a pointer difference divided by
+  the element size). Otherwise the result is undefined. An exact division
+  by a constant `2^k * o` (`o` odd) is a shift right by `k` and a multiply
+  by `o`'s inverse modulo `2^width`.
 - `sdiv`/`smod` require signed integer types; `udiv`/`umod` require unsigned
   integer types. Division by zero and signed `MIN / -1` (and its corresponding
   remainder) are immediate undefined behavior in ANVIL IR. There is no

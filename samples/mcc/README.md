@@ -79,6 +79,11 @@ make clean && make
 # -fno-builtin / -ffreestanding keep every library call as written.
 ./mcc -O2 -fno-math-errno -o output.s input.c
 
+# Signed int arithmetic (+, -, * on int and wider) cannot overflow in ISO C;
+# MCC tells ANVIL so (no-wrap), which lets it widen and reassociate index
+# arithmetic.  -fwrapv makes signed overflow wrap instead.
+./mcc -O2 -fwrapv -o output.s input.c
+
 # Check syntax only (multiple files supported)
 ./mcc -fsyntax-only file1.c file2.c
 

@@ -26,11 +26,12 @@ static void print_usage(const char *prog)
     printf("                      ppc32, ppc64, ppc64le, arm64, arm64_macos\n");
     printf("                      x86_64_windows (Windows x64, LLP64)\n");
     printf("  -O<level>         Optimization level (0, g, 1, 2, 3)\n");
-    printf("  -ffp-vectorize    Allow FP lane packing in O3 (changes exception observation order)\n");
+    printf("  -ffp-vectorize    Allow FP lane packing at O2/O3 (changes exception observation order)\n");
     printf("  -fassociative-math  Allow reordering FP additions (vectorized FP sums)\n");
     printf("  -ffp-contract=fast  Allow fusing a*b+c into one multiply-add (one rounding)\n");
     printf("  -fno-builtin, -ffreestanding  Treat standard library names as ordinary functions\n");
     printf("  -fno-math-errno   Math routines need not set errno (sqrt becomes one instruction)\n");
+    printf("  -fwrapv           Signed integer overflow wraps (otherwise undefined, as in ISO C)\n");
     printf("  -fPIC, -fPIE      Position-independent code for a shared object / executable\n");
     printf("  -fno-pic          Static code (absolute or PC-relative addresses)\n");
     printf("  -E                Preprocess only\n");
@@ -677,6 +678,12 @@ int main(int argc, char **argv)
         if (strcmp(arg, "-fno-builtin") == 0 || strcmp(arg, "-ffreestanding") == 0 || strcmp(arg, "-fbuiltin") == 0)
         {
             opts.no_builtin = strcmp(arg, "-fbuiltin") != 0;
+            continue;
+        }
+
+        if (strcmp(arg, "-fwrapv") == 0 || strcmp(arg, "-fno-wrapv") == 0)
+        {
+            opts.wrapv = strcmp(arg, "-fwrapv") == 0;
             continue;
         }
 

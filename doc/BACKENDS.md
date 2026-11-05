@@ -41,7 +41,7 @@ order), the CPU model what the *implementation* adds.  Examples:
 | SystemZ `AHI`/`CHI`/`MHI` immediates | `ANVIL_FEATURE_ZARCH_IMMREL` (S/390 G1+, every z) | register forms or `C`/`CL` from a literal (S/370) |
 | SystemZ `NILF`/`OILF`/`XILF` | `ANVIL_FEATURE_ZARCH_EIMM` (z9) | `N`/`O`/`X` from a literal |
 | Scalar operations priced by table (`ANVIL_MIR_OP_SCALAR`: FMA, FSQRT, UMULH/SMULH) | the same tables, `ANVIL_VECTOR_SHAPE_SCALAR` rows: x86-64 FMA3 `vfmadd231sd`, `sqrtsd`, `mul`/`imul` into RDX:RAX; i386 `sqrtsd` with `ANVIL_FEATURE_X86_SSE2`, else x87 `fsqrt`, `mull`/`imull`; ARM64 `fmadd`, `fsqrt`, `umulh`/`smulh` (`umull`/`smull` + `lsr #32` for words); PowerPC `fmadd`, `fsqrt` with `ANVIL_FEATURE_PPC_FSQRT` (970, POWER), `mulhwu`/`mulhw`, `mulhdu`/`mulhd` in 64-bit mode | priced 0: front ends keep their library call (G3/G4, SystemZ); division by constants stays a division |
-| 128-bit f32/f64 vectors (SLP, loop vectorizer, `splat`) | `vector_operation_cost`: x86-64 `ANVIL_FEATURE_X86_SSE2` (`addps`, `shufps`/`unpcklpd`), ARM64 `ANVIL_FEATURE_ARM64_NEON` (`fadd v.4s`, `dup`), PowerPC `ANVIL_FEATURE_PPC_VSX` (POWER7+: `lxvd2x`/`stxvd2x`, `xvaddsp`, `xxspltw`, `xxpermdi`) | scalar code |
+| 128-bit f32/f64 vectors (SLP, loop vectorizer, `splat`) | `vector_operation_cost`: x86-64 and i386 `ANVIL_FEATURE_X86_SSE2` (`addps`, `shufps`/`unpcklpd`; one table, `x86_sse_isa.c`, and one printer, `asm/x86_sse_vector.c`, for both; i386 without 64-bit integer scalars in lanes), ARM64 `ANVIL_FEATURE_ARM64_NEON` (`fadd v.4s`, `dup`), PowerPC `ANVIL_FEATURE_PPC_VSX` (POWER7+: `lxvd2x`/`stxvd2x`, `xvaddsp`, `xxspltw`, `xxpermdi`) | scalar code |
 
 `anvil_ctx_set_cpu()` accepts a model from the same family when it runs the
 context's architecture (x86-64 CPUs for i386, 64-bit PowerPC CPUs for ppc32 and
@@ -269,15 +269,23 @@ invariants are checked separately.
 
 ### MachineIR Pipeline (shared)
 
+Before lowering, `anvil_module_codegen` prepares the optimized IR for every
+backend (`anvil_opt_prepare_codegen`): an address (GEP) loaded or stored
+through in other blocks than its own is recomputed in each of them, an
+integer extension of its index along with it, so the per-block address
+folding below reaches every access.
+
 Every backend listed above lowers source IR into target MachineIR and then runs
 the shared pipeline. The per-target driver (e.g. `anvil_x86_64_regalloc_mir`)
-calls into the generic passes in this order (x86-64, i386, ARM64 and PowerPC
-run all of them; SystemZ skips the optional optimizations):
+calls into the generic passes in this order (every backend runs all of them;
+the optional ones are one shared call, `anvil_mir_optimize_before_allocation`,
+fed the target's addressing-mode and constant-cost hooks):
 
 ```
-verify-legal  ->  duplicate_branch_targets  ->  local_cse  ->
-fold_address_arithmetic  ->  call clobbers  ->  coalesce_copies  ->
-verify-legal  ->  printer scratch  ->  regalloc + materialize_spills  ->  verify-legal
+verify-legal  ->  order_blocks  ->  local_cse  ->  fold_address_arithmetic  ->
+hoist_loop_constants  ->  duplicate_branch_targets  ->  call clobbers  ->
+coalesce_copies  ->  verify-legal  ->  printer scratch  ->
+regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
 ```
 
 - **Legality verification** (`anvil_<arch>_verify_mir_legal`): per-target rules,
@@ -287,12 +295,29 @@ verify-legal  ->  printer scratch  ->  regalloc + materialize_spills  ->  verify
   copy of it, keeping one incoming edge, so top-tested loops branch back from
   their latch.
 - **Local value numbering** (`anvil_mir_local_cse`): a repeated pure integer
-  computation in a block becomes a copy of the first.
+  computation in a block becomes a copy of the first; an extension or
+  truncation of a constant known in the block becomes a MOV of the converted
+  constant (an immediate again for its users).
+- **Constant hoisting** (`anvil_mir_hoist_loop_constants`): the MOV of a
+  constant the target calls expensive (`anvil_mir_expensive_constant_fn`:
+  more than one instruction; immediates on x86 never are) leaves the loops
+  that contain it for their outside predecessors, ahead of a compare feeding
+  their branch. After the registerless marking (below), every backend also
+  runs `anvil_mir_hoist_materialized_constants`: any constant still printed
+  into a register, and any pure integer operation of values defined only
+  outside the loop, leaves its innermost loop the same way (equal constants
+  merged).
+- **Registerless marking** (`anvil_<arch>_mark_registerless`, right before
+  allocation, with the printer's own immediate rules): constants every
+  reader takes as an immediate and integer compares only the next branch
+  reads (`anvil_mir_sink_compares` first) get a nominal register the
+  allocator never reserves; printers fail rather than write one.
 - **Address folding** (`anvil_mir_fold_address_arithmetic`): `ADD(base,
   index * 1|2|4|8)` feeding loads/stores becomes an indexed access
   (`index_scale` on LOAD/STORE) when the target's hook accepts the form:
   x86 `disp(base,index,scale)` (both widths, `x86_address.h`), ARM64
-  `[base, index, lsl #log2(size)]`, PowerPC X-form. Targets without the hook never see indexed accesses.
+  `[base, index, lsl #log2(size)]` (a 32-bit index extended in place:
+  `sxtw`/`uxtw`, `index_extend`), PowerPC X-form, SystemZ `D(X,B)`. Targets without the hook never see indexed accesses.
 - **Call clobbers**: every CALL (and every instruction the printer expands into
   a helper call) carries the ABI's caller-saved set as a per-instruction
   clobber mask; the allocator keeps values that cross it out of those
@@ -312,7 +337,12 @@ verify-legal  ->  printer scratch  ->  regalloc + materialize_spills  ->  verify
   either; elsewhere it is an ordinary pool register.
 - **Copy coalescing** (`anvil_mir_coalesce_copies`): removes copies between
   single-definition values within a block, and folds PHI moves (`t = op;
-  x = COPY t`) by letting `op` write `x` when nothing in between touches it.
+  x = COPY t`) by letting `op` write `x` when nothing in between touches it,
+  across a straight predecessor or, for a back edge's move block, across a
+  conditional branch whose other target `x` is not live into (block
+  liveness, recomputed after each rewrite). The PHI-move part runs once
+  before test blocks are duplicated too (a copied test gives `t` a second
+  definition), so a single-block loop's step updates in place.
 - **Register allocation** (`anvil_regalloc_linear_scan_classes`,
   `src/machine/regalloc.c`): linear scan over typed virtual registers with
   per-class pools (`anvil_regalloc_class_config_t`). Pools list caller-saved
@@ -321,7 +351,11 @@ verify-legal  ->  printer scratch  ->  regalloc + materialize_spills  ->  verify
   in that register, and the two sides of a plain copy in one register. A
   fixed-register interval that displaces an allocated value moves it to a free
   register before spilling it; spilled single-definition values are split at
-  clobbers and allocation reruns. `narrow_bits`/`narrow_regs` keep small
+  clobbers and allocation reruns. Values keep their per-block live ranges
+  (lifetime holes): a register is free for a value whose ranges do not meet
+  those of its active holders, so a value dead across an inner loop leaves
+  its register to the loop's values; copy hints try up to four partners and
+  their partners. `narrow_bits`/`narrow_regs` keep small
   values in the registers that have a form of their width (i386: bytes and
   booleans in EAX-EDX); reloads follow the same rule.
 - **Spill materialization** (`anvil_mir_materialize_spills`): inserts
@@ -375,6 +409,14 @@ typedef struct {
     
     // Return architecture information
     const anvil_arch_info_t *(*get_arch_info)(anvil_backend_t *be);
+
+    // ... ABI, va_arg, atomics, vector costs, relocation models ...
+
+    // Optional: the convention an internal function called only directly
+    // may take instead of the default (ANVIL_CC_DEFAULT: none).  Codegen
+    // preparation then rewrites such functions and their calls (i386:
+    // fastcall, the first two integer arguments in ECX/EDX).
+    anvil_cc_t (*local_call_convention)(anvil_backend_t *be);
 } anvil_backend_ops_t;
 ```
 

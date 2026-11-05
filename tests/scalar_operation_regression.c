@@ -22,7 +22,7 @@ typedef struct {
 static const sqrt_case_t cases[] = {
     {ANVIL_ARCH_X86_64, 0, "sqrtsd", "sqrtpd"},
     {ANVIL_ARCH_X86, ANVIL_CPU_X86_I486, "fsqrt", NULL},
-    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, "sqrtsd", NULL},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, "sqrtsd", "sqrtpd"},
     {ANVIL_ARCH_ARM64, 0, "fsqrt d", "fsqrt v"},
     {ANVIL_ARCH_PPC64, ANVIL_CPU_PPC64_POWER8, "fsqrt ", "xvsqrtdp"},
     {ANVIL_ARCH_PPC64LE, ANVIL_CPU_PPC64_POWER8, "fsqrt ", "xvsqrtdp"},

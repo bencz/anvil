@@ -1,6 +1,7 @@
 /* i386 floating point in SSE/SSE2 registers (Pentium 4 and later). */
 #include "gas32_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static const char *xmm(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
@@ -9,9 +10,10 @@ static const char *xmm(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
     return phys >= 0 && phys < 8 ? x86_xmm_names[phys] : "?";
 }
 
+/* A scalar, or a whole vector (unaligned: element-aligned streams). */
 static const char *mov_op(int size)
 {
-    return size <= 4 ? "movss" : "movsd";
+    return size == 16 ? "movups" : size <= 4 ? "movss" : "movsd";
 }
 
 /* Register copies move the whole register: movss/movsd between registers
@@ -43,19 +45,58 @@ static void copy(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_vreg_t sr
     }
 }
 
+/* The literal-pool entry holding `bits` (added when new); -1 without
+ * memory. */
+static long pool_entry(x86_mir_emit_t *emit, uint64_t bits, int size)
+{
+    for (size_t i = 0; i < emit->fp_pool_count; i++)
+        if (emit->fp_pool[i].bits == bits && emit->fp_pool[i].size == size)
+            return (long)i;
+    if (emit->fp_pool_count == emit->fp_pool_cap) {
+        size_t cap = emit->fp_pool_cap ? emit->fp_pool_cap * 2 : 8;
+        void *grown = realloc(emit->fp_pool, cap * sizeof(*emit->fp_pool));
+        if (!grown)
+            return -1;
+        emit->fp_pool = grown;
+        emit->fp_pool_cap = cap;
+    }
+    emit->fp_pool[emit->fp_pool_count].bits = bits;
+    emit->fp_pool[emit->fp_pool_count].size = size;
+    return (long)emit->fp_pool_count++;
+}
+
+/* +0.0 by xorps; position-dependent code loads others from the literal
+ * pool, position-independent code (no register for the GOT pointer) builds
+ * them in the frame. */
 static void constant(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, uint64_t bits)
 {
     int size = x86_fp_size(emit, dst);
     const char *reg = xmm(emit, dst);
     if (emit->failed)
         return;
+    if (size <= 4)
+        bits &= UINT32_MAX;
+    if (bits == 0) {
+        anvil_strbuf_appendf(&emit->code, "\txorps %%%s, %%%s\n", reg, reg);
+        return;
+    }
+    if (emit->reloc == ANVIL_RELOC_STATIC) {
+        long entry = pool_entry(emit, bits, size);
+        if (entry < 0) {
+            emit->failed = true;
+            return;
+        }
+        anvil_strbuf_appendf(&emit->code, "\t%s %s%s_fpc%ld, %%%s\n", mov_op(size), emit->plat->format->local_label_prefix,
+                             anvil_mir_func_name(emit->mir), entry, reg);
+        return;
+    }
     if (size <= 4) {
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, -%d(%%ebp)\n", (uint32_t)bits, emit->scratch_a_off);
-        anvil_strbuf_appendf(&emit->code, "\tmovss -%d(%%ebp), %%%s\n", emit->scratch_a_off, reg);
+        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)bits, x86_frame(emit, -(emit->scratch_a_off)));
+        anvil_strbuf_appendf(&emit->code, "\tmovss %s, %%%s\n", x86_frame(emit, -(emit->scratch_a_off)), reg);
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, -%d(%%ebp)\n", (uint32_t)(bits & 0xffffffffu), emit->scratch_b_off);
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, -%d(%%ebp)\n", (uint32_t)(bits >> 32), emit->scratch_b_off - 4);
-        anvil_strbuf_appendf(&emit->code, "\tmovsd -%d(%%ebp), %%%s\n", emit->scratch_b_off, reg);
+        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)(bits & 0xffffffffu), x86_frame(emit, -(emit->scratch_b_off)));
+        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)(bits >> 32), x86_frame(emit, -(emit->scratch_b_off - 4)));
+        anvil_strbuf_appendf(&emit->code, "\tmovsd %s, %%%s\n", x86_frame(emit, -(emit->scratch_b_off)), reg);
     }
 }
 
@@ -150,9 +191,9 @@ static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_
         const char *d = xmm(emit, dst), *s = x86_gpr_name(x86_phys_of(emit, src), 4);
         if (emit->failed)
             break;
-        anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, -%d(%%ebp)\n\tmovl $0, -%d(%%ebp)\n", s, emit->scratch_b_off, emit->scratch_b_off - 4);
-        anvil_strbuf_appendf(&emit->code, "\tfildll -%d(%%ebp)\n\tfstp%s -%d(%%ebp)\n", emit->scratch_b_off, size <= 4 ? "s" : "l", emit->scratch_b_off);
-        anvil_strbuf_appendf(&emit->code, "\t%s -%d(%%ebp), %%%s\n", mov_op(size), emit->scratch_b_off, d);
+        anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %s\n\tmovl $0, %s\n", s, x86_frame(emit, -(emit->scratch_b_off)), x86_frame(emit, -(emit->scratch_b_off - 4)));
+        anvil_strbuf_appendf(&emit->code, "\tfildll %s\n\tfstp%s %s\n", x86_frame(emit, -(emit->scratch_b_off)), size <= 4 ? "s" : "l", x86_frame(emit, -(emit->scratch_b_off)));
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
         break;
     }
     case ANVIL_MIR_OP_FPTOSI:
@@ -168,8 +209,7 @@ static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_
              * x - 2^31 instead (exact there) and set bit 31.  XMM4 is never
              * allocated; -2^31 comes from the integer conversion. */
             anvil_strbuf_appendf(&emit->code, "\ttestl %%%s, %%%s\n\tjns 1f\n", d, d);
-            anvil_strbuf_appendf(&emit->code, "\tmovl $-2147483648, -%d(%%ebp)\n\tcvtsi2s%sl -%d(%%ebp), %%xmm4\n", emit->scratch_a_off, sd,
-                                 emit->scratch_a_off);
+            anvil_strbuf_appendf(&emit->code, "\tmovl $-2147483648, %s\n\tcvtsi2s%sl %s, %%xmm4\n", x86_frame(emit, -(emit->scratch_a_off)), sd, x86_frame(emit, -(emit->scratch_a_off)));
             anvil_strbuf_appendf(&emit->code, "\tadds%s %%%s, %%xmm4\n\tcvtts%s2si %%xmm4, %%%s\n", sd, s, sd, d);
             anvil_strbuf_appendf(&emit->code, "\txorl $0x80000000, %%%s\n1:\n", d);
         }
@@ -213,8 +253,8 @@ static void push_result(x86_mir_emit_t *emit, anvil_mir_vreg_t src)
     const char *s = xmm(emit, src);
     if (emit->failed)
         return;
-    anvil_strbuf_appendf(&emit->code, "\t%s %%%s, -%d(%%ebp)\n", mov_op(size), s, emit->scratch_b_off);
-    anvil_strbuf_appendf(&emit->code, "\t%s -%d(%%ebp)\n", size <= 4 ? "flds" : "fldl", emit->scratch_b_off);
+    anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %s\n", mov_op(size), s, x86_frame(emit, -(emit->scratch_b_off)));
+    anvil_strbuf_appendf(&emit->code, "\t%s %s\n", size <= 4 ? "flds" : "fldl", x86_frame(emit, -(emit->scratch_b_off)));
 }
 
 static void pop_result(x86_mir_emit_t *emit, anvil_mir_vreg_t dst)
@@ -223,8 +263,8 @@ static void pop_result(x86_mir_emit_t *emit, anvil_mir_vreg_t dst)
     const char *d = xmm(emit, dst);
     if (emit->failed)
         return;
-    anvil_strbuf_appendf(&emit->code, "\t%s -%d(%%ebp)\n", size <= 4 ? "fstps" : "fstpl", emit->scratch_b_off);
-    anvil_strbuf_appendf(&emit->code, "\t%s -%d(%%ebp), %%%s\n", mov_op(size), emit->scratch_b_off, d);
+    anvil_strbuf_appendf(&emit->code, "\t%s %s\n", size <= 4 ? "fstps" : "fstpl", x86_frame(emit, -(emit->scratch_b_off)));
+    anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
 }
 
 const x86_fp_unit_t x86_fp_sse2_unit = {

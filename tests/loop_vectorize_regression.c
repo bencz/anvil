@@ -28,6 +28,8 @@ typedef struct {
 
 static const target_case_t targets[] = {
     {ANVIL_ARCH_X86_64, 0, {{"mulps", "shufps"}, {"pxor", "paddd"}, {"psrad", "movd"}, {"pcmpgtd", "pandn"}, {"paddd", "pshufd $0x4e"}}},
+    /* i386 shares the SSE table and printer with x86-64 (SSE2 CPUs). */
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, {{"mulps", "shufps"}, {"pxor", "paddd"}, {"psrad", "movd"}, {"pcmpgtd", "pandn"}, {"paddd", "pshufd $0x4e"}}},
     {ANVIL_ARCH_ARM64, 0, {{"fmul v", "dup v"}, {"eor v", "add v"}, {"sshl v", "neg v"}, {"cmgt v", ".16b"}, {"add v", "addv"}}},
     {ANVIL_ARCH_PPC64, ANVIL_CPU_PPC64_POWER8, {{"xvmulsp", "xxspltw"}, {"vxor", "vadduwm"}, {"vsraw", "mtvsrwz"}, {"vcmpgtsw", "xxsel"}, {"vadduwm", "vsldoi"}}},
     {ANVIL_ARCH_PPC64LE, ANVIL_CPU_PPC64_POWER8, {{"xvmulsp", "xxspltw"}, {"vxor", "vadduwm"}, {"vsraw", "mtvsrwz"}, {"vcmpgtsw", "xxsel"}, {"vadduwm", "vsldoi"}}},
@@ -136,8 +138,9 @@ static bool run_case(const target_case_t *target, unsigned mode, size_t allowanc
 /* for (i = 0; i < n; i++) if (a[i] == k) return i; return -1;  A search
  * loop: the vector loop tests a whole vector for the exit, and the scalar
  * loop finds the element. */
+/* In the order of targets[]. */
 static const char *const search_expected[][2] = {
-    {"pcmpeqd", "pmovmskb"}, {"cmeq v", "umaxv"}, {"vcmpequw", "sradi"}, {"vcmpequw", "sradi"},
+    {"pcmpeqd", "pmovmskb"}, {"pcmpeqd", "pmovmskb"}, {"cmeq v", "umaxv"}, {"vcmpequw", "sradi"}, {"vcmpequw", "sradi"},
 };
 
 static bool run_search_case(size_t target_index, size_t allowance, bool *completed)
@@ -219,6 +222,9 @@ static const accumulate_case_t accumulate_cases[] = {
     {ANVIL_ARCH_X86_64, 0, false, 16, 32, "psrld"},
     {ANVIL_ARCH_X86_64, 0, true, 8, 32, NULL},           /* pmaddubsw needs SSSE3 */
     {ANVIL_ARCH_X86_64, ANVIL_CPU_X86_64_HASWELL, true, 8, 32, "pmaddubsw"},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, false, 8, 32, "psadbw"},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, true, 16, 32, "pmaddwd"},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_I486, false, 8, 32, NULL},    /* no SSE2: no vector registers */
     {ANVIL_ARCH_ARM64, 0, false, 8, 32, "uadalp v"},
     {ANVIL_ARCH_ARM64, 0, true, 16, 64, "sadalp v"},
     {ANVIL_ARCH_PPC64, ANVIL_CPU_PPC64_POWER8, false, 8, 32, "vsum4ubs"},
@@ -308,6 +314,7 @@ static const saturate_case_t saturate_cases[] = {
     {ANVIL_ARCH_X86_64, 0, 16, false, true, 0, "psubusw"},
     {ANVIL_ARCH_X86_64, 0, 16, true, false, 32767, "paddsw"},
     {ANVIL_ARCH_X86_64, 0, 8, false, false, 254, NULL},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, 16, false, true, 0, "psubusw"},
     {ANVIL_ARCH_ARM64, 0, 8, true, true, 127, "sqsub v"},
     {ANVIL_ARCH_ARM64, 0, 16, false, false, 65535, "uqadd v"},
     {ANVIL_ARCH_PPC64LE, ANVIL_CPU_PPC64_POWER8, 8, false, true, 0, "vsububs"},

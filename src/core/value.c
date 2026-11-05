@@ -1294,12 +1294,42 @@ bool anvil_global_is_constant(const anvil_value_t *global)
     return global && global->kind == ANVIL_VAL_GLOBAL && global->data.global.is_constant;
 }
 
+static bool no_wrap_operation(const anvil_instr_t *instr)
+{
+    if (instr->op != ANVIL_OP_ADD && instr->op != ANVIL_OP_SUB && instr->op != ANVIL_OP_MUL && instr->op != ANVIL_OP_TRUNC &&
+        instr->op != ANVIL_OP_SDIV && instr->op != ANVIL_OP_UDIV)
+        return false;
+    anvil_type_t *type = instr->result ? instr->result->type : NULL;
+    if (type && type->kind == ANVIL_TYPE_VECTOR)
+        type = type->data.vector.element;
+    return type && anvil_type_is_integer(type);
+}
+
+bool anvil_set_no_wrap(anvil_value_t *value, bool no_wrap)
+{
+    if (!value || value->kind != ANVIL_VAL_INSTR || !value->data.instr || !no_wrap_operation(value->data.instr))
+        return false;
+    value->data.instr->no_wrap = no_wrap;
+    return true;
+}
+
+bool anvil_is_no_wrap(const anvil_value_t *value)
+{
+    return value && value->kind == ANVIL_VAL_INSTR && value->data.instr && value->data.instr->no_wrap;
+}
+
+bool anvil_instr_no_wrap_valid(const anvil_instr_t *instr)
+{
+    return !instr->no_wrap || no_wrap_operation(instr);
+}
+
 bool anvil_instr_copy_attributes(anvil_instr_t *copy, const anvil_instr_t *original)
 {
     copy->fcmp_pred = original->fcmp_pred;
     copy->call_cc = original->call_cc;
     copy->memory_access = original->memory_access;
     copy->atomic = original->atomic;
+    copy->no_wrap = original->no_wrap;
     copy->aux_type = original->aux_type;
     if (original->call_arg_attrs && original->num_operands > 1) {
         size_t count = original->num_operands - 1;
