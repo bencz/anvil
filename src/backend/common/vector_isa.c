@@ -90,20 +90,59 @@ bool anvil_vector_isa_print(anvil_strbuf_t *code, const char *mnemonic, const ch
     return true;
 }
 
+/* Whether every definition of `vreg` leaves each lane all ones or zero: a
+ * vector comparison, an AND/OR/XOR of such values, a copy of one, or a
+ * splat of a constant that is all ones or zero in the lane's width. */
+static bool mask_value(const anvil_mir_func_t *mir, anvil_mir_vreg_t vreg, unsigned depth)
+{
+    if (depth > 4)
+        return false;
+    bool defined = false;
+    size_t count = anvil_mir_num_instrs(mir);
+    for (size_t at = 0; at < count; at++) {
+        anvil_mir_instr_info_t info;
+        if (!anvil_mir_get_instr_info(mir, at, &info) || info.def != vreg)
+            continue;
+        defined = true;
+        bool compare = info.op == ANVIL_MIR_OP_VECTOR &&
+                       (info.ir_op == ANVIL_OP_FCMP || (info.ir_op >= ANVIL_OP_CMP_EQ && info.ir_op <= ANVIL_OP_CMP_UGE));
+        if (compare)
+            continue;
+        if (info.op == ANVIL_MIR_OP_VECTOR && (info.ir_op == ANVIL_OP_AND || info.ir_op == ANVIL_OP_OR || info.ir_op == ANVIL_OP_XOR) &&
+            info.num_uses == 2 && mask_value(mir, anvil_mir_get_instr_use(mir, at, 0), depth + 1) &&
+            mask_value(mir, anvil_mir_get_instr_use(mir, at, 1), depth + 1))
+            continue;
+        if (info.op == ANVIL_MIR_OP_COPY && info.num_uses == 1 && mask_value(mir, anvil_mir_get_instr_use(mir, at, 0), depth + 1))
+            continue;
+        if (info.op == ANVIL_MIR_OP_VECTOR && info.ir_op == ANVIL_OP_SPLAT && info.num_uses == 1) {
+            /* The splat lane: one constant definition, all ones or zero. */
+            anvil_mir_vreg_t lane = anvil_mir_get_instr_use(mir, at, 0);
+            const anvil_mir_vreg_info_t *lane_info = anvil_mir_get_vreg_info(mir, lane);
+            unsigned bits = lane_info ? lane_info->size_bits : 0;
+            uint64_t ones = bits >= 64 ? ~UINT64_C(0) : (UINT64_C(1) << bits) - 1;
+            size_t constants = 0;
+            bool all_or_none = bits > 0;
+            for (size_t def = 0; def < count && all_or_none; def++) {
+                anvil_mir_instr_info_t source;
+                if (!anvil_mir_get_instr_info(mir, def, &source) || source.def != lane)
+                    continue;
+                constants++;
+                uint64_t value = (uint64_t)source.imm & ones;
+                all_or_none = source.op == ANVIL_MIR_OP_MOV && source.has_imm && source.num_uses == 0 && !source.symbol &&
+                              (value == 0 || value == ones);
+            }
+            if (all_or_none && constants == 1)
+                continue;
+        }
+        return false;
+    }
+    return defined;
+}
+
 bool anvil_vector_mir_is_mask(const anvil_mir_func_t *mir, size_t index, anvil_mir_vreg_t vreg)
 {
     anvil_mir_instr_info_t user;
-    if (!anvil_mir_get_instr_info(mir, index, &user))
-        return false;
-    for (size_t at = index; at-- > 0;) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(mir, at, &info) || info.block != user.block)
-            return false;
-        if (info.def == vreg)
-            return info.op == ANVIL_MIR_OP_VECTOR &&
-                   (info.ir_op == ANVIL_OP_FCMP || (info.ir_op >= ANVIL_OP_CMP_EQ && info.ir_op <= ANVIL_OP_CMP_UGE));
-    }
-    return false;
+    return anvil_mir_get_instr_info(mir, index, &user) && mask_value(mir, vreg, 0);
 }
 
 const anvil_vector_isa_t *anvil_vector_isa_for_mir(const anvil_vector_isa_t *table, size_t count, const anvil_mir_func_t *mir, size_t index,

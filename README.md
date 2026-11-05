@@ -268,7 +268,9 @@ Highlights (details in [doc/OPTIMIZATION.md](doc/OPTIMIZATION.md)):
   the target asks for it (`anvil_arch_info_t.small_loop_unroll`).
 * **Loop tables**: a loop computing a constant table, such as CRC32's 256
   entries, runs at compile time into a read-only global.
-* **Vectorization**: loops and SLP groups become vectors only where the
+* **Vectorization**: counted loops (with early exits), open searches (a scan
+  for a terminator or delimiter, reading aligned vectors that cannot fault
+  past the scalar loop's reads) and SLP groups become vectors only where the
   backend's `vector_operation_cost` hook accepts them for the CPU model.
   Floating-point lanes vectorize by default, with results identical to the
   scalar code; `anvil_func_set_fp_vectorization(func, false)` (MCC:
@@ -340,7 +342,7 @@ kernels this short):
 | crc32 | table-driven bit loop, table built by a loop | 100 | 100 | 1.00 | 100 | 101 | 1.01 |
 | sieve | byte stores, nested counted loops | 112 | 104 | 0.93 | 111 | 106 | 0.95 |
 | matmul | integer multiply-accumulate, strided loads | 19 | 20 | 1.05 | 21 | 22 | 1.05 |
-| strings | strlen / strcmp / strcpy / reverse byte loops | 74 | 67 | 0.91 | 75 | 64 | 0.85 |
+| strings | strlen / strcmp / strcpy / reverse byte loops | 75 | 49 | 0.65 | 77 | 46 | 0.60 |
 | qsort | recursion, compares, swaps, branches | 168 | 170 | 1.01 | 163 | 173 | 1.06 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
@@ -353,7 +355,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | crc32 | 533,510 | 533,301 | 1.00 | 468,161 | 451,974 | 0.97 |
 | sieve | 2,109,042 | 1,620,757 | 0.77 | 2,123,809 | 1,620,784 | 0.76 |
 | matmul | 214,390 | 207,910 | 0.97 | 340,798 | 286,037 | 0.84 |
-| strings | 253,432 | 228,880 | 0.90 | 292,630 | 292,558 | 1.00 |
+| strings | 253,432 | 196,936 | 0.78 | 292,630 | 242,296 | 0.83 |
 | qsort | 800,784 | 826,725 | 1.03 | 1,138,113 | 994,093 | 0.87 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
@@ -368,7 +370,9 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 Typical sources of the differences, both ways:
 * ANVIL wins with counter branches and update-form streams on PowerPC
   (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep pointers
-  sharing one index on x86, and in-place index updates.
+  sharing one index on x86, in-place index updates, and vectorized open
+  searches (strings: clang leaves the `strlen` scan scalar when it may not
+  call the library).
 * Open gaps: ARM64 qsort, x86 matmul, and i386 fib and qsort (tracked in
   [doc/REVIEW.md](doc/REVIEW.md)).
 
@@ -385,16 +389,17 @@ Best of 10 runs, in milliseconds:
 | nbody (double) | 79 | 97 | 1.23 | 82 | 96 | 1.17 |
 | qsort | 107 | 106 | 0.99 | 103 | 105 | 1.02 |
 | sieve | 91 | 91 | 1.00 | (see below) | | |
-| strings | 17 | 26 | 1.53 | 21 | 26 | 1.24 |
+| strings | 18 | 19 | 1.06 | 21 | 19 | 0.90 |
 
 Where the gaps come from:
 * **nbody**: clang packs the x/y fields of each struct into one register (SLP).
   ANVIL's SLP vectorizer does not group struct fields yet. matmul's loop
   vectorizes like clang's, with lane-wise FP vectorization on by default.
 * **strings**: clang replaces the hand-written `strlen` loop with a call to
-  the C library's vectorized `strlen`. ANVIL compiles the loop as written
-  (`bench/ir` builds its references with `-fno-builtin` to compare code
-  generation alone).
+  the C library's `strlen`. ANVIL vectorizes the loop itself as an open
+  search, which is generic and not tied to C. `bench/ir` builds its references
+  with `-fno-builtin` to compare code generation alone; there ANVIL's
+  vectorized scan is 0.60–0.65x of clang's scalar loop.
 * **i386 crc32 and fib**: open. Both have six allocatable registers, and fib
   still has a branch-then-jump in its loop layout.
 * **i386 sieve**: the program's output differs between the compilers. It

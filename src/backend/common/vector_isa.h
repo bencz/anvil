@@ -51,7 +51,8 @@ unsigned anvil_vector_isa_cost(const anvil_vector_isa_t *table, size_t count, si
 bool anvil_vector_mir_key(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, anvil_vector_key_t *key);
 
 /* Whether `vreg`, used by instruction `index`, is a lane mask (each lane
- * all ones or zero): a vector comparison defined earlier in the block.  A
+ * all ones or zero) by every definition: a vector comparison, an
+ * AND/OR/XOR of masks, a copy of one, or a splat of all ones or zero.  A
  * printer may then reduce it with a shorter idiom. */
 bool anvil_vector_mir_is_mask(const anvil_mir_func_t *mir, size_t index, anvil_mir_vreg_t vreg);
 

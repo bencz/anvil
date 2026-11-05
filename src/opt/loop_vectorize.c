@@ -12,7 +12,13 @@
  * the original loop, entered with the vector loop's final index, finishes
  * the rest.  Bases whose distance is unknown are checked at run time: when
  * two accessed bases (one of them stored through) are closer than one
- * vector the vector loop runs zero iterations.  Lane counts and legality
+ * vector the vector loop runs zero iterations.
+ *
+ * An open search (match_open_loop) has no trip test: its header reads one
+ * stream and leaves on a lane condition.  Its vector loop has no end; it
+ * reads aligned vectors from the one holding base[start] (lanes before
+ * the start masked off) until one holds a leaving lane, and the scalar
+ * loop resumes at that vector to find the exact one.  Lane counts and legality
  * come from the backend's vector_operation_cost, so nothing here knows a
  * target.
  */
@@ -21,6 +27,8 @@
 #include "opt_utils.h"
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 enum {
     LV_BODY_LIMIT = 64,
@@ -95,6 +103,11 @@ typedef struct {
     anvil_instr_t *phi, *increment, *compare;
     anvil_value_t *start, *limit;
     bool bounded;                     /* < or u<: the vector end needs start < n */
+    /* An open search: no limit; the header (chain[0]) leaves on a lane
+     * condition.  While building: the lanes the vector loop may leave on
+     * (the first vector's from the start on, then all). */
+    bool open;
+    anvil_value_t *keep;
     anvil_type_t *element, *vector;
     size_t lanes;
     anvil_instr_t *instrs[LV_BODY_LIMIT];
@@ -477,6 +490,8 @@ static bool classify_block(lv_plan *plan, size_t block)
 {
     const anvil_block_t *current = plan->chain[block];
     for (anvil_instr_t *instr = current->first; instr && instr != current->last; instr = instr->next) {
+        if (instr == plan->phi)
+            continue;  /* an open search's header */
         if (plan->count == LV_BODY_LIMIT)
             return false;
         size_t index = plan->count++;
@@ -906,6 +921,65 @@ static bool match_loop(lv_plan *plan, const anvil_opt_cfg_t *cfg, const anvil_lo
     return true;
 }
 
+/* An open search: no trip test, the header leaving on a lane condition,
+ *
+ *     header: i = phi [start, preheader], [i + 1, latch]
+ *             ... c, a comparison of lanes of base[i] ...
+ *             br c, latch, exit   (or exit, latch)
+ *     latch:  i + 1; br header
+ *
+ * matched as an early-exit chain of the header and the latch. */
+static bool match_open_loop(lv_plan *plan, const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t index)
+{
+    const anvil_loop_info_t *loop = &loops->loops[index];
+    if (loop->latch_count != 1 || loop->preheader == SIZE_MAX || loop->member_count != 2 || loop->exit_edge_count != 1)
+        return false;
+    plan->header = cfg->blocks[loop->header];
+    plan->preheader = cfg->blocks[loop->preheader];
+    anvil_instr_t *branch = plan->header->last;
+    if (plan->header->vectorized || !plan->preheader->last || plan->preheader->last->op != ANVIL_OP_BR || !branch ||
+        branch->op != ANVIL_OP_BR_COND)
+        return false;
+    bool true_stays = anvil_loop_contains(loops, index, anvil_opt_cfg_index(cfg, branch->true_block));
+    bool false_stays = anvil_loop_contains(loops, index, anvil_opt_cfg_index(cfg, branch->false_block));
+    anvil_block_t *body = true_stays ? branch->true_block : branch->false_block;
+    size_t body_at = anvil_opt_cfg_index(cfg, body);
+    if (true_stays == false_stays || body == plan->header || body_at == SIZE_MAX || !body->last || body->last->op != ANVIL_OP_BR ||
+        body->last->true_block != plan->header || cfg->predecessor_offsets[body_at + 1] - cfg->predecessor_offsets[body_at] != 1)
+        return false;
+    plan->chain[0] = plan->header;
+    plan->exit_on_true[0] = !true_stays;
+    plan->chain[1] = body;
+    plan->chain_count = 2;
+
+    /* The index, the header's only PHI. */
+    anvil_instr_t *phi = plan->header->first;
+    if (!phi || phi->op != ANVIL_OP_PHI || phi->num_phi_incoming != 2 || (phi->next && phi->next->op == ANVIL_OP_PHI))
+        return false;
+    anvil_value_t *start = NULL, *next = NULL;
+    for (size_t item = 0; item < 2; item++) {
+        if (phi->phi_blocks[item] == plan->preheader)
+            start = phi->operands[item];
+        else if (phi->phi_blocks[item] == body)
+            next = phi->operands[item];
+    }
+    anvil_type_t *index_type = phi->result->type;
+    if (!start || !next || next->kind != ANVIL_VAL_INSTR ||
+        (index_type->kind != ANVIL_TYPE_I32 && index_type->kind != ANVIL_TYPE_I64 && index_type->kind != ANVIL_TYPE_U32 &&
+         index_type->kind != ANVIL_TYPE_U64))
+        return false;
+    anvil_instr_t *increment = next->data.instr;
+    if (increment->op != ANVIL_OP_ADD || increment->parent != body ||
+        !((increment->operands[0] == phi->result && is_const_one(increment->operands[1])) ||
+          (increment->operands[1] == phi->result && is_const_one(increment->operands[0]))))
+        return false;
+    plan->phi = phi;
+    plan->start = start;
+    plan->increment = increment;
+    plan->open = true;
+    return true;
+}
+
 /* The cost of one scalar operation in the cost hook's units: the target's
  * price for the operations it prices on single values (FMA, FSQRT). */
 static unsigned scalar_cost(lv_plan *plan, const anvil_instr_t *instr)
@@ -1109,13 +1183,30 @@ static anvil_pass_result_t vector_costs(lv_plan *plan)
         plan->scalar_cost += LV_EXIT_COST;
         plan->vector_cost += inverse + reduce + 1 + LV_EXIT_COST;
     }
+    /* An open search reads one stream, element-aligned in aligned vectors:
+     * lanes before the start are masked by comparing lane numbers (a
+     * constant vector) with their count, and every vector's leaving lanes
+     * are ANDed with that mask. */
+    if (plan->open) {
+        size_t size = plan->element->size;
+        if (plan->num_streams != 1 || plan->stored[0] || plan->num_reductions || !anvil_type_is_integer(plan->element) || !size ||
+            (size & (size - 1)) || !mask)
+            return ANVIL_PASS_RUN_UNCHANGED;
+        unsigned keep = anvil_vector_operation_cost(plan->ctx, ANVIL_OP_AND, mask);
+        unsigned lanes = anvil_vector_operation_cost(plan->ctx, ANVIL_OP_CMP_GE, mask);
+        unsigned splat = anvil_vector_operation_cost(plan->ctx, ANVIL_OP_SPLAT, mask);
+        if (!keep || !lanes || !splat)
+            return ANVIL_PASS_RUN_UNCHANGED;
+        plan->vector_cost += keep;
+        plan->splat_cost += lanes + 2 * splat + LV_CHECK_COST;
+    }
     return ANVIL_PASS_RUN_CHANGED;
 }
 
 /* The trip count when start and limit are constants. */
 static bool constant_trips(const lv_plan *plan, uint64_t *trips)
 {
-    if (plan->start->kind != ANVIL_VAL_CONST_INT || plan->limit->kind != ANVIL_VAL_CONST_INT)
+    if (!plan->limit || plan->start->kind != ANVIL_VAL_CONST_INT || plan->limit->kind != ANVIL_VAL_CONST_INT)
         return false;
     int64_t start = plan->start->data.i, limit = plan->limit->data.i;
     *trips = limit > start ? (uint64_t)(limit - start) : 0;
@@ -1584,6 +1675,11 @@ static bool build_body(lv_plan *plan, lv_list *bodies, lv_list *preheader, size_
             inverse->fcmp_pred = pred;
             leaving = inverse->result;
         }
+        if (leaving && plan->open && block == 0) {
+            anvil_value_t *kept_ops[] = {leaving, plan->keep};
+            anvil_instr_t *kept = make(plan, body, ANVIL_OP_AND, mask, kept_ops, 2);
+            leaving = kept ? kept->result : NULL;
+        }
         anvil_instr_t *any = leaving ? make(plan, body, ANVIL_OP_REDUCE_OR, mask->data.vector.element, &leaving, 1) : NULL;
         anvil_value_t *test_ops[] = {any ? any->result : NULL, anvil_opt_make_const_int(plan->ctx, mask->data.vector.element, 0)};
         anvil_instr_t *hit = any && test_ops[1] ? make(plan, body, ANVIL_OP_CMP_NE, plan->ctx->type_i1, test_ops, 2) : NULL;
@@ -1817,6 +1913,276 @@ done:
     return result;
 }
 
+/* An open search walking a pointer, p = phi [base, preheader], [p + 1
+ * element, latch], read through p in the header: p becomes base + i over a
+ * pointer-wide index i, the form match_open_loop takes.  Only where the
+ * target compares vectors of the element and its aligned vectors cannot
+ * fault past a readable byte (vector_costs); a loop left scalar keeps the
+ * index, which late loop strength reduction makes a stream again where
+ * that pays. */
+static anvil_pass_result_t index_pointer_search(anvil_func_t *func, const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t index)
+{
+    const anvil_loop_info_t *loop = &loops->loops[index];
+    if (loop->latch_count != 1 || loop->preheader == SIZE_MAX || loop->member_count != 2 || loop->exit_edge_count != 1)
+        return ANVIL_PASS_RUN_UNCHANGED;
+    anvil_block_t *header = cfg->blocks[loop->header], *preheader = cfg->blocks[loop->preheader];
+    anvil_instr_t *phi = header->first, *branch = header->last;
+    if (header->vectorized || !phi || phi->op != ANVIL_OP_PHI || phi->num_phi_incoming != 2 || (phi->next && phi->next->op == ANVIL_OP_PHI) ||
+        !phi->result || phi->result->type->kind != ANVIL_TYPE_PTR || !branch || branch->op != ANVIL_OP_BR_COND || !preheader->last ||
+        preheader->last->op != ANVIL_OP_BR)
+        return ANVIL_PASS_RUN_UNCHANGED;
+    anvil_value_t *base = NULL, *next = NULL;
+    anvil_block_t *latch_block = NULL;
+    for (size_t item = 0; item < 2; item++) {
+        if (phi->phi_blocks[item] == preheader)
+            base = phi->operands[item];
+        else {
+            next = phi->operands[item];
+            latch_block = phi->phi_blocks[item];
+        }
+    }
+    anvil_instr_t *step = next && next->kind == ANVIL_VAL_INSTR ? next->data.instr : NULL;
+    anvil_type_t *element = step ? step->aux_type : NULL;
+    if (!base || !step || step->op != ANVIL_OP_GEP || step->num_operands != 2 || step->operands[0] != phi->result || !is_const_one(step->operands[1]) ||
+        step->parent != latch_block || latch_block == header || !element || !anvil_type_is_integer(element) ||
+        !anvil_types_equal(phi->result->type->data.pointee, element))
+        return ANVIL_PASS_RUN_UNCHANGED;
+    /* The header reads the element through p; the step feeds the PHI alone. */
+    bool read = false;
+    for (anvil_block_t *block = func->blocks; block; block = block->next)
+        for (const anvil_instr_t *user = block->first; user; user = user->next)
+            for (size_t o = 0; o < user->num_operands; o++) {
+                if (user->operands[o] == step->result && user != phi)
+                    return ANVIL_PASS_RUN_UNCHANGED;
+                read |= user->operands[o] == phi->result && user->op == ANVIL_OP_LOAD && user->parent == header;
+            }
+    anvil_ctx_t *ctx = func->owner_ctx;
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
+    size_t size = element->size;
+    if (!read || !arch || arch->access_fault_granularity < LV_VECTOR_BYTES || !size || LV_VECTOR_BYTES % size)
+        return ANVIL_PASS_RUN_UNCHANGED;
+    anvil_type_t *vector = anvil_type_vector(ctx, element, LV_VECTOR_BYTES / size);
+    if (!vector)
+        return ANVIL_PASS_RUN_ERROR;
+    if (!anvil_vector_operation_cost(ctx, ANVIL_OP_CMP_EQ, vector) || !anvil_vector_operation_cost(ctx, ANVIL_OP_LOAD, vector))
+        return ANVIL_PASS_RUN_UNCHANGED;
+
+    anvil_type_t *index_type = arch->ptr_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
+    anvil_value_t *zero = anvil_opt_make_const_int(ctx, index_type, 0), *one = anvil_opt_make_const_int(ctx, index_type, 1);
+    anvil_instr_t *counter = zero && one ? anvil_instr_create(ctx, ANVIL_OP_PHI, index_type, "search.index") : NULL;
+    anvil_instr_t *advance = counter ? anvil_instr_create(ctx, ANVIL_OP_ADD, index_type, "search.next") : NULL;
+    anvil_instr_t *address = advance ? anvil_instr_create(ctx, ANVIL_OP_GEP, phi->result->type, "search.at") : NULL;
+    anvil_block_t **incoming = address ? anvil_ctx_calloc(ctx, 2, sizeof(*incoming)) : NULL;
+    if (!incoming || !anvil_instr_reserve_operands(counter, 2) || !anvil_instr_add_operand(advance, counter->result) ||
+        !anvil_instr_add_operand(advance, one) || !anvil_instr_add_operand(address, base) || !anvil_instr_add_operand(address, counter->result)) {
+        free(incoming);
+        return ANVIL_PASS_RUN_ERROR;
+    }
+    /* Everything allocated: the rewrite below cannot fail. */
+    counter->phi_blocks = incoming;
+    counter->phi_capacity = 2;
+    counter->operands[0] = zero;
+    counter->phi_blocks[0] = preheader;
+    advance->no_wrap = true;
+    address->aux_type = element;
+    anvil_opt_insert_before(header->first, counter);
+    anvil_opt_insert_before(step, advance);
+    anvil_instr_t *after = phi->next;
+    anvil_opt_insert_before(after, address);
+    counter->operands[1] = advance->result;
+    counter->phi_blocks[1] = latch_block;
+    counter->num_operands = counter->num_phi_incoming = 2;
+    anvil_opt_replace_uses_in_func(func, phi->result, address->result);
+    anvil_opt_erase_instr(step);
+    anvil_opt_erase_instr(phi);
+    return ANVIL_PASS_RUN_CHANGED;
+}
+
+/* A value of integer type `type` from the non-negative integer `value`. */
+static anvil_value_t *convert_count(lv_plan *plan, lv_list *list, anvil_value_t *value, anvil_type_t *type)
+{
+    if (anvil_types_equal(value->type, type))
+        return value;
+    size_t from = anvil_type_size(value->type), to = anvil_type_size(type);
+    anvil_op_t op = from == to ? ANVIL_OP_BITCAST : from > to ? ANVIL_OP_TRUNC : ANVIL_OP_ZEXT;
+    anvil_instr_t *converted = make(plan, list, op, type, &value, 1);
+    return converted ? converted->result : NULL;
+}
+
+/* An open search (match_open_loop).  The preheader computes the stream's
+ * first address a, off = (a mod V) / size, the elements before base[start]
+ * in its aligned vector, and the vector loop's first index start - off;
+ * the loop runs when that index does not wrap below start and a is
+ * element-aligned (otherwise the scalar loop runs alone).  Every vector
+ * is aligned, so it lies within one protection block holding an element
+ * the scalar loop would read (vector_costs).  The first vector may leave
+ * only on lanes from off on (lane numbers, a constant vector, against
+ * off); the later ones on any.  A vector holding a leaving lane resumes
+ * the scalar loop at its first index (at start for the first vector),
+ * which finds the exact one. */
+static anvil_pass_result_t vectorize_open(lv_plan *plan)
+{
+    anvil_ctx_t *ctx = plan->ctx;
+    lv_list *setup = calloc(1, sizeof(*setup)), *bodies = calloc(2, sizeof(*bodies)), *tail = calloc(1, sizeof(*tail));
+    anvil_value_t *hits[LV_CHAIN_LIMIT] = {0};
+    anvil_value_t *no_accumulators[LV_INTERLEAVE][LV_REDUCTION_LIMIT] = {0}, *no_updates[LV_INTERLEAVE][LV_REDUCTION_LIMIT] = {0};
+    anvil_pass_result_t result = ANVIL_PASS_RUN_ERROR;
+    if (!setup || !bodies || !tail || plan->chain_count != 2)
+        goto done;
+
+    anvil_type_t *index_type = plan->phi->result->type;
+    anvil_type_t *mask = anvil_type_vector_mask(ctx, plan->vector);
+    anvil_type_t *lane = mask ? anvil_type_vector_element(mask) : NULL;
+    anvil_type_t *mask_pointer = mask ? anvil_type_ptr(ctx, mask) : NULL;
+    size_t pointer_size = anvil_type_size(plan->streams[0]->result->type);
+    anvil_type_t *address_type = pointer_size == 8 ? ctx->type_i64 : ctx->type_i32;
+    size_t size = plan->element->size, lanes = plan->lanes;
+    unsigned log2 = 0;
+    while (((size_t)1 << log2) < size)
+        log2++;
+    if (!lane || !mask_pointer || lanes > 64)
+        goto done;
+
+    /* off, the first index and whether the vector loop may run. */
+    anvil_value_t *address = first_address(plan, setup, plan->streams[0], address_type);
+    anvil_value_t *low_ops[] = {address, anvil_opt_make_const_int(ctx, address_type, LV_VECTOR_BYTES - 1)};
+    anvil_instr_t *low = address ? make(plan, setup, ANVIL_OP_AND, address_type, low_ops, 2) : NULL;
+    anvil_value_t *shift_ops[] = {low ? low->result : NULL, anvil_opt_make_const_int(ctx, address_type, log2)};
+    anvil_instr_t *off = low && log2 ? make(plan, setup, ANVIL_OP_SHR, address_type, shift_ops, 2) : low;
+    anvil_value_t *off_index = off ? convert_count(plan, setup, off->result, index_type) : NULL;
+    anvil_value_t *first_ops[] = {plan->start, off_index};
+    anvil_instr_t *first = off_index ? make(plan, setup, ANVIL_OP_SUB, index_type, first_ops, 2) : NULL;
+    anvil_value_t *below_ops[] = {first ? first->result : NULL, plan->start};
+    anvil_instr_t *no_wrap = first ? make(plan, setup, index_type->is_signed ? ANVIL_OP_CMP_LE : ANVIL_OP_CMP_ULE, ctx->type_i1, below_ops, 2) : NULL;
+    anvil_value_t *may_run = no_wrap ? no_wrap->result : NULL;
+    if (may_run && size > 1) {
+        anvil_value_t *odd_ops[] = {address, anvil_opt_make_const_int(ctx, address_type, (int64_t)size - 1)};
+        anvil_instr_t *odd = make(plan, setup, ANVIL_OP_AND, address_type, odd_ops, 2);
+        anvil_value_t *even_ops[] = {odd ? odd->result : NULL, anvil_opt_make_const_int(ctx, address_type, 0)};
+        anvil_instr_t *even = odd ? make(plan, setup, ANVIL_OP_CMP_EQ, ctx->type_i1, even_ops, 2) : NULL;
+        may_run = even ? all_of(plan, setup, may_run, even->result) : NULL;
+    }
+
+    /* The first vector's lanes from off on: lane numbers >= off. */
+    anvil_value_t *numbers[64];
+    for (size_t k = 0; k < lanes; k++)
+        if (!(numbers[k] = anvil_opt_make_const_int(ctx, lane, (int64_t)k)))
+            goto done;
+    anvil_type_t *table_type = anvil_type_array(ctx, lane, lanes);
+    char name[160];
+    snprintf(name, sizeof(name), "%s.lanes.%u", plan->func->name ? plan->func->name : "loop", (unsigned)plan->header->id);
+    anvil_value_t *table = table_type ? anvil_module_add_global(plan->func->parent, name, table_type, ANVIL_LINK_INTERNAL) : NULL;
+    anvil_value_t *init = table ? anvil_const_array(ctx, lane, numbers, lanes) : NULL;
+    if (!may_run || !init || !anvil_global_set_initializer(table, init) || !anvil_global_set_constant(table, true))
+        goto done;
+    anvil_value_t *table_ops[] = {table, index_const(plan, 0), index_const(plan, 0)};
+    anvil_instr_t *table_first = make(plan, setup, ANVIL_OP_GEP, anvil_type_ptr(ctx, lane), table_ops, 3);
+    if (table_first)
+        table_first->aux_type = table_type;
+    anvil_instr_t *table_address = table_first ? make(plan, setup, ANVIL_OP_BITCAST, mask_pointer, &table_first->result, 1) : NULL;
+    anvil_instr_t *lane_numbers = table_address ? make(plan, setup, ANVIL_OP_LOAD, mask, &table_address->result, 1) : NULL;
+    anvil_value_t *off_lane = lane_numbers ? convert_count(plan, setup, off->result, lane) : NULL;
+    anvil_instr_t *offs = off_lane ? make(plan, setup, ANVIL_OP_SPLAT, mask, &off_lane, 1) : NULL;
+    anvil_value_t *from_ops[] = {lane_numbers ? lane_numbers->result : NULL, offs ? offs->result : NULL};
+    anvil_instr_t *first_keep = offs ? make(plan, setup, ANVIL_OP_CMP_GE, mask, from_ops, 2) : NULL;
+    anvil_value_t *all_lanes = anvil_opt_make_const_int(ctx, lane, -1);
+    anvil_instr_t *every = first_keep && all_lanes ? make(plan, setup, ANVIL_OP_SPLAT, mask, &all_lanes, 1) : NULL;
+
+    /* The vector loop: header (index, mask), the header's lanes and exit
+     * test, the latch's step. */
+    anvil_instr_t *index = every ? make_phi(plan, index_type) : NULL;
+    anvil_instr_t *keep = index ? make_phi(plan, mask) : NULL;
+    anvil_block_t *vector_header = anvil_block_prepare(plan->func, "vec.header");
+    anvil_block_t *vector_bodies[2] = {anvil_block_prepare(plan->func, "vec.body"), anvil_block_prepare(plan->func, "vec.body")};
+    anvil_block_t *vector_exit = anvil_block_prepare(plan->func, "vec.exit");
+    if (!keep || !vector_header || !vector_bodies[0] || !vector_bodies[1] || !vector_exit)
+        goto done;
+    plan->keep = keep->result;
+    anvil_value_t *firsts[LV_INTERLEAVE] = {index->result};
+    bool body_built = build_body(plan, bodies, setup, 1, firsts, hits, (anvil_value_t *const (*)[LV_REDUCTION_LIMIT])no_accumulators, no_updates);
+    plan->invariants = NULL;
+    plan->keep = NULL;
+    if (!body_built || !hits[0])
+        goto done;
+    lv_list head = {.count = 0};
+    anvil_instr_t *enter = make(plan, &head, ANVIL_OP_BR, NULL, NULL, 0);
+    anvil_instr_t *leave = make(plan, &bodies[0], ANVIL_OP_BR_COND, NULL, &hits[0], 1);
+    anvil_value_t *step_ops[] = {index->result, index_const(plan, (int64_t)lanes)};
+    anvil_instr_t *step = make(plan, &bodies[1], ANVIL_OP_ADD, index_type, step_ops, 2);
+    anvil_instr_t *back = step ? make(plan, &bodies[1], ANVIL_OP_BR, NULL, NULL, 0) : NULL;
+    anvil_value_t *at_first_ops[] = {index->result, first->result};
+    anvil_instr_t *at_first = make(plan, tail, ANVIL_OP_CMP_EQ, ctx->type_i1, at_first_ops, 2);
+    anvil_value_t *resume_ops[] = {at_first ? at_first->result : NULL, plan->start, index->result};
+    anvil_instr_t *resume = at_first ? make(plan, tail, ANVIL_OP_SELECT, index_type, resume_ops, 3) : NULL;
+    anvil_instr_t *rejoin = resume ? make(plan, tail, ANVIL_OP_BR, NULL, NULL, 0) : NULL;
+    if (!enter || !leave || !back || !rejoin)
+        goto done;
+    enter->true_block = vector_bodies[0];
+    leave->true_block = vector_exit;
+    leave->false_block = vector_bodies[1];
+    back->true_block = vector_header;
+    rejoin->true_block = plan->header;
+
+    /* Room for the preheader branch's condition and the scalar PHI's
+     * third incoming value: nothing allocates once the commit begins. */
+    anvil_instr_t *entry = plan->preheader->last, *scalar = plan->phi;
+    if (!anvil_instr_reserve_operands(entry, 1) || !anvil_instr_reserve_operands(scalar, scalar->num_operands + 1))
+        goto done;
+    if (scalar->phi_capacity < scalar->num_phi_incoming + 1) {
+        anvil_block_t **blocks = anvil_ctx_malloc(ctx, (scalar->num_phi_incoming + 1) * sizeof(*blocks));
+        if (!blocks)
+            goto done;
+        memcpy(blocks, scalar->phi_blocks, scalar->num_phi_incoming * sizeof(*blocks));
+        free(scalar->phi_blocks);
+        scalar->phi_blocks = blocks;
+        scalar->phi_capacity = scalar->num_phi_incoming + 1;
+    }
+
+    /* Commit. */
+    for (size_t item = 0; item < setup->count; item++)
+        anvil_opt_insert_before(entry, setup->items[item]);
+    entry->operands[entry->num_operands++] = may_run;
+    entry->op = ANVIL_OP_BR_COND;
+    entry->true_block = vector_header;
+    entry->false_block = plan->header;
+
+    anvil_instr_t *phis[2] = {index, keep};
+    anvil_value_t *initial[2] = {first->result, first_keep->result}, *again[2] = {step->result, every->result};
+    for (size_t p = 0; p < 2; p++) {
+        phis[p]->operands[0] = initial[p];
+        phis[p]->phi_blocks[0] = plan->preheader;
+        phis[p]->operands[1] = again[p];
+        phis[p]->phi_blocks[1] = vector_bodies[1];
+        phis[p]->num_operands = phis[p]->num_phi_incoming = 2;
+        anvil_block_append_prepared(vector_header, phis[p]);
+    }
+    anvil_block_append_prepared(vector_header, enter);
+    for (size_t block = 0; block < 2; block++)
+        for (size_t item = 0; item < bodies[block].count; item++)
+            anvil_block_append_prepared(vector_bodies[block], bodies[block].items[item]);
+    for (size_t item = 0; item < tail->count; item++)
+        anvil_block_append_prepared(vector_exit, tail->items[item]);
+
+    anvil_block_t *anchor = plan->preheader;
+    insert_block_after(plan->func, anchor, vector_header);
+    insert_block_after(plan->func, vector_header, vector_bodies[0]);
+    insert_block_after(plan->func, vector_bodies[0], vector_bodies[1]);
+    insert_block_after(plan->func, vector_bodies[1], vector_exit);
+    /* The scalar loop: from the preheader as before, or resumed (room
+     * reserved above). */
+    scalar->operands[scalar->num_operands++] = resume->result;
+    scalar->phi_blocks[scalar->num_phi_incoming++] = vector_exit;
+    plan->header->vectorized = true;
+    anvil_func_invalidate_cfg(plan->func);
+    result = ANVIL_PASS_RUN_CHANGED;
+
+done:
+    free(setup);
+    free(bodies);
+    free(tail);
+    return result;
+}
+
 anvil_pass_result_t anvil_pass_loop_vectorize(anvil_func_t *func)
 {
     if (!func || !func->parent || !func->owner_ctx)
@@ -1844,12 +2210,29 @@ anvil_pass_result_t anvil_pass_loop_vectorize(anvil_func_t *func)
             }
             plan->func = func;
             plan->ctx = func->owner_ctx;
-            anvil_pass_result_t status = ANVIL_PASS_RUN_UNCHANGED;
-            if (match_loop(plan, &cfg, &loops, loop) && classify_body(plan) && match_reductions(plan) && plan->num_streams)
+            anvil_pass_result_t status = index_pointer_search(func, &cfg, &loops, loop);
+            if (status != ANVIL_PASS_RUN_UNCHANGED) {
+                /* Indexed now: the next round matches it. */
+                result = status;
+                changed = status == ANVIL_PASS_RUN_CHANGED;
+                free(plan);
+                if (result == ANVIL_PASS_RUN_ERROR)
+                    break;
+                continue;
+            }
+            bool matched = match_loop(plan, &cfg, &loops, loop);
+            if (!matched) {
+                /* An open search, from a fresh plan. */
+                memset(plan, 0, sizeof(*plan));
+                plan->func = func;
+                plan->ctx = func->owner_ctx;
+                matched = match_open_loop(plan, &cfg, &loops, loop);
+            }
+            if (matched && classify_body(plan) && match_reductions(plan) && plan->num_streams)
                 status = vector_costs(plan);
             if (status == ANVIL_PASS_RUN_CHANGED) {
-                plan->interleave = interleave(plan);
-                status = profitable(plan) ? vectorize_loop(plan) : ANVIL_PASS_RUN_UNCHANGED;
+                plan->interleave = plan->open ? 1 : interleave(plan);
+                status = !profitable(plan) ? ANVIL_PASS_RUN_UNCHANGED : plan->open ? vectorize_open(plan) : vectorize_loop(plan);
             }
             if (status != ANVIL_PASS_RUN_UNCHANGED)
                 result = status;

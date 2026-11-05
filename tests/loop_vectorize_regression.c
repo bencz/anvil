@@ -204,6 +204,76 @@ static bool run_search_case(size_t target_index, size_t allowance, bool *complet
     return valid;
 }
 
+/* const char *p = s; while (*p) p++; return p - s;  An open search: no
+ * bound, one stream read through a pointer.  The pointer becomes s + i and
+ * the loop reads aligned vectors (the first one's lanes before s masked
+ * off) until one holds the terminator.  Allocation failure at any point
+ * leaves valid IR. */
+static const char *const open_search_expected[][2] = {
+    {"pcmpeqb", "pmovmskb"}, {"pcmpeqb", "pmovmskb"}, {"cmeq v", "umaxv"}, {"vcmpequb", "vand"}, {"vcmpequb", "vand"},
+};
+
+static bool run_open_search_case(size_t target_index, size_t allowance, bool *completed)
+{
+    const target_case_t *target = &targets[target_index];
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(target->arch);
+    if (target->cpu)
+        anvil_ctx_set_cpu(ctx, target->cpu);
+    anvil_module_t *module = anvil_module_create(ctx, "open_search");
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
+    anvil_type_t *i8 = anvil_type_i8(ctx), *p8 = anvil_type_ptr(ctx, i8);
+    anvil_type_t *word = arch->ptr_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
+    anvil_type_t *params[] = {p8};
+    anvil_func_t *func = anvil_func_create(module, "length", anvil_type_func(ctx, word, params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_block_t *header = anvil_block_create(func, "header");
+    anvil_block_t *latch = anvil_block_create(func, "latch");
+    anvil_block_t *done = anvil_block_create(func, "done");
+
+    anvil_set_insert_point(ctx, func->entry);
+    anvil_build_br(ctx, header);
+    anvil_set_insert_point(ctx, header);
+    anvil_value_t *p = anvil_build_phi(ctx, p8, "p");
+    anvil_value_t *c = anvil_build_load(ctx, i8, p, "c");
+    anvil_build_br_cond(ctx, anvil_build_cmp_ne(ctx, c, anvil_const_i8(ctx, 0), "more"), latch, done);
+    anvil_set_insert_point(ctx, latch);
+    anvil_value_t *one = anvil_const_i32(ctx, 1);
+    anvil_value_t *next = anvil_build_gep(ctx, i8, p, &one, 1, "next");
+    anvil_build_br(ctx, header);
+    anvil_phi_add_incoming(p, anvil_func_get_param(func, 0), func->entry);
+    anvil_phi_add_incoming(p, next, latch);
+    anvil_set_insert_point(ctx, done);
+    anvil_value_t *end = anvil_build_ptrtoint(ctx, p, word, "end");
+    anvil_value_t *begin = anvil_build_ptrtoint(ctx, anvil_func_get_param(func, 0), word, "begin");
+    anvil_build_ret(ctx, anvil_build_sub(ctx, end, begin, "length"));
+
+    if (allowance != SIZE_MAX)
+        anvil_test_fail_alloc_after(ctx, allowance);
+    anvil_pass_result_t status = anvil_pass_loop_vectorize(func);
+    anvil_test_disable_alloc_fail(ctx);
+    anvil_ctx_clear_error(ctx);
+
+    char error[256] = {0};
+    bool valid = anvil_func_verify(func, error, sizeof(error));
+    *completed = status != ANVIL_PASS_RUN_ERROR;
+    if (*completed) {
+        valid &= status == ANVIL_PASS_RUN_CHANGED;
+        char *assembly = NULL;
+        size_t length = 0;
+        valid &= anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly &&
+                 strstr(assembly, open_search_expected[target_index][0]) && strstr(assembly, open_search_expected[target_index][1]);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+    }
+    if (!valid) {
+        fprintf(stderr, "open search vectorize failure: arch=%d allowance=%zu status=%d error=%s\n", (int)target->arch, allowance, status, error);
+        anvil_dump_module(stderr, module);
+    }
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid;
+}
+
 /* int s = 5; for (i = 0; i < n; i++) s += ext(a[i]);  A sum of narrow
  * elements into a wider accumulator accumulates the lanes into wider ones
  * with the target's widening form (or stays scalar where it has none). */
@@ -435,6 +505,15 @@ int main(void)
         bool completed = false;
         for (size_t allowance = 0; allowance < 500 && !completed; allowance++) {
             if (!run_search_case(target, allowance, &completed))
+                return 1;
+        }
+        if (!completed)
+            return 1;
+    }
+    for (size_t target = 0; target < sizeof(targets) / sizeof(targets[0]); target++) {
+        bool completed = false;
+        for (size_t allowance = 0; allowance < 800 && !completed; allowance++) {
+            if (!run_open_search_case(target, allowance, &completed))
                 return 1;
         }
         if (!completed)

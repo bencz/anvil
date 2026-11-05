@@ -377,6 +377,31 @@ identity (not min/max) and the copies' accumulators and temporaries fit the
 target's FP/vector registers (`anvil_arch_info_t.num_fpr`); the vector trip
 count is then a multiple of twice the lanes.
 
+An *open search* has no trip test: its header reads one stream and leaves on
+a comparison of the element, as in a scan for a terminator or a delimiter in
+any language:
+
+```
+header: %i = phi [%start, preheader], [%i + 1, latch]
+        %x = load base[%i]; %c = cmp %x, %k
+        br %c, latch, exit
+latch:  br header
+```
+
+A loop walking a pointer instead (`p = phi [base, p + 1]`, read through `p`)
+first becomes `base + i`, where the target compares vectors of the element.
+The vector loop has no end; it runs until a vector holds a leaving lane, then
+resumes the scalar loop at that vector, which finds the exact element. It
+reads only aligned vectors, from the one holding `base[start]`: an aligned
+vector lies within one protection block (`access_fault_granularity` at least
+the vector size), and that block holds an element the scalar loop would read,
+so the vector loop faults only where the scalar one would. The first vector's
+lanes before the start are masked off (lane numbers, a constant vector,
+compared with their count); the mask is a loop-carried value, all lanes after
+the first vector. The vector loop runs when the start is element-aligned and
+`start - off` does not wrap the index, otherwise the scalar loop runs alone.
+Only one read-only stream, no stores and no accumulators.
+
 ### CFG Simplification (`ANVIL_PASS_SIMPLIFY_CFG`)
 
 Simplifies the control flow graph.
