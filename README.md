@@ -347,6 +347,7 @@ kernels this short):
 | qsort | recursion, compares, swaps, branches | 174 | 176 | 1.01 | 169 | 178 | 1.05 |
 | lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
 | hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 53 | 87 | 1.64 |
+| bigprime | transform butterflies: 64-bit products modulo a prime | 163 | 181 | 1.11 | 329 | 490 | 1.49 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
@@ -362,6 +363,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | qsort | 800,784 | 826,725 | 1.03 | 1,138,113 | 994,093 | 0.87 |
 | lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
 | hex | 1,149,427 | 1,346,047 | 1.17 | 1,183,965 | 1,380,549 | 1.17 |
+| bigprime | 722,178 | 940,628 | 1.30 | 931,585 | 1,028,757 | 1.10 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
 |--------|-----------------:|------------:|------:|------------:|------------:|------:|
@@ -373,6 +375,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | qsort | 1,012,850 | 998,492 | 0.99 | 1,049,861 | 877,019 | 0.84 |
 | lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
 | hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
+| bigprime | 970,260 | 1,099,375 | 1.13 | 111,575,208 | 113,357,198 | 1.02 |
 
 ANVIL comes out ahead with counter branches and update-form streams on
 PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep
