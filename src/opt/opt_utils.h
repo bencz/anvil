@@ -206,6 +206,35 @@ static inline uint64_t anvil_opt_mul_high(uint64_t a, uint64_t b, unsigned bits,
     return high;
 }
 
+/* Whether `value` is an integer constant whose bits, in its type's width,
+ * are one power of two 2^shift. */
+static inline bool anvil_opt_power_of_two(anvil_value_t *value, int *shift)
+{
+    if (!value || value->kind != ANVIL_VAL_CONST_INT || !value->type || !shift)
+        return false;
+    unsigned bits;
+    switch (value->type->kind) {
+        case ANVIL_TYPE_I8:
+        case ANVIL_TYPE_U8:  bits = 8;  break;
+        case ANVIL_TYPE_I16:
+        case ANVIL_TYPE_U16: bits = 16; break;
+        case ANVIL_TYPE_I32:
+        case ANVIL_TYPE_U32: bits = 32; break;
+        case ANVIL_TYPE_I64:
+        case ANVIL_TYPE_U64: bits = 64; break;
+        default: return false;
+    }
+    uint64_t mask = bits == 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
+    uint64_t v = anvil_const_int_unsigned_value(value) & mask;
+    if (v == 0 || (v & (v - 1)) != 0)
+        return false;
+    int s = 0;
+    while ((v >> s) != 1)
+        s++;
+    *shift = s;
+    return true;
+}
+
 /* ---------------------------------------------------------------------------
  * Typed-constant constructors (wrap the context-based builder API).
  * ------------------------------------------------------------------------- */

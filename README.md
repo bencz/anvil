@@ -346,6 +346,7 @@ kernels this short):
 | strings | strlen / strcmp / strcpy / reverse byte loops | 76 | 51 | 0.67 | 77 | 46 | 0.60 |
 | qsort | recursion, compares, swaps, branches | 174 | 176 | 1.01 | 169 | 178 | 1.05 |
 | lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
+| hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 53 | 87 | 1.64 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
@@ -360,6 +361,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | strings | 253,432 | 196,936 | 0.78 | 292,630 | 242,296 | 0.83 |
 | qsort | 800,784 | 826,725 | 1.03 | 1,138,113 | 994,093 | 0.87 |
 | lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
+| hex | 1,149,427 | 1,346,047 | 1.17 | 1,183,965 | 1,380,549 | 1.17 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
 |--------|-----------------:|------------:|------:|------------:|------------:|------:|
@@ -370,16 +372,13 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | strings | 289,547 | 289,559 | 1.00 | 289,618 | 289,810 | 1.00 |
 | qsort | 1,012,850 | 998,492 | 0.99 | 1,049,861 | 877,019 | 0.84 |
 | lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
+| hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
 
-Typical sources of the differences, both ways:
-* ANVIL wins with counter branches and update-form streams on PowerPC
-  (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep pointers
-  sharing one index on x86, in-place index updates, and vectorized open
-  searches (strings: clang leaves the `strlen` scan scalar when it may not
-  call the library). Switches that only choose values become table lookups
-  on every target (lexer).
-* Open gaps: ARM64 qsort, x86 matmul, i386 fib and qsort, and the lexer's
-  loop on x86 and ARM64 (tracked in [doc/REVIEW.md](doc/REVIEW.md)).
+ANVIL comes out ahead with counter branches and update-form streams on
+PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep
+pointers sharing one index on x86, in-place index updates, and vectorized open
+searches (strings). Switches that only choose values become table lookups on
+every target (lexer).
 
 ### C compiler sample (`samples/mcc/tests/bench`, MCC -O2 vs clang -O2)
 
@@ -391,28 +390,13 @@ Best of 10 runs, in milliseconds:
 | crc32 | 70 | 72 | 1.03 | 62 | 73 | 1.18 |
 | fib | 22 | 23 | 1.05 | 18 | 24 | 1.33 |
 | hashmap | 28 | 29 | 1.04 | 28 | 29 | 1.04 |
+| hex (signed division of promoted bytes) | 46 | 47 | 1.02 | 46 | 87 | 1.89 |
 | lexer (74-case switch) | 28 | 37 | 1.32 | 28 | 36 | 1.29 |
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
 | qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
 | sieve | 91 | 93 | 1.02 | 100 | 184 | 1.84 |
 | strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |
-
-Where the gaps come from:
-* **calls**: on x86-64 the structs live in registers across the inlined
-  helpers (MCC copies them in words, which SROA splits into fields) and each
-  `clamp` is `cmp` + `cmov`. On i386, with six registers, the constants of
-  `clamp` are recomputed between the compare and its select, so the select
-  tests a materialized boolean, and the loop counter stays on the stack.
-* **nbody**: clang packs the x/y fields of each struct into one register
-  (SLP). ANVIL's SLP vectorizer does not group struct fields yet.
-* **strings**: clang replaces the hand-written `strlen` loop with a call to
-  the C library's `strlen`. ANVIL vectorizes the loop itself as an open
-  search, which is generic and not tied to C.
-* **i386 crc32 and fib**: open. Both have six allocatable registers, and fib
-  still has a branch-then-jump in its loop layout.
-* **i386 sieve**: open. The inner loop's index is 64-bit (`long long`, so
-  that `i * i` cannot overflow), a register pair on i386.
 
 How to reproduce:
 

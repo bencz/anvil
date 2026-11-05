@@ -42,7 +42,7 @@ case "$ARCH" in
     ppc32) MODE=count; TARGET_CFLAGS="--target=powerpc-linux-gnu"; QEMU=qemu-ppc-static; LD=ld.lld ;;
     *) echo "unknown --arch=$ARCH" >&2; exit 2 ;;
 esac
-[ ${#KERNELS[@]} -eq 0 ] && KERNELS=(fib crc32 sieve matmul strings qsort lexer)
+[ ${#KERNELS[@]} -eq 0 ] && KERNELS=(fib crc32 sieve matmul strings qsort lexer hex)
 
 make -s -C "$ROOT" bench-ir >/dev/null
 GEN="$ROOT/build/bench_ir/anvil-bench-gen"

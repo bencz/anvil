@@ -196,6 +196,11 @@ static known_bits_t evaluate_bits(const anvil_def_use_t *uses, const known_bits_
             return add_bits(left, right, width, instr->op == ANVIL_OP_SUB);
         case ANVIL_OP_TRUNC:
             return (known_bits_t){ .zero = left.zero & mask, .one = left.one & mask };
+        case ANVIL_OP_BITCAST:
+            /* Between integers of one width (signed and unsigned): the same bits. */
+            if (anvil_type_is_integer(instr->operands[0]->type) && anvil_type_bit_width(instr->operands[0]->type) == width)
+                return left;
+            return unknown;
         case ANVIL_OP_ZEXT:
         case ANVIL_OP_SEXT:
         {
@@ -245,6 +250,76 @@ static known_bits_t evaluate_bits(const anvil_def_use_t *uses, const known_bits_
             return compare_bits(instr->op, left, right, anvil_type_bit_width(instr->operands[0]->type), instr->operands[0] == instr->operands[1]);
         default:
             return unknown;
+    }
+}
+
+/* Partial facts, for a value not fully known: a sign bit known zero makes
+ * a signed operation its unsigned form (sext -> zext, sar -> shr, sdiv and
+ * smod by 2^k -> shr and and), and an AND clearing only bits already known
+ * zero is its operand.  The constant is made before anything changes. */
+static bool rewrite_partial(anvil_ctx_t *ctx, const anvil_def_use_t *uses, const known_bits_t *facts, size_t index)
+{
+    anvil_instr_t *instr = uses->instructions[index];
+    unsigned width = anvil_type_bit_width(instr->result->type);
+    known_bits_t left = operand_bits(uses, facts, instr->operands[0]);
+    bool sign_zero = width && (left.zero >> (width - 1)) & 1;
+    int shift;
+    switch (instr->op)
+    {
+        case ANVIL_OP_SEXT:
+        {
+            unsigned source = anvil_type_bit_width(instr->operands[0]->type);
+            if (!source || !((left.zero >> (source - 1)) & 1))
+                return false;
+            instr->op = ANVIL_OP_ZEXT;
+            return true;
+        }
+        case ANVIL_OP_SAR:
+            if (!sign_zero)
+                return false;
+            instr->op = ANVIL_OP_SHR;
+            return true;
+        case ANVIL_OP_SDIV:
+        case ANVIL_OP_SMOD:
+        {
+            if (!sign_zero || instr->num_operands != 2 || !anvil_opt_power_of_two(instr->operands[1], &shift))
+                return false;
+            bool divide = instr->op == ANVIL_OP_SDIV;
+            int64_t value = divide ? shift : (int64_t)(width_mask((unsigned)shift));
+            anvil_value_t *operand = anvil_opt_make_const_int(ctx, instr->result->type, value);
+            if (!operand)
+                return false;
+            instr->op = divide ? ANVIL_OP_SHR : ANVIL_OP_AND;
+            instr->operands[1] = operand;
+            return true;
+        }
+        case ANVIL_OP_AND:
+        {
+            if (instr->num_operands != 2)
+                return false;
+            uint64_t mask = width_mask(width);
+            for (size_t side = 0; side < 2; side++)
+            {
+                const anvil_value_t *constant = instr->operands[1 - side];
+                if (constant->kind != ANVIL_VAL_CONST_INT)
+                    continue;
+                known_bits_t value = operand_bits(uses, facts, instr->operands[side]);
+                if (~(uint64_t)constant->data.i & mask & ~value.zero)
+                    continue;
+                anvil_value_t *same = instr->operands[side];
+                for (size_t use = uses->use_offsets[index]; use < uses->use_offsets[index + 1]; use++)
+                {
+                    anvil_instr_t *user = uses->instructions[uses->users[use]];
+                    for (size_t operand = 0; operand < user->num_operands; operand++)
+                        if (user->operands[operand] == instr->result)
+                            user->operands[operand] = same;
+                }
+                return true;
+            }
+            return false;
+        }
+        default:
+            return false;
     }
 }
 
@@ -307,7 +382,17 @@ anvil_pass_result_t anvil_pass_known_bits(anvil_func_t *func)
         }
     }
 
+    /* Values fully known become constants below; rewriting one here could
+     * hand its readers an operand that folding then erases. */
     bool changed = false;
+    for (size_t index = 0; index < uses.count; index++)
+    {
+        anvil_instr_t *instr = uses.instructions[index];
+        if (instr->result && anvil_type_is_integer(instr->result->type) && instr->num_operands &&
+            (facts[index].zero | facts[index].one) != width_mask(anvil_type_bit_width(instr->result->type)))
+            changed |= rewrite_partial(ctx, &uses, facts, index);
+    }
+
     for (size_t index = 0; index < uses.count; index++)
     {
         anvil_instr_t *instr = uses.instructions[index];

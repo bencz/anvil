@@ -402,6 +402,23 @@ the first vector. The vector loop runs when the start is element-aligned and
 `start - off` does not wrap the index, otherwise the scalar loop runs alone.
 Only one read-only stream, no stores and no accumulators.
 
+### Known Bits (`ANVIL_PASS_KNOWN_BITS`) - O2
+
+`src/opt/known_bits.c`. For every integer value, it records which bits are
+known zero and which are known one. The facts come from AND, OR, XOR, NOT,
+ADD and SUB, truncations and extensions, shifts by constants, compares, PHIs
+and selects, and bitcasts between integers of one width. They are solved to a
+fixpoint over a worklist. A value whose bits are all known becomes a constant.
+For a value that is not fully known:
+- a signed operation whose operand has its sign bit known zero becomes its
+  unsigned form: `sext` → `zext`, `sar` → `shr`, `sdiv` by 2^k → `shr` by
+  k, `smod` by 2^k → `and` with 2^k − 1;
+- an AND whose constant clears only bits already known zero is replaced by
+  its operand.
+
+C code that promotes a byte or a masked value to `int` and divides, reduces
+or shifts it then needs no sign fix-up.
+
 ### Scalar Replacement of Aggregates (`ANVIL_PASS_SROA`) - O2
 
 `src/opt/sroa.c`. A struct or array allocated in the entry block splits into
@@ -748,6 +765,7 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/load_elim.c` | Redundant load elimination |
 | `src/opt/ctx_opt.c` | Context integration |
 | `src/opt/cse.c` | Common subexpression elimination |
+| `src/opt/known_bits.c` | Known bits |
 | `src/opt/sroa.c` | Scalar replacement of aggregates |
 
 ## Not Implemented

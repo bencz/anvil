@@ -693,6 +693,36 @@ static void test_bit_facts(anvil_arch_t arch)
     check(anvil_pass_known_bits(range) == ANVIL_PASS_RUN_CHANGED && range->entry->last->operands[0]->kind == ANVIL_VAL_CONST_INT &&
           range->entry->last->operands[0]->data.u == 1, "signed bounds preserve sign-bit ordering");
 
+    /* m = x & 0x7fff: its sign bit is known zero, its value unknown.  The
+     * signed operations of m become unsigned ones, an AND clearing only known
+     * zeros is m itself, a quotient of (i32)((u32)x >> 1) shifts too (facts
+     * cross integer bitcasts); sdiv of the unknown x stays signed. */
+    anvil_type_t *i16 = anvil_type_i16(ctx);
+    anvil_func_t *partial = anvil_func_create(module, "partial_facts", anvil_type_func(ctx, i32, signed_params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(partial));
+    argument = anvil_func_get_param(partial, 0);
+    anvil_value_t *low = anvil_build_and(ctx, argument, anvil_const_i32(ctx, 0x7fff), "low");
+    anvil_value_t *widened = anvil_build_sext(ctx, anvil_build_trunc(ctx, low, i16, "narrow"), i32, "widened");
+    anvil_value_t *shifted_right = anvil_build_sar(ctx, low, anvil_const_i32(ctx, 3), "shifted");
+    anvil_value_t *quotient = anvil_build_sdiv(ctx, low, anvil_const_i32(ctx, 8), "quotient");
+    anvil_value_t *remainder = anvil_build_smod(ctx, low, anvil_const_i32(ctx, 16), "remainder");
+    anvil_value_t *same = anvil_build_and(ctx, low, anvil_const_i32(ctx, 0xffff), "same");
+    anvil_value_t *signed_quotient = anvil_build_sdiv(ctx, argument, anvil_const_i32(ctx, 8), "signed");
+    anvil_value_t *unsigned_argument = anvil_build_bitcast(ctx, argument, u32, "unsigned");
+    anvil_value_t *half = anvil_build_bitcast(ctx, anvil_build_shr(ctx, unsigned_argument, anvil_const_u32(ctx, 1), "halved"), i32, "half");
+    anvil_value_t *half_quotient = anvil_build_sdiv(ctx, half, anvil_const_i32(ctx, 4), "half.quotient");
+    anvil_value_t *total = anvil_build_add(ctx, widened, shifted_right, "t1");
+    total = anvil_build_add(ctx, total, quotient, "t2");
+    total = anvil_build_add(ctx, total, remainder, "t3");
+    total = anvil_build_add(ctx, total, same, "t4");
+    total = anvil_build_add(ctx, total, half_quotient, "t5");
+    anvil_build_ret(ctx, anvil_build_add(ctx, total, signed_quotient, "t6"));
+    check(anvil_pass_known_bits(partial) == ANVIL_PASS_RUN_CHANGED, "known sign bits rewrite signed operations");
+    anvil_pass_dce(partial);
+    check(count_opcode(partial, ANVIL_OP_SEXT) == 0 && count_opcode(partial, ANVIL_OP_SAR) == 0 && count_opcode(partial, ANVIL_OP_SMOD) == 0 &&
+          count_opcode(partial, ANVIL_OP_SDIV) == 1 && count_opcode(partial, ANVIL_OP_ZEXT) == 1 && count_opcode(partial, ANVIL_OP_SHR) == 4 &&
+          count_opcode(partial, ANVIL_OP_AND) == 2, "a sign known zero makes sext, sar, sdiv and smod unsigned; a redundant mask goes");
+
     char error[256] = { 0 };
     check(anvil_module_verify(module, error, sizeof(error)), "bit facts preserve verified IR");
     char *assembly = NULL;

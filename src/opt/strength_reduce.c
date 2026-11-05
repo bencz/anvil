@@ -26,42 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if a value is a constant power of 2 */
-static bool is_power_of_2(anvil_value_t *val, int *shift)
-{
-    if (!val || val->kind != ANVIL_VAL_CONST_INT || !val->type || !shift) {
-        return false;
-    }
-
-    unsigned bits;
-    switch (val->type->kind) {
-        case ANVIL_TYPE_I8:
-        case ANVIL_TYPE_U8:  bits = 8;  break;
-        case ANVIL_TYPE_I16:
-        case ANVIL_TYPE_U16: bits = 16; break;
-        case ANVIL_TYPE_I32:
-        case ANVIL_TYPE_U32: bits = 32; break;
-        case ANVIL_TYPE_I64:
-        case ANVIL_TYPE_U64: bits = 64; break;
-        default: return false;
-    }
-
-    uint64_t mask = bits == 64 ? UINT64_MAX
-                               : ((UINT64_C(1) << bits) - 1);
-    uint64_t v = anvil_const_int_unsigned_value(val) & mask;
-    if (v == 0) return false;
-
-    /* Check if only one bit is set */
-    if ((v & (v - 1)) != 0) return false;
-    
-    /* Calculate shift amount */
-    int s = 0;
-    while ((v >> s) != 1) s++;
-    
-    *shift = s;
-    return true;
-}
-
 /* Create a constant for shift amount */
 static anvil_value_t *make_shift_const(anvil_ctx_t *ctx, anvil_type_t *type,
                                        int shift)
@@ -802,7 +766,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
             switch (instr->op) {
                 case ANVIL_OP_MUL:
                     /* x * 2^n -> x << n */
-                    if (is_power_of_2(rhs, &shift)) {
+                    if (anvil_opt_power_of_two(rhs, &shift)) {
                         anvil_value_t *amount = make_shift_const(
                             ctx, lhs->type, shift);
                         if (!amount) break;
@@ -810,7 +774,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                         instr->no_wrap = false;
                         instr->operands[1] = amount;
                         changed = true;
-                    } else if (is_power_of_2(lhs, &shift)) {
+                    } else if (anvil_opt_power_of_two(lhs, &shift)) {
                         /* 2^n * x -> x << n */
                         anvil_value_t *amount = make_shift_const(
                             ctx, rhs->type, shift);
@@ -825,9 +789,9 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                     
                 case ANVIL_OP_UDIV:
                     /* x / 2^n -> x >> n (unsigned) */
-                    if (!is_power_of_2(rhs, &shift) && reduce_exact_division(ctx, instr)) {
+                    if (!anvil_opt_power_of_two(rhs, &shift) && reduce_exact_division(ctx, instr)) {
                         changed = true;
-                    } else if (is_power_of_2(rhs, &shift)) {
+                    } else if (anvil_opt_power_of_two(rhs, &shift)) {
                         instr->no_wrap = false;
                         anvil_value_t *amount = make_shift_const(
                             ctx, lhs->type, shift);
@@ -843,7 +807,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
                     
                 case ANVIL_OP_SDIV:
                 case ANVIL_OP_SMOD:
-                    if (reduce_exact_division(ctx, instr) || (is_power_of_2(rhs, &shift) && reduce_signed_power(ctx, instr, (unsigned)shift)) ||
+                    if (reduce_exact_division(ctx, instr) || (anvil_opt_power_of_two(rhs, &shift) && reduce_signed_power(ctx, instr, (unsigned)shift)) ||
                         reduce_constant_division(ctx, instr)) {
                         instr->no_wrap = false;
                         changed = true;
@@ -858,7 +822,7 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
 
                 case ANVIL_OP_UMOD:
                     /* x % 2^n -> x & (2^n - 1) (unsigned) */
-                    if (is_power_of_2(rhs, &shift)) {
+                    if (anvil_opt_power_of_two(rhs, &shift)) {
                         anvil_value_t *mask = make_mask_const(
                             ctx, lhs->type, shift);
                         if (!mask) break;
