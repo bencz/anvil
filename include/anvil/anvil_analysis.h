@@ -93,6 +93,8 @@ typedef struct {
 bool anvil_def_use_build(anvil_func_t *func, anvil_def_use_t *graph);
 void anvil_def_use_destroy(anvil_def_use_t *graph);
 size_t anvil_def_use_definition(const anvil_def_use_t *graph, const anvil_value_t *value);
+/* How many operands read `value` (0 when the function does not define it). */
+size_t anvil_def_use_count(const anvil_def_use_t *graph, const anvil_value_t *value);
 
 typedef enum {
     ANVIL_ALIAS_MAY,

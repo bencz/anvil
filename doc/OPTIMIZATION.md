@@ -52,7 +52,9 @@ vectors follow `anvil_func_set_fp_vectorization`, on by default (MCC:
 `-fno-fp-vectorize` turns it off): lane-wise arithmetic gives the same results
 as the scalar loop, the policy exists for exception-flag and denormal
 behaviour.  Reductions (a vectorized sum) also need
-`anvil_func_set_fp_reassociation`, off by default.
+`anvil_func_set_fp_reassociation`, off by default.  Inlining copies a callee
+only into a caller with the same floating-point policies, so the inlined code
+keeps its own.
 
 ## Available Passes
 
@@ -777,16 +779,6 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 
 ## Not Implemented
 
-The following are **not** present in the current optimizer. All implemented
-passes are local (single-basic-block) except CFG simplification and DCE, which
-work across the function. There is no SSA-construction / promotion step, so the
-"SSA" properties of the IR depend on how the front-end builds it:
-
-- **mem2reg / register promotion (SSA construction)** — alloca/load/store are not
-  promoted to SSA values; only the local memory passes (store-load propagation,
-  dead store, redundant load) clean up obvious cases.
-- **Global Value Numbering (GVN)** — only local CSE exists.
-- **Loop-Invariant Code Motion (LICM)**
-- **Loop unrolling**
-- **Inlining**
-- **Tail call optimization**
+- **Tail calls to other functions** (sibling calls): a recursive tail call
+  becomes a loop (`ANVIL_PASS_TAIL_RECURSION`), but a call in tail position to
+  another function keeps its call and return.

@@ -354,8 +354,7 @@ static int contractible_side(anvil_ctx_t *ctx, const anvil_def_use_t *uses, cons
         const anvil_value_t *product = add->operands[side];
         if (product->kind != ANVIL_VAL_INSTR || product->data.instr->op != ANVIL_OP_FMUL || product->data.instr->num_operands != 2)
             continue;
-        size_t definition = anvil_def_use_definition(uses, product);
-        if (definition != SIZE_MAX && uses->use_offsets[definition + 1] - uses->use_offsets[definition] == 1)
+        if (anvil_def_use_count(uses, product) == 1)
             return side;
     }
     return -1;
@@ -394,8 +393,7 @@ static anvil_instr_t *distributable(const anvil_def_use_t *uses, anvil_op_t ext,
         (narrow->op != ANVIL_OP_ADD && narrow->op != ANVIL_OP_SUB && narrow->op != ANVIL_OP_MUL) ||
         narrow->result->type->is_signed != (ext == ANVIL_OP_SEXT))
         return NULL;
-    size_t definition = anvil_def_use_definition(uses, value);
-    return definition != SIZE_MAX && uses->use_offsets[definition + 1] - uses->use_offsets[definition] == 1 ? narrow : NULL;
+    return anvil_def_use_count(uses, value) == 1 ? narrow : NULL;
 }
 
 /* Rewrites `instr` (ext of a distributable operation) in place into the

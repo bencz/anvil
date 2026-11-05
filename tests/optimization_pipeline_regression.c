@@ -867,9 +867,43 @@ static void test_word_copy(anvil_arch_t arch, bool sweep)
     }
 }
 
+/* A call inlines only when caller and callee share their floating-point
+ * policies: inlined code keeps its own. */
+static void test_inline_fp_policy(void)
+{
+    for (int policy = 0; policy < 4; policy++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        anvil_module_t *module = anvil_module_create(ctx, "inline_policy");
+        anvil_type_t *f64 = anvil_type_f64(ctx);
+        anvil_type_t *params[] = { f64, f64 };
+        anvil_type_t *type = anvil_type_func(ctx, f64, params, 2, false);
+        anvil_func_t *callee = anvil_func_create(module, "scale", type, ANVIL_LINK_INTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(callee));
+        anvil_build_ret(ctx, anvil_build_fdiv(ctx, anvil_func_get_param(callee, 0), anvil_func_get_param(callee, 1), "q"));
+        anvil_func_t *caller = anvil_func_create(module, "caller", type, ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+        anvil_value_t *args[] = { anvil_func_get_param(caller, 0), anvil_func_get_param(caller, 1) };
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 2, "r", &result);
+        anvil_build_ret(ctx, result);
+        if (policy == 1)
+            anvil_func_set_fp_contraction(callee, true);
+        if (policy == 2)
+            anvil_func_set_fp_reassociation(caller, true);
+        if (policy == 3)
+            anvil_func_set_fp_vectorization(callee, false);
+        check(anvil_pass_inline(caller) != ANVIL_PASS_RUN_ERROR, "inlining runs");
+        check(count_opcode(caller, ANVIL_OP_CALL) == (policy ? 1u : 0u), "only a callee with the caller's FP policies inlines");
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
     test_word_copy(ANVIL_ARCH_X86_64, true);
+    test_inline_fp_policy();
     test_promotion_allocation_failure();
     test_cfg_cache();
     test_parallel_copies();

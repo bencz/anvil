@@ -30,6 +30,12 @@ size_t anvil_def_use_definition(const anvil_def_use_t *graph, const anvil_value_
     return SIZE_MAX;
 }
 
+size_t anvil_def_use_count(const anvil_def_use_t *graph, const anvil_value_t *value)
+{
+    size_t definition = anvil_def_use_definition(graph, value);
+    return definition == SIZE_MAX ? 0 : graph->use_offsets[definition + 1] - graph->use_offsets[definition];
+}
+
 void anvil_def_use_destroy(anvil_def_use_t *graph)
 {
     if (!graph)

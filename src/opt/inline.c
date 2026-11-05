@@ -300,6 +300,14 @@ done:
     return success;
 }
 
+/* Inlined code keeps its own floating-point policy: the caller's must be
+ * the same. */
+static bool same_fp_policy(const anvil_func_t *caller, const anvil_func_t *callee)
+{
+    return caller->fp_vectorization == callee->fp_vectorization && caller->fp_reassociation == callee->fp_reassociation &&
+           caller->fp_contraction == callee->fp_contraction;
+}
+
 anvil_pass_result_t anvil_pass_inline(anvil_func_t *func)
 {
     if (!func || !func->parent)
@@ -320,7 +328,7 @@ anvil_pass_result_t anvil_pass_inline(anvil_func_t *func)
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next)
         {
             anvil_func_t *callee = direct_callee(instr);
-            if (!callee || callee == func || callee->parent != func->parent || callee->fp_vectorization != func->fp_vectorization || !instr->next)
+            if (!callee || callee == func || callee->parent != func->parent || !same_fp_policy(func, callee) || !instr->next)
                 continue;
 
             size_t cost = body_cost(callee);

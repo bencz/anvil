@@ -65,10 +65,22 @@ du __fixunssfdi(float f) { return __fixunsdfdi(f); }
 di __fixsfdi(float f) { return __fixdfdi(f); }
 su __fixunsdfsi(double d) { return d >= 2147483648.0 ? (su)(int)(d - 2147483648.0) ^ 0x80000000u : (su)(int)d; }
 su __fixunssfsi(float f) { return __fixunsdfsi(f); }
-/* Library square roots for the NaN fallback path of inline sqrt. */
+/* Library square roots for the NaN fallback path of inline sqrt.  32-bit
+ * PowerPC CPUs may lack the optional fsqrt: Newton's iteration from a start
+ * with the exponent halved, which converges in a few steps. */
 #if defined(__powerpc__) && !defined(__powerpc64__)
-double sqrt(double x) { double r; __asm__("fsqrt %0, %1" : "=f"(r) : "f"(x)); return r; }
-float sqrtf(float x) { double r; __asm__("fsqrt %0, %1" : "=f"(r) : "f"((double)x)); return (float)r; }
+double sqrt(double x)
+{
+    if (!(x > 0) || x > 1.7976931348623157e308)
+        return x == 0 || x > 0 ? x : (x - x) / (x - x);
+    union { double d; du u; } start = { x };
+    start.u = (start.u >> 1) + (0x3ff0000000000000ull >> 1);
+    double r = start.d;
+    for (int step = 0; step < 6; step++)
+        r = 0.5 * (r + x / r);
+    return r;
+}
+float sqrtf(float x) { return (float)sqrt(x); }
 #else
 double sqrt(double x) { return __builtin_elementwise_sqrt(x); }
 float sqrtf(float x) { return __builtin_elementwise_sqrt(x); }
