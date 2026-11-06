@@ -5,14 +5,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Internal callees within a size budget: at O2 small bodies, or larger
- * ones with a single call site (the copy replaces the original, which dead
- * code removal then drops); at O3 twice those.  Calls inside the callee are
+/* Callees within a size budget: at O2 small bodies, internal or external
+ * ones nothing can replace (an external one stays for other callers; a weak
+ * one may be replaced at link time, and under PIC a default-visibility one
+ * at load time, anvil_symbol_uses_got), or larger internal ones with a
+ * single call site (the copy replaces the original, which dead code removal
+ * then drops); at O3 twice those.  Conversions do not count toward the
+ * budget, as they mostly fold into a load, a register view or their user;
+ * the caller's growth counts every instruction.  Calls inside the callee are
  * copied too, except a call of the callee itself (no recursive expansion);
  * static allocas move to the caller's entry block, so they stay static and
  * promotable wherever the call sits.  Varargs and dynamic allocas keep the
  * call.  The caller stops growing at INLINE_CALLER_LIMIT. */
-enum { INLINE_SMALL_BODY = 24, INLINE_SINGLE_BODY = 64, INLINE_BODY_LIMIT = 128, INLINE_CALLER_LIMIT = 1024 };
+enum { INLINE_SMALL_BODY = 48, INLINE_SINGLE_BODY = 64, INLINE_BODY_LIMIT = 128, INLINE_CALLER_LIMIT = 1024 };
 
 typedef struct {
     anvil_opt_cfg_t cfg;
@@ -35,12 +40,16 @@ static anvil_func_t *direct_callee(anvil_instr_t *call)
     return value && value->kind == ANVIL_VAL_FUNC ? value->data.func : NULL;
 }
 
-static size_t body_cost(const anvil_func_t *callee)
+/* The budget cost of `callee` (SIZE_MAX: not inlinable) and, in
+ * *instructions, how many instructions a copy adds. */
+static size_t body_cost(const anvil_func_t *callee, size_t *instructions)
 {
-    if (callee->linkage != ANVIL_LINK_INTERNAL || callee->is_declaration || callee->type->data.func.variadic)
+    if ((callee->linkage != ANVIL_LINK_INTERNAL && callee->linkage != ANVIL_LINK_EXTERNAL) || callee->is_declaration ||
+        callee->type->data.func.variadic || anvil_symbol_uses_got(callee->owner_ctx, callee->value))
         return SIZE_MAX;
 
     size_t cost = 0;
+    *instructions = 0;
     size_t returns = 0;
     for (anvil_block_t *block = callee->blocks; block; block = block->next)
     {
@@ -60,8 +69,9 @@ static size_t body_cost(const anvil_func_t *callee)
             }
 
             returns += instr->op == ANVIL_OP_RET;
-            cost += instr->op == ANVIL_OP_SWITCH ? 1 + instr->num_switch_cases : 1;
-            if (cost > INLINE_BODY_LIMIT)
+            bool conversion = instr->op == ANVIL_OP_TRUNC || instr->op == ANVIL_OP_ZEXT || instr->op == ANVIL_OP_SEXT || instr->op == ANVIL_OP_BITCAST;
+            cost += instr->op == ANVIL_OP_SWITCH ? 1 + instr->num_switch_cases : conversion ? 0 : 1;
+            if (++*instructions > INLINE_BODY_LIMIT)
                 return SIZE_MAX;
         }
     }
@@ -331,17 +341,20 @@ anvil_pass_result_t anvil_pass_inline(anvil_func_t *func)
             if (!callee || callee == func || callee->parent != func->parent || !same_fp_policy(func, callee) || !instr->next)
                 continue;
 
-            size_t cost = body_cost(callee);
+            size_t instructions;
+            size_t cost = body_cost(callee, &instructions);
             size_t scale = aggressive ? 2 : 1, calls = 0;
-            bool fits = cost <= INLINE_SMALL_BODY * scale || (cost <= INLINE_SINGLE_BODY * scale && anvil_opt_direct_calls(callee->parent, callee, NULL, &calls) && calls == 1);
-            if (!fits || cost + 2 > INLINE_CALLER_LIMIT - size)
+            bool fits = cost <= INLINE_SMALL_BODY * scale ||
+                        (callee->linkage == ANVIL_LINK_INTERNAL && cost <= INLINE_SINGLE_BODY * scale &&
+                         anvil_opt_direct_calls(callee->parent, callee, NULL, &calls) && calls == 1);
+            if (!fits || instructions + 2 > INLINE_CALLER_LIMIT - size)
                 continue;
 
             if (!inline_call(func, callee, instr))
                 return ANVIL_PASS_RUN_ERROR;
 
             changed = true;
-            size += cost + 2;
+            size += instructions + 2;
             break;
         }
     }

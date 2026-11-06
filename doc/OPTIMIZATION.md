@@ -43,7 +43,7 @@ level is a strict superset of the one below it.
 | O0 | `ANVIL_OPT_NONE` | None (default) |
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, switch-table, inline (small bodies and single call sites), loop-vectorize; unrolling |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, switch-table, inline (small bodies, internal or external and not preemptible, and internal single call sites), loop-vectorize; unrolling |
 | O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + larger inlining budgets, vectorize (SLP) |
 
 The two vectorizers create vector operations only where the backend's
@@ -250,10 +250,13 @@ x = *p;
 z = x + x;
 ```
 
-**Limitations:**
-- Only analyzes within a single basic block
-- Conservative with stores (any store may invalidate cached loads)
-- Different allocas are known not to alias
+`src/opt/load_elim.c`. A load takes the value of a load or store of the same
+address (`anvil_memory_alias` says MUST) earlier in its block or in a
+dominating one, when every path between them preserves it: no volatile
+access, no store that may alias, no call that may write memory or be
+observable. Nothing writes a read-only global (`anvil_memory_read_only`,
+through any address arithmetic), so stores and calls never invalidate a load
+of one.
 
 ### Common Subexpression Elimination (`ANVIL_PASS_COMMON_SUBEXPR`)
 

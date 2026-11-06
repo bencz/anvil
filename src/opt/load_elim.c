@@ -25,7 +25,7 @@
 /* Check if instruction may modify memory at pointer p */
 static bool may_modify_ptr(anvil_instr_t *instr, anvil_value_t *ptr)
 {
-    if (!instr) return false;
+    if (!instr || anvil_memory_read_only(ptr)) return false;
     if (anvil_op_is_atomic(instr->op))
         return true;
 

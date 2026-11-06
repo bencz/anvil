@@ -389,7 +389,7 @@ Best of 10 runs, in milliseconds:
 
 | kernel | x86-64 clang | x86-64 MCC | ratio | i386 clang | i386 MCC | ratio |
 |--------|-------------:|-----------:|------:|-----------:|---------:|------:|
-| andlut (AND/OR/XOR through a nibble table) | 233 | 1481 | 6.36 | 244 | 1491 | 6.11 |
+| andlut (AND/OR/XOR through a nibble table) | 232 | 426 | 1.84 | 241 | 451 | 1.87 |
 | bigprime (number-theoretic transforms, 64-bit products modulo a prime) | 299 | 368 | 1.23 | 367 | 494 | 1.35 |
 | calls (small static helpers, structs by value) | 97 | 87 | 0.90 | 97 | 167 | 1.72 |
 | crc32 | 70 | 72 | 1.03 | 62 | 73 | 1.18 |

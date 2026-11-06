@@ -16,9 +16,18 @@ static size_t count_calls(anvil_func_t *func)
     return count;
 }
 
-static bool run_case(anvil_arch_t arch, anvil_linkage_t linkage, size_t allowance, bool *completed)
+/* An internal callee inlines, and an external one when nothing can replace
+ * it; a weak one, or an external one under PIC (interposable at load time),
+ * keeps its call. */
+static bool run_case(anvil_arch_t arch, anvil_linkage_t linkage, bool pic, size_t allowance, bool *completed)
 {
     anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    if (pic && anvil_ctx_set_reloc_model(ctx, ANVIL_RELOC_PIC) != ANVIL_OK)
+    {
+        anvil_ctx_destroy(ctx);
+        *completed = true;
+        return true;
+    }
     anvil_module_t *module = anvil_module_create(ctx, "inline_contracts");
     anvil_type_t *integer = anvil_type_i32(ctx);
     anvil_type_t *type = anvil_type_func(ctx, integer, &integer, 1, false);
@@ -66,7 +75,7 @@ static bool run_case(anvil_arch_t arch, anvil_linkage_t linkage, size_t allowanc
     *completed = status != ANVIL_PASS_RUN_ERROR;
     if (*completed)
     {
-        bool eligible = linkage == ANVIL_LINK_INTERNAL;
+        bool eligible = linkage == ANVIL_LINK_INTERNAL || (linkage == ANVIL_LINK_EXTERNAL && !pic);
         valid &= status == (eligible ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED);
         valid &= count_calls(caller) == (eligible ? 0 : 1);
         valid &= anvil_pass_inline(caller) == ANVIL_PASS_RUN_UNCHANGED;
@@ -84,7 +93,8 @@ static bool run_case(anvil_arch_t arch, anvil_linkage_t linkage, size_t allowanc
 
     if (!valid)
     {
-        fprintf(stderr, "inline failure: arch=%d linkage=%d allowance=%zu status=%d error=%s context=%s\n", arch, linkage, allowance, status, error, anvil_ctx_get_error(ctx));
+        fprintf(stderr, "inline failure: arch=%d linkage=%d pic=%d allowance=%zu status=%d error=%s context=%s\n", arch, linkage, pic, allowance, status, error,
+                anvil_ctx_get_error(ctx));
         anvil_dump_module(stderr, module);
         if (arch == ANVIL_ARCH_X86_64)
         {
@@ -111,24 +121,25 @@ int main(void)
     bool completed = false;
     for (size_t allowance = 0; allowance < 500 && !completed; allowance++)
     {
-        if (!run_case(ANVIL_ARCH_X86_64, ANVIL_LINK_INTERNAL, allowance, &completed))
+        if (!run_case(ANVIL_ARCH_X86_64, ANVIL_LINK_INTERNAL, false, allowance, &completed))
             return 1;
     }
 
     if (!completed)
         return 1;
 
+    static const anvil_linkage_t linkages[] = { ANVIL_LINK_INTERNAL, ANVIL_LINK_EXTERNAL, ANVIL_LINK_WEAK };
     for (anvil_arch_t arch = ANVIL_ARCH_X86; arch < ANVIL_ARCH_COUNT; arch++)
     {
-        if (!run_case(arch, ANVIL_LINK_INTERNAL, SIZE_MAX, &completed) || !completed)
-            return 1;
+        for (size_t linkage = 0; linkage < sizeof(linkages) / sizeof(linkages[0]); linkage++)
+        {
+            for (int pic = 0; pic < 2; pic++)
+            {
+                if (!run_case(arch, linkages[linkage], pic != 0, SIZE_MAX, &completed) || !completed)
+                    return 1;
+            }
+        }
     }
-
-    if (!run_case(ANVIL_ARCH_X86_64, ANVIL_LINK_EXTERNAL, SIZE_MAX, &completed) || !completed)
-        return 1;
-
-    if (!run_case(ANVIL_ARCH_X86_64, ANVIL_LINK_WEAK, SIZE_MAX, &completed) || !completed)
-        return 1;
 
     return 0;
 }

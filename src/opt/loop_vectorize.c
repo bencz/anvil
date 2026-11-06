@@ -1067,7 +1067,7 @@ static anvil_type_t *accumulator_vector(const lv_plan *plan, const lv_reduction 
 static bool read_only_stream(const lv_plan *plan, size_t stream)
 {
     const anvil_instr_t *gep = plan->streams[stream];
-    return !plan->stored[stream] && gep->num_operands > 0 && anvil_global_is_constant(gep->operands[0]);
+    return !plan->stored[stream] && anvil_memory_read_only(gep->result);
 }
 
 static bool needs_overlap_check(const lv_plan *plan, size_t a, size_t b)

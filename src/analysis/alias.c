@@ -34,6 +34,20 @@ static bool add_gep_offset(const anvil_instr_t *instr, int64_t *offset)
     return true;
 }
 
+/* The address `pointer` is computed from by one step of address
+ * arithmetic (a constant symbol address, a pointer bitcast, a GEP), or NULL. */
+static const anvil_value_t *address_source(const anvil_value_t *pointer)
+{
+    if (pointer->kind == ANVIL_VAL_CONST_GEP || pointer->kind == ANVIL_VAL_CONST_SYMBOL_ADDR)
+        return pointer->data.reloc.symbol;
+    const anvil_instr_t *instr = pointer->kind == ANVIL_VAL_INSTR ? pointer->data.instr : NULL;
+    if (!instr || !instr->num_operands)
+        return NULL;
+    if (instr->op == ANVIL_OP_GEP || instr->op == ANVIL_OP_STRUCT_GEP || (instr->op == ANVIL_OP_BITCAST && instr->operands[0]->type->kind == ANVIL_TYPE_PTR))
+        return instr->operands[0];
+    return NULL;
+}
+
 static bool describe_location(const anvil_value_t *pointer, size_t size, memory_location_t *location)
 {
     if (!pointer || !size)
@@ -43,34 +57,27 @@ static bool describe_location(const anvil_value_t *pointer, size_t size, memory_
     for (;;)
     {
         const anvil_value_t *base = location->base;
-        if (base->kind == ANVIL_VAL_CONST_GEP || base->kind == ANVIL_VAL_CONST_SYMBOL_ADDR)
+        bool constant = base->kind == ANVIL_VAL_CONST_GEP || base->kind == ANVIL_VAL_CONST_SYMBOL_ADDR;
+        if (constant && !base->data.reloc.symbol)
+            return false;
+        const anvil_value_t *source = address_source(base);
+        if (!source)
+            break;
+        if (constant)
         {
-            if (!base->data.reloc.symbol || !anvil_gep_accumulate_offset(&location->offset, base->data.reloc.addend))
+            if (!anvil_gep_accumulate_offset(&location->offset, base->data.reloc.addend))
                 return false;
-
-            location->base = base->data.reloc.symbol;
-            continue;
         }
-
-        if (base->kind != ANVIL_VAL_INSTR)
-            break;
-
-        const anvil_instr_t *instr = base->data.instr;
-        if (instr->op == ANVIL_OP_BITCAST && instr->operands[0]->type->kind == ANVIL_TYPE_PTR)
+        else if (base->data.instr->op != ANVIL_OP_BITCAST)
         {
-            location->base = instr->operands[0];
-            continue;
+            /* A variable index: this address is the root, constant offsets
+             * from it still apart. */
+            int64_t offset = location->offset;
+            if (!add_gep_offset(base->data.instr, &offset))
+                break;
+            location->offset = offset;
         }
-
-        if (instr->op != ANVIL_OP_GEP && instr->op != ANVIL_OP_STRUCT_GEP)
-            break;
-        /* A variable index: this address is the root, constant offsets
-         * from it still apart. */
-        int64_t offset = location->offset;
-        if (!add_gep_offset(instr, &offset))
-            break;
-        location->offset = offset;
-        location->base = instr->operands[0];
+        location->base = source;
     }
 
     const anvil_value_t *base = location->base;
@@ -94,6 +101,13 @@ bool anvil_memory_offset(const anvil_value_t *pointer, const anvil_value_t **roo
     *root = location.base;
     *offset = location.offset;
     return true;
+}
+
+bool anvil_memory_read_only(const anvil_value_t *pointer)
+{
+    for (const anvil_value_t *source; pointer && (source = address_source(pointer));)
+        pointer = source;
+    return anvil_global_is_constant(pointer);
 }
 
 bool anvil_memory_bounded_range(const anvil_value_t *pointer, size_t size, const anvil_value_t **object, size_t *offset)

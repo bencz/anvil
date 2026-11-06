@@ -110,6 +110,9 @@ anvil_alias_result_t anvil_memory_alias(const anvil_value_t *left, size_t left_s
  * is the first value that is none of those.  Two accesses through one root
  * (where one dominates the other) are apart by their offsets. */
 bool anvil_memory_offset(const anvil_value_t *pointer, const anvil_value_t **root, int64_t *offset);
+/* Whether `pointer` addresses a read-only global (anvil_global_set_constant)
+ * through any address arithmetic: nothing writes the memory it reads. */
+bool anvil_memory_read_only(const anvil_value_t *pointer);
 /* Succeeds only for a complete range inside a known stack/global object. */
 bool anvil_memory_bounded_range(const anvil_value_t *pointer, size_t size, const anvil_value_t **object, size_t *offset);
 

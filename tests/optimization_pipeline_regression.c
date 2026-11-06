@@ -938,6 +938,86 @@ static void test_licm_speculation(anvil_arch_t arch)
     anvil_ctx_destroy(ctx);
 }
 
+/* A small external callee with strong linkage inlines and stays defined for
+ * other callers; a weak one may be replaced at link time, and under PIC any
+ * external one at load time, so they keep their call.  Conversions cost
+ * nothing: a body of 40 operations wrapped in 80 casts fits the budget. */
+static void test_inline_external(anvil_arch_t arch)
+{
+    for (int variant = 0; variant < 3; variant++) {
+        bool weak = variant == 1, pic = variant == 2;
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+        if (pic && anvil_ctx_set_reloc_model(ctx, ANVIL_RELOC_PIC) != ANVIL_OK) {
+            anvil_ctx_destroy(ctx);
+            continue;
+        }
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        anvil_module_t *module = anvil_module_create(ctx, "inline_external");
+        anvil_type_t *i32 = anvil_type_i32(ctx), *i64 = anvil_type_i64(ctx);
+        anvil_type_t *params[] = { i32 };
+        anvil_type_t *type = anvil_type_func(ctx, i32, params, 1, false);
+        anvil_func_t *callee = anvil_func_create(module, "mix", type, weak ? ANVIL_LINK_WEAK : ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(callee));
+        anvil_value_t *value = anvil_func_get_param(callee, 0);
+        for (int step = 0; step < 40; step++) {
+            anvil_value_t *wide = anvil_build_sext(ctx, value, i64, "wide");
+            anvil_value_t *mixed = anvil_build_xor(ctx, wide, anvil_const_i64(ctx, step * 7 + 1), "mixed");
+            value = anvil_build_trunc(ctx, mixed, i32, "narrow");
+        }
+        anvil_build_ret(ctx, value);
+        anvil_func_t *caller = anvil_func_create(module, "caller", type, ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(caller));
+        anvil_value_t *args[] = { anvil_func_get_param(caller, 0) };
+        anvil_value_t *result = NULL;
+        anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 1, "r", &result);
+        anvil_build_ret(ctx, result);
+        check(anvil_pass_inline(caller) != ANVIL_PASS_RUN_ERROR, "inlining runs");
+        check(count_opcode(caller, ANVIL_OP_CALL) == (weak || pic ? 1u : 0u), "a strong external callee inlines unless it is preemptible");
+        char *assembly = NULL;
+        size_t length = 0;
+        check(anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && (strstr(assembly, "mix") || strstr(assembly, "MIX")),
+              "an inlined external callee stays defined");
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* Two loads of a read-only global's element with a store through another
+ * pointer between them: nothing writes read-only memory, so the second load
+ * takes the first one's value; a writable global keeps both. */
+static void test_read_only_loads(anvil_arch_t arch)
+{
+    for (int constant = 0; constant < 2; constant++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+        anvil_module_t *module = anvil_module_create(ctx, "read_only");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *array = anvil_type_array(ctx, i32, 16);
+        anvil_value_t *table = anvil_module_add_global(module, "table", array, ANVIL_LINK_INTERNAL);
+        anvil_value_t *elements[16];
+        for (int index = 0; index < 16; index++)
+            elements[index] = anvil_const_i32(ctx, index * 3);
+        anvil_global_set_initializer(table, anvil_const_array(ctx, i32, elements, 16));
+        if (constant)
+            anvil_global_set_constant(table, true);
+        anvil_type_t *params[] = { i32, anvil_type_ptr(ctx, i32) };
+        anvil_func_t *func = anvil_func_create(module, "twice", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+        anvil_value_t *indices[] = { anvil_const_i32(ctx, 0), anvil_func_get_param(func, 0) };
+        anvil_value_t *address = anvil_build_gep(ctx, array, table, indices, 2, "element");
+        anvil_value_t *first = anvil_build_load(ctx, i32, address, "first");
+        anvil_build_store(ctx, first, anvil_func_get_param(func, 1));
+        anvil_value_t *second = anvil_build_load(ctx, i32, address, "second");
+        anvil_build_ret(ctx, anvil_build_add(ctx, first, second, "sum"));
+        check(anvil_pass_load_elim(func) != ANVIL_PASS_RUN_ERROR, "load elimination runs");
+        char error[256] = { 0 };
+        check(anvil_func_verify(func, error, sizeof(error)) && count_opcode(func, ANVIL_OP_LOAD) == (constant ? 1u : 2u),
+              "a load of read-only memory survives stores; a writable one does not");
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* A call inlines only when caller and callee share their floating-point
  * policies: inlined code keeps its own. */
 static void test_inline_fp_policy(void)
@@ -1009,6 +1089,8 @@ int main(void)
         test_bit_facts(targets[index]);
         test_shift_speculation(targets[index]);
         test_licm_speculation(targets[index]);
+        test_inline_external(targets[index]);
+        test_read_only_loads(targets[index]);
         test_memory_aliasing(targets[index], false);
         test_memory_aliasing(targets[index], true);
     }
