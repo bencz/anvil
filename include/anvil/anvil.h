@@ -369,8 +369,6 @@ typedef struct {
     bool index_scale_access;
     uint8_t address_increments;
     uint8_t address_increment_bytes;  /* the widest access with those forms */
-    /* base + index * scale + a constant folds into one access (x86). */
-    bool index_displacement;
     /* Body copies per iteration for small counted loops, where the loop
      * control costs enough to unroll it at run time (1: none). */
     uint8_t small_loop_unroll;
@@ -1099,6 +1097,11 @@ typedef struct anvil_backend_ops {
      * instead of the default one, for the current ABI (NULL or
      * ANVIL_CC_DEFAULT: none). */
     anvil_cc_t (*local_call_convention)(anvil_backend_t *be);
+    /* Whether a load or store of `access_bytes` at base + index +
+     * `displacement` (bytes) is one instruction on the current CPU, the
+     * index scaled by the access's size where the target scales indexes
+     * (NULL: no such form). */
+    bool (*indexed_displacement)(anvil_backend_t *be, int64_t displacement, size_t access_bytes);
 } anvil_backend_ops_t;
 
 /* Register a custom backend */

@@ -522,7 +522,7 @@ src/
 │
 └── backend/
     ├── common/
-    │   ├── anvil_slot_map.h    # shared slot-mapping helper
+    │   ├── lower_map.c, lower_map.h # IR value/block -> MachineIR maps of every lowerer
     │   └── gnu_data.c, gnu_data.h # GAS constants, relocations and aggregate layout
     ├── x86/                    # x86 family: 32-bit and 64-bit modes
     │   ├── x86_32_lower.c, x86_64_lower.c

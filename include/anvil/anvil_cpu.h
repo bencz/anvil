@@ -175,7 +175,8 @@ typedef uint64_t anvil_cpu_features_t;
 #define ANVIL_FEATURE_ZARCH_BFP         (1ULL << 15)  /* IEEE binary floating point (S/390 G5+) */
 #define ANVIL_FEATURE_ZARCH_IMMREL      (1ULL << 16)  /* Relative-and-immediate: AHI/CHI/MHI/LHI, BRC (ESA/390 G1+) */
 #define ANVIL_FEATURE_ZARCH_DISTINCT    (1ULL << 17)  /* Distinct operands: ARK/AHIK/SLLK... (z196) */
-/* Room for 46 more z/Arch features (bits 18-63) */
+#define ANVIL_FEATURE_ZARCH_LONGDISP    (1ULL << 18)  /* Long displacement: signed 20-bit D(X,B), LY/STY... (z990) */
+/* Room for 45 more z/Arch features (bits 19-63) */
 
 /* ----------------------------------------------------------------------------
  * ARM64 Features (bits 0-63, ARM64 namespace)

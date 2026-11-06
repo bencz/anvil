@@ -143,25 +143,6 @@ static bool expr_key(const anvil_instr_t *instr, expr_key_t *key)
     return true;
 }
 
-/* Check if operation is commutative */
-static bool is_commutative(anvil_op_t op)
-{
-    switch (op) {
-        case ANVIL_OP_ADD:
-        case ANVIL_OP_MUL:
-        case ANVIL_OP_UMULH:
-        case ANVIL_OP_SMULH:
-        case ANVIL_OP_AND:
-        case ANVIL_OP_OR:
-        case ANVIL_OP_XOR:
-        case ANVIL_OP_CMP_EQ:
-        case ANVIL_OP_CMP_NE:
-            return true;
-        default:
-            return false;
-    }
-}
-
 /* Constants are not interned: two integer constants of one type and value
  * are the same operand. */
 static bool same_operand(const anvil_value_t *left, const anvil_value_t *right)
@@ -239,7 +220,7 @@ static void expr_table_clear(expr_table_t *table)
  * the same slot. */
 static inline void normalise_operands(expr_key_t *key)
 {
-    if (key->count == 2 && is_commutative(key->op) && operand_identity(key->operands[0]) > operand_identity(key->operands[1])) {
+    if (key->count == 2 && anvil_opt_commutative(key->op) && operand_identity(key->operands[0]) > operand_identity(key->operands[1])) {
         anvil_value_t *tmp = key->operands[0];
         key->operands[0] = key->operands[1];
         key->operands[1] = tmp;

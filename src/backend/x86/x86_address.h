@@ -2,6 +2,7 @@
 #ifndef ANVIL_X86_ADDRESS_H
 #define ANVIL_X86_ADDRESS_H
 
+#include "anvil/anvil.h"
 #include "anvil/anvil_machine.h"
 
 #include <stdbool.h>
@@ -14,6 +15,14 @@ static inline bool x86_address_mode(void *user, unsigned scale, int64_t disp, ui
     (void)user;
     (void)access_bits;
     return extend == ANVIL_MIR_INDEX_PLAIN && (scale == 1 || scale == 2 || scale == 4 || scale == 8) && disp >= INT32_MIN && disp <= INT32_MAX;
+}
+
+/* anvil_backend_ops_t.indexed_displacement: any disp32, any width. */
+static inline bool x86_indexed_displacement(anvil_backend_t *be, int64_t displacement, size_t access_bytes)
+{
+    (void)be;
+    (void)access_bytes;
+    return x86_address_mode(NULL, 1, displacement, 0, ANVIL_MIR_INDEX_PLAIN);
 }
 
 #endif

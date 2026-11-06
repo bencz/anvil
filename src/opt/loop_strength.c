@@ -1030,6 +1030,14 @@ static bool only_addressed(anvil_func_t *func, const anvil_value_t *value)
     return true;
 }
 
+/* Whether `count` elements of `element_bytes` from an indexed address fold
+ * into the access (anvil_ctx_indexed_displacement). */
+static bool displacement_folds(anvil_ctx_t *ctx, int64_t count, size_t element_bytes)
+{
+    return element_bytes && element_bytes <= INT32_MAX && count > -(INT64_C(1) << 31) && count < (INT64_C(1) << 31) &&
+           anvil_ctx_indexed_displacement(ctx, count * (int64_t)element_bytes, element_bytes);
+}
+
 /* The byte step of `phi` advanced by `step` = gep T phi, c in the latch
  * (c * sizeof(T)), 0 if it is no such pointer. */
 static int64_t pointer_step(const anvil_instr_t *phi, const anvil_instr_t *step)
@@ -1080,8 +1088,9 @@ static anvil_pass_result_t share_lockstep_index(anvil_func_t *func, const anvil_
                         continue;
                     if (addresses_with(user, phi->result))
                         continue;
-                    bool displaced = arch->index_displacement && user->op == ANVIL_OP_GEP && user->num_operands == 2 && o == 0 &&
-                                     user->operands[1]->kind == ANVIL_VAL_CONST_INT && only_addressed(func, user->result);
+                    bool displaced = user->op == ANVIL_OP_GEP && user->num_operands == 2 && o == 0 && user->aux_type &&
+                                     user->operands[1]->kind == ANVIL_VAL_CONST_INT && only_addressed(func, user->result) &&
+                                     displacement_folds(func->owner_ctx, user->operands[1]->data.i, user->aux_type->size);
                     if (!displaced)
                         only_addresses = false;
                 }
@@ -1124,6 +1133,69 @@ static anvil_pass_result_t share_lockstep_index(anvil_func_t *func, const anvil_
     return ANVIL_PASS_RUN_CHANGED;
 }
 
+enum { LS_SHARED_BASES = 16 };
+
+/* Accesses at constant distances from one index through invariant bases of
+ * one family (t + n and t - 4 + n, as count_to_zero and the GEP index split
+ * leave t[k] and t[k - 1]): where the target folds the distance into an
+ * indexed access (anvil_ctx_indexed_displacement), the later reads the
+ * earlier's base, gep T (gep T b0, i), c, and the loop keeps one base
+ * register instead of one per distance.  The base left unread goes. */
+static anvil_pass_result_t share_index_bases(anvil_func_t *func, const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t loop)
+{
+    anvil_ctx_t *ctx = func->owner_ctx;
+    const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
+    if (!arch || !anvil_ctx_indexed_displacement(ctx, 0, 1))
+        return ANVIL_PASS_RUN_UNCHANGED;
+    anvil_type_t *offset_type = arch->ptr_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
+    anvil_instr_t *anchors[LS_SHARED_BASES];
+    ls_form_t forms[LS_SHARED_BASES];
+    size_t count = 0;
+    bool changed = false;
+    for (size_t member = 0; member < cfg->count; member++) {
+        if (!anvil_loop_contains(loops, loop, member))
+            continue;
+        for (anvil_instr_t *gep = cfg->blocks[member]->first; gep; gep = gep->next) {
+            if (gep->op != ANVIL_OP_GEP || gep->num_operands != 2 || !gep->aux_type || !gep->result || gep->operands[1]->kind == ANVIL_VAL_CONST_INT ||
+                in_loop(cfg, loops, loop, gep->operands[0]))
+                continue;
+            ls_form_t form;
+            address_form(gep->operands[0], gep->aux_type, &form);
+            size_t anchor = 0;
+            while (anchor < count && !(anvil_types_equal(anchors[anchor]->aux_type, gep->aux_type) && anchors[anchor]->operands[1] == gep->operands[1] &&
+                                       same_family(&forms[anchor], &form)))
+                anchor++;
+            if (anchor == count) {
+                if (count < LS_SHARED_BASES) {
+                    anchors[count] = gep;
+                    forms[count++] = form;
+                }
+                continue;
+            }
+            int64_t distance = form.constant - forms[anchor].constant;
+            if (anchors[anchor]->operands[0] == gep->operands[0] || !displacement_folds(ctx, distance, gep->aux_type->size))
+                continue;
+            anvil_value_t *offset = anvil_opt_make_const_int(ctx, offset_type, distance);
+            anvil_value_t *base = gep->operands[0];
+            if (!offset)
+                return ANVIL_PASS_RUN_ERROR;
+            gep->operands[0] = anchors[anchor]->operands[0];
+            if (!anvil_opt_split_gep(ctx, gep, gep, gep->operands[1], offset)) {
+                gep->operands[0] = base;
+                return ANVIL_PASS_RUN_ERROR;
+            }
+            changed = true;
+            /* The base, and the address arithmetic only it read. */
+            while (base->kind == ANVIL_VAL_INSTR && base->data.instr->op == ANVIL_OP_GEP && !has_readers(func, base)) {
+                anvil_instr_t *dead = base->data.instr;
+                base = dead->operands[0];
+                anvil_opt_erase_instr(dead);
+            }
+        }
+    }
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
+}
+
 static anvil_pass_result_t reduce_loop(anvil_func_t *func, const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t loop, bool late)
 {
     const anvil_loop_info_t *info = &loops->loops[loop];
@@ -1164,6 +1236,9 @@ static anvil_pass_result_t reduce_loop(anvil_func_t *func, const anvil_opt_cfg_t
         anvil_pass_result_t shared = share_lockstep_index(func, cfg, loops, loop, arch, header, preheader, latch);
         if (shared != ANVIL_PASS_RUN_UNCHANGED)
             return shared;  /* the header's PHIs changed: the next round */
+        shared = share_index_bases(func, cfg, loops, loop);
+        if (shared != ANVIL_PASS_RUN_UNCHANGED)
+            return shared;
     }
 
     /* Narrow induction variables first: bounded by the header's test with

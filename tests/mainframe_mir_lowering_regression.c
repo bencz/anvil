@@ -1886,8 +1886,59 @@ static void test_mainframe_immediates_follow_cpu_model(void)
     }
 }
 
+/* p[-1] + p[-2] (i32, i16) stored to p[-3] (i8), and a double at p - 8:
+ * negative displacements take the long-displacement forms (LY, LHY or the
+ * extending LGH, STCY, LDY) where the CPU has them; without them the
+ * displacement goes into an index register. */
+static void test_zarch_long_displacements_follow_cpu_model(void)
+{
+    static const struct {
+        anvil_cpu_model_t cpu;
+        bool long_disp;
+    } cases[] = {{ANVIL_CPU_ZARCH_Z196, true}, {ANVIL_CPU_ZARCH_Z990, true}, {ANVIL_CPU_ZARCH_Z900, false}};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_ZARCH);
+        if (!ctx)
+            continue;
+        CHECK(anvil_ctx_set_cpu(ctx, cases[c].cpu) == ANVIL_OK, "z/Architecture CPU model should be selectable");
+        anvil_module_t *mod = anvil_module_create(ctx, "disp");
+        anvil_type_t *i32 = anvil_type_i32(ctx), *i16 = anvil_type_i16(ctx), *i8 = anvil_type_i8(ctx), *f64 = anvil_type_f64(ctx);
+        anvil_type_t *params[] = {anvil_type_ptr(ctx, i32), anvil_type_ptr(ctx, i16), anvil_type_ptr(ctx, i8), anvil_type_ptr(ctx, f64)};
+        anvil_func_t *fn = anvil_func_create(mod, "back", anvil_type_func(ctx, f64, params, 4, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+        anvil_value_t *minus1 = anvil_const_i64(ctx, -1), *minus2 = anvil_const_i64(ctx, -2), *minus3 = anvil_const_i64(ctx, -3);
+        anvil_value_t *word = anvil_build_load(ctx, i32, anvil_build_gep(ctx, i32, anvil_func_get_param(fn, 0), &minus1, 1, "w.at"), "w");
+        anvil_value_t *half = anvil_build_load(ctx, i16, anvil_build_gep(ctx, i16, anvil_func_get_param(fn, 1), &minus2, 1, "h.at"), "h");
+        anvil_value_t *sum = anvil_build_add(ctx, word, anvil_build_sext(ctx, half, i32, "hw"), "sum");
+        anvil_build_store(ctx, anvil_build_trunc(ctx, sum, i8, "byte"), anvil_build_gep(ctx, i8, anvil_func_get_param(fn, 2), &minus3, 1, "b.at"));
+        anvil_value_t *real = anvil_build_load(ctx, f64, anvil_build_gep(ctx, f64, anvil_func_get_param(fn, 3), &minus1, 1, "d.at"), "d");
+        CHECK(anvil_build_ret(ctx, real), "the function should build");
+        char *text = NULL;
+        size_t len = 0;
+        CHECK(anvil_module_codegen(mod, &text, &len) == ANVIL_OK && text, "negative displacements should emit HLASM");
+        if (text && cases[c].long_disp) {
+            check_contains(text, "LY    ", "a word at -4 loads with LY");
+            /* LGH, the extending load (extended immediates), is RXY too. */
+            CHECK(strstr(text, "LHY   R3,-4(") || strstr(text, "LGH   R3,-4("), "a halfword at -4 loads with LHY or LGH");
+            check_contains(text, "STCY  ", "a byte at -3 stores with STCY");
+            check_contains(text, "LDY   ", "a double at -8 loads with LDY");
+            CHECK(strstr(text, ",-4(") || strstr(text, ",-3(") || strstr(text, ",-8("), "the displacement is negative");
+        } else if (text) {
+            CHECK(!strstr(text, "LY    ") && !strstr(text, "LHY") && !strstr(text, "STCY") && !strstr(text, "LDY") && !strstr(text, "-4(") &&
+                      !strstr(text, "-3(") && !strstr(text, "-8("),
+                  "without long displacements no RXY form or negative displacement appears");
+        }
+        if (failures && text)
+            fprintf(stderr, "%s\n", text);
+        free(text);
+        anvil_module_destroy(mod);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
+    test_zarch_long_displacements_follow_cpu_model();
     test_mainframe_frame_allocation_separates_nested_calls();
     test_mainframe_materializes_call_values_before_bundle();
     test_mainframe_dynamic_alloca_updates_stack_chain();

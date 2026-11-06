@@ -159,6 +159,21 @@ reorganization. ISA validation should use the applicable edition of the
 and the original [System/370 Principles of Operation, GA22-7000-0](https://www.bitsavers.org/pdf/ibm/370/princOps/GA22-7000-0_370_Principles_Of_Operation_Jun70.pdf).
 The latter is an IBM manual hosted in the Bitsavers archive.
 
+## Storage operands and CPU facilities
+
+Loads and stores address `D(X,B)`: base, optional index and a displacement.
+The RX forms (`L`, `ST`, `LH`, `IC`, `LE`, `LD`, ...) take an unsigned
+12-bit displacement on every model. The long-displacement facility (z990 on,
+`ANVIL_FEATURE_ZARCH_LONGDISP`) gives their RXY forms (`LY`, `STY`, `LHY`,
+`STHY`, `ICY`, `STCY`, `LEY`, `LDY`, `STEY`, `STDY`) and the RXY loads
+(`LG`, `STG`, the extending `LGB`/`LLGC`/`LGH`/`LLGH`) a signed 20-bit one
+(-524288..524287); without it those RXY loads see only the low 12 bits. A
+constant address (a GEP of constant indices) becomes base + displacement
+where the CPU's forms reach it, and the displacement goes into an index
+register otherwise. The lowering, the MIR address folds and the legality
+verifier all read the facility from the function's CPU features
+(`anvil_mir_func_cpu_features`), so no form a CPU lacks reaches the printer.
+
 ## Validation boundary
 
 `tests/mainframe_mir_lowering_regression.c` exercises source lowering, variant

@@ -623,6 +623,12 @@ anvil_cc_t anvil_ctx_local_call_convention(anvil_ctx_t *ctx)
     return local != ANVIL_CC_DEFAULT && anvil_cc_resolve(ctx, local, &resolved) && resolved == local ? local : ANVIL_CC_DEFAULT;
 }
 
+bool anvil_ctx_indexed_displacement(anvil_ctx_t *ctx, int64_t displacement, size_t access_bytes)
+{
+    return ctx && ctx->backend && ctx->backend->ops->indexed_displacement &&
+           ctx->backend->ops->indexed_displacement(ctx->backend, displacement, access_bytes);
+}
+
 bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
                       anvil_cc_t *effective)
 {

@@ -20,6 +20,26 @@
 
 enum { SYSTEMZ_INTERNAL_LABEL_CAP = 160 };
 
+/* D(X,B) displacements: RX/RS forms take an unsigned 12-bit one; with the
+ * long-displacement facility their RXY/RSY forms (LY, STY, ...) take a
+ * signed 20-bit one. */
+enum { SYSTEMZ_SHORT_DISP_MAX = 4095, SYSTEMZ_LONG_DISP_MIN = -524288, SYSTEMZ_LONG_DISP_MAX = 524287 };
+
+static inline bool systemz_short_displacement(int64_t disp)
+{
+    return disp >= 0 && disp <= SYSTEMZ_SHORT_DISP_MAX;
+}
+
+static inline bool systemz_displacement_fits(int64_t disp, anvil_cpu_features_t features)
+{
+    return systemz_short_displacement(disp) ||
+           ((features & ANVIL_FEATURE_ZARCH_LONGDISP) && disp >= SYSTEMZ_LONG_DISP_MIN && disp <= SYSTEMZ_LONG_DISP_MAX);
+}
+
+/* anvil_backend_ops_t.indexed_displacement: D(X,B) on the context's CPU
+ * (the index unscaled); vector accesses (VRX) take only the short form. */
+bool anvil_systemz_indexed_displacement(anvil_backend_t *be, int64_t displacement, size_t access_bytes);
+
 /* BRCT decrements and tests 32 bits (BRCTG 64): a narrower counter would
  * count modulo 2^32, not its own width. */
 enum { SYSTEMZ_NARROWEST_COUNTER = 32 };

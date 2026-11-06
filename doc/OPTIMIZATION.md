@@ -92,6 +92,7 @@ Evaluates constant expressions at compile time.
 | `x << 0` | `x` |
 | `x >> 0` | `x` |
 | `(x + c1) - c2` (any of `+`, `-`) | `x + (c1 - c2)`, or `x` when the constants cancel (modulo the width; no-wrap kept when both had it and the constant fits) |
+| `c op x`, op commutative (`anvil_opt_commutative`) | `x op c`: the constant on the right, where strength reduction and the targets' immediate forms look |
 
 **Comparison Folding:**
 
@@ -391,9 +392,16 @@ lockstep (two or more header PHIs stepped by the same bytes, read in the
 loop only as addresses or through a constant displacement the target folds)
 become `p0 + i` over one byte index where an index folds into the access and
 no access advances its own base (x86, the mainframes): one add per iteration
-for all of them. An address a constant number of elements from a stream's
-base joins that stream at a displacement, whether or not a stream of its own
-would pay. On a target that advances a base before the access, the advance
+for all of them (a pointer also read through a constant displacement
+qualifies where the target folds that displacement:
+`anvil_ctx_indexed_displacement`, the backend's `indexed_displacement`
+hook). Where no stream is made, addresses at constant distances from one
+index through invariant bases of one family (t[k] and t[k - 1]) share the
+first base, `gep T (gep T b0, i), c`, when the hook says the distance folds
+into an indexed access (x86; SystemZ within its displacement range): the
+loop keeps one base register. An address a constant number of elements from
+a stream's base joins that stream at a displacement, whether or not a stream
+of its own would pay. On a target that advances a base before the access, the advance
 moves down to the stream's first access, with the addresses derived from the
 stream (constant GEPs, pointer casts) that it needs.
 

@@ -734,22 +734,26 @@ static void test_branching_counter_loop(void)
 {
     static const struct {
         anvil_arch_t arch;
+        anvil_cpu_model_t cpu;
         const char *present;
         const char *absent;
         const char *counter;
     } cases[] = {
-        {ANVIL_ARCH_X86_64, NULL, "leal -1(", NULL},
-        {ANVIL_ARCH_X86, NULL, "leal -1(", NULL},
-        {ANVIL_ARCH_ARM64, NULL, "sxtw #2]", NULL},
-        {ANVIL_ARCH_PPC64LE, "-4(%r", NULL, "\tbdnz "},
-        {ANVIL_ARCH_PPC64, "-4(%r", NULL, "\tbdnz "},
-        {ANVIL_ARCH_PPC32, "-4(%r", NULL, "\tbdnz "},
-        /* No update forms to make the index a pure counter. */
-        {ANVIL_ARCH_ZARCH, NULL, NULL, NULL},
+        {ANVIL_ARCH_X86_64, ANVIL_CPU_GENERIC, NULL, "leal -1(", NULL},
+        {ANVIL_ARCH_X86, ANVIL_CPU_GENERIC, NULL, "leal -1(", NULL},
+        {ANVIL_ARCH_ARM64, ANVIL_CPU_GENERIC, NULL, "sxtw #2]", NULL},
+        {ANVIL_ARCH_PPC64LE, ANVIL_CPU_GENERIC, "-4(%r", NULL, "\tbdnz "},
+        {ANVIL_ARCH_PPC64, ANVIL_CPU_GENERIC, "-4(%r", NULL, "\tbdnz "},
+        {ANVIL_ARCH_PPC32, ANVIL_CPU_GENERIC, "-4(%r", NULL, "\tbdnz "},
+        /* No update forms to make the index a pure counter; t[k - 1]'s
+         * base is computed once, before the loop. */
+        {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z196, NULL, NULL, NULL},
     };
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         anvil_ctx_t *ctx = anvil_ctx_create_for_target(cases[c].arch);
         anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        if (cases[c].cpu != ANVIL_CPU_GENERIC)
+            anvil_ctx_set_cpu(ctx, cases[c].cpu);
         anvil_module_t *module = anvil_module_create(ctx, "drain");
         anvil_type_t *i32 = anvil_type_i32(ctx);
         anvil_type_t *params[] = {anvil_type_ptr(ctx, i32), i32};

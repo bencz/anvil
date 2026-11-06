@@ -1,50 +1,20 @@
 #include "../common/switch_lower.h"
 #include "systemz_internal.h"
 #include "../common/ir_lower.h"
+#include "../common/lower_map.h"
 #include "../common/wide_mir.h"
 #include "../common/narrow_mir.h"
-
-typedef struct {
-    anvil_value_t *value;
-    anvil_mir_vreg_t vreg;
-} systemz_value_map_entry_t;
-
-typedef struct {
-    anvil_block_t *block;
-    anvil_mir_block_t mir_block;
-} systemz_block_map_entry_t;
-
-typedef struct {
-    anvil_value_t *value;
-    int frame_slot;
-} systemz_addr_map_entry_t;
-
-typedef struct {
-    anvil_value_t *value;
-    anvil_mir_vreg_t hi;
-    anvil_mir_vreg_t lo;
-    bool is_unsigned;
-} systemz_wide_pair_map_entry_t;
 
 typedef struct {
     const anvil_mainframe_target_desc_t *desc;
     anvil_func_t *func;
     anvil_mir_func_t *mir;
 
-    systemz_value_map_entry_t *values;
-    size_t num_values;
-    size_t cap_values;
-
-    systemz_block_map_entry_t *blocks;
-    size_t num_blocks;
-
-    systemz_addr_map_entry_t *frame_addrs;
-    size_t num_frame_addrs;
-    size_t cap_frame_addrs;
-
-    systemz_wide_pair_map_entry_t *wide_pairs;
-    size_t num_wide_pairs;
-    size_t cap_wide_pairs;
+    anvil_lower_map_t values;
+    anvil_lower_map_t blocks;
+    anvil_lower_map_t wide_pairs;
+    /* GEPs of constant indices: a register plus a displacement. */
+    anvil_lower_map_t addresses;
 
     /* The hidden SRET argument, returned when the ABI says so. */
     anvil_mir_vreg_t sret_pointer;
@@ -115,147 +85,6 @@ static anvil_mir_vreg_t systemz_add_vreg_for_type(systemz_lower_t *lower, anvil_
     return anvil_mir_add_vreg_typed(lower->mir, systemz_reg_class_for_type(type), systemz_bits_for_type(lower->desc, type), systemz_type_is_signed(type));
 }
 
-static bool systemz_map_reserve(systemz_lower_t *lower, size_t needed)
-{
-    if (needed <= lower->cap_values)
-        return true;
-    size_t cap = lower->cap_values ? lower->cap_values * 2 : 64;
-    while (cap < needed)
-        cap *= 2;
-    systemz_value_map_entry_t *grown = realloc(lower->values, cap * sizeof(*grown));
-    if (!grown)
-        return false;
-    lower->values = grown;
-    lower->cap_values = cap;
-    return true;
-}
-
-static bool systemz_map_put(systemz_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t vreg)
-{
-    if (!value)
-        return true;
-    for (size_t i = 0; i < lower->num_values; i++) {
-        if (lower->values[i].value == value) {
-            lower->values[i].vreg = vreg;
-            return true;
-        }
-    }
-    if (!systemz_map_reserve(lower, lower->num_values + 1))
-        return false;
-    lower->values[lower->num_values].value = value;
-    lower->values[lower->num_values].vreg = vreg;
-    lower->num_values++;
-    return true;
-}
-
-static anvil_mir_vreg_t systemz_map_get(systemz_lower_t *lower, anvil_value_t *value)
-{
-    for (size_t i = 0; i < lower->num_values; i++) {
-        if (lower->values[i].value == value)
-            return lower->values[i].vreg;
-    }
-    return ANVIL_MIR_NO_VREG;
-}
-
-static bool systemz_addr_map_reserve(systemz_lower_t *lower, size_t needed)
-{
-    if (needed <= lower->cap_frame_addrs)
-        return true;
-    size_t cap = lower->cap_frame_addrs ? lower->cap_frame_addrs * 2 : 16;
-    while (cap < needed)
-        cap *= 2;
-    systemz_addr_map_entry_t *grown = realloc(lower->frame_addrs, cap * sizeof(*grown));
-    if (!grown)
-        return false;
-    lower->frame_addrs = grown;
-    lower->cap_frame_addrs = cap;
-    return true;
-}
-
-static bool systemz_addr_map_put(systemz_lower_t *lower, anvil_value_t *value, int frame_slot)
-{
-    if (!value)
-        return false;
-    for (size_t i = 0; i < lower->num_frame_addrs; i++) {
-        if (lower->frame_addrs[i].value == value) {
-            lower->frame_addrs[i].frame_slot = frame_slot;
-            return true;
-        }
-    }
-    if (!systemz_addr_map_reserve(lower, lower->num_frame_addrs + 1))
-        return false;
-    lower->frame_addrs[lower->num_frame_addrs].value = value;
-    lower->frame_addrs[lower->num_frame_addrs].frame_slot = frame_slot;
-    lower->num_frame_addrs++;
-    return true;
-}
-
-static anvil_mir_block_t systemz_block_get(systemz_lower_t *lower, anvil_block_t *block)
-{
-    if (!block)
-        return ANVIL_MIR_NO_BLOCK;
-    for (size_t i = 0; i < lower->num_blocks; i++) {
-        if (lower->blocks[i].block == block)
-            return lower->blocks[i].mir_block;
-    }
-    return ANVIL_MIR_NO_BLOCK;
-}
-
-static bool systemz_wide_pair_reserve(systemz_lower_t *lower, size_t needed)
-{
-    if (needed <= lower->cap_wide_pairs)
-        return true;
-    size_t cap = lower->cap_wide_pairs ? lower->cap_wide_pairs * 2 : 8;
-    while (cap < needed)
-        cap *= 2;
-    systemz_wide_pair_map_entry_t *grown = realloc(lower->wide_pairs, cap * sizeof(*grown));
-    if (!grown)
-        return false;
-    lower->wide_pairs = grown;
-    lower->cap_wide_pairs = cap;
-    return true;
-}
-
-static bool systemz_wide_pair_put(systemz_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t hi, anvil_mir_vreg_t lo, bool is_unsigned)
-{
-    if (!value || hi == ANVIL_MIR_NO_VREG || lo == ANVIL_MIR_NO_VREG)
-        return false;
-    for (size_t i = 0; i < lower->num_wide_pairs; i++) {
-        if (lower->wide_pairs[i].value == value) {
-            lower->wide_pairs[i].hi = hi;
-            lower->wide_pairs[i].lo = lo;
-            lower->wide_pairs[i].is_unsigned = is_unsigned;
-            return true;
-        }
-    }
-    if (!systemz_wide_pair_reserve(lower, lower->num_wide_pairs + 1))
-        return false;
-    lower->wide_pairs[lower->num_wide_pairs].value = value;
-    lower->wide_pairs[lower->num_wide_pairs].hi = hi;
-    lower->wide_pairs[lower->num_wide_pairs].lo = lo;
-    lower->wide_pairs[lower->num_wide_pairs].is_unsigned = is_unsigned;
-    lower->num_wide_pairs++;
-    return true;
-}
-
-static bool systemz_wide_pair_get(systemz_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *hi, anvil_mir_vreg_t *lo, bool *is_unsigned)
-{
-    if (!value)
-        return false;
-    for (size_t i = 0; i < lower->num_wide_pairs; i++) {
-        if (lower->wide_pairs[i].value == value) {
-            if (hi)
-                *hi = lower->wide_pairs[i].hi;
-            if (lo)
-                *lo = lower->wide_pairs[i].lo;
-            if (is_unsigned)
-                *is_unsigned = lower->wide_pairs[i].is_unsigned;
-            return true;
-        }
-    }
-    return false;
-}
-
 /* 64-bit integers on targets whose GPRs hold 32 bits travel as word pairs
  * (common/wide_mir); the parameter-list and result conventions for them
  * come from the ABI (systemz_abi_ops_t). */
@@ -269,11 +98,6 @@ static bool systemz_type_is_u64(anvil_type_t *type)
     return type && type->kind == ANVIL_TYPE_U64;
 }
 
-static bool systemz_wide_put(systemz_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t pair)
-{
-    return systemz_wide_pair_put(lower, value, pair.hi, pair.lo, systemz_type_is_u64(value->type));
-}
-
 static int64_t systemz_int_constant(anvil_value_t *value);
 
 /* Constants are materialized at each use: the first use of a shared
@@ -284,30 +108,7 @@ static bool systemz_ensure_wide(systemz_lower_t *lower, anvil_value_t *value, an
         return anvil_wide_constant(lower->mir, systemz_int_constant(value), systemz_type_is_u64(value->type), out);
     if (value && value->kind == ANVIL_VAL_CONST_NULL)
         return anvil_wide_constant(lower->mir, 0, systemz_type_is_u64(value->type), out);
-    return systemz_wide_pair_get(lower, value, &out->hi, &out->lo, NULL);
-}
-
-static bool systemz_create_mir_blocks(systemz_lower_t *lower)
-{
-    lower->num_blocks = lower->func->num_blocks;
-    if (lower->num_blocks == 0)
-        return false;
-    lower->blocks = calloc(lower->num_blocks, sizeof(*lower->blocks));
-    if (!lower->blocks)
-        return false;
-
-    size_t idx = 0;
-    for (anvil_block_t *block = lower->func->blocks; block; block = block->next) {
-        if (idx >= lower->num_blocks)
-            return false;
-        anvil_mir_block_t mir_block = anvil_mir_block_for(lower->mir, block, idx == 0);
-        if (mir_block == ANVIL_MIR_NO_BLOCK)
-            return false;
-        lower->blocks[idx].block = block;
-        lower->blocks[idx].mir_block = mir_block;
-        idx++;
-    }
-    return idx == lower->num_blocks;
+    return anvil_lower_pair_get(&lower->wide_pairs, value, &out->hi, &out->lo, NULL);
 }
 
 static bool systemz_lower_params(systemz_lower_t *lower)
@@ -321,7 +122,7 @@ static bool systemz_lower_params(systemz_lower_t *lower)
             if (!anvil_wide_new(lower->mir, systemz_type_is_u64(param->type), &pair) ||
                 !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, pair.hi, entry * (int64_t)lower->desc->ptr_size) ||
                 !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, pair.lo, (entry + 1) * (int64_t)lower->desc->ptr_size) ||
-                !systemz_wide_put(lower, param, pair))
+                !anvil_lower_wide_put(&lower->wide_pairs, param, pair))
                 return false;
             entry += 2;
             continue;
@@ -336,7 +137,7 @@ static bool systemz_lower_params(systemz_lower_t *lower)
         /* A BYVAL parameter is already the address of the callee's copy. */
         if (anvil_type_func_param_attr(lower->func->type, i) == ANVIL_PARAM_SRET)
             lower->sret_pointer = local;
-        if (!systemz_map_put(lower, param, local))
+        if (!anvil_lower_vreg_put(&lower->values, param, local))
             return false;
     }
 
@@ -370,14 +171,14 @@ static bool systemz_prepare_phi_results(systemz_lower_t *lower)
                 continue;
             if (systemz_needs_pair(lower, instr->result->type)) {
                 anvil_wide_pair_t pair;
-                if (!anvil_wide_new(lower->mir, systemz_type_is_u64(instr->result->type), &pair) || !systemz_wide_put(lower, instr->result, pair))
+                if (!anvil_wide_new(lower->mir, systemz_type_is_u64(instr->result->type), &pair) || !anvil_lower_wide_put(&lower->wide_pairs, instr->result, pair))
                     return false;
                 continue;
             }
             anvil_mir_vreg_t vreg = systemz_add_vreg_for_type(lower, instr->result->type);
             if (vreg == ANVIL_MIR_NO_VREG)
                 return false;
-            if (!systemz_map_put(lower, instr->result, vreg))
+            if (!anvil_lower_vreg_put(&lower->values, instr->result, vreg))
                 return false;
         }
     }
@@ -385,6 +186,7 @@ static bool systemz_prepare_phi_results(systemz_lower_t *lower)
 }
 
 static anvil_mir_vreg_t systemz_lower_value(systemz_lower_t *lower, anvil_value_t *value);
+static bool systemz_lower_add_const_offset(systemz_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t dst);
 static anvil_mir_vreg_t systemz_lower_word(systemz_lower_t *lower, anvil_value_t *value);
 
 static int64_t systemz_int_constant(anvil_value_t *value)
@@ -398,7 +200,7 @@ static int64_t systemz_int_constant(anvil_value_t *value)
 
 static anvil_mir_vreg_t systemz_lower_const_value(systemz_lower_t *lower, anvil_value_t *value)
 {
-    anvil_mir_vreg_t existing = systemz_map_get(lower, value);
+    anvil_mir_vreg_t existing = anvil_lower_vreg_get(&lower->values, value);
     if (existing != ANVIL_MIR_NO_VREG)
         return existing;
 
@@ -432,7 +234,7 @@ static anvil_mir_vreg_t systemz_lower_const_value(systemz_lower_t *lower, anvil_
     if (!anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, vreg, imm)) {
         return ANVIL_MIR_NO_VREG;
     }
-    if (!systemz_map_put(lower, value, vreg))
+    if (!anvil_lower_vreg_put(&lower->values, value, vreg))
         return ANVIL_MIR_NO_VREG;
     return vreg;
 }
@@ -465,9 +267,17 @@ static anvil_mir_vreg_t systemz_lower_value(systemz_lower_t *lower, anvil_value_
 {
     if (!value)
         return ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t existing = systemz_map_get(lower, value);
+    anvil_mir_vreg_t existing = anvil_lower_vreg_get(&lower->values, value);
     if (existing != ANVIL_MIR_NO_VREG)
         return existing;
+    anvil_mir_vreg_t base;
+    int64_t offset;
+    if (anvil_lower_address_get(&lower->addresses, value, &base, &offset)) {
+        /* Materialized at each use: a register from the first use need not
+         * dominate the others (the base does). */
+        anvil_mir_vreg_t address = systemz_add_vreg_for_type(lower, value->type);
+        return address != ANVIL_MIR_NO_VREG && systemz_lower_add_const_offset(lower, base, offset, address) ? address : ANVIL_MIR_NO_VREG;
+    }
 
     switch (value->kind) {
     case ANVIL_VAL_CONST_INT:
@@ -483,7 +293,7 @@ static anvil_mir_vreg_t systemz_lower_value(systemz_lower_t *lower, anvil_value_
         anvil_mir_vreg_t vreg = systemz_lower_symbol_address(lower, value->type, label);
         if (vreg == ANVIL_MIR_NO_VREG)
             return vreg;
-        if (!systemz_map_put(lower, value, vreg))
+        if (!anvil_lower_vreg_put(&lower->values, value, vreg))
             return ANVIL_MIR_NO_VREG;
         return vreg;
     }
@@ -491,7 +301,7 @@ static anvil_mir_vreg_t systemz_lower_value(systemz_lower_t *lower, anvil_value_
     case ANVIL_VAL_CONST_SYMBOL_ADDR:
     case ANVIL_VAL_CONST_GEP: {
         anvil_mir_vreg_t vreg = systemz_lower_reloc_address(lower, value);
-        if (vreg == ANVIL_MIR_NO_VREG || !systemz_map_put(lower, value, vreg))
+        if (vreg == ANVIL_MIR_NO_VREG || !anvil_lower_vreg_put(&lower->values, value, vreg))
             return ANVIL_MIR_NO_VREG;
         return vreg;
     }
@@ -501,7 +311,7 @@ static anvil_mir_vreg_t systemz_lower_value(systemz_lower_t *lower, anvil_value_
         anvil_mir_vreg_t vreg = systemz_lower_symbol_address(lower, value->type, value->name);
         if (vreg == ANVIL_MIR_NO_VREG)
             return vreg;
-        if (!systemz_map_put(lower, value, vreg))
+        if (!anvil_lower_vreg_put(&lower->values, value, vreg))
             return ANVIL_MIR_NO_VREG;
         return vreg;
     }
@@ -828,7 +638,7 @@ static bool systemz_emit_phi_copies_for_edge(systemz_lower_t *lower, anvil_block
         size_t words = 1;
         if (systemz_needs_pair(lower, phi->result->type)) {
             anvil_wide_pair_t from, to;
-            if (!systemz_ensure_wide(lower, incoming, &from) || !systemz_wide_pair_get(lower, phi->result, &to.hi, &to.lo, NULL)) {
+            if (!systemz_ensure_wide(lower, incoming, &from) || !anvil_lower_pair_get(&lower->wide_pairs, phi->result, &to.hi, &to.lo, NULL)) {
                 free(copies);
                 return false;
             }
@@ -836,7 +646,7 @@ static bool systemz_emit_phi_copies_for_edge(systemz_lower_t *lower, anvil_block
             words = 2;
         } else {
             src[0] = systemz_lower_value(lower, incoming);
-            dst[0] = systemz_map_get(lower, phi->result);
+            dst[0] = anvil_lower_vreg_get(&lower->values, phi->result);
             if (src[0] == ANVIL_MIR_NO_VREG || dst[0] == ANVIL_MIR_NO_VREG) {
                 free(copies);
                 return false;
@@ -872,7 +682,7 @@ static bool systemz_block_has_phi(anvil_block_t *block)
 static anvil_mir_block_t systemz_create_phi_edge_block(systemz_lower_t *lower, anvil_block_t *pred, anvil_block_t *succ)
 {
     if (!systemz_block_has_phi(succ))
-        return systemz_block_get(lower, succ);
+        return anvil_lower_block_get(&lower->blocks, succ);
 
     char name[160];
     snprintf(name, sizeof(name), "%s_to_%s_phi_%zu", pred && pred->name ? pred->name : "pred", succ && succ->name ? succ->name : "succ", anvil_mir_num_blocks(lower->mir));
@@ -885,7 +695,7 @@ static anvil_mir_block_t systemz_create_phi_edge_block(systemz_lower_t *lower, a
         return ANVIL_MIR_NO_BLOCK;
     if (!systemz_emit_phi_copies_for_edge(lower, pred, succ))
         return ANVIL_MIR_NO_BLOCK;
-    if (!anvil_mir_add_branch(lower->mir, systemz_block_get(lower, succ))) {
+    if (!anvil_mir_add_branch(lower->mir, anvil_lower_block_get(&lower->blocks, succ))) {
         return ANVIL_MIR_NO_BLOCK;
     }
     if (!anvil_mir_set_current_block(lower->mir, previous)) {
@@ -910,9 +720,7 @@ static bool systemz_lower_alloca(systemz_lower_t *lower, anvil_instr_t *instr)
             return false;
         if (!anvil_mir_add_frame_addr(lower->mir, ptr, slot))
             return false;
-        if (!systemz_addr_map_put(lower, instr->result, slot))
-            return false;
-        return systemz_map_put(lower, instr->result, ptr);
+        return anvil_lower_vreg_put(&lower->values, instr->result, ptr);
     }
 
     anvil_mir_vreg_t count = systemz_lower_word(lower, instr->operands[0]);
@@ -924,7 +732,7 @@ static bool systemz_lower_alloca(systemz_lower_t *lower, anvil_instr_t *instr)
     if (!anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_DYN_ALLOCA, ptr, uses, 1, elem_size)) {
         return false;
     }
-    return systemz_map_put(lower, instr->result, ptr);
+    return anvil_lower_vreg_put(&lower->values, instr->result, ptr);
 }
 
 static bool systemz_lower_add_const_offset(systemz_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t dst)
@@ -989,7 +797,7 @@ static bool systemz_lower_load_pair(systemz_lower_t *lower, anvil_instr_t *instr
     anvil_mir_vreg_t uses[] = {addr};
     return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_LOAD, pair.hi, uses, 1) &&
            anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_LOAD, pair.lo, uses, 1, 4) &&
-           systemz_wide_put(lower, instr->result, pair);
+           anvil_lower_wide_put(&lower->wide_pairs, instr->result, pair);
 }
 
 static bool systemz_lower_store_pair(systemz_lower_t *lower, anvil_instr_t *instr)
@@ -1099,7 +907,7 @@ static bool systemz_lower_wide_binary(systemz_lower_t *lower, anvil_instr_t *ins
 
     if (op >= ANVIL_MIR_OP_CMP_EQ && op <= ANVIL_MIR_OP_CMP_UGE) {
         anvil_mir_vreg_t result = systemz_add_bool_vreg(lower);
-        return result != ANVIL_MIR_NO_VREG && anvil_wide_compare(lower->mir, op, a, b, result) && systemz_map_put(lower, instr->result, result);
+        return result != ANVIL_MIR_NO_VREG && anvil_wide_compare(lower->mir, op, a, b, result) && anvil_lower_vreg_put(&lower->values, instr->result, result);
     }
     anvil_wide_target_t target = systemz_wide_target(lower);
     bool is_unsigned = systemz_type_is_u64(instr->result->type);
@@ -1111,7 +919,7 @@ static bool systemz_lower_wide_binary(systemz_lower_t *lower, anvil_instr_t *ins
     } else {
         ok = anvil_wide_binary(lower->mir, &target, instr->op, a, b, is_unsigned, &out);
     }
-    return ok && systemz_wide_put(lower, instr->result, out);
+    return ok && anvil_lower_wide_put(&lower->wide_pairs, instr->result, out);
 }
 
 /* def (i1) = low bit of the integer src. */
@@ -1153,7 +961,7 @@ static bool systemz_lower_wide_cast(systemz_lower_t *lower, anvil_instr_t *instr
                  anvil_wide_from_fp(lower->mir, &target, src, op == ANVIL_MIR_OP_FPTOUI, &out);
         else
             ok = anvil_wide_extend(lower->mir, src, op == ANVIL_MIR_OP_SEXT, systemz_type_is_u64(to), &out);
-        return ok && systemz_wide_put(lower, instr->result, out);
+        return ok && anvil_lower_wide_put(&lower->wide_pairs, instr->result, out);
     }
     if (!systemz_ensure_wide(lower, instr->operands[0], &a))
         return false;
@@ -1172,7 +980,7 @@ static bool systemz_lower_wide_cast(systemz_lower_t *lower, anvil_instr_t *instr
         } else {
             result = anvil_wide_truncate(lower->mir, a, systemz_bits_for_type(lower->desc, to), systemz_type_is_signed(to));
         }
-        return result != ANVIL_MIR_NO_VREG && systemz_map_put(lower, instr->result, result);
+        return result != ANVIL_MIR_NO_VREG && anvil_lower_vreg_put(&lower->values, instr->result, result);
     }
 
     bool ok;
@@ -1195,7 +1003,7 @@ static bool systemz_lower_wide_cast(systemz_lower_t *lower, anvil_instr_t *instr
         ok = false;
         break;
     }
-    return ok && systemz_wide_put(lower, instr->result, out);
+    return ok && anvil_lower_wide_put(&lower->wide_pairs, instr->result, out);
 }
 
 static bool systemz_lower_wide_select(systemz_lower_t *lower, anvil_instr_t *instr)
@@ -1207,19 +1015,22 @@ static bool systemz_lower_wide_select(systemz_lower_t *lower, anvil_instr_t *ins
         return false;
     anvil_mir_vreg_t hi_uses[] = {cond, t.hi, f.hi}, lo_uses[] = {cond, t.lo, f.lo};
     return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, out.hi, hi_uses, 3) &&
-           anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, out.lo, lo_uses, 3) && systemz_wide_put(lower, instr->result, out);
+           anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, out.lo, lo_uses, 3) && anvil_lower_wide_put(&lower->wide_pairs, instr->result, out);
 }
 
 static bool systemz_lower_gep(systemz_lower_t *lower, anvil_instr_t *instr)
 {
     if (!instr->result || instr->num_operands < 2 || !instr->aux_type)
         return false;
-    anvil_mir_vreg_t cur = systemz_lower_value(lower, instr->operands[0]);
+    anvil_mir_vreg_t cur;
+    int64_t constant_offset = 0;
+    if (!anvil_lower_address_get(&lower->addresses, instr->operands[0], &cur, &constant_offset))
+        cur = systemz_lower_value(lower, instr->operands[0]);
     if (cur == ANVIL_MIR_NO_VREG)
         return false;
 
     anvil_type_t *walk_type = instr->aux_type;
-    int64_t constant_offset = 0;
+    bool all_constant = true;
     for (size_t i = 1; i < instr->num_operands; i++) {
         anvil_value_t *index_value = instr->operands[i];
         anvil_gep_step_t step;
@@ -1234,6 +1045,7 @@ static bool systemz_lower_gep(systemz_lower_t *lower, anvil_instr_t *instr)
         }
         if (step.kind != ANVIL_GEP_STEP_SCALE)
             return false;
+        all_constant = false;
         int64_t elem_size = (int64_t)step.amount;
         anvil_mir_vreg_t idx = systemz_lower_word(lower, index_value);
         if (idx == ANVIL_MIR_NO_VREG)
@@ -1268,6 +1080,8 @@ static bool systemz_lower_gep(systemz_lower_t *lower, anvil_instr_t *instr)
         cur = next;
     }
 
+    if (all_constant)
+        return anvil_lower_address_put(&lower->addresses, instr->result, cur, constant_offset);
     if (constant_offset != 0) {
         anvil_mir_vreg_t next = systemz_add_vreg_for_type(lower, instr->result->type);
         if (next == ANVIL_MIR_NO_VREG || !systemz_lower_add_const_offset(lower, cur, constant_offset, next)) {
@@ -1276,7 +1090,7 @@ static bool systemz_lower_gep(systemz_lower_t *lower, anvil_instr_t *instr)
         cur = next;
     }
 
-    return systemz_map_put(lower, instr->result, cur);
+    return anvil_lower_vreg_put(&lower->values, instr->result, cur);
 }
 
 static bool systemz_lower_struct_gep(systemz_lower_t *lower, anvil_instr_t *instr)
@@ -1288,15 +1102,27 @@ static bool systemz_lower_struct_gep(systemz_lower_t *lower, anvil_instr_t *inst
     if (field >= instr->aux_type->data.struc.num_fields)
         return false;
 
-    anvil_mir_vreg_t base = systemz_lower_value(lower, instr->operands[0]);
-    anvil_mir_vreg_t dst = systemz_add_vreg_for_type(lower, instr->result->type);
-    if (base == ANVIL_MIR_NO_VREG || dst == ANVIL_MIR_NO_VREG)
+    anvil_mir_vreg_t base;
+    int64_t offset = 0;
+    if (!anvil_lower_address_get(&lower->addresses, instr->operands[0], &base, &offset))
+        base = systemz_lower_value(lower, instr->operands[0]);
+    size_t field_offset = instr->aux_type->data.struc.offsets[field];
+    if (base == ANVIL_MIR_NO_VREG || field_offset > INT64_MAX || !anvil_gep_accumulate_offset(&offset, (int64_t)field_offset))
         return false;
+    return anvil_lower_address_put(&lower->addresses, instr->result, base, offset);
+}
 
-    if (!systemz_lower_add_const_offset(lower, base, (int64_t)instr->aux_type->data.struc.offsets[field], dst)) {
-        return false;
-    }
-    return systemz_map_put(lower, instr->result, dst);
+/* The register and displacement an access through `pointer` takes: a
+ * constant address's base and offset where the CPU's D(X,B) forms reach
+ * that displacement, the pointer's register and 0 otherwise. */
+static bool systemz_memory_address(systemz_lower_t *lower, anvil_value_t *pointer, anvil_mir_vreg_t *base, int64_t *displacement)
+{
+    if (anvil_lower_address_get(&lower->addresses, pointer, base, displacement) &&
+        systemz_displacement_fits(*displacement, anvil_mir_func_cpu_features(lower->mir)))
+        return true;
+    *displacement = 0;
+    *base = systemz_lower_value(lower, pointer);
+    return *base != ANVIL_MIR_NO_VREG;
 }
 
 static bool systemz_lower_call(systemz_lower_t *lower, anvil_instr_t *instr)
@@ -1362,7 +1188,7 @@ static bool systemz_lower_call(systemz_lower_t *lower, anvil_instr_t *instr)
         return false;
     if (result.lo == ANVIL_MIR_NO_VREG)
         return true;
-    return result.hi != ANVIL_MIR_NO_VREG ? systemz_wide_put(lower, instr->result, result) : systemz_map_put(lower, instr->result, result.lo);
+    return result.hi != ANVIL_MIR_NO_VREG ? anvil_lower_wide_put(&lower->wide_pairs, instr->result, result) : anvil_lower_vreg_put(&lower->values, instr->result, result.lo);
 }
 
 /* The shared switch lowering (anvil_mir_lower_switch_tree) in this
@@ -1518,7 +1344,7 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
                                              : anvil_mir_add_binary_extending(lower->mir, op, def, lhs, rhs, 32);
         if (!added)
             return false;
-        return systemz_map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (systemz_unary_op(instr->op, &op)) {
@@ -1527,7 +1353,7 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
         /* A pointer reinterpreted as another pointer is the same value. */
         if (anvil_cast_keeps_value(instr)) {
             anvil_mir_vreg_t same = systemz_lower_value(lower, instr->operands[0]);
-            return same != ANVIL_MIR_NO_VREG && systemz_map_put(lower, instr->result, same);
+            return same != ANVIL_MIR_NO_VREG && anvil_lower_vreg_put(&lower->values, instr->result, same);
         }
         if (systemz_needs_pair(lower, instr->result->type) || systemz_needs_pair(lower, instr->operands[0]->type))
             return systemz_lower_wide_cast(lower, instr, op);
@@ -1553,12 +1379,12 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
             }
             if (!src_info || src_info->reg_class != ANVIL_MIR_REG_GPR || !systemz_normalize_bool(lower, src, def))
                 return false;
-            return systemz_map_put(lower, instr->result, def);
+            return anvil_lower_vreg_put(&lower->values, instr->result, def);
         }
         anvil_mir_vreg_t uses[] = {src};
         if (!anvil_mir_add_instr(lower->mir, op, def, uses, 1))
             return false;
-        return systemz_map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (instr->op == ANVIL_OP_VA_START) {
@@ -1566,7 +1392,7 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
             return false;
         anvil_mir_vreg_t def = systemz_add_vreg_for_type(lower, instr->result->type);
         anvil_mir_vreg_t uses[] = {lower->va_base};
-        return def != ANVIL_MIR_NO_VREG && anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, def, uses, 1) && systemz_map_put(lower, instr->result, def);
+        return def != ANVIL_MIR_NO_VREG && anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_COPY, def, uses, 1) && anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     switch (instr->op) {
@@ -1584,9 +1410,12 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
             return false;
         if (systemz_needs_pair(lower, instr->result->type))
             return systemz_lower_load_pair(lower, instr);
-        anvil_mir_vreg_t addr = systemz_lower_value(lower, instr->operands[0]);
+        anvil_mir_vreg_t addr;
+        int64_t displacement;
+        if (!systemz_memory_address(lower, instr->operands[0], &addr, &displacement))
+            return false;
         anvil_mir_vreg_t def = systemz_add_vreg_for_type(lower, instr->result->type);
-        if (addr == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
+        if (def == ANVIL_MIR_NO_VREG)
             return false;
         /* Its sign unobserved: loaded zero-extended. */
         if (instr->sign_unobserved && !anvil_mir_set_vreg_signed(lower->mir, def, false))
@@ -1596,16 +1425,16 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
         if (loaded == ANVIL_MIR_NO_VREG)
             return false;
         anvil_mir_vreg_t uses[] = {addr};
-        if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_LOAD, loaded, uses, 1)) {
+        if (!(displacement ? anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_LOAD, loaded, uses, 1, displacement)
+                           : anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_LOAD, loaded, uses, 1)))
             return false;
-        }
         if (is_i1) {
             anvil_mir_vreg_t one = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false);
             anvil_mir_vreg_t norm_uses[] = {loaded, one};
             if (one == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) || !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, def, norm_uses, 2))
                 return false;
         }
-        return systemz_map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     case ANVIL_OP_STORE: {
@@ -1614,8 +1443,9 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
         if (systemz_needs_pair(lower, instr->operands[0]->type))
             return systemz_lower_store_pair(lower, instr);
         anvil_mir_vreg_t value = systemz_lower_value(lower, instr->operands[0]);
-        anvil_mir_vreg_t addr = systemz_lower_value(lower, instr->operands[1]);
-        if (value == ANVIL_MIR_NO_VREG || addr == ANVIL_MIR_NO_VREG)
+        anvil_mir_vreg_t addr;
+        int64_t displacement;
+        if (value == ANVIL_MIR_NO_VREG || !systemz_memory_address(lower, instr->operands[1], &addr, &displacement))
             return false;
         if (instr->operands[0]->type->kind == ANVIL_TYPE_I1) {
             anvil_mir_vreg_t one = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false);
@@ -1627,7 +1457,8 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
             value = normalized;
         }
         anvil_mir_vreg_t uses[] = {value, addr};
-        return anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_STORE, ANVIL_MIR_NO_VREG, uses, 2);
+        return displacement ? anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_STORE, ANVIL_MIR_NO_VREG, uses, 2, displacement)
+                            : anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_STORE, ANVIL_MIR_NO_VREG, uses, 2);
     }
 
     case ANVIL_OP_CALL:
@@ -1669,7 +1500,7 @@ static bool systemz_lower_instr(systemz_lower_t *lower, anvil_instr_t *instr)
         if (!anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_SELECT, def, uses, 3)) {
             return false;
         }
-        return systemz_map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     default:
@@ -1700,9 +1531,9 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(anvil_func_t *func, anvil_ma
     anvil_opt_cfg_t cfg;
     bool ok = anvil_opt_cfg_build(func, &cfg) && anvil_opt_cfg_build_layout(&cfg);
     if (ok)
-        ok = systemz_create_mir_blocks(&lower);
+        ok = anvil_lower_create_blocks(lower.mir, lower.func, &lower.blocks);
     if (ok)
-        ok = anvil_mir_set_current_block(mir, systemz_block_get(&lower, func->entry));
+        ok = anvil_mir_set_current_block(mir, anvil_lower_block_get(&lower.blocks, func->entry));
     if (ok)
         ok = systemz_lower_params(&lower);
     if (ok)
@@ -1712,7 +1543,7 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(anvil_func_t *func, anvil_ma
 
     for (size_t rank = 0; ok && rank < cfg.count; rank++) {
         anvil_block_t *block = cfg.blocks[cfg.layout[rank]];
-        ok = anvil_mir_set_current_block(mir, systemz_block_get(&lower, block));
+        ok = anvil_mir_set_current_block(mir, anvil_lower_block_get(&lower.blocks, block));
         for (anvil_instr_t *instr = block->first; ok && instr; instr = instr->next) {
             size_t first = anvil_mir_num_instrs(lower.mir);
             ok = systemz_lower_instr(&lower, instr) && anvil_mir_annotate_memory(lower.mir, first, &instr->memory_access);
@@ -1722,10 +1553,10 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(anvil_func_t *func, anvil_ma
     }
 
     anvil_opt_cfg_destroy(&cfg);
-    free(lower.values);
-    free(lower.blocks);
-    free(lower.frame_addrs);
-    free(lower.wide_pairs);
+    anvil_lower_map_destroy(&lower.values);
+    anvil_lower_map_destroy(&lower.blocks);
+    anvil_lower_map_destroy(&lower.wide_pairs);
+    anvil_lower_map_destroy(&lower.addresses);
 
     char verify_error[256] = {0};
     bool verified = ok && anvil_mir_verify(mir, verify_error, sizeof(verify_error));

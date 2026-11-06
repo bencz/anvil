@@ -579,7 +579,16 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
             if (!instr->result) continue;
             
             anvil_value_t *folded = NULL;
-            
+
+            /* A commutative operation keeps its constant on the right, where
+             * the strength reductions and the targets' immediate forms look. */
+            if (instr->num_operands == 2 && anvil_opt_commutative(instr->op) && instr->operands[0]->kind == ANVIL_VAL_CONST_INT &&
+                instr->operands[1]->kind != ANVIL_VAL_CONST_INT) {
+                anvil_value_t *constant = instr->operands[0];
+                instr->operands[0] = instr->operands[1];
+                instr->operands[1] = constant;
+                changed = true;
+            }
             if (instr->num_operands == 2 && fold_constant_chain(ctx, instr, &folded)) {
                 changed = true;
             }

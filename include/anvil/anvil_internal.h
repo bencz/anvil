@@ -516,6 +516,8 @@ anvil_type_t *anvil_sem_callee_func_type(const anvil_value_t *callee);
 /* The target's convention for internal functions called only directly
  * (anvil_backend_ops_t.local_call_convention), ANVIL_CC_DEFAULT if none. */
 anvil_cc_t anvil_ctx_local_call_convention(anvil_ctx_t *ctx);
+/* anvil_backend_ops_t.indexed_displacement for the context's target. */
+bool anvil_ctx_indexed_displacement(anvil_ctx_t *ctx, int64_t displacement, size_t access_bytes);
 /* Takes `func` out of `mod` (its list and symbol table); the context still
  * owns and frees it.  For a function nothing in the module refers to. */
 bool anvil_module_unlink_func(anvil_module_t *mod, anvil_func_t *func);

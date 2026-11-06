@@ -1,3 +1,4 @@
+#include "../x86_address.h"
 #include "../x86_64_internal.h"
 
 #include <limits.h>
@@ -101,4 +102,5 @@ const anvil_backend_ops_t anvil_backend_x86_64 = {
     .abi_support = (1u << ANVIL_ABI_SYSV) | (1u << ANVIL_ABI_DARWIN) | (1u << ANVIL_ABI_WIN64),
     .reloc_model_supported = x64_reloc_model_supported,
     .default_reloc_model = x64_default_reloc_model,
+    .indexed_displacement = x86_indexed_displacement,
 };

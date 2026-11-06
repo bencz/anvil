@@ -162,8 +162,7 @@ bool anvil_mainframe_verify_mir_legal(const anvil_mir_func_t *mir, anvil_mainfra
             break;
         case ANVIL_MIR_OP_LOAD:
         case ANVIL_MIR_OP_STORE:
-            /* RX/RXE displacements are 12-bit unsigned on every model. */
-            if (instr.has_imm && (instr.imm < 0 || instr.imm > 4095))
+            if (instr.has_imm && !systemz_displacement_fits(instr.imm, anvil_mir_func_cpu_features(mir)))
                 return anvil_format_failure(error, error_len, "%s memory displacement %lld is out of range", desc->name, (long long)instr.imm);
             break;
         case ANVIL_MIR_OP_KEEPALIVE:
@@ -190,12 +189,22 @@ bool anvil_mainframe_verify_mir_legal(const anvil_mir_func_t *mir, anvil_mainfra
     return true;
 }
 
-/* RX forms: D(X,B), base + index + an unsigned 12-bit displacement. */
+enum { SYSTEMZ_GPR_ACCESS_MAX = 8 };
+
+bool anvil_systemz_indexed_displacement(anvil_backend_t *be, int64_t displacement, size_t access_bytes)
+{
+    if (!be || !be->ctx)
+        return false;
+    return access_bytes > SYSTEMZ_GPR_ACCESS_MAX ? systemz_short_displacement(displacement)
+                                                 : systemz_displacement_fits(displacement, anvil_ctx_get_cpu_features(be->ctx));
+}
+
+/* D(X,B): base + index + a displacement (systemz_displacement_fits for
+ * the CPU features of the function `user` is). */
 static bool systemz_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
 {
-    (void)user;
     (void)access_bits;
-    return extend == ANVIL_MIR_INDEX_PLAIN && scale == 1 && disp >= 0 && disp <= 4095;
+    return extend == ANVIL_MIR_INDEX_PLAIN && scale == 1 && systemz_displacement_fits(disp, anvil_mir_func_cpu_features(user));
 }
 
 /* LHI takes a signed 16-bit value; anything else (floating constants
@@ -240,9 +249,10 @@ bool anvil_mainframe_regalloc_mir_features(anvil_mir_func_t *mir, anvil_mainfram
                                                        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_scratch_fprs, .phys_regs = scratch_fprs,
                                                         .printer_declares_writes = true}};
 
-    if (!anvil_mir_optimize_before_allocation(mir, systemz_address_mode, systemz_expensive_constant, NULL))
+    if (!anvil_mir_optimize_before_allocation(mir, systemz_address_mode, systemz_expensive_constant, mir))
         return false;
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) || !anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0) ||
+    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) ||
+        !anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0) ||
         !anvil_systemz_mark_registerless(mir, desc, features) || !anvil_mir_hoist_materialized_constants(mir))
         return false;
     if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,

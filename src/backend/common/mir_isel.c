@@ -354,6 +354,26 @@ bool anvil_mir_isel_feeds_next_select(const anvil_mir_isel_facts_t *facts, size_
     return feeds_next(facts, index, info, ANVIL_MIR_OP_SELECT);
 }
 
+static bool power_of_two_shift(uint64_t value, unsigned width, unsigned *shift)
+{
+    if (!value || (value & (value - 1)))
+        return false;
+    unsigned k = 0;
+    while ((UINT64_C(1) << k) != value)
+        k++;
+    *shift = k;
+    return k < width;
+}
+
+anvil_mir_mul_form_t anvil_mir_isel_mul_form(int64_t value, unsigned width, unsigned *shift)
+{
+    if (value > 0 && power_of_two_shift((uint64_t)value, width, shift))
+        return ANVIL_MIR_MUL_SHIFT;
+    if (value > 2 && power_of_two_shift((uint64_t)value - 1, width, shift))
+        return ANVIL_MIR_MUL_SHIFT_ADD;
+    return ANVIL_MIR_MUL_MULTIPLY;
+}
+
 /* Whether instruction `index` reads `vreg` as a == / != test with zero. */
 static bool zero_test_of(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, const anvil_mir_instr_info_t *info,
                          anvil_mir_vreg_t vreg)

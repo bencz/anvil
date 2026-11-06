@@ -55,7 +55,12 @@ only definition is a `MOV` of an immediate), how often each vreg is used, and
 which constant `MOV`s are still needed.  Each printer supplies one callback
 saying which operands it encodes as immediates (x86-64 imm32, ARM64 12-bit
 arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
-facility), so a folded constant never occupies a register.  The printers also
+facility), so a folded constant never occupies a register.  A multiply by a
+constant runs without the multiplier where `anvil_mir_isel_mul_form` says
+how: by 2^k a shift on every target; by 2^k + 1, x + (x << k), one `lea`
+(scales 2, 4, 8) on x86 and one `add` of a shifted register on ARM64, while
+PowerPC (`mulli`) and SystemZ (`MHI`/`MGHI`) keep their one-instruction
+multiply.  The printers also
 branch on the condition flags when a compare's only use is the following
 `BR_COND`, select on them when it is the following `SELECT` (x86 `cmov`, ARM64
 `csel`, PowerPC `isel`, SystemZ `LOCGR` under the compare's mask, or a branch
@@ -70,6 +75,16 @@ reads, writes or calls; PowerPC then counts in CTR and branches with
 2^bits from 0: CTR = ((-j - 1) mod 2^bits) + 1), SystemZ counts in the
 counter's own register with `BRCT`/`BRCTG` by its width, which takes no
 counter narrower than 32 bits (`SYSTEMZ_NARROWEST_COUNTER`).
+
+**Lowering maps.** `src/backend/common/lower_map.c` is the one table every
+lowerer keeps of what it made of each IR value or block: a value's virtual
+register (`anvil_lower_vreg_put/get`), a constant address as a register plus
+a displacement (`anvil_lower_address_put/get`, so accesses take the
+displacement), a block's MachineIR block (`anvil_lower_create_blocks`,
+`anvil_lower_block_get`), and on word-pair targets a 64-bit value's pair and
+a 64-bit constant (`anvil_lower_pair_*`, `anvil_lower_constant_*` in
+`wide_mir.h`).  It is keyed by pointer and only looked up, never iterated,
+so its hash order never reaches the output.
 
 **64-bit integers on 32-bit targets.** `src/backend/common/wide_mir.c` legalizes
 64-bit operations into pairs of 32-bit virtual registers with target-independent
@@ -282,8 +297,9 @@ invariants are checked separately.
 Before lowering, `anvil_module_codegen` prepares the optimized IR for every
 backend (`anvil_opt_prepare_codegen`): an address (GEP) loaded or stored
 through in other blocks than its own is recomputed in each of them, an
-integer extension of its index along with it, so the per-block address
-folding below reaches every access.
+integer extension of its index and a base GEP only it reads (an address
+split in two) along with it, so the per-block address folding below
+reaches every access; a base other addresses share stays one register.
 
 Every backend listed above lowers source IR into target MachineIR and then runs
 the shared pipeline. The per-target driver (e.g. `anvil_x86_64_regalloc_mir`)
@@ -463,58 +479,31 @@ static anvil_error_t myarch_prepare_ir(anvil_backend_t *be, anvil_module_t *mod)
 - **Peephole optimization**: Target-specific optimizations at IR level
 - **Register pressure analysis**: Insert spill/reload hints
 
-### Architecture-Specific Optimizations
+### Target-Specific Choices
 
-Backends can implement their own optimization passes that run during `prepare_ir`. These are separate from the generic IR optimizations in `src/opt/` and can leverage architecture-specific knowledge.
-
-**Example: ARM64 Optimization Structure**
-
-```
-src/backend/arm64/opt/
-├── arm64_opt.h       # Interface declarations
-├── arm64_opt.c       # Pass manager
-├── arm64_peephole.c  # Peephole optimizations
-├── arm64_dead_store.c # Dead store elimination
-├── arm64_load_elim.c  # Redundant load elimination
-├── arm64_branch.c     # Branch optimization
-└── arm64_immediate.c  # Immediate optimization
-```
-
-**Pass Manager Example:**
-```c
-void arm64_opt_function(arm64_backend_t *be, anvil_func_t *func)
-{
-    /* Run optimization passes in order */
-    arm64_opt_peephole(be, func);     // Local improvements
-    arm64_opt_dead_store(be, func);   // Remove dead stores
-    arm64_opt_load_elim(be, func);    // Eliminate redundant loads
-    arm64_opt_branch(be, func);       // Optimize branches
-    arm64_opt_immediate(be, func);    // Use immediate forms
-}
-```
-
-**ARM64-Specific Optimizations:**
-- **Peephole**: Redundant store elimination, load-store same address removal
-- **Branch**: Combine `cmp`+`cset`+`cbnz` into `cmp`+`b.cond`, use `cbz`/`cbnz`/`tbz`/`tbnz`
-- **Immediate**: Use `add`/`sub` immediate forms, efficient constant loading with `mov`/`movn`/`movz`
+There are no per-backend IR optimization passes. Generic passes in
+`src/opt/` and the MachineIR passes in `src/machine/` read what a target can
+do from its descriptor and its vtable hooks; instruction selection proper
+(immediate forms, folded operands, flag reuse) happens in each printer on the
+shared isel facts (`src/backend/common/mir_isel.h`).
 
 ### Architecture Information
 
-```c
-typedef struct {
-    anvil_arch_t arch;             // Architecture enum
-    const char *name;              // Architecture name
-    int ptr_size;                  // Pointer size in bytes
-    int addr_bits;                 // Address bits (24, 31, 32, 64)
-    int word_size;                 // Native word size
-    int num_gpr;                   // General purpose registers
-    int num_fpr;                   // Floating point registers
-    anvil_endian_t endian;         // ANVIL_ENDIAN_LITTLE or ANVIL_ENDIAN_BIG
-    anvil_stack_dir_t stack_dir;   // ANVIL_STACK_DOWN or ANVIL_STACK_UP
-    bool has_condition_codes;      // Has condition code register
-    bool has_delay_slots;          // Has branch delay slots
-} anvil_arch_info_t;
-```
+`anvil_arch_info_t` (`include/anvil/anvil.h`, one entry per architecture in
+`src/core/context.c`, read through `anvil_ctx_get_arch_info`) holds the
+static facts: pointer, address and word sizes, register counts, endianness,
+stack direction, the floating-point formats, and the address and loop forms
+the passes shape code for: `index_scales` and `index_scale_access` (scaled
+indexes the accesses fold), `address_increments` and
+`address_increment_bytes` (pre/post-increment accesses), `counter_branches`
+(decrement-and-branch counters) and `small_loop_unroll` (body copies per
+iteration for small counted loops). What depends on the CPU model, or on a
+value, is a hook of `anvil_backend_ops_t` instead:
+`vector_operation_cost` (lane operations per CPU features),
+`indexed_displacement` (whether base + index + a given displacement is one
+access: x86 any disp32; SystemZ D(X,B) with 12 bits, or signed 20 with the
+long-displacement facility; ARM64 and PowerPC have no such form) and
+`local_call_convention`.
 
 ## Implementing a New Backend
 

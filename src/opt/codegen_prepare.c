@@ -61,6 +61,71 @@ static bool accesses_through(const anvil_instr_t *user, size_t operand)
     return (user->op == ANVIL_OP_LOAD && operand == 0) || (user->op == ANVIL_OP_STORE && operand == 1);
 }
 
+enum { SINK_BASE_DEPTH = 4 };
+
+/* A copy of `gep` ahead of `first` in `block`: an index extended in another
+ * block, and a base GEP of `gep`'s own block that only `gep` reads (an
+ * address split in two there), are recomputed with it, so the block's
+ * accesses fold the whole address; a base computed elsewhere (before a
+ * loop, say) or shared by other addresses stays one register.  NULL only
+ * on allocation failure (what was inserted is unread). */
+static anvil_instr_t *copy_address(anvil_ctx_t *ctx, gep_table_t *table, anvil_instr_t *gep, anvil_block_t *block, anvil_instr_t *first,
+                                   unsigned depth)
+{
+    anvil_instr_t *copy = anvil_instr_create(ctx, gep->op, gep->result->type, gep->result->name);
+    if (!copy)
+        return NULL;
+    for (size_t operand = 0; operand < gep->num_operands; operand++) {
+        anvil_value_t *value = gep->operands[operand];
+        anvil_instr_t *source = value && value->kind == ANVIL_VAL_INSTR ? value->data.instr : NULL;
+        size_t source_slot = source ? gep_slot(table, source->result) : 0;
+        bool only_reader = source && table->keys[source_slot] == source->result && table->uses[source_slot] == 1;
+        if (operand == 0 && only_reader && is_address(source) && source->parent == gep->parent && source->parent != block && depth < SINK_BASE_DEPTH) {
+            anvil_instr_t *base = copy_address(ctx, table, source, block, first, depth + 1);
+            if (!base)
+                return NULL;
+            value = base->result;
+        } else if (operand > 0 && source && (source->op == ANVIL_OP_SEXT || source->op == ANVIL_OP_ZEXT) && source->parent != block &&
+                   source->num_operands == 1) {
+            anvil_instr_t *widened = anvil_instr_create(ctx, source->op, source->result->type, source->result->name);
+            if (!widened || !anvil_instr_add_operand(widened, source->operands[0]))
+                return NULL;
+            anvil_opt_insert_before(first, widened);
+            value = widened->result;
+        }
+        if (!anvil_instr_add_operand(copy, value))
+            return NULL;
+        /* A GEP the copy reads stays (erase_unread counts its readers). */
+        size_t slot = value ? gep_slot(table, value) : 0;
+        if (value && table->keys[slot] == value && table->uses[slot] != SIZE_MAX)
+            table->uses[slot]++;
+    }
+    copy->aux_type = gep->aux_type;
+    anvil_opt_insert_before(first, copy);
+    return copy;
+}
+
+/* Erases `gep` once nothing reads it, then a GEP base only it read. */
+static void erase_unread(gep_table_t *table, anvil_instr_t *gep)
+{
+    for (unsigned depth = 0; gep && gep->parent && depth <= SINK_BASE_DEPTH; depth++) {
+        size_t slot = gep_slot(table, gep->result);
+        if (table->keys[slot] != gep->result || table->uses[slot] != 0)
+            return;
+        anvil_value_t *base = gep->num_operands ? gep->operands[0] : NULL;
+        anvil_opt_erase_instr(gep);
+        table->uses[slot] = SIZE_MAX;
+        anvil_instr_t *source = base && base->kind == ANVIL_VAL_INSTR ? base->data.instr : NULL;
+        if (!source || !is_address(source))
+            return;
+        size_t base_slot = gep_slot(table, source->result);
+        if (table->keys[base_slot] != source->result || table->uses[base_slot] == SIZE_MAX)
+            return;
+        table->uses[base_slot]--;
+        gep = source;
+    }
+}
+
 static bool sink_addresses(anvil_func_t *func)
 {
     anvil_ctx_t *ctx = func->parent ? func->parent->ctx : NULL;
@@ -122,26 +187,10 @@ static bool sink_addresses(anvil_func_t *func)
             for (size_t k = m; k < num_moves && !first; k++)
                 if (!done[k] && moves[k].gep == gep && moves[k].user == instr)
                     first = instr;
-        anvil_instr_t *copy = first ? anvil_instr_create(ctx, gep->op, gep->result->type, gep->result->name) : NULL;
+        anvil_instr_t *copy = first ? copy_address(ctx, &table, gep, block, first, 0) : NULL;
         ok = copy != NULL;
-        for (size_t operand = 0; ok && operand < gep->num_operands; operand++) {
-            anvil_value_t *value = gep->operands[operand];
-            anvil_instr_t *cast = value && value->kind == ANVIL_VAL_INSTR ? value->data.instr : NULL;
-            if (operand > 0 && cast && (cast->op == ANVIL_OP_SEXT || cast->op == ANVIL_OP_ZEXT) && cast->parent != block &&
-                cast->num_operands == 1) {
-                anvil_instr_t *widened = anvil_instr_create(ctx, cast->op, cast->result->type, cast->result->name);
-                ok = widened && anvil_instr_add_operand(widened, cast->operands[0]);
-                if (!ok)
-                    break;
-                anvil_opt_insert_before(first, widened);
-                value = widened->result;
-            }
-            ok = anvil_instr_add_operand(copy, value);
-        }
         if (!ok)
             break;
-        copy->aux_type = gep->aux_type;
-        anvil_opt_insert_before(first, copy);
         for (size_t k = m; k < num_moves; k++) {
             if (done[k] || moves[k].gep != gep || moves[k].user->parent != block)
                 continue;
@@ -151,15 +200,9 @@ static bool sink_addresses(anvil_func_t *func)
         }
     }
 
-    /* A GEP all of whose accesses moved goes. */
-    for (size_t m = 0; ok && m < num_moves; m++) {
-        anvil_instr_t *gep = moves[m].gep;
-        size_t slot = gep_slot(&table, gep->result);
-        if (gep->parent && table.uses[slot] == 0) {
-            anvil_opt_erase_instr(gep);
-            table.uses[slot] = SIZE_MAX;
-        }
-    }
+    /* A GEP all of whose accesses moved goes, and a base GEP only it read. */
+    for (size_t m = 0; ok && m < num_moves; m++)
+        erase_unread(&table, moves[m].gep);
 
     free(done);
     free(moves);

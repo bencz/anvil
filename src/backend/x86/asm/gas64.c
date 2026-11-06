@@ -1,4 +1,5 @@
 #include "../x86_64_internal.h"
+#include "../x86_address.h"
 #include "anvil/anvil_analysis.h"
 #include "../../common/mir_isel.h"
 #include "../../common/parallel_move.h"
@@ -711,14 +712,16 @@ static void x64_emit_gpr_binary(x64_mir_emit_t *emit, size_t index, const anvil_
 
     if (mnemonic && b_imm) {
         bool wide = size >= 4;
-        if (info->op == ANVIL_MIR_OP_MUL && imm > 0 && (imm & (imm - 1)) == 0) {
-            int shift = 0;
-            while ((INT64_C(1) << shift) != imm)
-                shift++;
+        unsigned shift = 0;
+        anvil_mir_mul_form_t form = info->op == ANVIL_MIR_OP_MUL ? anvil_mir_isel_mul_form(imm, (unsigned)size * 8, &shift) : ANVIL_MIR_MUL_MULTIPLY;
+        if (form == ANVIL_MIR_MUL_SHIFT) {
             if (dst_phys != a_phys)
                 anvil_strbuf_appendf(&emit->code, "\tmov%s %%%s, %%%s\n", suf, a, dst);
             if (shift != 0)
-                anvil_strbuf_appendf(&emit->code, "\tshl%s $%d, %%%s\n", suf, shift, dst);
+                anvil_strbuf_appendf(&emit->code, "\tshl%s $%u, %%%s\n", suf, shift, dst);
+        } else if (form == ANVIL_MIR_MUL_SHIFT_ADD && wide && x86_address_mode(NULL, 1u << shift, 0, 0, ANVIL_MIR_INDEX_PLAIN)) {
+            /* x * (2^k + 1): x + x * 2^k, one lea for scales 2, 4, 8. */
+            anvil_strbuf_appendf(&emit->code, "\tlea%s (%%%s,%%%s,%u), %%%s\n", suf, x64_gpr_name(a_phys, 8), x64_gpr_name(a_phys, 8), 1u << shift, dst);
         } else if (info->op == ANVIL_MIR_OP_MUL) {
             /* Bytes multiply in 16 bits: the low byte is the same. */
             int width = size >= 2 ? size : 2;

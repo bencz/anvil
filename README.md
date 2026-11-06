@@ -346,7 +346,7 @@ kernels this short):
 | strings | strlen / strcmp / strcpy / reverse byte loops | 76 | 51 | 0.67 | 77 | 46 | 0.60 |
 | qsort | recursion, compares, swaps, branches | 174 | 176 | 1.01 | 169 | 178 | 1.05 |
 | lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
-| hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 53 | 87 | 1.64 |
+| hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 54 | 78 | 1.44 |
 | bigprime | transform butterflies: 64-bit products modulo a prime | 163 | 181 | 1.11 | 329 | 490 | 1.49 |
 | cells | a tape machine's drain loop (computed in closed form) | 2 | 2 | 1.00 | 2 | 2 | 1.00 |
 
@@ -378,7 +378,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
 | hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
 | bigprime | 970,260 | 1,099,375 | 1.13 | 111,575,208 | 113,357,198 | 1.02 |
-| cells | 271,080 | 271,412 | 1.00 | 271,311 | 271,631 | 1.00 |
+| cells | 271,080 | 271,396 | 1.00 | 271,311 | 271,631 | 1.00 |
 
 ANVIL comes out ahead with counter branches and update-form streams on
 PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep

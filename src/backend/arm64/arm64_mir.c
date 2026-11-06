@@ -7,6 +7,7 @@
  * assembly from the allocated machine instructions.
  */
 
+#include "../common/lower_map.h"
 #include "../common/switch_lower.h"
 #include "anvil/anvil_arm64_mir.h"
 #include "anvil/anvil_internal.h"
@@ -20,22 +21,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-    anvil_value_t *value;
-    anvil_mir_vreg_t vreg;
-} value_vreg_t;
-
-typedef struct {
-    anvil_value_t *value;
-    anvil_mir_vreg_t base;
-    int64_t offset;
-} value_addr_offset_t;
-
-typedef struct {
-    anvil_block_t *block;
-    anvil_mir_block_t mir_block;
-} block_map_t;
-
 typedef anvil_mir_parallel_copy_t phi_edge_copy_t;
 
 typedef struct {
@@ -47,14 +32,9 @@ typedef struct {
 typedef struct {
     anvil_func_t *func;
     anvil_mir_func_t *mir;
-    value_vreg_t *values;
-    size_t num_values;
-    size_t cap_values;
-    value_addr_offset_t *addr_offsets;
-    size_t num_addr_offsets;
-    size_t cap_addr_offsets;
-    block_map_t *blocks;
-    size_t num_blocks;
+    anvil_lower_map_t values;
+    anvil_lower_map_t addresses;
+    anvil_lower_map_t blocks;
     size_t num_edge_blocks;
     const arm64_abi_desc_t *abi;
     /* Argument state after the named parameters (va_start). */
@@ -121,140 +101,6 @@ static anvil_mir_vreg_t arm64_add_vreg_for_type(arm64_mir_lower_t *lower,
                                     arm64_reg_class_for_type(type),
                                     arm64_bits_for_type(type),
                                     arm64_type_is_signed(type));
-}
-
-static bool map_reserve(arm64_mir_lower_t *lower, size_t needed)
-{
-    if (needed <= lower->cap_values) return true;
-
-    size_t new_cap = lower->cap_values ? lower->cap_values * 2 : 32;
-    while (new_cap < needed) {
-        if (new_cap > SIZE_MAX / 2) return false;
-        new_cap *= 2;
-    }
-
-    value_vreg_t *grown = realloc(lower->values, new_cap * sizeof(*grown));
-    if (!grown) return false;
-
-    lower->values = grown;
-    lower->cap_values = new_cap;
-    return true;
-}
-
-static bool map_put(arm64_mir_lower_t *lower, anvil_value_t *value,
-                    anvil_mir_vreg_t vreg)
-{
-    if (!value || vreg == ANVIL_MIR_NO_VREG) return false;
-
-    for (size_t i = 0; i < lower->num_values; i++) {
-        if (lower->values[i].value == value) {
-            lower->values[i].vreg = vreg;
-            return true;
-        }
-    }
-
-    if (!map_reserve(lower, lower->num_values + 1)) return false;
-    lower->values[lower->num_values].value = value;
-    lower->values[lower->num_values].vreg = vreg;
-    lower->num_values++;
-    return true;
-}
-
-static anvil_mir_vreg_t map_get(arm64_mir_lower_t *lower, anvil_value_t *value)
-{
-    for (size_t i = 0; i < lower->num_values; i++) {
-        if (lower->values[i].value == value) return lower->values[i].vreg;
-    }
-    return ANVIL_MIR_NO_VREG;
-}
-
-static bool addr_map_reserve(arm64_mir_lower_t *lower, size_t needed)
-{
-    if (needed <= lower->cap_addr_offsets) return true;
-
-    size_t new_cap = lower->cap_addr_offsets ? lower->cap_addr_offsets * 2 : 16;
-    while (new_cap < needed) {
-        if (new_cap > SIZE_MAX / 2) return false;
-        new_cap *= 2;
-    }
-
-    value_addr_offset_t *grown =
-        realloc(lower->addr_offsets, new_cap * sizeof(*grown));
-    if (!grown) return false;
-
-    lower->addr_offsets = grown;
-    lower->cap_addr_offsets = new_cap;
-    return true;
-}
-
-static bool addr_map_put(arm64_mir_lower_t *lower,
-                         anvil_value_t *value,
-                         anvil_mir_vreg_t base,
-                         int64_t offset)
-{
-    if (!value || base == ANVIL_MIR_NO_VREG) return false;
-
-    for (size_t i = 0; i < lower->num_addr_offsets; i++) {
-        if (lower->addr_offsets[i].value == value) {
-            lower->addr_offsets[i].base = base;
-            lower->addr_offsets[i].offset = offset;
-            return true;
-        }
-    }
-
-    if (!addr_map_reserve(lower, lower->num_addr_offsets + 1)) return false;
-    lower->addr_offsets[lower->num_addr_offsets].value = value;
-    lower->addr_offsets[lower->num_addr_offsets].base = base;
-    lower->addr_offsets[lower->num_addr_offsets].offset = offset;
-    lower->num_addr_offsets++;
-    return true;
-}
-
-static bool addr_map_get(arm64_mir_lower_t *lower,
-                         anvil_value_t *value,
-                         anvil_mir_vreg_t *out_base,
-                         int64_t *out_offset)
-{
-    if (!value) return false;
-    for (size_t i = 0; i < lower->num_addr_offsets; i++) {
-        if (lower->addr_offsets[i].value == value) {
-            if (out_base) *out_base = lower->addr_offsets[i].base;
-            if (out_offset) *out_offset = lower->addr_offsets[i].offset;
-            return true;
-        }
-    }
-    return false;
-}
-
-static anvil_mir_block_t block_get(arm64_mir_lower_t *lower,
-                                   anvil_block_t *block)
-{
-    if (!block) return ANVIL_MIR_NO_BLOCK;
-    for (size_t i = 0; i < lower->num_blocks; i++) {
-        if (lower->blocks[i].block == block) return lower->blocks[i].mir_block;
-    }
-    return ANVIL_MIR_NO_BLOCK;
-}
-
-static bool create_mir_blocks(arm64_mir_lower_t *lower)
-{
-    lower->num_blocks = lower->func->num_blocks;
-    if (lower->num_blocks == 0) return true;
-
-    lower->blocks = calloc(lower->num_blocks, sizeof(*lower->blocks));
-    if (!lower->blocks) return false;
-
-    size_t index = 0;
-    for (anvil_block_t *block = lower->func->blocks; block; block = block->next) {
-        anvil_mir_block_t mir_block = anvil_mir_block_for(lower->mir, block, index == 0);
-        if (mir_block == ANVIL_MIR_NO_BLOCK) return false;
-
-        lower->blocks[index].block = block;
-        lower->blocks[index].mir_block = mir_block;
-        index++;
-    }
-
-    return true;
 }
 
 /* ------------------------------------------------------------------
@@ -376,7 +222,7 @@ static bool lower_params(arm64_mir_lower_t *lower)
     const arm64_abi_desc_t *abi = lower->abi;
     arm64_arg_state_t state = { 0, 0, 0 };
 
-    anvil_mir_block_t entry = block_get(lower, lower->func->blocks);
+    anvil_mir_block_t entry = anvil_lower_block_get(&lower->blocks, lower->func->blocks);
     if (entry == ANVIL_MIR_NO_BLOCK ||
         !anvil_mir_set_current_block(lower->mir, entry)) {
         return false;
@@ -395,7 +241,7 @@ static bool lower_params(arm64_mir_lower_t *lower)
                 /* The callee's own copy of the argument, or the local
                  * result object RET loads into the return registers. */
                 anvil_mir_vreg_t object = anvil_agg_frame_object(lower->mir, plan.size, plan.align, arm64_agg_target);
-                if (object == ANVIL_MIR_NO_VREG || !map_put(lower, param, object))
+                if (object == ANVIL_MIR_NO_VREG || !anvil_lower_vreg_put(&lower->values, param, object))
                     return false;
                 if (attr == ANVIL_PARAM_SRET) {
                     lower->sret_in_regs = true;
@@ -410,7 +256,7 @@ static bool lower_params(arm64_mir_lower_t *lower)
                 /* The result address has a register of its own. */
                 arm64_arg_loc_t loc = { abi->indirect_result_reg, 0 };
                 anvil_mir_vreg_t value = lower_incoming_value(lower, loc, ANVIL_MIR_REG_GPR, 64, false);
-                if (value == ANVIL_MIR_NO_VREG || !map_put(lower, param, value))
+                if (value == ANVIL_MIR_NO_VREG || !anvil_lower_vreg_put(&lower->values, param, value))
                     return false;
                 continue;
             }
@@ -421,7 +267,7 @@ static bool lower_params(arm64_mir_lower_t *lower)
                                                  (unsigned)arm64_type_size(param->type), false);
         anvil_mir_vreg_t value = lower_incoming_value(lower, loc, arm64_reg_class_for_type(param->type),
                                                       arm64_bits_for_type(param->type), arm64_type_is_signed(param->type));
-        if (value == ANVIL_MIR_NO_VREG || !map_put(lower, param, value))
+        if (value == ANVIL_MIR_NO_VREG || !anvil_lower_vreg_put(&lower->values, param, value))
             return false;
     }
 
@@ -439,7 +285,7 @@ static bool prepare_phi_results(arm64_mir_lower_t *lower)
             anvil_mir_vreg_t vreg = arm64_add_vreg_for_type(lower,
                                                             instr->result->type);
             if (vreg == ANVIL_MIR_NO_VREG) return false;
-            if (!map_put(lower, instr->result, vreg)) return false;
+            if (!anvil_lower_vreg_put(&lower->values, instr->result, vreg)) return false;
         }
     }
 
@@ -551,12 +397,12 @@ static anvil_mir_vreg_t lower_value(arm64_mir_lower_t *lower,
 {
     if (!value) return ANVIL_MIR_NO_VREG;
 
-    anvil_mir_vreg_t existing = map_get(lower, value);
+    anvil_mir_vreg_t existing = anvil_lower_vreg_get(&lower->values, value);
     if (existing != ANVIL_MIR_NO_VREG) return existing;
 
     anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG;
     int64_t offset = 0;
-    if (addr_map_get(lower, value, &base, &offset)) {
+    if (anvil_lower_address_get(&lower->addresses, value, &base, &offset)) {
         anvil_mir_vreg_t materialized = ANVIL_MIR_NO_VREG;
         if (!lower_add_const_offset(lower, base, offset, &materialized)) {
             return ANVIL_MIR_NO_VREG;
@@ -892,7 +738,7 @@ static bool lower_phi_copies_for_edge(arm64_mir_lower_t *lower,
         if (phi->op != ANVIL_OP_PHI) break;
         if (!phi->result) goto fail;
 
-        anvil_mir_vreg_t phi_vreg = map_get(lower, phi->result);
+        anvil_mir_vreg_t phi_vreg = anvil_lower_vreg_get(&lower->values, phi->result);
         if (phi_vreg == ANVIL_MIR_NO_VREG) goto fail;
 
         bool found = false;
@@ -992,7 +838,7 @@ static bool prepare_phi_aware_target(arm64_mir_lower_t *lower,
                                      size_t *num_edges,
                                      size_t *cap_edges)
 {
-    anvil_mir_block_t dest_mir = block_get(lower, dest_block);
+    anvil_mir_block_t dest_mir = anvil_lower_block_get(&lower->blocks, dest_block);
     if (dest_mir == ANVIL_MIR_NO_BLOCK) return false;
 
     *out_target = dest_mir;
@@ -1191,7 +1037,7 @@ static bool lower_call(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                                  local_result, copy_uses, 1)) {
             return false;
         }
-        return map_put(lower, instr->result, local_result);
+        return anvil_lower_vreg_put(&lower->values, instr->result, local_result);
     }
     return true;
 }
@@ -1302,7 +1148,7 @@ static bool lower_alloca(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                                             arm64_align_for_type(element_type));
         if (slot < 0) return false;
         if (!anvil_mir_add_frame_addr(lower->mir, ptr, slot)) return false;
-        return map_put(lower, instr->result, ptr);
+        return anvil_lower_vreg_put(&lower->values, instr->result, ptr);
     }
 
     if (instr->num_operands != 1) return false;
@@ -1318,7 +1164,7 @@ static bool lower_alloca(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                                       ptr, uses, 1, elem_size)) {
         return false;
     }
-    return map_put(lower, instr->result, ptr);
+    return anvil_lower_vreg_put(&lower->values, instr->result, ptr);
 }
 
 static bool lower_add_const_offset(arm64_mir_lower_t *lower,
@@ -1414,10 +1260,10 @@ static bool lower_gep(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         current = next;
     }
     if (all_constant)
-        return addr_map_put(lower, instr->result, current, constant_offset);
+        return anvil_lower_address_put(&lower->addresses, instr->result, current, constant_offset);
     if (!lower_add_const_offset(lower, current, constant_offset, &current))
         return false;
-    return map_put(lower, instr->result, current);
+    return anvil_lower_vreg_put(&lower->values, instr->result, current);
 }
 
 static bool lower_struct_gep(arm64_mir_lower_t *lower, anvil_instr_t *instr)
@@ -1439,7 +1285,7 @@ static bool lower_struct_gep(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         offset = (int64_t)instr->aux_type->data.struc.offsets[idx];
     }
 
-    return addr_map_put(lower, instr->result, base, offset);
+    return anvil_lower_address_put(&lower->addresses, instr->result, base, offset);
 }
 
 static bool lower_cast(arm64_mir_lower_t *lower,
@@ -1452,10 +1298,10 @@ static bool lower_cast(arm64_mir_lower_t *lower,
     if (anvil_cast_keeps_value(instr)) {
         anvil_mir_vreg_t offset_base = ANVIL_MIR_NO_VREG;
         int64_t offset = 0;
-        if (addr_map_get(lower, instr->operands[0], &offset_base, &offset))
-            return addr_map_put(lower, instr->result, offset_base, offset);
+        if (anvil_lower_address_get(&lower->addresses, instr->operands[0], &offset_base, &offset))
+            return anvil_lower_address_put(&lower->addresses, instr->result, offset_base, offset);
         anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
-        return same != ANVIL_MIR_NO_VREG && map_put(lower, instr->result, same);
+        return same != ANVIL_MIR_NO_VREG && anvil_lower_vreg_put(&lower->values, instr->result, same);
     }
     anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
     anvil_mir_vreg_t def = arm64_add_vreg_for_type(lower, instr->result->type);
@@ -1496,7 +1342,7 @@ static bool lower_cast(arm64_mir_lower_t *lower,
             !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) ||
             !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, def, uses, 2))
             return false;
-        return map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (mir_op == ANVIL_MIR_OP_BITCAST) {
@@ -1517,7 +1363,7 @@ static bool lower_cast(arm64_mir_lower_t *lower,
 
     anvil_mir_vreg_t uses[] = { src };
     if (!anvil_mir_add_instr(lower->mir, mir_op, def, uses, 1)) return false;
-    return map_put(lower, instr->result, def);
+    return anvil_lower_vreg_put(&lower->values, instr->result, def);
 }
 
 static bool lower_select(arm64_mir_lower_t *lower, anvil_instr_t *instr)
@@ -1539,7 +1385,7 @@ static bool lower_select(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                              def, uses, 3)) {
         return false;
     }
-    return map_put(lower, instr->result, def);
+    return anvil_lower_vreg_put(&lower->values, instr->result, def);
 }
 
 static bool lower_memory_address(arm64_mir_lower_t *lower,
@@ -1549,7 +1395,7 @@ static bool lower_memory_address(arm64_mir_lower_t *lower,
 {
     anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG;
     int64_t offset = 0;
-    if (addr_map_get(lower, value, &base, &offset)) {
+    if (anvil_lower_address_get(&lower->addresses, value, &base, &offset)) {
         base = lower_widen_gpr_to_64(lower, base, false);
         if (base == ANVIL_MIR_NO_VREG) return false;
         *out_base = base;
@@ -1743,7 +1589,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         for (size_t operand = 0; operand < vector.num_uses; operand++)
             uses[operand] = lower_value(lower, instr->operands[operand]);
         anvil_mir_vreg_t def = vector.supported ? arm64_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
-        return anvil_vector_mir_emit(lower->mir, &vector, def, uses) && map_put(lower, instr->result, def);
+        return anvil_vector_mir_emit(lower->mir, &vector, def, uses) && anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (anvil_op_is_atomic(instr->op))
@@ -1761,7 +1607,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
             !anvil_mir_add_atomic(lower->mir, instr->op, def, uses, instr->num_operands, &instr->atomic))
             return false;
 
-        return !instr->result || map_put(lower, instr->result, def);
+        return !instr->result || anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     anvil_mir_opcode_t mir_op;
@@ -1788,7 +1634,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         if (!added) {
             return false;
         }
-        return map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (instr->num_operands == 1 && map_unop(instr->op, &mir_op)) {
@@ -1800,7 +1646,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
 
         anvil_mir_vreg_t uses[] = { src };
         if (!anvil_mir_add_instr(lower->mir, mir_op, def, uses, 1)) return false;
-        return map_put(lower, instr->result, def);
+        return anvil_lower_vreg_put(&lower->values, instr->result, def);
     }
 
     if (instr->num_operands == 1 && map_cast(instr->op, &mir_op)) {
@@ -1816,7 +1662,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
             anvil_mir_vreg_t def = arm64_add_vreg_for_type(lower, instr->result->type);
             return def != ANVIL_MIR_NO_VREG &&
                    lower->abi->add_va_start(lower->mir, def, &lower->named_args) &&
-                   map_put(lower, instr->result, def);
+                   anvil_lower_vreg_put(&lower->values, instr->result, def);
         }
 
         case ANVIL_OP_ALLOCA:
@@ -1864,7 +1710,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                     !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, def,
                                          norm_uses, 2)) return false;
             }
-            return map_put(lower, instr->result, def);
+            return anvil_lower_vreg_put(&lower->values, instr->result, def);
         }
         case ANVIL_OP_STORE: {
             if (instr->num_operands != 2) return false;
@@ -1901,7 +1747,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
             return lower_call(lower, instr);
         case ANVIL_OP_BR: {
             if (!instr->true_block) return false;
-            anvil_mir_block_t target = block_get(lower, instr->true_block);
+            anvil_mir_block_t target = anvil_lower_block_get(&lower->blocks, instr->true_block);
             if (target == ANVIL_MIR_NO_BLOCK) return false;
             if (!lower_phi_copies_for_edge(lower, instr->parent, instr->true_block)) {
                 return false;
@@ -1913,8 +1759,8 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
                 return false;
             }
             anvil_mir_vreg_t cond = lower_value(lower, instr->operands[0]);
-            anvil_mir_block_t true_block = block_get(lower, instr->true_block);
-            anvil_mir_block_t false_block = block_get(lower, instr->false_block);
+            anvil_mir_block_t true_block = anvil_lower_block_get(&lower->blocks, instr->true_block);
+            anvil_mir_block_t false_block = anvil_lower_block_get(&lower->blocks, instr->false_block);
             if (cond == ANVIL_MIR_NO_VREG ||
                 true_block == ANVIL_MIR_NO_BLOCK ||
                 false_block == ANVIL_MIR_NO_BLOCK) {
@@ -2001,28 +1847,28 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     }
 
     if (!anvil_opt_cfg_build_layout(&cfg) ||
-        !create_mir_blocks(&lower) ||
+        !anvil_lower_create_blocks(lower.mir, lower.func, &lower.blocks) ||
         !lower_params(&lower) ||
         !prepare_phi_results(&lower)) {
         anvil_opt_cfg_destroy(&cfg);
         anvil_mir_func_destroy(lower.mir);
-        free(lower.blocks);
-        free(lower.values);
-        free(lower.addr_offsets);
+        anvil_lower_map_destroy(&lower.blocks);
+        anvil_lower_map_destroy(&lower.values);
+        anvil_lower_map_destroy(&lower.addresses);
         return NULL;
     }
 
     for (size_t rank = 0; rank < cfg.count; rank++)
     {
         anvil_block_t *block = cfg.blocks[cfg.layout[rank]];
-        anvil_mir_block_t mir_block = block_get(&lower, block);
+        anvil_mir_block_t mir_block = anvil_lower_block_get(&lower.blocks, block);
         if (mir_block == ANVIL_MIR_NO_BLOCK ||
             !anvil_mir_set_current_block(lower.mir, mir_block)) {
             anvil_opt_cfg_destroy(&cfg);
             anvil_mir_func_destroy(lower.mir);
-            free(lower.blocks);
-            free(lower.values);
-            free(lower.addr_offsets);
+            anvil_lower_map_destroy(&lower.blocks);
+            anvil_lower_map_destroy(&lower.values);
+            anvil_lower_map_destroy(&lower.addresses);
             return NULL;
         }
 
@@ -2032,17 +1878,17 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
                 (instr->op == ANVIL_OP_CALL && !anvil_mir_annotate_call_effects(lower.mir, first, anvil_instr_call_effects(instr)))) {
                 anvil_opt_cfg_destroy(&cfg);
                 anvil_mir_func_destroy(lower.mir);
-                free(lower.blocks);
-                free(lower.values);
-                free(lower.addr_offsets);
+                anvil_lower_map_destroy(&lower.blocks);
+                anvil_lower_map_destroy(&lower.values);
+                anvil_lower_map_destroy(&lower.addresses);
                 return NULL;
             }
         }
     }
 
-    free(lower.blocks);
-    free(lower.values);
-    free(lower.addr_offsets);
+    anvil_lower_map_destroy(&lower.blocks);
+    anvil_lower_map_destroy(&lower.values);
+    anvil_lower_map_destroy(&lower.addresses);
     anvil_opt_cfg_destroy(&cfg);
     return lower.mir;
 }
@@ -2659,16 +2505,6 @@ static bool mir_logical_imm(int64_t value, unsigned width)
     return transitions == 2;
 }
 
-static int mir_pow2_shift(int64_t value, unsigned width)
-{
-    if (value <= 0 || (value & (value - 1)) != 0)
-        return -1;
-    int shift = 0;
-    while ((INT64_C(1) << shift) != value)
-        shift++;
-    return shift < (int)width ? shift : -1;
-}
-
 /* Mirrors the immediate forms chosen by mir_emit_binary and mir_emit_cmp. */
 static bool mir_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
 {
@@ -2683,8 +2519,10 @@ static bool mir_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_i
     case ANVIL_MIR_OP_ADD:
     case ANVIL_MIR_OP_SUB:
         return use == 1 && mir_arith_imm(v);
-    case ANVIL_MIR_OP_MUL:
-        return use == 1 && mir_pow2_shift(v, width) >= 0;
+    case ANVIL_MIR_OP_MUL: {
+        unsigned shift;
+        return use == 1 && anvil_mir_isel_mul_form(v, width, &shift) != ANVIL_MIR_MUL_MULTIPLY;
+    }
     case ANVIL_MIR_OP_AND:
     case ANVIL_MIR_OP_OR:
     case ANVIL_MIR_OP_XOR:
@@ -3587,7 +3425,9 @@ static bool mir_fold_shift(arm64_mir_emit_t *emit, size_t instr_index, const anv
     const char *kind = info->op == ANVIL_MIR_OP_SHL || info->op == ANVIL_MIR_OP_MUL ? "lsl" : info->op == ANVIL_MIR_OP_SHR ? "lsr"
                      : info->op == ANVIL_MIR_OP_SAR                                 ? "asr"
                                                                                     : NULL;
-    unsigned amount = info->op == ANVIL_MIR_OP_MUL ? (unsigned)mir_pow2_shift(imm, width) : (unsigned)(imm & (int64_t)(width - 1));
+    unsigned amount = (unsigned)(imm & (int64_t)(width - 1));
+    if (info->op == ANVIL_MIR_OP_MUL && anvil_mir_isel_mul_form(imm, width, &amount) != ANVIL_MIR_MUL_SHIFT)
+        return false;
     if (!kind || emit->shift_target != SIZE_MAX || !def_info || mir_gpr_width(emit->mir, info->def) != width)
         return false;
     size_t reader = anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 8, false);
@@ -3710,9 +3550,14 @@ static void mir_emit_binary(arm64_mir_emit_t *emit,
                 anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, #%lld\n", add ? "add" : "sub", dst, a, (long long)(imm < 0 ? -imm : imm));
                 return;
             }
-            case ANVIL_MIR_OP_MUL:
-                anvil_strbuf_appendf(&emit->code, "\tlsl %s, %s, #%d\n", dst, a, mir_pow2_shift(imm, width));
+            case ANVIL_MIR_OP_MUL: {
+                unsigned amount;
+                if (anvil_mir_isel_mul_form(imm, width, &amount) == ANVIL_MIR_MUL_SHIFT_ADD)
+                    anvil_strbuf_appendf(&emit->code, "\tadd %s, %s, %s, lsl #%u\n", dst, a, a, amount);
+                else
+                    anvil_strbuf_appendf(&emit->code, "\tlsl %s, %s, #%u\n", dst, a, amount);
                 return;
+            }
             case ANVIL_MIR_OP_AND:
             case ANVIL_MIR_OP_OR:
             case ANVIL_MIR_OP_XOR:

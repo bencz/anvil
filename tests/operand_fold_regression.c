@@ -30,6 +30,9 @@ typedef enum {
     MASK_SCALE,       /* zext(x & 255) << 2 (32 then 64 bits) */
     KEEP_OPERAND,     /* (a + 5) ^ a (32-bit): the add cannot write a */
     STORE_CONSTANT,   /* *p = 7; return a (32-bit) */
+    MUL_THREE,        /* a * 3 (32-bit) */
+    MUL_NINE,         /* a * 9 (64-bit) */
+    MUL_SEVENTEEN,    /* a * 17 (32-bit) */
 } shape_t;
 
 static anvil_func_t *build(anvil_ctx_t *ctx, anvil_module_t **module, shape_t shape)
@@ -49,7 +52,12 @@ static anvil_func_t *build(anvil_ctx_t *ctx, anvil_module_t **module, shape_t sh
         break;
     case EXTRACT:
     case KEEP_OPERAND:
+    case MUL_THREE:
+    case MUL_SEVENTEEN:
         params[0] = u32, params[1] = u32, result = u32;
+        break;
+    case MUL_NINE:
+        params[0] = i64, params[1] = i64, result = i64;
         break;
     default:
         params[0] = u32, params[1] = u32, result = u64;
@@ -77,6 +85,15 @@ static anvil_func_t *build(anvil_ctx_t *ctx, anvil_module_t **module, shape_t sh
     case STORE_CONSTANT:
         anvil_build_store(ctx, anvil_const_i32(ctx, 7), b);
         value = a;
+        break;
+    case MUL_THREE:
+        value = anvil_build_mul(ctx, a, anvil_const_u32(ctx, 3), "tripled");
+        break;
+    case MUL_NINE:
+        value = anvil_build_mul(ctx, a, anvil_const_i64(ctx, 9), "nine");
+        break;
+    case MUL_SEVENTEEN:
+        value = anvil_build_mul(ctx, a, anvil_const_u32(ctx, 17), "seventeen");
         break;
     case MASK_SCALE: {
         anvil_value_t *low = anvil_build_and(ctx, anvil_build_xor(ctx, a, b, "x"), anvil_const_u32(ctx, 255), "low");
@@ -115,6 +132,19 @@ static const fold_case_t cases[] = {
     /* A stored constant is the store's immediate. */
     {ANVIL_ARCH_X86_64, 0, STORE_CONSTANT, "\tmovl $7, (%", NULL, "\tmovl $7, %"},
     {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, STORE_CONSTANT, "\tmovl $7, (%", NULL, "\tmovl $7, %"},
+    /* x * (2^k + 1) is x + (x << k): one lea for scales 2, 4, 8 on x86, one
+     * add of a shifted register on ARM64; PowerPC's mulli and SystemZ's
+     * MHI are one instruction already. */
+    {ANVIL_ARCH_X86_64, 0, MUL_THREE, "\tleal (%", ",2), %", "\timul"},
+    {ANVIL_ARCH_X86_64, 0, MUL_NINE, "\tleaq (%", ",8), %", "\timul"},
+    {ANVIL_ARCH_X86_64, 0, MUL_SEVENTEEN, "\timull $17", NULL, "\tlea"},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_I486, MUL_THREE, "\tleal (%", ",2), %", "\timul"},
+    {ANVIL_ARCH_ARM64, 0, MUL_THREE, "\tadd w", ", lsl #1", "\tmul "},
+    {ANVIL_ARCH_ARM64, 0, MUL_NINE, "\tadd x", ", lsl #3", "\tmul "},
+    {ANVIL_ARCH_ARM64, 0, MUL_SEVENTEEN, "\tadd w", ", lsl #4", "\tmul "},
+    {ANVIL_ARCH_PPC64LE, 0, MUL_THREE, "\tmulli ", ", 3", NULL},
+    {ANVIL_ARCH_PPC32, 0, MUL_NINE, "\t", NULL, NULL},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z10, MUL_THREE, "         MHI ", ",3", NULL},
 };
 
 static bool has_line(const char *text, const char *start, const char *holding)

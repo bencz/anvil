@@ -111,6 +111,13 @@ size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_i
  * materialized write nothing. */
 bool anvil_mir_isel_keeps(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t from, size_t to, anvil_mir_vreg_t vreg);
 
+/* How a multiply by the constant `value` (`width` bits) runs without a
+ * multiplier: by 2^shift, a shift; by 2^shift + 1 (shift >= 1), x + (x <<
+ * shift), which a target with a shifted operand or a scaled address takes
+ * in one instruction. */
+typedef enum { ANVIL_MIR_MUL_MULTIPLY, ANVIL_MIR_MUL_SHIFT, ANVIL_MIR_MUL_SHIFT_ADD } anvil_mir_mul_form_t;
+anvil_mir_mul_form_t anvil_mir_isel_mul_form(int64_t value, unsigned width, unsigned *shift);
+
 /* Counter loops: an innermost loop whose counter j only counts up to zero
  * (count_to_zero's shape): one definition before the loop (INIT), an
  * in-place j = j + 1 in the latch (STEP) and j != 0 there consumed by the

@@ -52,6 +52,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/parallel_move.c \
 	$(SRC_DIR)/backend/common/va_cursor.c \
 	$(SRC_DIR)/backend/common/ir_lower.c \
+	$(SRC_DIR)/backend/common/lower_map.c \
 	$(SRC_DIR)/backend/common/vector_isa.c \
 	$(SRC_DIR)/backend/common/print_flags.c \
 	$(SRC_DIR)/backend/common/rotate_mask.c \

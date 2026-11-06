@@ -750,14 +750,11 @@ static bool ppc_uimm16(int64_t value)
     return value >= 0 && value <= 65535;
 }
 
+/* mulli is one instruction: only a power of two becomes a shift. */
 static int ppc_pow2_shift(int64_t value, bool wide)
 {
-    if (value <= 0 || (value & (value - 1)) != 0)
-        return -1;
-    int shift = 0;
-    while ((INT64_C(1) << shift) != value)
-        shift++;
-    return shift < (wide ? 64 : 32) ? shift : -1;
+    unsigned shift;
+    return anvil_mir_isel_mul_form(value, wide ? 64 : 32, &shift) == ANVIL_MIR_MUL_SHIFT ? (int)shift : -1;
 }
 
 /* The rotate-and-mask instruction computing `rm`, if one does: rlwinm on

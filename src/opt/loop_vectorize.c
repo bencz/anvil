@@ -1542,7 +1542,8 @@ static bool build_body(lv_plan *plan, lv_list *bodies, lv_list *preheader, size_
              * writeback); elsewhere base[i + k] (a base hoisted per copy
              * for PowerPC's reg+reg vector accesses). */
             const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(plan->ctx);
-            bool displaced = arch && (arch->index_displacement || arch->address_increment_bytes >= LV_VECTOR_BYTES);
+            bool displaced = arch && (anvil_ctx_indexed_displacement(plan->ctx, (int64_t)(copy * plan->vector->size), plan->vector->size) ||
+                                      arch->address_increment_bytes >= LV_VECTOR_BYTES);
             if (copy > 0 && displaced && plan->classes[position] == LV_ADDRESS && map_get(&maps[0], instr->result)) {
                 anvil_value_t *ahead[] = {map_get(&maps[0], instr->result), index_const(plan, (int64_t)copy)};
                 made = make(plan, body, ANVIL_OP_GEP, vector_pointer, ahead, 2);

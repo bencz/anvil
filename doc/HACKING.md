@@ -96,7 +96,7 @@ anvil/
 │   ├── opt/                 # IR optimization passes
 │   └── backend/             # Target backends
 │       ├── common/                   # Shared target-independent backend utilities
-│       │   ├── anvil_slot_map.h
+│       │   ├── lower_map.c, lower_map.h # What each lowering made of IR values and blocks
 │       │   └── gnu_data.c, gnu_data.h # GAS data emission with symbol callback
 │       ├── x86/                      # x86 family (32-bit and 64-bit)
 │       │   ├── x86_32_lower.c, x86_64_lower.c

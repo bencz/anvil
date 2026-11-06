@@ -34,7 +34,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = false,
-        .index_displacement = true,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_X86_64] = {
@@ -60,7 +59,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = false,
-        .index_displacement = true,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S370] = {
@@ -86,7 +84,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S370_XA] = {
@@ -112,7 +109,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_S390] = {
@@ -138,7 +134,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_ZARCH] = {
@@ -164,7 +159,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 1
     },
     [ANVIL_ARCH_PPC32] = {
@@ -190,7 +184,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 4
     },
     [ANVIL_ARCH_PPC64] = {
@@ -216,7 +209,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 4
     },
     [ANVIL_ARCH_PPC64LE] = {
@@ -242,7 +234,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .index_displacement = false,
         .small_loop_unroll = 4
     },
     [ANVIL_ARCH_ARM64] = {
@@ -268,7 +259,6 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT | ANVIL_ADDRESS_POST_INCREMENT,
         .address_increment_bytes = 16,
         .counter_branches = false,
-        .index_displacement = false,
         .small_loop_unroll = 1
     }
 };

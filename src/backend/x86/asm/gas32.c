@@ -1,4 +1,5 @@
 #include "gas32_internal.h"
+#include "../x86_address.h"
 #include "../../common/parallel_move.h"
 #include "x86_gas.h"
 #include "x86_sse_vector.h"
@@ -558,14 +559,16 @@ static void x86_emit_gpr_binary(x86_mir_emit_t *emit, size_t index, const anvil_
     }
 
     if (mnemonic && b_imm) {
-        if (info->op == ANVIL_MIR_OP_MUL && imm > 0 && (imm & (imm - 1)) == 0) {
-            int shift = 0;
-            while ((INT64_C(1) << shift) != imm)
-                shift++;
+        unsigned shift = 0;
+        anvil_mir_mul_form_t form = info->op == ANVIL_MIR_OP_MUL ? anvil_mir_isel_mul_form(imm, 32, &shift) : ANVIL_MIR_MUL_MULTIPLY;
+        if (form == ANVIL_MIR_MUL_SHIFT) {
             if (dst_phys != a_phys)
                 anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %%%s\n", a, dst);
             if (shift != 0)
-                anvil_strbuf_appendf(&emit->code, "\tshll $%d, %%%s\n", shift, dst);
+                anvil_strbuf_appendf(&emit->code, "\tshll $%u, %%%s\n", shift, dst);
+        } else if (form == ANVIL_MIR_MUL_SHIFT_ADD && x86_address_mode(NULL, 1u << shift, 0, 0, ANVIL_MIR_INDEX_PLAIN)) {
+            /* x * (2^k + 1): x + x * 2^k, one lea for scales 2, 4, 8. */
+            anvil_strbuf_appendf(&emit->code, "\tleal (%%%s,%%%s,%u), %%%s\n", a, a, 1u << shift, dst);
         } else if (info->op == ANVIL_MIR_OP_MUL) {
             anvil_strbuf_appendf(&emit->code, "\timull $%lld, %%%s, %%%s\n", (long long)imm, a, dst);
         } else if (dst_phys != a_phys && (info->op == ANVIL_MIR_OP_ADD || (info->op == ANVIL_MIR_OP_SUB && imm != INT32_MIN))) {
