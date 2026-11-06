@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static size_t lane_operation_arity(anvil_op_t operation)
 {
@@ -399,4 +400,100 @@ bool anvil_ir_lower_switch(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
             return false;
     }
     return true;
+}
+
+bool anvil_ir_add_offset(anvil_ir_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t *result)
+{
+    if (offset == 0) {
+        *result = base;
+        return true;
+    }
+    anvil_mir_vreg_t amount = anvil_mir_add_vreg_ex(lower->mir, ANVIL_MIR_REG_GPR, (uint16_t)lower->pointer_bits);
+    anvil_mir_vreg_t sum = anvil_mir_add_vreg_ex(lower->mir, ANVIL_MIR_REG_GPR, (uint16_t)lower->pointer_bits);
+    anvil_mir_vreg_t uses[] = {base, amount};
+    if (amount == ANVIL_MIR_NO_VREG || sum == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, amount, offset) ||
+        !anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_ADD, sum, uses, 2))
+        return false;
+    *result = sum;
+    return true;
+}
+
+bool anvil_ir_mark_symbol(anvil_ir_lower_t *lower, const anvil_value_t *source)
+{
+    anvil_ctx_t *ctx = lower->func->parent ? lower->func->parent->ctx : NULL;
+    return !source || !anvil_symbol_uses_got(ctx, source) || anvil_mir_set_instr_symbol_got(lower->mir, anvil_mir_num_instrs(lower->mir) - 1, true);
+}
+
+/* A relocated constant (symbol + addend) carries its addend as the
+ * instruction's immediate, 0 included. */
+static anvil_mir_vreg_t symbol_address(anvil_ir_lower_t *lower, const char *symbol, bool relocated, int64_t addend, const anvil_value_t *source)
+{
+    if (!symbol || !symbol[0])
+        return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, (uint16_t)lower->pointer_bits, false);
+    bool made = vreg != ANVIL_MIR_NO_VREG && (relocated ? anvil_mir_add_instr_symbol_imm(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol, addend)
+                                                        : anvil_mir_add_instr_symbol(lower->mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol));
+    return made && anvil_ir_mark_symbol(lower, source) ? vreg : ANVIL_MIR_NO_VREG;
+}
+
+anvil_mir_vreg_t anvil_ir_symbol_address(anvil_ir_lower_t *lower, const char *symbol, const anvil_value_t *source)
+{
+    return symbol_address(lower, symbol, false, 0, source);
+}
+
+/* An FP constant's bits at its width (4 or 8 bytes). */
+static int64_t float_bits(double value, size_t bytes)
+{
+    if (bytes == sizeof(float)) {
+        float narrow = (float)value;
+        uint32_t raw = 0;
+        memcpy(&raw, &narrow, sizeof(raw));
+        return (int64_t)raw;
+    }
+    uint64_t raw = 0;
+    memcpy(&raw, &value, sizeof(raw));
+    return (int64_t)raw;
+}
+
+static anvil_mir_vreg_t constant(anvil_ir_lower_t *lower, anvil_value_t *value)
+{
+    anvil_mir_vreg_t vreg = lower->vreg_for_type(lower, value->type);
+    int64_t bits = value->kind == ANVIL_VAL_CONST_INT ? value->data.i : value->kind == ANVIL_VAL_CONST_FLOAT ? float_bits(value->data.f, value->type->size) : 0;
+    return vreg != ANVIL_MIR_NO_VREG && anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, vreg, bits) ? vreg : ANVIL_MIR_NO_VREG;
+}
+
+anvil_mir_vreg_t anvil_ir_lower_value(anvil_ir_lower_t *lower, anvil_value_t *value)
+{
+    if (!value)
+        return ANVIL_MIR_NO_VREG;
+    anvil_mir_vreg_t existing = anvil_lower_vreg_get(&lower->values, value);
+    if (existing != ANVIL_MIR_NO_VREG)
+        return existing;
+    anvil_mir_vreg_t base;
+    int64_t offset;
+    if (anvil_lower_address_get(&lower->addresses, value, &base, &offset)) {
+        anvil_mir_vreg_t address;
+        return anvil_ir_add_offset(lower, base, offset, &address) ? address : ANVIL_MIR_NO_VREG;
+    }
+    switch (value->kind) {
+    case ANVIL_VAL_CONST_INT:
+    case ANVIL_VAL_CONST_FLOAT:
+    case ANVIL_VAL_CONST_NULL:
+        return constant(lower, value);
+    case ANVIL_VAL_CONST_STRING: {
+        const char *label = NULL;
+        return anvil_mir_add_string_literal(lower->mir, value->data.str, &label) < 0 ? ANVIL_MIR_NO_VREG : anvil_ir_symbol_address(lower, label, NULL);
+    }
+    case ANVIL_VAL_CONST_SYMBOL_ADDR:
+    case ANVIL_VAL_CONST_GEP:
+        return value->data.reloc.symbol
+                   ? symbol_address(lower, value->data.reloc.symbol->name, true, value->data.reloc.addend, value->data.reloc.symbol)
+                   : ANVIL_MIR_NO_VREG;
+    case ANVIL_VAL_FUNC:
+        return anvil_ir_symbol_address(lower, value->data.func && value->data.func->name ? value->data.func->name : value->name, value);
+    case ANVIL_VAL_GLOBAL:
+        return anvil_ir_symbol_address(lower, value->name, value);
+    default:
+        return ANVIL_MIR_NO_VREG;
+    }
 }

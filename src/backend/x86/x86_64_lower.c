@@ -238,137 +238,6 @@ static bool prepare_phi_results(x64_mir_lower_t *lower)
     return true;
 }
 
-static int64_t float_bits_as_i64(double value, uint16_t bits)
-{
-    if (bits == 32) {
-        float f = (float)value;
-        uint32_t raw = 0;
-        memcpy(&raw, &f, sizeof(raw));
-        return (int64_t)raw;
-    }
-
-    uint64_t raw = 0;
-    memcpy(&raw, &value, sizeof(raw));
-    return (int64_t)raw;
-}
-
-static anvil_mir_vreg_t lower_value(x64_mir_lower_t *lower, anvil_value_t *value);
-static bool lower_add_const_offset(x64_mir_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t *out_ptr);
-
-static anvil_mir_vreg_t lower_const_value(x64_mir_lower_t *lower, anvil_value_t *value)
-{
-    anvil_mir_vreg_t vreg = x64_add_vreg_for_type(lower, value->type);
-    if (vreg == ANVIL_MIR_NO_VREG)
-        return ANVIL_MIR_NO_VREG;
-
-    int64_t imm = 0;
-    switch (value->kind) {
-    case ANVIL_VAL_CONST_INT:
-        imm = value->data.i;
-        break;
-    case ANVIL_VAL_CONST_NULL:
-        imm = 0;
-        break;
-    case ANVIL_VAL_CONST_FLOAT:
-        imm = float_bits_as_i64(value->data.f, x64_bits_for_type(value->type));
-        break;
-    default:
-        return ANVIL_MIR_NO_VREG;
-    }
-
-    if (!anvil_mir_add_instr_imm(lower->base.mir, ANVIL_MIR_OP_MOV, vreg, imm)) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    return vreg;
-}
-
-/* The last instruction names `source` (a global or function): mark it to go
- * through the GOT/PLT when the relocation model requires. */
-static bool x64_mark_symbol_access(x64_mir_lower_t *lower, const anvil_value_t *source)
-{
-    anvil_ctx_t *ctx = lower->base.func->parent ? lower->base.func->parent->ctx : NULL;
-    return !source || !anvil_symbol_uses_got(ctx, source) ||
-           anvil_mir_set_instr_symbol_got(lower->base.mir, anvil_mir_num_instrs(lower->base.mir) - 1, true);
-}
-
-static anvil_mir_vreg_t lower_symbol_address(x64_mir_lower_t *lower, const char *symbol, const anvil_value_t *source)
-{
-    if (!symbol || !symbol[0])
-        return ANVIL_MIR_NO_VREG;
-
-    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, 64, false);
-    if (vreg == ANVIL_MIR_NO_VREG)
-        return ANVIL_MIR_NO_VREG;
-
-    if (!anvil_mir_add_instr_symbol(lower->base.mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol) || !x64_mark_symbol_access(lower, source)) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    return vreg;
-}
-
-static anvil_mir_vreg_t lower_reloc_address(x64_mir_lower_t *lower, anvil_value_t *value)
-{
-    const char *symbol = value && value->data.reloc.symbol ? value->data.reloc.symbol->name : NULL;
-    if (!symbol || !symbol[0])
-        return ANVIL_MIR_NO_VREG;
-    anvil_mir_vreg_t vreg = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, 64, false);
-    if (vreg == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_symbol_imm(lower->base.mir, ANVIL_MIR_OP_SYMBOL_ADDR, vreg, NULL, 0, symbol, value->data.reloc.addend) ||
-        !x64_mark_symbol_access(lower, value->data.reloc.symbol))
-        return ANVIL_MIR_NO_VREG;
-    return vreg;
-}
-
-static anvil_mir_vreg_t lower_string_address(x64_mir_lower_t *lower, anvil_value_t *value)
-{
-    const char *label = NULL;
-    if (anvil_mir_add_string_literal(lower->base.mir, value->data.str, &label) < 0 || !label) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    return lower_symbol_address(lower, label, NULL);
-}
-
-static anvil_mir_vreg_t lower_value(x64_mir_lower_t *lower, anvil_value_t *value)
-{
-    if (!value)
-        return ANVIL_MIR_NO_VREG;
-
-    anvil_mir_vreg_t existing = anvil_lower_vreg_get(&lower->base.values, value);
-    if (existing != ANVIL_MIR_NO_VREG)
-        return existing;
-
-    anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG;
-    int64_t offset = 0;
-    if (anvil_lower_address_get(&lower->base.addresses, value, &base, &offset)) {
-        anvil_mir_vreg_t materialized = ANVIL_MIR_NO_VREG;
-        if (!lower_add_const_offset(lower, base, offset, &materialized)) {
-            return ANVIL_MIR_NO_VREG;
-        }
-        /* Materialized where this use is, every time: a vreg from the
-         * first use need not dominate the others (the base does). */
-        return materialized;
-    }
-
-    switch (value->kind) {
-    case ANVIL_VAL_CONST_INT:
-    case ANVIL_VAL_CONST_FLOAT:
-    case ANVIL_VAL_CONST_NULL:
-        return lower_const_value(lower, value);
-    case ANVIL_VAL_CONST_STRING:
-        return lower_string_address(lower, value);
-    case ANVIL_VAL_CONST_SYMBOL_ADDR:
-    case ANVIL_VAL_CONST_GEP:
-        return lower_reloc_address(lower, value);
-    case ANVIL_VAL_FUNC:
-        if (value->data.func && value->data.func->name) {
-            return lower_symbol_address(lower, value->data.func->name, value);
-        }
-        return lower_symbol_address(lower, value->name, value);
-    case ANVIL_VAL_GLOBAL:
-        return lower_symbol_address(lower, value->name, value);
-    default:
-        return ANVIL_MIR_NO_VREG;
-    }
-}
 
 /* Physical return register of the given SysV/Win64 part. */
 static int agg_return_reg(const anvil_x64_abi_desc_t *desc, const x64_agg_plan_t *plan, unsigned part)
@@ -415,7 +284,7 @@ static bool add_return(x64_mir_lower_t *lower, anvil_value_t *value)
         return anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0);
     }
 
-    anvil_mir_vreg_t src = lower_value(lower, value);
+    anvil_mir_vreg_t src = anvil_ir_lower_value(&lower->base, value);
     const anvil_mir_vreg_info_t *info = src != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(lower->base.mir, src) : NULL;
     if (!info)
         return false;
@@ -512,7 +381,7 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
 
     for (size_t i = 0; ok && i < num_args; i++) {
         anvil_value_t *arg = instr->operands[i + 1];
-        anvil_mir_vreg_t src = lower_value(lower, arg);
+        anvil_mir_vreg_t src = anvil_ir_lower_value(&lower->base, arg);
         if (src == ANVIL_MIR_NO_VREG) {
             ok = false;
             break;
@@ -617,7 +486,7 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
 
     /* The target is loaded last, next to the call. */
     if (ok && !direct_call) {
-        anvil_mir_vreg_t target_src = lower_value(lower, callee);
+        anvil_mir_vreg_t target_src = anvil_ir_lower_value(&lower->base, callee);
         anvil_mir_vreg_t target_fixed = x64_add_vreg_for_type(lower, callee->type);
         anvil_mir_vreg_t target_uses[] = {target_src};
         ok = target_src != ANVIL_MIR_NO_VREG && target_fixed != ANVIL_MIR_NO_VREG &&
@@ -654,7 +523,7 @@ static bool lower_call(x64_mir_lower_t *lower, anvil_instr_t *instr)
     }
 
     bool emit_ok = anvil_mir_add_call(lower->base.mir, call_def, call_uses, num_call_uses, symbol, instr->call_cc, is_variadic, vector_args) &&
-                   (!symbol || x64_mark_symbol_access(lower, callee));
+                   (!symbol || anvil_ir_mark_symbol(&lower->base, callee));
     free(call_uses);
     if (!emit_ok)
         return false;
@@ -800,7 +669,7 @@ static bool lower_alloca(x64_mir_lower_t *lower, anvil_instr_t *instr)
 
     if (instr->num_operands != 1)
         return false;
-    anvil_mir_vreg_t count = lower_value(lower, instr->operands[0]);
+    anvil_mir_vreg_t count = anvil_ir_lower_value(&lower->base, instr->operands[0]);
     if (count == ANVIL_MIR_NO_VREG)
         return false;
     count = lower_widen_gpr_to_64(lower, count, false);
@@ -817,35 +686,12 @@ static bool lower_alloca(x64_mir_lower_t *lower, anvil_instr_t *instr)
     return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
 }
 
-static bool lower_add_const_offset(x64_mir_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t *out_ptr)
-{
-    if (offset == 0) {
-        *out_ptr = base;
-        return true;
-    }
-
-    anvil_mir_vreg_t off = anvil_mir_add_vreg_ex(lower->base.mir, ANVIL_MIR_REG_GPR, 64);
-    anvil_mir_vreg_t dst = anvil_mir_add_vreg_ex(lower->base.mir, ANVIL_MIR_REG_GPR, 64);
-    if (off == ANVIL_MIR_NO_VREG || dst == ANVIL_MIR_NO_VREG)
-        return false;
-    if (!anvil_mir_add_instr_imm(lower->base.mir, ANVIL_MIR_OP_MOV, off, offset)) {
-        return false;
-    }
-    anvil_mir_vreg_t uses[] = {base, off};
-    if (!anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_ADD, dst, uses, 2)) {
-        return false;
-    }
-
-    *out_ptr = dst;
-    return true;
-}
-
 static bool lower_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands < 2 || !instr->result || !instr->aux_type)
         return false;
 
-    anvil_mir_vreg_t current = lower_value(lower, instr->operands[0]);
+    anvil_mir_vreg_t current = anvil_ir_lower_value(&lower->base, instr->operands[0]);
     if (current == ANVIL_MIR_NO_VREG)
         return false;
     current = lower_widen_gpr_to_64(lower, current, false);
@@ -871,7 +717,7 @@ static bool lower_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
         if (step.kind != ANVIL_GEP_STEP_SCALE)
             return false;
         int64_t elem_size = (int64_t)step.amount;
-        anvil_mir_vreg_t index = lower_value(lower, index_value);
+        anvil_mir_vreg_t index = anvil_ir_lower_value(&lower->base, index_value);
         if (index == ANVIL_MIR_NO_VREG)
             return false;
         index = lower_widen_gpr_to_64(lower, index, index_value->type->is_signed);
@@ -905,7 +751,7 @@ static bool lower_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
     }
     if (all_constant)
         return anvil_lower_address_put(&lower->base.addresses, instr->result, current, constant_offset);
-    if (!lower_add_const_offset(lower, current, constant_offset, &current))
+    if (!anvil_ir_add_offset(&lower->base, current, constant_offset, &current))
         return false;
     return anvil_lower_vreg_put(&lower->base.values, instr->result, current);
 }
@@ -915,7 +761,7 @@ static bool lower_struct_gep(x64_mir_lower_t *lower, anvil_instr_t *instr)
     if (instr->num_operands < 1 || !instr->result)
         return false;
 
-    anvil_mir_vreg_t base = lower_value(lower, instr->operands[0]);
+    anvil_mir_vreg_t base = anvil_ir_lower_value(&lower->base, instr->operands[0]);
     if (base == ANVIL_MIR_NO_VREG)
         return false;
     base = lower_widen_gpr_to_64(lower, base, false);
@@ -944,10 +790,10 @@ static bool lower_cast(x64_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_o
         int64_t offset = 0;
         if (anvil_lower_address_get(&lower->base.addresses, instr->operands[0], &offset_base, &offset))
             return anvil_lower_address_put(&lower->base.addresses, instr->result, offset_base, offset);
-        anvil_mir_vreg_t same = lower_value(lower, instr->operands[0]);
+        anvil_mir_vreg_t same = anvil_ir_lower_value(&lower->base, instr->operands[0]);
         return same != ANVIL_MIR_NO_VREG && anvil_lower_vreg_put(&lower->base.values, instr->result, same);
     }
-    anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
+    anvil_mir_vreg_t src = anvil_ir_lower_value(&lower->base, instr->operands[0]);
     anvil_mir_vreg_t def = x64_add_vreg_for_type(lower, instr->result->type);
     if (src == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
         return false;
@@ -1007,9 +853,9 @@ static bool lower_select(x64_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->num_operands != 3 || !instr->result)
         return false;
-    anvil_mir_vreg_t cond = lower_value(lower, instr->operands[0]);
-    anvil_mir_vreg_t then_v = lower_value(lower, instr->operands[1]);
-    anvil_mir_vreg_t else_v = lower_value(lower, instr->operands[2]);
+    anvil_mir_vreg_t cond = anvil_ir_lower_value(&lower->base, instr->operands[0]);
+    anvil_mir_vreg_t then_v = anvil_ir_lower_value(&lower->base, instr->operands[1]);
+    anvil_mir_vreg_t else_v = anvil_ir_lower_value(&lower->base, instr->operands[2]);
     anvil_mir_vreg_t def = x64_add_vreg_for_type(lower, instr->result->type);
     if (cond == ANVIL_MIR_NO_VREG || then_v == ANVIL_MIR_NO_VREG || else_v == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) {
         return false;
@@ -1060,7 +906,7 @@ static bool lower_memory_address(x64_mir_lower_t *lower, anvil_value_t *value, a
         return true;
     }
 
-    base = lower_value(lower, value);
+    base = anvil_ir_lower_value(&lower->base, value);
     if (base == ANVIL_MIR_NO_VREG)
         return false;
     base = lower_widen_gpr_to_64(lower, base, false);
@@ -1085,15 +931,15 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
     if (anvil_vector_mir_form(lower->base.func->owner_ctx, instr, &vector)) {
         anvil_mir_vreg_t uses[ANVIL_VECTOR_MAX_USES] = {ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG, ANVIL_MIR_NO_VREG};
         for (size_t operand = 0; operand < vector.num_uses; operand++)
-            uses[operand] = lower_value(lower, instr->operands[operand]);
+            uses[operand] = anvil_ir_lower_value(&lower->base, instr->operands[operand]);
         anvil_mir_vreg_t def = vector.supported ? x64_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
         return anvil_vector_mir_emit(lower->base.mir, &vector, def, uses) && anvil_lower_vreg_put(&lower->base.values, instr->result, def);
     }
 
     anvil_mir_opcode_t mir_op;
     if (instr->num_operands == 2 && anvil_ir_binary_op(instr->op, &mir_op)) {
-        anvil_mir_vreg_t lhs = lower_value(lower, instr->operands[0]);
-        anvil_mir_vreg_t rhs = lower_value(lower, instr->operands[1]);
+        anvil_mir_vreg_t lhs = anvil_ir_lower_value(&lower->base, instr->operands[0]);
+        anvil_mir_vreg_t rhs = anvil_ir_lower_value(&lower->base, instr->operands[1]);
         anvil_mir_vreg_t def = instr->result ? x64_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
         if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) {
             return false;
@@ -1111,7 +957,7 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
     }
 
     if (instr->num_operands == 1 && anvil_ir_unary_op(instr->op, &mir_op)) {
-        anvil_mir_vreg_t src = lower_value(lower, instr->operands[0]);
+        anvil_mir_vreg_t src = anvil_ir_lower_value(&lower->base, instr->operands[0]);
         anvil_mir_vreg_t def = instr->result ? x64_add_vreg_for_type(lower, instr->result->type) : ANVIL_MIR_NO_VREG;
         if (src == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG)
             return false;
@@ -1134,7 +980,7 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
     case ANVIL_OP_ATOMIC_FENCE: {
         anvil_mir_vreg_t uses[3];
         for (size_t operand = 0; operand < instr->num_operands; operand++) {
-            uses[operand] = lower_value(lower, instr->operands[operand]);
+            uses[operand] = anvil_ir_lower_value(&lower->base, instr->operands[operand]);
             if (uses[operand] == ANVIL_MIR_NO_VREG)
                 return false;
         }
@@ -1215,7 +1061,7 @@ static bool lower_instr(x64_mir_lower_t *lower, anvil_instr_t *instr)
     case ANVIL_OP_STORE: {
         if (instr->num_operands != 2)
             return false;
-        anvil_mir_vreg_t val = lower_value(lower, instr->operands[0]);
+        anvil_mir_vreg_t val = anvil_ir_lower_value(&lower->base, instr->operands[0]);
         anvil_mir_vreg_t ptr = ANVIL_MIR_NO_VREG;
         int64_t offset = 0;
         if (!lower_memory_address(lower, instr->operands[1], &ptr, &offset)) {
@@ -1275,17 +1121,18 @@ static anvil_abi_t x64_lower_abi(anvil_func_t *func)
 }
 
 /* anvil_ir_lower_t hooks: every value in one register. */
-static anvil_mir_vreg_t ir_value(anvil_ir_lower_t *base, anvil_value_t *value)
+static anvil_mir_vreg_t ir_vreg_for_type(anvil_ir_lower_t *base, anvil_type_t *type)
 {
-    return lower_value((x64_mir_lower_t *)base, value);
+    return x64_add_vreg_for_type((x64_mir_lower_t *)base, type);
 }
 
 static bool ir_value_regs(anvil_ir_lower_t *base, anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count)
 {
-    regs[0] = ir_value(base, value);
+    regs[0] = anvil_ir_lower_value(base, value);
     *count = 1;
     return regs[0] != ANVIL_MIR_NO_VREG;
 }
+
 anvil_mir_func_t *anvil_x86_64_lower_func_to_mir(anvil_func_t *func)
 {
     if (!func || func->is_declaration || !func->type || func->type->kind != ANVIL_TYPE_FUNC || (func->type->data.func.cc != ANVIL_CC_SYSV && func->type->data.func.cc != ANVIL_CC_WIN64))
@@ -1303,7 +1150,9 @@ anvil_mir_func_t *anvil_x86_64_lower_func_to_mir(anvil_func_t *func)
     lower.sret_pointer = ANVIL_MIR_NO_VREG;
     lower.desc = desc;
     lower.base.func = func;
-    lower.base.value = ir_value;
+    lower.base.value = anvil_ir_lower_value;
+    lower.base.vreg_for_type = ir_vreg_for_type;
+    lower.base.pointer_bits = 64;
     lower.base.value_regs = ir_value_regs;
     lower.base.mir = anvil_mir_func_create(func->name);
     anvil_mir_func_set_linkage(lower.base.mir, func->linkage);

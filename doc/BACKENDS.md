@@ -88,7 +88,14 @@ or a switch case (`anvil_ir_lower_branch`, `anvil_ir_lower_cond_branch`,
 `anvil_ir_edge_target`); a switch takes the shared compare tree from
 `ANVIL_SWITCH_TREE_MIN_CASES` constant cases on a one-register selector and
 a chain of compares otherwise, a word-pair selector comparing both words
-(`anvil_ir_lower_switch`).  The IR-to-MIR operation tables
+(`anvil_ir_lower_switch`).  Values lower the same way too
+(`anvil_ir_lower_value`): the vreg a value was given, or, materialized at
+each use (a register from the first use need not dominate the others; the
+MIR passes move constants out of loops), a constant address's base plus its
+offset, a constant, a string literal's, a relocated constant's, a
+function's or a global's address (through the GOT/TOC where the relocation
+model asks, `anvil_ir_mark_symbol`), with the target's `vreg_for_type` hook
+and pointer width.  The IR-to-MIR operation tables
 (`anvil_ir_binary_op`, `anvil_ir_unary_op`, `anvil_ir_cast_op`,
 `anvil_ir_compare_op`) and a call's direct target (`anvil_ir_call_symbol`,
 `anvil_ir_call_type`) are shared too.

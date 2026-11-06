@@ -4664,17 +4664,29 @@ static bool mir_hoist_constants_once(anvil_mir_func_t *func, anvil_mir_expensive
         for (size_t b = h; loop_end[h] != SIZE_MAX && b <= loop_end[h]; b++)
             inner[b] = h;
     /* Where a block's hoisted constants go: before its terminator, or
-     * before the compare that feeds it. */
+     * before the compare that feeds it.  A block's instructions need not
+     * be contiguous: its last two are found by their block. */
+    size_t *last_of = ok ? malloc(blocks * sizeof(size_t)) : NULL;
+    size_t *before_last = ok ? malloc(blocks * sizeof(size_t)) : NULL;
+    ok = ok && last_of && before_last;
+    for (size_t b = 0; ok && b < blocks; b++)
+        last_of[b] = before_last[b] = SIZE_MAX;
+    for (size_t i = 0; ok && i < func->num_instrs; i++) {
+        anvil_mir_block_t b = func->instrs[i].block;
+        if (mir_valid_block(func, b)) {
+            before_last[b] = last_of[b];
+            last_of[b] = i;
+        }
+    }
     for (size_t b = 0; ok && b < blocks; b++) {
-        const anvil_mir_block_data_t *info = &func->blocks[b];
-        if (info->num_instrs == 0)
+        if (last_of[b] == SIZE_MAX)
             continue;
-        size_t last = info->first_instr + info->num_instrs - 1;
-        insert_at[b] = last;
-        const anvil_mir_instr_t *term = &func->instrs[last];
-        if (term->op == ANVIL_MIR_OP_BR_COND && info->num_instrs > 1 && func->instrs[last - 1].def != ANVIL_MIR_NO_VREG &&
-            term->num_uses && func->instrs[last - 1].def == term->uses[0])
-            insert_at[b] = last - 1;
+        insert_at[b] = last_of[b];
+        const anvil_mir_instr_t *term = &func->instrs[last_of[b]];
+        size_t feed = before_last[b];
+        if (term->op == ANVIL_MIR_OP_BR_COND && feed != SIZE_MAX && func->instrs[feed].def != ANVIL_MIR_NO_VREG && term->num_uses &&
+            func->instrs[feed].def == term->uses[0])
+            insert_at[b] = feed;
     }
 
     size_t moved = 0;
@@ -4730,8 +4742,7 @@ static bool mir_hoist_constants_once(anvil_mir_func_t *func, anvil_mir_expensive
         size_t b = instr->block;
         if (mir_valid_block(func, b) && insert_at[b] == i) {
             /* The constants hoisted to loops this block enters. */
-            const anvil_mir_block_data_t *info = &func->blocks[b];
-            const anvil_mir_instr_t *term = &func->instrs[info->first_instr + info->num_instrs - 1];
+            const anvil_mir_instr_t *term = &func->instrs[last_of[b]];
             for (size_t k = 0; ok && k < func->num_instrs; k++) {
                 size_t h = hoist_to[k];
                 if (h == SIZE_MAX || h == MIR_HOIST_MERGED || (b >= h && b <= loop_end[h]) ||
@@ -4781,6 +4792,8 @@ static bool mir_hoist_constants_once(anvil_mir_func_t *func, anvil_mir_expensive
     free(loop_end);
     free(inner);
     free(insert_at);
+    free(last_of);
+    free(before_last);
     free(defs);
     free(hoist_to);
     free(renamed);

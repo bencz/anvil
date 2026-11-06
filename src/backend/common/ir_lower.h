@@ -58,7 +58,26 @@ struct anvil_ir_lower {
     /* `value` in one register (a branch condition, a switch selector or
      * case value), lowered where the code being emitted reads it. */
     anvil_mir_vreg_t (*value)(anvil_ir_lower_t *lower, anvil_value_t *value);
+    /* A new vreg of the register class, width and signedness the target
+     * gives `type` (NO_VREG for a type it cannot hold). */
+    anvil_mir_vreg_t (*vreg_for_type)(anvil_ir_lower_t *lower, anvil_type_t *type);
+    unsigned pointer_bits;
 };
+
+/* `value` in a register where the code being emitted reads it: the vreg it
+ * was lowered to, or, materialized at each use (a register from the first
+ * use need not dominate the others), a constant address's base plus its
+ * offset, a constant (an FP one by its bits), a string literal's, a
+ * relocated constant's, a function's or a global's address. */
+anvil_mir_vreg_t anvil_ir_lower_value(anvil_ir_lower_t *lower, anvil_value_t *value);
+/* `base` + `offset` in a new pointer-wide vreg (`base` itself for 0). */
+bool anvil_ir_add_offset(anvil_ir_lower_t *lower, anvil_mir_vreg_t base, int64_t offset, anvil_mir_vreg_t *result);
+/* The address of `symbol` in a new pointer-wide vreg, through the GOT
+ * where the relocation model requires it for `source`. */
+anvil_mir_vreg_t anvil_ir_symbol_address(anvil_ir_lower_t *lower, const char *symbol, const anvil_value_t *source);
+/* Marks the last instruction (it names `source`, a global or function) to
+ * reach it through the GOT/TOC where the relocation model requires. */
+bool anvil_ir_mark_symbol(anvil_ir_lower_t *lower, const anvil_value_t *source);
 
 /* Control flow, the same on every target.  An edge into a block with PHIs
  * carries their values as one parallel copy: on an unconditional branch in

@@ -1328,7 +1328,7 @@ static void test_mainframe_phi_swap_uses_parallel_copy(void)
     }
 }
 
-static void test_zarch_shared_phi_literal_is_entry_dominated(void)
+static void test_zarch_shared_phi_literal_dominates_each_use(void)
 {
     anvil_ctx_t *ctx = new_mainframe_ctx(ANVIL_ARCH_ZARCH);
     if (!ctx) return;
@@ -1375,7 +1375,9 @@ static void test_zarch_shared_phi_literal_is_entry_dominated(void)
         CHECK(mir != NULL,
               "shared literal used by disjoint PHI edges must dominate both edges");
         if (mir) {
-            bool saw_entry_i64_zero = false;
+            /* Materialized where each edge reads it (left and right), so
+             * every use has a dominating definition. */
+            size_t edge_zeros = 0u;
             for (size_t index = 0u; index < anvil_mir_num_instrs(mir);
                  index++) {
                 anvil_mir_instr_info_t info;
@@ -1383,25 +1385,28 @@ static void test_zarch_shared_phi_literal_is_entry_dominated(void)
                 const anvil_mir_vreg_info_t *vreg =
                     info.def == ANVIL_MIR_NO_VREG ? NULL
                     : anvil_mir_get_vreg_info(mir, info.def);
-                if (info.op == ANVIL_MIR_OP_MOV && info.block == 0u &&
+                if (info.op == ANVIL_MIR_OP_MOV && (info.block == 1u || info.block == 2u) &&
                     info.has_imm && info.imm == 0 && vreg &&
                     vreg->reg_class == ANVIL_MIR_REG_GPR &&
                     vreg->size_bits == 64u) {
-                    saw_entry_i64_zero = true;
+                    edge_zeros++;
                 }
             }
-            CHECK(saw_entry_i64_zero,
-                  "shared PHI literal must be materialized in the entry block");
+            CHECK(edge_zeros == 2u,
+                  "a PHI literal shared by two edges is materialized on each");
+            char legal_error[256] = { 0 };
+            CHECK(anvil_mainframe_verify_mir_legal(mir, ANVIL_MAINFRAME_VARIANT_ZARCH, legal_error, sizeof(legal_error)),
+                  legal_error[0] ? legal_error : "every use of the shared literal has a dominating definition");
             CHECK(anvil_mainframe_regalloc_mir(
                       mir, ANVIL_MAINFRAME_VARIANT_ZARCH),
-                  "entry-dominated PHI literal should survive register allocation");
+                  "the shared PHI literal should survive register allocation");
             char *text = NULL;
             size_t length = 0u;
             CHECK(anvil_mainframe_emit_mir(
                       mir, ANVIL_MAINFRAME_VARIANT_ZARCH, &text, &length),
-                  "entry-dominated PHI literal should emit complete HLASM");
+                  "the shared PHI literal should emit complete HLASM");
             CHECK(text != NULL && length != 0u,
-                  "entry-dominated PHI literal should produce nonempty HLASM");
+                  "the shared PHI literal should produce nonempty HLASM");
             free(text);
             anvil_mir_func_destroy(mir);
         }
@@ -1947,7 +1952,7 @@ int main(void)
     test_mainframe_unsigned_divmod_and_not64_are_real();
     test_mainframe_numeric_conversions_use_target_isa();
     test_mainframe_phi_swap_uses_parallel_copy();
-    test_zarch_shared_phi_literal_is_entry_dominated();
+    test_zarch_shared_phi_literal_dominates_each_use();
     test_mainframe_fp_parameters_use_gpr_address_scratch();
     test_s390_call_bundles_layout_f64_and_mark_each_call();
     test_zarch_spilled_call_arguments_preserve_bundle();
