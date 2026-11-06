@@ -4,8 +4,9 @@
  * An address `gep T p, a + b` in a loop, with p and a invariant and b not,
  * splits into `gep T (gep T p, a), b`: the invariant part leaves the loop,
  * and the access left inside indexes an invariant base by b alone (the form
- * loop passes and indexed address modes take).  The index is pointer-wide,
- * so the split is exact in address arithmetic. */
+ * loop passes and indexed address modes take).  The split is exact when the
+ * index is pointer-wide, or narrower and without wrap: the GEP extends each
+ * index in its signedness, and ext(a + b) = ext(a) + ext(b) then. */
 #include "anvil/anvil_analysis.h"
 #include "anvil/anvil_opt.h"
 #include "opt_utils.h"
@@ -103,7 +104,7 @@ static bool split_invariant_index(anvil_ctx_t *ctx, const anvil_opt_cfg_t *cfg, 
         return false;
     anvil_value_t *index = gep->operands[1];
     anvil_instr_t *sum = index->kind == ANVIL_VAL_INSTR ? index->data.instr : NULL;
-    if (!sum || sum->op != ANVIL_OP_ADD || sum->num_operands != 2 || anvil_type_bit_width(index->type) != pointer_bits)
+    if (!sum || sum->op != ANVIL_OP_ADD || sum->num_operands != 2 || (anvil_type_bit_width(index->type) != pointer_bits && !sum->no_wrap))
         return false;
     size_t side = defined_outside(cfg, loops, loop, preheader, sum->operands[0]) ? 0
                 : defined_outside(cfg, loops, loop, preheader, sum->operands[1]) ? 1 : 2;

@@ -300,7 +300,10 @@ integer arithmetic, compares, selects, casts, address arithmetic, rotates and
 shifts by a constant below the width. Divisions, loads, calls and
 floating-point operations stay in the loop. An address `gep p, a + b` with
 `p` and `a` invariant splits into `gep (gep p, a), b`, so the invariant part
-leaves the loop.
+leaves the loop: exactly when the index is pointer-wide, or narrower and
+without wrap (the GEP extends each index in its signedness, and then
+`ext(a + b) = ext(a) + ext(b)`). A C matrix indexed `i * n + j` in `int` then
+reaches the loop vectorizer as `row[j]`.
 
 ### Complete Unrolling (`ANVIL_PASS_UNROLL`) - O2
 

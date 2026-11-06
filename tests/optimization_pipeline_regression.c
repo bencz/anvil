@@ -1068,6 +1068,46 @@ static void test_read_only_loads(anvil_arch_t arch)
     }
 }
 
+/* p[row + j] in a loop on j, the index an i32 with row invariant: without
+ * wrap the GEP's extension distributes, so LICM leaves p + row outside and
+ * indexes it by j; a sum that may wrap splits only where i32 is
+ * pointer-wide. */
+static void test_licm_narrow_split(anvil_arch_t arch)
+{
+    for (int no_wrap = 0; no_wrap < 2; no_wrap++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+        anvil_module_t *module = anvil_module_create(ctx, "narrow_split");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = { anvil_type_ptr(ctx, i32), i32, i32 };
+        anvil_func_t *func = anvil_func_create(module, "split", anvil_type_func(ctx, anvil_type_void(ctx), params, 3, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body"), *exit = anvil_block_create(func, "exit");
+        anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *j = anvil_build_phi(ctx, i32, "j");
+        anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, j, anvil_func_get_param(func, 2), "more"), body, exit);
+        anvil_set_insert_point(ctx, body);
+        anvil_value_t *index = anvil_build_add(ctx, anvil_func_get_param(func, 1), j, "index");
+        anvil_set_no_wrap(index, no_wrap != 0);
+        anvil_value_t *address = anvil_build_gep(ctx, i32, anvil_func_get_param(func, 0), &index, 1, "address");
+        anvil_build_store(ctx, j, address);
+        anvil_value_t *next = marked_no_wrap(anvil_build_add(ctx, j, anvil_const_i32(ctx, 1), "next"));
+        anvil_build_br(ctx, header);
+        anvil_phi_add_incoming(j, anvil_const_i32(ctx, 0), anvil_func_get_entry(func));
+        anvil_phi_add_incoming(j, next, body);
+        anvil_set_insert_point(ctx, exit);
+        anvil_build_ret_void(ctx);
+        check(anvil_pass_licm(func) != ANVIL_PASS_RUN_ERROR, "LICM runs");
+        bool split = address->data.instr->operands[1] == j;
+        bool pointer_wide = anvil_ctx_get_arch_info(ctx)->ptr_size == 4;
+        char error[256] = { 0 };
+        check(anvil_func_verify(func, error, sizeof(error)) && split == (no_wrap || pointer_wide),
+              "a narrow invariant-plus-index address splits when the sum cannot wrap");
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* A call inlines only when caller and callee share their floating-point
  * policies: inlined code keeps its own. */
 static void test_inline_fp_policy(void)
@@ -1139,6 +1179,7 @@ int main(void)
         test_bit_facts(targets[index]);
         test_shift_speculation(targets[index]);
         test_licm_speculation(targets[index]);
+        test_licm_narrow_split(targets[index]);
         test_inline_external(targets[index]);
         test_read_only_loads(targets[index]);
         test_memory_aliasing(targets[index], false);

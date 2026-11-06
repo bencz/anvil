@@ -397,6 +397,7 @@ Best of 10 runs, in milliseconds:
 | hashmap | 28 | 29 | 1.04 | 28 | 29 | 1.04 |
 | hex (signed division of promoted bytes) | 46 | 47 | 1.02 | 46 | 87 | 1.89 |
 | lexer (74-case switch) | 28 | 37 | 1.32 | 28 | 36 | 1.29 |
+| matflat (double, run-time order, flat int indices) | 13 | 14 | 1.08 | 14 | 15 | 1.07 |
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
 | pidigits (a Brainfuck program as C, 30 digits of pi) | 8 | 15 | 1.88 | 6 | 17 | 2.83 |
