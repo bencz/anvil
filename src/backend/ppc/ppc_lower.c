@@ -106,8 +106,6 @@ static anvil_mir_vreg_t ppc_add_vreg_for_type(ppc_mir_lower_t *lower, anvil_type
  * (abi_ops->assign_*); this code only moves values there.
  * ------------------------------------------------------------------ */
 
-static anvil_mir_vreg_t lower_resize_gpr(ppc_mir_lower_t *lower, anvil_mir_vreg_t src, uint16_t target_bits);
-static anvil_mir_vreg_t lower_widen_gpr_to_word(ppc_mir_lower_t *lower, anvil_mir_vreg_t src, bool sign_extend);
 
 static ppc_arg_loc_t ppc_assign_word(const ppc_mir_lower_t *lower, ppc_arg_state_t *state)
 {
@@ -171,7 +169,7 @@ static anvil_mir_vreg_t ppc_incoming_value(ppc_mir_lower_t *lower, ppc_arg_loc_t
         anvil_mir_vreg_t word = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, word_bits, is_signed);
         if (word == ANVIL_MIR_NO_VREG || !anvil_mir_add_instr_imm(lower->base.mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, word, loc.offset))
             return ANVIL_MIR_NO_VREG;
-        return lower_resize_gpr(lower, word, bits);
+        return anvil_ir_resize(&lower->base, word, bits);
     }
     return anvil_mir_add_instr_imm(lower->base.mir, ANVIL_MIR_OP_INCOMING_STACK_ARG, value, loc.offset) ? value : ANVIL_MIR_NO_VREG;
 }
@@ -586,7 +584,7 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         }
 
         /* Integers travel as whole words, extended according to their type. */
-        src = lower_widen_gpr_to_word(lower, src, ppc_type_is_signed(arg->type));
+        src = anvil_ir_pointer_width(&lower->base, src, ppc_type_is_signed(arg->type));
         if (src == ANVIL_MIR_NO_VREG || !ppc_outgoing_value(lower, ppc_assign_word(lower, &state), src, &args))
             return false;
     }
@@ -677,89 +675,6 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     return true;
 }
 
-static anvil_mir_vreg_t lower_widen_gpr_to_word(ppc_mir_lower_t *lower, anvil_mir_vreg_t src, bool sign_extend)
-{
-    const anvil_mir_vreg_info_t *src_info = anvil_mir_get_vreg_info(lower->base.mir, src);
-    if (!src_info || src_info->reg_class != ANVIL_MIR_REG_GPR) {
-        return ANVIL_MIR_NO_VREG;
-    }
-
-    uint16_t word_bits = (uint16_t)(lower->desc->word_size * 8);
-    if (src_info->size_bits == word_bits)
-        return src;
-
-    if (src_info->size_bits > word_bits) {
-        anvil_mir_vreg_t narrow = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, word_bits, sign_extend);
-        if (narrow == ANVIL_MIR_NO_VREG)
-            return ANVIL_MIR_NO_VREG;
-        anvil_mir_vreg_t uses[] = {src};
-        if (!anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_TRUNC, narrow, uses, 1)) {
-            return ANVIL_MIR_NO_VREG;
-        }
-        return narrow;
-    }
-
-    anvil_mir_vreg_t wide = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, word_bits, sign_extend);
-    if (wide == ANVIL_MIR_NO_VREG)
-        return ANVIL_MIR_NO_VREG;
-
-    anvil_mir_vreg_t uses[] = {src};
-    anvil_mir_opcode_t op = sign_extend ? ANVIL_MIR_OP_SEXT : ANVIL_MIR_OP_ZEXT;
-    if (!anvil_mir_add_instr(lower->base.mir, op, wide, uses, 1)) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    return wide;
-}
-
-static anvil_mir_vreg_t lower_resize_gpr(ppc_mir_lower_t *lower, anvil_mir_vreg_t src, uint16_t target_bits)
-{
-    const anvil_mir_vreg_info_t *src_info = anvil_mir_get_vreg_info(lower->base.mir, src);
-    if (!src_info || src_info->reg_class != ANVIL_MIR_REG_GPR || src_info->size_bits == 0 || target_bits == 0) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    if (src_info->size_bits == target_bits)
-        return src;
-
-    /* Capture src fields before anvil_mir_add_vreg_typed: it may realloc the
-     * vreg array, invalidating src_info. */
-    uint16_t src_bits = src_info->size_bits;
-    bool src_signed = src_info->is_signed;
-
-    anvil_mir_vreg_t resized = anvil_mir_add_vreg_typed(lower->base.mir, ANVIL_MIR_REG_GPR, target_bits, src_signed);
-    if (resized == ANVIL_MIR_NO_VREG)
-        return ANVIL_MIR_NO_VREG;
-
-    anvil_mir_vreg_t uses[] = {src};
-    anvil_mir_opcode_t op = ANVIL_MIR_OP_TRUNC;
-    if (src_bits < target_bits) {
-        op = src_signed ? ANVIL_MIR_OP_SEXT : ANVIL_MIR_OP_ZEXT;
-    }
-    if (!anvil_mir_add_instr(lower->base.mir, op, resized, uses, 1)) {
-        return ANVIL_MIR_NO_VREG;
-    }
-    return resized;
-}
-
-static bool lower_match_binary_operand_sizes(ppc_mir_lower_t *lower, anvil_mir_vreg_t *lhs, anvil_mir_vreg_t *rhs, anvil_mir_vreg_t def)
-{
-    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(lower->base.mir, def);
-    const anvil_mir_vreg_info_t *lhs_info = anvil_mir_get_vreg_info(lower->base.mir, *lhs);
-    const anvil_mir_vreg_info_t *rhs_info = anvil_mir_get_vreg_info(lower->base.mir, *rhs);
-    if (!def_info || !lhs_info || !rhs_info)
-        return false;
-
-    if (def_info->reg_class != ANVIL_MIR_REG_GPR || lhs_info->reg_class != ANVIL_MIR_REG_GPR || rhs_info->reg_class != ANVIL_MIR_REG_GPR) {
-        return true;
-    }
-
-    /* Capture def size before resizing: lower_resize_gpr may realloc the vreg
-     * array, invalidating def_info. */
-    uint16_t def_bits = def_info->size_bits;
-    *lhs = lower_resize_gpr(lower, *lhs, def_bits);
-    *rhs = lower_resize_gpr(lower, *rhs, def_bits);
-    return *lhs != ANVIL_MIR_NO_VREG && *rhs != ANVIL_MIR_NO_VREG;
-}
-
 static bool lower_alloca(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (!instr->result || !instr->result->type || instr->result->type->kind != ANVIL_TYPE_PTR) {
@@ -790,7 +705,7 @@ static bool lower_alloca(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     anvil_mir_vreg_t count = anvil_ir_lower_value(&lower->base, instr->operands[0]);
     if (count == ANVIL_MIR_NO_VREG)
         return false;
-    count = lower_widen_gpr_to_word(lower, count, false);
+    count = anvil_ir_pointer_width(&lower->base, count, false);
     if (count == ANVIL_MIR_NO_VREG)
         return false;
 
@@ -802,108 +717,6 @@ static bool lower_alloca(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         return false;
     }
     return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
-}
-
-static bool lower_gep(ppc_mir_lower_t *lower, anvil_instr_t *instr)
-{
-    if (instr->num_operands < 2 || !instr->result || !instr->aux_type)
-        return false;
-
-    anvil_mir_vreg_t current = anvil_ir_lower_value(&lower->base, instr->operands[0]);
-    if (current == ANVIL_MIR_NO_VREG)
-        return false;
-    current = lower_widen_gpr_to_word(lower, current, false);
-    if (current == ANVIL_MIR_NO_VREG)
-        return false;
-
-    anvil_type_t *walk_type = instr->aux_type;
-    bool all_constant = true;
-    int64_t constant_offset = 0;
-    for (size_t i = 1; i < instr->num_operands; i++) {
-        anvil_value_t *index_value = instr->operands[i];
-        anvil_gep_step_t step;
-        if (!anvil_gep_analyze_step(&walk_type, index_value, i - 1, &step) || step.amount > (size_t)INT64_MAX)
-            return false;
-        if (index_value->kind == ANVIL_VAL_CONST_INT) {
-            int64_t offset;
-            if (!anvil_gep_const_step_offset(&step, index_value, &offset) || !anvil_gep_accumulate_offset(&constant_offset, offset)) {
-                return false;
-            }
-            continue;
-        }
-        all_constant = false;
-        if (step.kind != ANVIL_GEP_STEP_SCALE)
-            return false;
-        int64_t elem_size = (int64_t)step.amount;
-        anvil_mir_vreg_t index = ANVIL_MIR_NO_VREG;
-        if (ppc_needs_i64_pair(lower, index_value->type)) {
-            anvil_mir_vreg_t hi = ANVIL_MIR_NO_VREG;
-            if (!ppc_ensure_i64_pair(lower, index_value, &hi, &index, NULL))
-                return false;
-            /* PPC32 represents i64 values as {hi,lo}; the low word is the
-             * required pointer-width truncation. */
-        } else {
-            index = anvil_ir_lower_value(&lower->base, index_value);
-            if (index == ANVIL_MIR_NO_VREG)
-                return false;
-            index = lower_widen_gpr_to_word(lower, index, index_value->type->is_signed);
-        }
-        if (index == ANVIL_MIR_NO_VREG)
-            return false;
-
-        anvil_mir_vreg_t scaled = index;
-        if (elem_size != 1) {
-            anvil_mir_vreg_t scale = anvil_mir_add_vreg_ex(lower->base.mir, ANVIL_MIR_REG_GPR, (uint16_t)(lower->desc->word_size * 8));
-            scaled = anvil_mir_add_vreg_ex(lower->base.mir, ANVIL_MIR_REG_GPR, (uint16_t)(lower->desc->word_size * 8));
-            if (scale == ANVIL_MIR_NO_VREG || scaled == ANVIL_MIR_NO_VREG) {
-                return false;
-            }
-            if (!anvil_mir_add_instr_imm(lower->base.mir, ANVIL_MIR_OP_MOV, scale, elem_size)) {
-                return false;
-            }
-            anvil_mir_vreg_t mul_uses[] = {index, scale};
-            if (!anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_MUL, scaled, mul_uses, 2)) {
-                return false;
-            }
-        }
-
-        anvil_mir_vreg_t next = anvil_mir_add_vreg_ex(lower->base.mir, ANVIL_MIR_REG_GPR, (uint16_t)(lower->desc->word_size * 8));
-        if (next == ANVIL_MIR_NO_VREG)
-            return false;
-        anvil_mir_vreg_t add_uses[] = {current, scaled};
-        if (!anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_ADD, next, add_uses, 2)) {
-            return false;
-        }
-        current = next;
-    }
-    if (all_constant)
-        return anvil_lower_address_put(&lower->base.addresses, instr->result, current, constant_offset);
-    if (!anvil_ir_add_offset(&lower->base, current, constant_offset, &current))
-        return false;
-    return anvil_lower_vreg_put(&lower->base.values, instr->result, current);
-}
-
-static bool lower_struct_gep(ppc_mir_lower_t *lower, anvil_instr_t *instr)
-{
-    if (instr->num_operands < 1 || !instr->result)
-        return false;
-
-    anvil_mir_vreg_t base = anvil_ir_lower_value(&lower->base, instr->operands[0]);
-    if (base == ANVIL_MIR_NO_VREG)
-        return false;
-    base = lower_widen_gpr_to_word(lower, base, false);
-    if (base == ANVIL_MIR_NO_VREG)
-        return false;
-
-    int64_t offset = 0;
-    if (instr->aux_type && instr->aux_type->kind == ANVIL_TYPE_STRUCT && instr->num_operands > 1 && instr->operands[1] && instr->operands[1]->kind == ANVIL_VAL_CONST_INT) {
-        unsigned idx = (unsigned)instr->operands[1]->data.i;
-        if (idx >= instr->aux_type->data.struc.num_fields)
-            return false;
-        offset = (int64_t)instr->aux_type->data.struc.offsets[idx];
-    }
-
-    return anvil_lower_address_put(&lower->base.addresses, instr->result, base, offset);
 }
 
 static bool ppc_ensure_i64_pair(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *hi, anvil_mir_vreg_t *lo, bool *is_unsigned);
@@ -1043,31 +856,6 @@ static bool lower_select(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     return anvil_lower_vreg_put(&lower->base.values, instr->result, def);
 }
 
-static bool lower_memory_address(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *out_base, int64_t *out_offset)
-{
-    anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG;
-    int64_t offset = 0;
-    if (anvil_lower_address_get(&lower->base.addresses, value, &base, &offset)) {
-        base = lower_widen_gpr_to_word(lower, base, false);
-        if (base == ANVIL_MIR_NO_VREG)
-            return false;
-        *out_base = base;
-        *out_offset = offset;
-        return true;
-    }
-
-    base = anvil_ir_lower_value(&lower->base, value);
-    if (base == ANVIL_MIR_NO_VREG)
-        return false;
-    base = lower_widen_gpr_to_word(lower, base, false);
-    if (base == ANVIL_MIR_NO_VREG)
-        return false;
-
-    *out_base = base;
-    *out_offset = 0;
-    return true;
-}
-
 static bool ppc_add_memory_instr(ppc_mir_lower_t *lower, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t *uses, size_t num_uses, int64_t offset)
 {
     if (offset == 0) {
@@ -1196,7 +984,7 @@ static bool ppc_lower_load_i64_pair(ppc_mir_lower_t *lower, anvil_instr_t *instr
 
     anvil_mir_vreg_t base = ANVIL_MIR_NO_VREG;
     int64_t offset = 0;
-    if (!lower_memory_address(lower, instr->operands[0], &base, &offset)) {
+    if (!anvil_ir_lower_memory_address(&lower->base, instr->operands[0], &base, &offset)) {
         return false;
     }
     if (offset > INT64_MAX - 4)
@@ -1301,7 +1089,7 @@ static bool ppc_lower_wide_binary(ppc_mir_lower_t *lower, anvil_instr_t *instr, 
     if (shift && !ppc_needs_i64_pair(lower, instr->operands[1]->type)) {
         /* A shift count may be narrower than the shifted value. */
         b.hi = ANVIL_MIR_NO_VREG;
-        b.lo = lower_widen_gpr_to_word(lower, anvil_ir_lower_value(&lower->base, instr->operands[1]), false);
+        b.lo = anvil_ir_pointer_width(&lower->base, anvil_ir_lower_value(&lower->base, instr->operands[1]), false);
         if (b.lo == ANVIL_MIR_NO_VREG)
             return false;
     } else if (!ppc_ensure_wide(lower, instr->operands[1], &b)) {
@@ -1355,7 +1143,7 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG || def == ANVIL_MIR_NO_VREG) {
             return false;
         }
-        if (!anvil_ir_compare_op(mir_op) && !lower_match_binary_operand_sizes(lower, &lhs, &rhs, def)) {
+        if (!anvil_ir_compare_op(mir_op) && !anvil_ir_match_operand_sizes(&lower->base, &lhs, &rhs, def)) {
             return false;
         }
 
@@ -1434,9 +1222,9 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     case ANVIL_OP_ALLOCA:
         return lower_alloca(lower, instr);
     case ANVIL_OP_GEP:
-        return lower_gep(lower, instr);
+        return anvil_ir_lower_gep(&lower->base, instr);
     case ANVIL_OP_STRUCT_GEP:
-        return lower_struct_gep(lower, instr);
+        return anvil_ir_lower_struct_gep(&lower->base, instr);
     case ANVIL_OP_SELECT:
         return lower_select(lower, instr);
     case ANVIL_OP_LOAD: {
@@ -1448,7 +1236,7 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
 
         anvil_mir_vreg_t ptr = ANVIL_MIR_NO_VREG;
         int64_t offset = 0;
-        if (!lower_memory_address(lower, instr->operands[0], &ptr, &offset)) {
+        if (!anvil_ir_lower_memory_address(&lower->base, instr->operands[0], &ptr, &offset)) {
             return false;
         }
         anvil_mir_vreg_t def = ppc_add_vreg_for_type(lower, instr->result->type);
@@ -1479,7 +1267,7 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         if (ppc_needs_i64_pair(lower, instr->operands[0]->type)) {
             anvil_mir_vreg_t ptr = ANVIL_MIR_NO_VREG;
             int64_t offset = 0;
-            if (!lower_memory_address(lower, instr->operands[1], &ptr, &offset)) {
+            if (!anvil_ir_lower_memory_address(&lower->base, instr->operands[1], &ptr, &offset)) {
                 return false;
             }
 
@@ -1495,7 +1283,7 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
         anvil_mir_vreg_t val = anvil_ir_lower_value(&lower->base, instr->operands[0]);
         anvil_mir_vreg_t ptr = ANVIL_MIR_NO_VREG;
         int64_t offset = 0;
-        if (!lower_memory_address(lower, instr->operands[1], &ptr, &offset)) {
+        if (!anvil_ir_lower_memory_address(&lower->base, instr->operands[1], &ptr, &offset)) {
             return false;
         }
         if (val == ANVIL_MIR_NO_VREG || ptr == ANVIL_MIR_NO_VREG) {

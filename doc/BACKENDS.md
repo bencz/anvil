@@ -95,7 +95,14 @@ MIR passes move constants out of loops), a constant address's base plus its
 offset, a constant, a string literal's, a relocated constant's, a
 function's or a global's address (through the GOT/TOC where the relocation
 model asks, `anvil_ir_mark_symbol`), with the target's `vreg_for_type` hook
-and pointer width.  The IR-to-MIR operation tables
+and pointer width.  Addresses too: a GEP or struct field address of
+constant indices is recorded as a register plus an offset that the accesses
+take as their displacement (`anvil_ir_lower_gep`,
+`anvil_ir_lower_struct_gep`, `anvil_ir_lower_memory_address`; SystemZ keeps
+only the displacements its CPU reaches), a variable index adds its scaled
+value at the pointer width (a 64-bit index on a word-pair target by its
+low word), and GPR operands of a binary operation take its result's width
+(`anvil_ir_resize`, `anvil_ir_match_operand_sizes`).  The IR-to-MIR operation tables
 (`anvil_ir_binary_op`, `anvil_ir_unary_op`, `anvil_ir_cast_op`,
 `anvil_ir_compare_op`) and a call's direct target (`anvil_ir_call_symbol`,
 `anvil_ir_call_type`) are shared too.

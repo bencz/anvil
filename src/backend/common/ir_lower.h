@@ -96,6 +96,24 @@ bool anvil_ir_lower_switch(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
 /* Frees what anvil_ir_lower_t owns (the maps). */
 void anvil_ir_lower_destroy(anvil_ir_lower_t *lower);
 
+/* A GPR value at `bits`: itself, or a new vreg truncated or extended by
+ * its own signedness; NO_VREG for any other class. */
+anvil_mir_vreg_t anvil_ir_resize(anvil_ir_lower_t *lower, anvil_mir_vreg_t value, uint16_t bits);
+/* A GPR value at the pointer width, extended by `sign_extend` (an index)
+ * or truncated. */
+anvil_mir_vreg_t anvil_ir_pointer_width(anvil_ir_lower_t *lower, anvil_mir_vreg_t value, bool sign_extend);
+/* GPR operands of a binary operation resized to its result's width. */
+bool anvil_ir_match_operand_sizes(anvil_ir_lower_t *lower, anvil_mir_vreg_t *lhs, anvil_mir_vreg_t *rhs, anvil_mir_vreg_t def);
+/* GEP and STRUCT_GEP from their base pointer in a register: a constant
+ * address is recorded as base + offset (the accesses take the offset as
+ * their displacement); a variable index adds its scaled value (a 64-bit
+ * index on a word-pair target by its low word, the address's width), the
+ * constant parts summed into one offset. */
+bool anvil_ir_lower_gep(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
+bool anvil_ir_lower_struct_gep(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
+/* The register and displacement a load or store through `pointer` uses. */
+bool anvil_ir_lower_memory_address(anvil_ir_lower_t *lower, anvil_value_t *pointer, anvil_mir_vreg_t *base, int64_t *displacement);
+
 /* The MIR opcode of an IR operation: two operands (integer and FP
  * arithmetic, shifts, compares), one (negations, NOT, FABS), or a
  * conversion; false for any other operation. */
