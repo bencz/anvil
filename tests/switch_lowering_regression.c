@@ -144,8 +144,46 @@ static bool run_return_case(bool code_default, size_t allowance, bool *completed
     return valid;
 }
 
+/* switch on a 64-bit selector, 5 -> one, 2^40 -> two, default zero: where
+ * the GPRs hold 32 bits the selector is a word pair, and each case compares
+ * both words (the high word decides 2^40); every target lowers it. */
+static void test_wide_selector(void)
+{
+    static const anvil_arch_t arches[] = {ANVIL_ARCH_X86, ANVIL_ARCH_PPC32, ANVIL_ARCH_S390, ANVIL_ARCH_X86_64, ANVIL_ARCH_ARM64,
+                                          ANVIL_ARCH_PPC64, ANVIL_ARCH_ZARCH};
+    for (size_t a = 0; a < sizeof(arches) / sizeof(arches[0]); a++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arches[a]);
+        anvil_module_t *module = anvil_module_create(ctx, "wide");
+        anvil_type_t *i64 = anvil_type_i64(ctx), *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = {i64};
+        anvil_func_t *func = anvil_func_create(module, "pick", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *one = anvil_block_create(func, "one"), *two = anvil_block_create(func, "two"), *other = anvil_block_create(func, "other");
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_instr_t *dispatch = anvil_build_switch(ctx, anvil_func_get_param(func, 0), other);
+        anvil_switch_add_case(dispatch, anvil_const_i64(ctx, 5), one);
+        anvil_switch_add_case(dispatch, anvil_const_i64(ctx, INT64_C(1) << 40), two);
+        anvil_set_insert_point(ctx, one);
+        anvil_build_ret(ctx, anvil_const_i32(ctx, 1));
+        anvil_set_insert_point(ctx, two);
+        anvil_build_ret(ctx, anvil_const_i32(ctx, 2));
+        anvil_set_insert_point(ctx, other);
+        anvil_build_ret(ctx, anvil_const_i32(ctx, 0));
+        char *assembly = NULL;
+        size_t length = 0;
+        char message[96];
+        snprintf(message, sizeof(message), "arch %d: a switch on a 64-bit selector lowers", (int)arches[a]);
+        CHECK(anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly, message);
+        if (!assembly)
+            fprintf(stderr, "%s\n", anvil_ctx_get_error(ctx));
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
+    test_wide_selector();
     for (int code_default = 0; code_default < 2; code_default++) {
         bool completed = false;
         for (size_t allowance = 0; allowance < 400 && !completed; allowance++)

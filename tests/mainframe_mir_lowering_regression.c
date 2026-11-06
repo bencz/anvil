@@ -1304,7 +1304,8 @@ static void test_mainframe_phi_swap_uses_parallel_copy(void)
             for (size_t bidx = 0; bidx < anvil_mir_num_blocks(mir); bidx++) {
                 anvil_mir_block_info_t info;
                 anvil_mir_get_block_info(mir, (anvil_mir_block_t)bidx, &info);
-                if (info.name && strncmp(info.name, "body_to_header_phi_", strlen("body_to_header_phi_")) == 0) {
+                /* An unconditional branch carries the PHI copies itself. */
+                if (info.name && strcmp(info.name, "body") == 0) {
                     mir_body = (anvil_mir_block_t)bidx;
                 }
             }

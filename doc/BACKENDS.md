@@ -76,6 +76,23 @@ reads, writes or calls; PowerPC then counts in CTR and branches with
 counter's own register with `BRCT`/`BRCTG` by its width, which takes no
 counter narrower than 32 bits (`SYSTEMZ_NARROWEST_COUNTER`).
 
+**Shared lowering.** Every lowerer's state begins with `anvil_ir_lower_t`
+(`src/backend/common/ir_lower.h`): the function, its MachineIR, the maps
+below and two hooks the target supplies, `value` (an IR value in one
+register, lowered where it is read) and `value_regs` (one register, or a
+word pair for a 64-bit integer on a 32-bit target).  On that base the
+control flow lowers the same way on every target: an edge into a block with
+PHIs carries their values as one parallel copy, in the branching block on an
+unconditional branch and in an edge block of its own on a conditional branch
+or a switch case (`anvil_ir_lower_branch`, `anvil_ir_lower_cond_branch`,
+`anvil_ir_edge_target`); a switch takes the shared compare tree from
+`ANVIL_SWITCH_TREE_MIN_CASES` constant cases on a one-register selector and
+a chain of compares otherwise, a word-pair selector comparing both words
+(`anvil_ir_lower_switch`).  The IR-to-MIR operation tables
+(`anvil_ir_binary_op`, `anvil_ir_unary_op`, `anvil_ir_cast_op`,
+`anvil_ir_compare_op`) and a call's direct target (`anvil_ir_call_symbol`,
+`anvil_ir_call_type`) are shared too.
+
 **Lowering maps.** `src/backend/common/lower_map.c` is the one table every
 lowerer keeps of what it made of each IR value or block: a value's virtual
 register (`anvil_lower_vreg_put/get`), a constant address as a register plus
