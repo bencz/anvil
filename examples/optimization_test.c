@@ -136,45 +136,6 @@ static void test_identities(anvil_ctx_t *ctx)
     anvil_ctx_set_opt_level(ctx, ANVIL_OPT_NONE);
 }
 
-/* Test with different architectures (only mainframe backends are complete) */
-static void test_multiarch(void)
-{
-    printf("\n--- Test: Multi-Architecture Optimization ---\n");
-    
-    anvil_arch_t archs[] = { ANVIL_ARCH_S370, ANVIL_ARCH_S390, ANVIL_ARCH_ZARCH };
-    const char *arch_names[] = { "S/370", "S/390", "z/Architecture" };
-    
-    for (int i = 0; i < 3; i++) {
-        printf("\n=== Architecture: %s ===\n", arch_names[i]);
-        
-        anvil_ctx_t *ctx = anvil_ctx_create_for_target(archs[i]);
-        anvil_module_t *mod = anvil_module_create(ctx, "multiarch_test");
-        
-        /* Create function: int double_it(int x) { return x * 2; } */
-        anvil_type_t *i32 = anvil_type_i32(ctx);
-        anvil_type_t *params[] = { i32 };
-        anvil_type_t *func_type = anvil_type_func(ctx, i32, params, 1, false);
-        anvil_func_t *func = anvil_func_create(mod, "double_it", func_type, ANVIL_LINK_EXTERNAL);
-        
-        anvil_block_t *entry = anvil_func_get_entry(func);
-        anvil_set_insert_point(ctx, entry);
-        
-        anvil_value_t *x = anvil_func_get_param(func, 0);
-        anvil_value_t *c2 = anvil_const_i32(ctx, 2);
-        anvil_value_t *result = anvil_build_mul(ctx, x, c2, "result");
-        anvil_build_ret(ctx, result);
-        
-        /* Optimize: x * 2 -> x << 1 */
-        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
-        anvil_module_optimize(mod);
-        
-        print_code(mod, "Optimized (x * 2 -> x << 1)");
-        
-        anvil_module_destroy(mod);
-        anvil_ctx_destroy(ctx);
-    }
-}
-
 int main(int argc, char **argv)
 {
     anvil_ctx_t *ctx;

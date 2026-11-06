@@ -348,7 +348,7 @@ kernels this short):
 | lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
 | hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 53 | 87 | 1.64 |
 | bigprime | transform butterflies: 64-bit products modulo a prime | 163 | 181 | 1.11 | 329 | 490 | 1.49 |
-| cells | a tape machine's drain loop (computed in closed form) | 2 | 3 | 1.50 | 2 | 2 | 1.00 |
+| cells | a tape machine's drain loop (computed in closed form) | 2 | 2 | 1.00 | 2 | 2 | 1.00 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
@@ -365,20 +365,20 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
 | hex | 1,149,427 | 1,346,047 | 1.17 | 1,183,965 | 1,380,549 | 1.17 |
 | bigprime | 722,178 | 940,628 | 1.30 | 931,585 | 1,028,757 | 1.10 |
-| cells | 201,973 | 364,157 | 1.80 | 267,726 | 503,604 | 1.88 |
+| cells | 201,973 | 185,633 | 0.92 | 267,726 | 276,208 | 1.03 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
 |--------|-----------------:|------------:|------:|------------:|------------:|------:|
 | fib | 316,168 | 294,276 | 0.93 | 294,383 | 261,546 | 0.89 |
 | crc32 | 534,069 | 484,989 | 0.91 | 534,616 | 485,157 | 0.91 |
 | sieve | 2,014,004 | 1,620,785 | 0.80 | 2,800,582 | 1,620,889 | 0.58 |
-| matmul | 388,710 | 387,247 | 1.00 | 390,554 | 389,090 | 1.00 |
+| matmul | 388,710 | 371,253 | 0.96 | 390,554 | 373,096 | 0.96 |
 | strings | 289,547 | 289,559 | 1.00 | 289,618 | 289,810 | 1.00 |
 | qsort | 1,012,850 | 998,492 | 0.99 | 1,049,861 | 877,019 | 0.84 |
 | lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
 | hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
 | bigprime | 970,260 | 1,099,375 | 1.13 | 111,575,208 | 113,357,198 | 1.02 |
-| cells | 271,080 | 498,796 | 1.84 | 271,311 | 499,015 | 1.84 |
+| cells | 271,080 | 271,412 | 1.00 | 271,311 | 271,631 | 1.00 |
 
 ANVIL comes out ahead with counter branches and update-form streams on
 PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep
@@ -403,7 +403,7 @@ Best of 10 runs, in milliseconds:
 | matflat (double, run-time order, flat int indices) | 13 | 14 | 1.08 | 14 | 15 | 1.07 |
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
-| pidigits (a Brainfuck program as C, 30 digits of pi) | 7 | 6 | 0.86 | 6 | 6 | 1.00 |
+| pidigits (a Brainfuck program as C, 30 digits of pi) | 7 | 6 | 0.86 | 6 | 7 | 1.17 |
 | qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
 | sieve | 91 | 93 | 1.02 | 100 | 184 | 1.84 |
 | strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |

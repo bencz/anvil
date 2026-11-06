@@ -364,8 +364,23 @@ static bool zero_test_of(const anvil_mir_func_t *mir, const anvil_mir_isel_facts
            anvil_mir_isel_constant(facts, anvil_mir_get_instr_use(mir, index, 1), &value) && value == 0;
 }
 
+/* An instruction that leaves a counter alone: it neither reads nor writes
+ * it, calls nothing and does not branch. */
+static bool passes_counter(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *info, anvil_mir_vreg_t counter)
+{
+    if (info->def == counter || info->op == ANVIL_MIR_OP_CALL || info->op == ANVIL_MIR_OP_BR || info->op == ANVIL_MIR_OP_BR_COND)
+        return false;
+    for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+        if (info->clobbers[c])
+            return false;
+    for (size_t u = 0; u < info->num_uses; u++)
+        if (anvil_mir_get_instr_use(mir, index, u) == counter)
+            return false;
+    return true;
+}
+
 bool anvil_mir_counter_loops(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool calls_clobber_counter, bool counts_in_place,
-                             uint8_t *roles)
+                             unsigned narrowest_counter, uint8_t *roles)
 {
     size_t count = anvil_mir_num_instrs(mir);
     for (size_t i = 0; i < count; i++)
@@ -378,9 +393,13 @@ bool anvil_mir_counter_loops(const anvil_mir_func_t *mir, const anvil_mir_isel_f
             one != 1)
             continue;
         anvil_mir_vreg_t counter = add.def;
-        /* The test: the next reader of j in the latch, then the branch. */
+        const anvil_mir_vreg_info_t *counter_info = anvil_mir_get_vreg_info(mir, counter);
+        if (!counter_info || counter_info->size_bits < narrowest_counter)
+            continue;
+        /* The test: the next reader of j in the latch, then the branch;
+         * what runs between neither reads nor writes j. */
         size_t at = step + 1;
-        while (at < count && anvil_mir_get_instr_info(mir, at, &test) && test.block == add.block && test.op == ANVIL_MIR_OP_MOV && test.num_uses == 0)
+        while (at < count && anvil_mir_get_instr_info(mir, at, &test) && test.block == add.block && passes_counter(mir, at, &test, counter))
             at++;
         if (at + 1 >= count || !anvil_mir_get_instr_info(mir, at, &test) || test.block != add.block || test.op != ANVIL_MIR_OP_CMP_NE ||
             !zero_test_of(mir, facts, at, &test, counter) || !anvil_mir_isel_feeds_next_branch(facts, at, &test) ||

@@ -723,8 +723,205 @@ static void test_lockstep_pointers(void)
     }
 }
 
+/* for (int k = 1; k < n; k++) if (t[k]) { t[k - 1] += 3 * t[k]; t[k] = 0; }
+ * with no-wrap int arithmetic: t[k - 1] shares t[k]'s index (the constant
+ * leaves the GEP index for a base of its own), so the loop computes no
+ * k - 1 and extends nothing; a stream reads t[k - 1] at t[k] - 4 where the
+ * accesses advance their base, and the loop, branching inside, still counts
+ * in the counter register where the target has one, the stream's advance
+ * between the counter's step and its test. */
+static void test_branching_counter_loop(void)
+{
+    static const struct {
+        anvil_arch_t arch;
+        const char *present;
+        const char *absent;
+        const char *counter;
+    } cases[] = {
+        {ANVIL_ARCH_X86_64, NULL, "leal -1(", NULL},
+        {ANVIL_ARCH_X86, NULL, "leal -1(", NULL},
+        {ANVIL_ARCH_ARM64, NULL, "sxtw #2]", NULL},
+        {ANVIL_ARCH_PPC64LE, "-4(%r", NULL, "\tbdnz "},
+        {ANVIL_ARCH_PPC64, "-4(%r", NULL, "\tbdnz "},
+        {ANVIL_ARCH_PPC32, "-4(%r", NULL, "\tbdnz "},
+        /* No update forms to make the index a pure counter. */
+        {ANVIL_ARCH_ZARCH, NULL, NULL, NULL},
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(cases[c].arch);
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        anvil_module_t *module = anvil_module_create(ctx, "drain");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *params[] = {anvil_type_ptr(ctx, i32), i32};
+        anvil_func_t *func = anvil_func_create(module, "drain", anvil_type_func(ctx, anvil_type_void(ctx), params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *header = anvil_block_create(func, "header"), *test = anvil_block_create(func, "test");
+        anvil_block_t *move = anvil_block_create(func, "move"), *latch = anvil_block_create(func, "latch");
+        anvil_block_t *exit = anvil_block_create(func, "exit");
+        anvil_value_t *tape = anvil_func_get_param(func, 0), *one = anvil_const_i32(ctx, 1);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *k = anvil_build_phi(ctx, i32, "k");
+        anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, k, anvil_func_get_param(func, 1), "more"), test, exit);
+        anvil_set_insert_point(ctx, test);
+        anvil_value_t *here = anvil_build_gep(ctx, i32, tape, &k, 1, "here");
+        anvil_value_t *value = anvil_build_load(ctx, i32, here, "value");
+        anvil_build_br_cond(ctx, anvil_build_cmp_ne(ctx, value, anvil_const_i32(ctx, 0), "full"), move, latch);
+        anvil_set_insert_point(ctx, move);
+        anvil_value_t *before = anvil_build_sub(ctx, k, one, "before");
+        anvil_set_no_wrap(before, true);
+        anvil_value_t *left = anvil_build_gep(ctx, i32, tape, &before, 1, "left");
+        anvil_value_t *moved = anvil_build_add(ctx, anvil_build_load(ctx, i32, left, "neighbour"),
+                                               anvil_build_mul(ctx, value, anvil_const_i32(ctx, 3), "tripled"), "moved");
+        anvil_build_store(ctx, moved, left);
+        anvil_build_store(ctx, anvil_const_i32(ctx, 0), here);
+        anvil_build_br(ctx, latch);
+        anvil_set_insert_point(ctx, latch);
+        anvil_value_t *next = anvil_build_add(ctx, k, one, "next");
+        anvil_set_no_wrap(next, true);
+        anvil_build_br(ctx, header);
+        anvil_phi_add_incoming(k, one, func->entry);
+        anvil_phi_add_incoming(k, next, latch);
+        anvil_set_insert_point(ctx, exit);
+        anvil_build_ret_void(ctx);
+        char *assembly = NULL;
+        size_t length = 0;
+        bool ok = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && (!cases[c].present || strstr(assembly, cases[c].present)) &&
+                  (!cases[c].absent || !strstr(assembly, cases[c].absent)) && (!cases[c].counter || strstr(assembly, cases[c].counter));
+        char message[160];
+        snprintf(message, sizeof(message), "arch %d: t[k - 1] shares t[k]'s index and the branching loop counts in its counter", (int)cases[c].arch);
+        CHECK(ok, message);
+        if (!ok)
+            fprintf(stderr, "%s\n", assembly ? assembly : anvil_ctx_get_error(ctx));
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* for (uintptr_t i = 1; i < n; i++) s += a[i - 1] + a[i]: a[i - 1] is
+ * a[i]'s address less one element, so on a pre-increment target the
+ * stream's advance moves down to the first access with that derived
+ * address (the IR stays valid; it once read the stream before its advance). */
+static void test_stream_with_neighbour(void)
+{
+    static const anvil_arch_t arches[] = {ANVIL_ARCH_X86_64, ANVIL_ARCH_X86, ANVIL_ARCH_ARM64, ANVIL_ARCH_PPC64LE,
+                                          ANVIL_ARCH_PPC64, ANVIL_ARCH_PPC32, ANVIL_ARCH_ZARCH};
+    for (size_t a = 0; a < sizeof(arches) / sizeof(arches[0]); a++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arches[a]);
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+        const anvil_arch_info_t *arch = anvil_ctx_get_arch_info(ctx);
+        anvil_type_t *index = arch->ptr_size == 8 ? anvil_type_u64(ctx) : anvil_type_u32(ctx);
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_module_t *module = anvil_module_create(ctx, "neighbour");
+        anvil_type_t *params[] = {anvil_type_ptr(ctx, i32), index};
+        anvil_func_t *func = anvil_func_create(module, "neighbour", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body");
+        anvil_block_t *exit = anvil_block_create(func, "exit");
+        anvil_value_t *base = anvil_func_get_param(func, 0), *one = arch->ptr_size == 8 ? anvil_const_u64(ctx, 1) : anvil_const_u32(ctx, 1);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *i = anvil_build_phi(ctx, index, "i"), *sum = anvil_build_phi(ctx, i32, "sum");
+        anvil_build_br_cond(ctx, anvil_build_cmp_ult(ctx, i, anvil_func_get_param(func, 1), "more"), body, exit);
+        anvil_set_insert_point(ctx, body);
+        anvil_value_t *before = anvil_build_sub(ctx, i, one, "before");
+        anvil_value_t *left = anvil_build_load(ctx, i32, anvil_build_gep(ctx, i32, base, &before, 1, "left.at"), "left");
+        anvil_value_t *here = anvil_build_load(ctx, i32, anvil_build_gep(ctx, i32, base, &i, 1, "here.at"), "here");
+        anvil_value_t *grown = anvil_build_add(ctx, sum, anvil_build_add(ctx, left, here, "pair"), "grown");
+        anvil_value_t *next = anvil_build_add(ctx, i, one, "next");
+        anvil_build_br(ctx, header);
+        anvil_phi_add_incoming(i, one, func->entry);
+        anvil_phi_add_incoming(i, next, body);
+        anvil_phi_add_incoming(sum, anvil_const_i32(ctx, 0), func->entry);
+        anvil_phi_add_incoming(sum, grown, body);
+        anvil_set_insert_point(ctx, exit);
+        anvil_build_ret(ctx, sum);
+        char *assembly = NULL;
+        size_t length = 0;
+        bool ok = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d: a stream read at a[i - 1] and a[i] generates", (int)arches[a]);
+        CHECK(ok, message);
+        if (!ok)
+            fprintf(stderr, "%s\n", anvil_ctx_get_error(ctx));
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* while (j != 0) { j++; s += 7; } with a 32- or 8-bit unsigned j: a
+ * counter narrower than the counter register counts (-j) modulo 2^bits
+ * (2^bits from 0), so PowerPC's CTR takes ((-j - 1) mod 2^bits) + 1, not a
+ * sign-extended or wider count; SystemZ branches on 32 bits (BRCT), so an
+ * 8-bit counter stays an ordinary loop there. */
+static void test_narrow_counter_width(void)
+{
+    static const struct {
+        anvil_arch_t arch;
+        bool byte;
+        const char *expect;
+        const char *absent;
+    } cases[] = {
+        {ANVIL_ARCH_PPC64LE, false, "\trldicl %r0, %r0, 0, 32\n\taddic %r0, %r0, 1\n\tmtctr %r0", NULL},
+        {ANVIL_ARCH_PPC64, false, "\trldicl %r0, %r0, 0, 32\n\taddic %r0, %r0, 1\n\tmtctr %r0", NULL},
+        {ANVIL_ARCH_PPC32, false, "\tneg %r0, %r3\n\tmtctr %r0", NULL},
+        {ANVIL_ARCH_PPC64LE, true, "\trldicl %r0, %r0, 0, 56\n\taddic %r0, %r0, 1\n\tmtctr %r0", NULL},
+        {ANVIL_ARCH_PPC32, true, "\trlwinm %r0, %r0, 0, 24, 31\n\taddic %r0, %r0, 1\n\tmtctr %r0", NULL},
+        {ANVIL_ARCH_ZARCH, false, "BRCT ", NULL},
+        {ANVIL_ARCH_ZARCH, true, NULL, "BRCT"},
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(cases[c].arch);
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_BASIC);
+        anvil_module_t *module = anvil_module_create(ctx, "wraps");
+        anvil_type_t *u32 = cases[c].byte ? anvil_type_u8(ctx) : anvil_type_u32(ctx);
+        anvil_type_t *params[] = {u32};
+        anvil_func_t *func = anvil_func_create(module, "wraps", anvil_type_func(ctx, u32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body");
+        anvil_block_t *exit = anvil_block_create(func, "exit");
+        anvil_value_t *start = anvil_func_get_param(func, 0);
+        anvil_value_t *zero = cases[c].byte ? anvil_const_u8(ctx, 0) : anvil_const_u32(ctx, 0);
+        anvil_value_t *one = cases[c].byte ? anvil_const_u8(ctx, 1) : anvil_const_u32(ctx, 1);
+        anvil_value_t *seven = cases[c].byte ? anvil_const_u8(ctx, 7) : anvil_const_u32(ctx, 7);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_build_br(ctx, header);
+        anvil_set_insert_point(ctx, header);
+        anvil_value_t *j = anvil_build_phi(ctx, u32, "j"), *sum = anvil_build_phi(ctx, u32, "s");
+        anvil_build_br_cond(ctx, anvil_build_cmp_ne(ctx, j, zero, "more"), body, exit);
+        anvil_set_insert_point(ctx, body);
+        anvil_value_t *next = anvil_build_add(ctx, j, one, "next");
+        anvil_value_t *grown = anvil_build_add(ctx, sum, seven, "grown");
+        anvil_build_br(ctx, header);
+        anvil_phi_add_incoming(j, start, func->entry);
+        anvil_phi_add_incoming(j, next, body);
+        anvil_phi_add_incoming(sum, zero, func->entry);
+        anvil_phi_add_incoming(sum, grown, body);
+        anvil_set_insert_point(ctx, exit);
+        anvil_build_ret(ctx, sum);
+        char *assembly = NULL;
+        size_t length = 0;
+        /* An 8-bit counter tested through its extension stays an ordinary
+         * loop; one counted in CTR must take the masked count. */
+        bool ok = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+        bool counted = ok && (!cases[c].byte || strstr(assembly, "mtctr"));
+        ok = ok && (!cases[c].expect || !counted || strstr(assembly, cases[c].expect)) && (!cases[c].absent || !strstr(assembly, cases[c].absent));
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d: a %d-bit counter counts modulo its width", (int)cases[c].arch, cases[c].byte ? 8 : 32);
+        CHECK(ok, message);
+        if (!ok)
+            fprintf(stderr, "%s\n", assembly ? assembly : anvil_ctx_get_error(ctx));
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 int main(void)
 {
+    test_stream_with_neighbour();
+    test_branching_counter_loop();
     test_lockstep_pointers();
     test_loop_table();
     test_runtime_unroll();
@@ -739,6 +936,7 @@ int main(void)
     test_constant_address_in_sibling_blocks();
     test_transform();
     test_targets();
+    test_narrow_counter_width();
     if (failures) {
         fprintf(stderr, "count_loop_regression: %d failure(s)\n", failures);
         return 1;

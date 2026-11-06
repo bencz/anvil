@@ -125,12 +125,6 @@ static void insert_block_after(anvil_func_t *func, anvil_block_t *anchor, anvil_
     func->num_blocks++;
 }
 
-static anvil_instr_t *binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *a, anvil_value_t *b, const char *name)
-{
-    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, name);
-    return instr && anvil_instr_add_operand(instr, a) && anvil_instr_add_operand(instr, b) ? instr : NULL;
-}
-
 /* `instr` at the end of the preheader. */
 static anvil_value_t *before_loop(const ru_plan *plan, anvil_instr_t *instr)
 {
@@ -165,9 +159,9 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
         return false;
 
     /* The unrolled loop's own counter. */
-    anvil_value_t *trips = before_loop(plan, binary(ctx, ANVIL_OP_SUB, counting, zero, plan->starts[plan->counter], "unroll.trips"));
-    anvil_value_t *rounds = trips ? before_loop(plan, binary(ctx, ANVIL_OP_SHR, counting, trips, amount, "unroll.rounds")) : NULL;
-    anvil_value_t *first = rounds ? before_loop(plan, binary(ctx, ANVIL_OP_SUB, counting, zero, rounds, "unroll.count")) : NULL;
+    anvil_value_t *trips = before_loop(plan, anvil_opt_make_binary(ctx, ANVIL_OP_SUB, counting, zero, plan->starts[plan->counter], "unroll.trips"));
+    anvil_value_t *rounds = trips ? before_loop(plan, anvil_opt_make_binary(ctx, ANVIL_OP_SHR, counting, trips, amount, "unroll.rounds")) : NULL;
+    anvil_value_t *first = rounds ? before_loop(plan, anvil_opt_make_binary(ctx, ANVIL_OP_SUB, counting, zero, rounds, "unroll.count")) : NULL;
     if (!first)
         return false;
     /* Where each stepped value stands after the unrolled iterations. */
@@ -185,8 +179,8 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
                 return false;
         }
         anvil_value_t *stride = anvil_opt_make_const_int(ctx, type, plan->steps[p] * (int64_t)factor);
-        anvil_value_t *distance = stride ? before_loop(plan, binary(ctx, ANVIL_OP_MUL, type, n, stride, "unroll.distance")) : NULL;
-        anvil_instr_t *moved = distance ? binary(ctx, ANVIL_OP_ADD, type, plan->starts[p], distance, "unroll.after") : NULL;
+        anvil_value_t *distance = stride ? before_loop(plan, anvil_opt_make_binary(ctx, ANVIL_OP_MUL, type, n, stride, "unroll.distance")) : NULL;
+        anvil_instr_t *moved = distance ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, type, plan->starts[p], distance, "unroll.after") : NULL;
         if (!moved)
             return false;
         const anvil_value_t *original = plan->nexts[p];
@@ -205,7 +199,7 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
             return false;
         values[p] = phis[p]->result;
     }
-    anvil_instr_t *more = binary(ctx, ANVIL_OP_CMP_NE, anvil_type_i1(ctx), counter->result, zero, "unroll.more");
+    anvil_instr_t *more = anvil_opt_make_binary(ctx, ANVIL_OP_CMP_NE, anvil_type_i1(ctx), counter->result, zero, "unroll.more");
     anvil_instr_t *branch = more ? anvil_instr_create(ctx, ANVIL_OP_BR_COND, ctx->type_void, NULL) : NULL;
     if (!branch || !anvil_instr_add_operand(branch, more->result))
         return false;
@@ -241,7 +235,7 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
                         continue;
                     clone->operands[1] = phis[p]->result;
                     anvil_value_t *offset = anvil_opt_make_const_int(ctx, plan->phis[p]->result->type, plan->steps[p] * (int64_t)copy);
-                    anvil_instr_t *ahead = offset ? binary(ctx, ANVIL_OP_GEP, original->result->type, clone->result, offset, "unroll.at") : NULL;
+                    anvil_instr_t *ahead = offset ? anvil_opt_make_binary(ctx, ANVIL_OP_GEP, original->result->type, clone->result, offset, "unroll.at") : NULL;
                     if (!ahead)
                         return false;
                     ahead->aux_type = original->aux_type;
@@ -267,7 +261,7 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
             }
             anvil_type_t *type = plan->phis[p]->result->type;
             anvil_value_t *step = anvil_opt_make_const_int(ctx, type, plan->steps[p] * (int64_t)(copy + 1));
-            anvil_instr_t *stepped = step ? binary(ctx, ANVIL_OP_ADD, type, phis[p]->result, step, "unroll.step") : NULL;
+            anvil_instr_t *stepped = step ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, type, phis[p]->result, step, "unroll.step") : NULL;
             if (!stepped)
                 return false;
             const anvil_value_t *original = plan->nexts[p];
@@ -278,7 +272,7 @@ static bool unroll(anvil_func_t *func, ru_plan *plan, unsigned factor)
         for (size_t p = 0; p < plan->num_phis; p++)
             values[p] = next[p];
     }
-    anvil_instr_t *advance = binary(ctx, ANVIL_OP_ADD, counting, counter->result, one, "unroll.count.next");
+    anvil_instr_t *advance = anvil_opt_make_binary(ctx, ANVIL_OP_ADD, counting, counter->result, one, "unroll.count.next");
     anvil_instr_t *back = advance ? anvil_instr_create(ctx, ANVIL_OP_BR, ctx->type_void, NULL) : NULL;
     if (!back)
         return false;

@@ -160,6 +160,14 @@ Replaces expensive operations with cheaper equivalents.
 | `ext(a) == ext(b)`, `sext(c) != C` | `a == b`, `c != C` | Extensions of one narrow type; a constant the narrow type represents |
 | `sext(a) < sext(b)` / `zext(a) u< zext(b)` | `a < b` / `a u< b` | The extension's kind matches the order |
 | `zext(a) < zext(b)` (signed) | `a u< b` | Unsigned narrow values |
+| `gep T p, x + c` | `gep T (gep T p, c), x` | One index, exact at its width: pointer-wide or no-wrap (`anvil_memory_index_term`, shared with alias analysis); the bytes of `c` fit |
+| `gep T p, trunc w` | `gep T p, w` | No-wrap (exact) truncation; `w` pointer-wide, or narrower with the index's signedness |
+
+The GEP rows give accesses at constant distances from one index the same
+index (`t[k]`, `t[k - 1]`), the constant in a base of its own as LICM splits
+an invariant term (`anvil_opt_split_gep`): loop strength reduction then makes
+them one stream at constant displacements, and a base that stays an indexed
+address is computed once, outside the loop.
 
 Division by a constant uses the Granlund-Montgomery reciprocal with the magic
 numbers of Hacker's Delight (10-1 signed, 10-2 unsigned with the "add"
@@ -383,7 +391,11 @@ lockstep (two or more header PHIs stepped by the same bytes, read in the
 loop only as addresses or through a constant displacement the target folds)
 become `p0 + i` over one byte index where an index folds into the access and
 no access advances its own base (x86, the mainframes): one add per iteration
-for all of them.
+for all of them. An address a constant number of elements from a stream's
+base joins that stream at a displacement, whether or not a stream of its own
+would pay. On a target that advances a base before the access, the advance
+moves down to the stream's first access, with the addresses derived from the
+stream (constant GEPs, pointer casts) that it needs.
 
 ### Loop Tables (`ANVIL_PASS_LOOP_TABLE`) - O2
 
@@ -537,7 +549,12 @@ Simplifies the control flow graph.
    bringing a constant straight to the chosen successor; a branch on a condition computed elsewhere sends each
    predecessor whose edge implies the condition (it branches on it, or is reached through single-predecessor blocks
    from one that does) straight to its successor. Pure instructions in the join move into both successors first.
-   This keeps a loop that exits on a test from carrying the test's result as a value.
+   This keeps a loop that exits on a test from carrying the test's result as a value. The join's PHIs may be read
+   past it: a use the chosen successor dominates (the successor having the join as its only predecessor) reads a
+   new PHI there of the join's value and the value the threaded edge brought; a use reached from the successor any
+   other way keeps the edge. A loop whose latch brings the counter value that leaves it (a closed form's) loses its
+   back edge this way. An edge from outside a loop that would enter it past its header (rotating the loop) is
+   threaded only when no PHI needs such a repair: loop passes expect the header's test.
 6. **If-conversion**: two-way branches over small speculatable sides (`anvil_opt_speculatable`, shared with LICM: no
    trap, memory or FP-environment effect, and no shift whose count could reach the width, which is undefined) become
    selects

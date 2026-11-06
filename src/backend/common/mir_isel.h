@@ -121,10 +121,12 @@ bool anvil_mir_isel_keeps(const anvil_mir_func_t *mir, const anvil_mir_isel_fact
  * decrement-and-branch counter then counts -j down instead: set it after
  * INIT, print nothing for STEP and TEST, and branch on the counter.  With
  * `calls_clobber_counter` (a special register) the loop and the stretch
- * from INIT to it hold no calls.  `roles` has one entry per instruction. */
+ * from INIT to it hold no calls.  A counter narrower than
+ * `narrowest_counter` bits, which the target cannot count modulo its width,
+ * stays as it is.  `roles` has one entry per instruction. */
 enum { ANVIL_MIR_COUNTER_NONE, ANVIL_MIR_COUNTER_INIT, ANVIL_MIR_COUNTER_STEP, ANVIL_MIR_COUNTER_TEST, ANVIL_MIR_COUNTER_BRANCH };
 bool anvil_mir_counter_loops(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool calls_clobber_counter, bool counts_in_place,
-                             uint8_t *roles);
+                             unsigned narrowest_counter, uint8_t *roles);
 
 /* Block layout after allocation.  A block (not the entry or the frame
  * block) that prints

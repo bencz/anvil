@@ -2157,7 +2157,7 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 
     emit.counter_roles = malloc(anvil_mir_num_instrs(mir) ? anvil_mir_num_instrs(mir) : 1);
     bool ok = emit.counter_roles && systemz_prepare_frame(&emit) && anvil_mir_isel_facts_build(&emit.isel, mir, systemz_takes_immediate, NULL, &emit) &&
-              anvil_mir_counter_loops(mir, &emit.isel, false, true, emit.counter_roles) && anvil_mir_layout_build(&emit.layout, mir);
+              anvil_mir_counter_loops(mir, &emit.isel, false, true, SYSTEMZ_NARROWEST_COUNTER, emit.counter_roles) && anvil_mir_layout_build(&emit.layout, mir);
     if (ok) {
         systemz_emit_header(&emit);
         desc->abi_ops->emit_prologue(&emit);

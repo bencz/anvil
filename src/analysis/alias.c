@@ -51,14 +51,16 @@ static const anvil_value_t *address_source(const anvil_value_t *pointer)
     return NULL;
 }
 
-/* The bytes `term` (an add or sub of a constant) moves an index scaled by
- * `scale`, when the term is exact at the index's width: pointer-wide (the
- * address wraps alike) or without wrap. */
-static bool index_term(const anvil_instr_t *term, size_t scale, size_t pointer_size, int64_t *bytes)
+bool anvil_memory_index_distributes(const anvil_instr_t *term, size_t pointer_size)
+{
+    return term->result && (term->result->type->size == pointer_size || term->no_wrap);
+}
+
+bool anvil_memory_index_term(const anvil_instr_t *term, size_t scale, size_t pointer_size, int64_t *amount)
 {
     const anvil_value_t *constant = term->num_operands == 2 ? term->operands[1] : NULL;
     if ((term->op != ANVIL_OP_ADD && term->op != ANVIL_OP_SUB) || !constant || constant->kind != ANVIL_VAL_CONST_INT ||
-        (term->result->type->size != pointer_size && !term->no_wrap))
+        !anvil_memory_index_distributes(term, pointer_size) || !scale || scale > (size_t)INT64_MAX)
         return false;
     unsigned bits = (unsigned)term->result->type->size * 8;
     if (!bits || bits > 64)
@@ -73,7 +75,7 @@ static bool index_term(const anvil_instr_t *term, size_t scale, size_t pointer_s
         value = (int64_t)raw;
     if (value == INT64_MIN || (value < 0 ? -value : value) > INT64_MAX / (int64_t)scale)
         return false;
-    *bytes = (term->op == ANVIL_OP_SUB ? -value : value) * (int64_t)scale;
+    *amount = term->op == ANVIL_OP_SUB ? -value : value;
     return true;
 }
 
@@ -102,9 +104,9 @@ static bool variable_index(const anvil_instr_t *instr, int64_t *offset, const an
         !step.amount || step.amount > (size_t)INT64_MAX)
         return false;
     size_t pointer_size = value->owner_ctx ? value->owner_ctx->data_layout.pointer.size : 8;
-    int64_t bytes;
-    while (value->kind == ANVIL_VAL_INSTR && index_term(value->data.instr, step.amount, pointer_size, &bytes) &&
-           anvil_gep_accumulate_offset(&total, bytes))
+    int64_t amount;
+    while (value->kind == ANVIL_VAL_INSTR && anvil_memory_index_term(value->data.instr, step.amount, pointer_size, &amount) &&
+           anvil_gep_accumulate_offset(&total, amount * (int64_t)step.amount))
         value = value->data.instr->operands[0];
     *offset = total;
     *index = value;

@@ -62,7 +62,14 @@ branch on the condition flags when a compare's only use is the following
 on the flags where the CPU has no conditional move), turn multiplication by a
 power of two into a shift, and fall through
 to the next block instead of jumping to it.  None of this changes the MIR
-contract; it is selection inside each backend's printer.
+contract; it is selection inside each backend's printer.  Counter loops
+(`anvil_mir_counter_loops`) find an innermost loop whose counter only counts
+up to zero, its step and test in the latch with nothing between them that
+reads, writes or calls; PowerPC then counts in CTR and branches with
+`bdnz` (a counter narrower than the register runs (-j) mod 2^bits times, or
+2^bits from 0: CTR = ((-j - 1) mod 2^bits) + 1), SystemZ counts in the
+counter's own register with `BRCT`/`BRCTG` by its width, which takes no
+counter narrower than 32 bits (`SYSTEMZ_NARROWEST_COUNTER`).
 
 **64-bit integers on 32-bit targets.** `src/backend/common/wide_mir.c` legalizes
 64-bit operations into pairs of 32-bit virtual registers with target-independent

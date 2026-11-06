@@ -98,6 +98,14 @@ static inline anvil_instr_t *anvil_opt_make_instr(anvil_ctx_t *ctx, anvil_op_t o
     return instr;
 }
 
+/* Both operands are required: a missing one (a constant that could not be
+ * made) fails like an allocation. */
+static inline anvil_instr_t *anvil_opt_make_binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *left, anvil_value_t *right,
+                                                   const char *name)
+{
+    return left && right ? anvil_opt_make_instr(ctx, op, type, left, right, name) : NULL;
+}
+
 /* Links a detached instruction into `position`'s block just before it. */
 static inline void anvil_opt_insert_before(anvil_instr_t *position, anvil_instr_t *instr)
 {
@@ -113,6 +121,21 @@ static inline void anvil_opt_insert_before(anvil_instr_t *position, anvil_instr_
     else
         block->first = instr;
     position->prev = instr;
+}
+
+/* Splits the single-index `gep` (gep T p, a op b, the index distributing:
+ * anvil_memory_index_distributes) into gep T (gep T p, first), rest, the
+ * inner GEP placed before `position`.  False only on allocation failure,
+ * the IR unchanged. */
+static inline bool anvil_opt_split_gep(anvil_ctx_t *ctx, anvil_instr_t *gep, anvil_instr_t *position, anvil_value_t *first, anvil_value_t *rest)
+{
+    anvil_instr_t *base = anvil_instr_create(ctx, ANVIL_OP_GEP, gep->result->type, gep->result->name);
+    if (!base || !anvil_instr_copy_attributes(base, gep) || !anvil_instr_add_operand(base, gep->operands[0]) || !anvil_instr_add_operand(base, first))
+        return false;
+    anvil_opt_insert_before(position, base);
+    gep->operands[0] = base->result;
+    gep->operands[1] = rest;
+    return true;
 }
 
 /* The comparison that holds exactly where `op` (with `pred` for FCMP)

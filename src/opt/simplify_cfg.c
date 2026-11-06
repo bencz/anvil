@@ -510,6 +510,8 @@ static bool rewrite_phi_predecessor(anvil_block_t *block,
         instr->phi_blocks = plans[i].blocks;
         instr->num_operands = plans[i].count;
         instr->num_phi_incoming = plans[i].count;
+        instr->operands_capacity = plans[i].count;
+        instr->phi_capacity = plans[i].count;
         plans[i].operands = NULL;
         plans[i].blocks = NULL;
     }
@@ -812,6 +814,22 @@ static bool used_only_through(anvil_func_t *func, const anvil_value_t *value, co
     return true;
 }
 
+/* The value `phi`, in a successor of `join`, takes once the edge from
+ * `from` skips `join`: what it took from `join`, through `join`'s PHI;
+ * NULL when that is another value `join` computes. */
+static anvil_value_t *threaded_value(const anvil_instr_t *phi, const anvil_block_t *join, const anvil_block_t *from)
+{
+    anvil_value_t *through = incoming_for(phi, join);
+    if (through && through->kind == ANVIL_VAL_INSTR && through->data.instr->parent == join)
+        through = through->data.instr->op == ANVIL_OP_PHI ? incoming_for(through->data.instr, from) : NULL;
+    return through;
+}
+
+static bool defined_in(const anvil_value_t *value, const anvil_block_t *block)
+{
+    return value && value->kind == ANVIL_VAL_INSTR && value->data.instr->parent == block;
+}
+
 /* Redirects `from`'s edge into `join` to `target`: the values `join`'s
  * PHIs had for it flow into `target`'s PHIs (all allocated before any edge
  * changes), and `join`'s PHIs drop it.  False only on allocation failure. */
@@ -822,10 +840,7 @@ static bool redirect_through(anvil_ctx_t *ctx, anvil_block_t *join, anvil_block_
             return false;
     }
     for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
-        anvil_value_t *through = incoming_for(phi, join);
-        if (through && through->kind == ANVIL_VAL_INSTR && through->data.instr->parent == join)
-            through = incoming_for(through->data.instr, from);
-        phi->operands[phi->num_phi_incoming] = through;
+        phi->operands[phi->num_phi_incoming] = threaded_value(phi, join, from);
         phi->phi_blocks[phi->num_phi_incoming++] = from;
         phi->num_operands = phi->num_phi_incoming;
     }
@@ -841,11 +856,234 @@ static bool redirect_through(anvil_ctx_t *ctx, anvil_block_t *join, anvil_block_
     return true;
 }
 
+/* Where an operand is read: a PHI's at the end of its incoming block. */
+static anvil_block_t *use_block(const anvil_instr_t *user, size_t operand)
+{
+    return user->op == ANVIL_OP_PHI ? user->phi_blocks[operand] : user->parent;
+}
+
+enum { REGION_REACHED = 1, REGION_DOMINATED = 2 };
+
+/* Marks, by CFG index, the blocks `target` reaches without passing `join`,
+ * and of those the ones `target` dominates.  False only on allocation
+ * failure. */
+static bool mark_region(anvil_ctx_t *ctx, const anvil_opt_cfg_t *cfg, size_t join, size_t target, unsigned char *mark)
+{
+    size_t *stack = anvil_ctx_calloc(ctx, cfg->count, sizeof(*stack));
+    if (!stack)
+        return false;
+    memset(mark, 0, cfg->count);
+    size_t depth = 0;
+    mark[target] = REGION_REACHED;
+    stack[depth++] = target;
+    while (depth) {
+        size_t block = stack[--depth];
+        if (anvil_opt_cfg_dominates(cfg, target, block))
+            mark[block] = REGION_DOMINATED;
+        for (size_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[block + 1]; edge++) {
+            size_t successor = cfg->successors[edge];
+            if (successor != join && !mark[successor]) {
+                mark[successor] = REGION_REACHED;
+                stack[depth++] = successor;
+            }
+        }
+    }
+    free(stack);
+    return true;
+}
+
+/* A block outside the snapshot counts as reached: nothing is assumed of it. */
+static unsigned char region_of(const anvil_opt_cfg_t *cfg, const unsigned char *mark, const anvil_block_t *block)
+{
+    size_t index = anvil_opt_cfg_index(cfg, block);
+    return index < cfg->count ? mark[index] : REGION_REACHED;
+}
+
+/* The k-th PHI of `join`, or SIZE_MAX when `value` is not one. */
+static size_t join_phi_index(const anvil_block_t *join, const anvil_value_t *value)
+{
+    if (value->kind != ANVIL_VAL_INSTR || value->data.instr->parent != join || value->data.instr->op != ANVIL_OP_PHI)
+        return SIZE_MAX;
+    size_t k = 0;
+    for (const anvil_instr_t *phi = join->first; phi != value->data.instr; phi = phi->next)
+        k++;
+    return k;
+}
+
+/* Which PHIs of `join` the edge from `from`, sent to `target` instead,
+ * leaves read where they no longer hold: a use `target` dominates (and
+ * `target` has `join` as its only predecessor) can read a new PHI of
+ * `target` (needs[k]); a use elsewhere on a path from `target` cannot.
+ * Uses in `join`, and its PHIs' values from `from` (that edge goes away),
+ * are unaffected.  When `from` itself lies on a path from `target`, a value
+ * of `join` there may be one the threaded edge skipped: the edge may then
+ * carry none. */
+static bool repairable(anvil_func_t *func, const anvil_opt_cfg_t *cfg, const unsigned char *mark, anvil_block_t *join, anvil_block_t *from,
+                       anvil_block_t *target, bool *needs)
+{
+    bool single = target->num_preds == 1 && target->preds[0] == join;
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (const anvil_instr_t *user = block->first; user; user = user->next) {
+            for (size_t operand = 0; operand < user->num_operands; operand++) {
+                size_t k = join_phi_index(join, user->operands[operand]);
+                anvil_block_t *at = k == SIZE_MAX ? NULL : use_block(user, operand);
+                if (!at || at == join || (user->parent == join && at == from))
+                    continue;
+                unsigned char region = region_of(cfg, mark, at);
+                if (region == REGION_DOMINATED && single)
+                    needs[k] = true;
+                else if (region)
+                    return false;
+            }
+        }
+    }
+    for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        if (!threaded_value(phi, join, from))
+            return false;  /* it took a value `join` computes, not a PHI */
+    }
+    if (!region_of(cfg, mark, from))
+        return true;
+    size_t k = 0;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next, k++) {
+        if (needs[k] && defined_in(incoming_for(phi, from), join))
+            return false;
+    }
+    for (anvil_instr_t *phi = target->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
+        if (defined_in(threaded_value(phi, join, from), join))
+            return false;
+    }
+    return true;
+}
+
+/* Threads `from`'s edge to `target` (redirect_through); each PHI of `join`
+ * marked in `needs` gets a PHI in `target` (its value from `join`, or the
+ * one it took from `from`) that its uses `target` dominates read instead.
+ * Everything is allocated before the IR changes.  False only on allocation
+ * failure. */
+static bool redirect_repairing(anvil_func_t *func, const anvil_opt_cfg_t *cfg, const unsigned char *mark, anvil_block_t *join,
+                               anvil_block_t *from, anvil_block_t *target, const bool *needs, size_t phi_count)
+{
+    anvil_ctx_t *ctx = func->owner_ctx;
+    anvil_instr_t **repairs = anvil_ctx_calloc(ctx, phi_count, sizeof(*repairs));
+    if (!repairs)
+        return false;
+    size_t k = 0;
+    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next, k++) {
+        if (!needs[k])
+            continue;
+        anvil_instr_t *repair = anvil_instr_create(ctx, ANVIL_OP_PHI, phi->result->type, phi->result->name);
+        if (!repair || !(repair->phi_blocks = anvil_ctx_calloc(ctx, 2, sizeof(*repair->phi_blocks))) || !anvil_instr_reserve_operands(repair, 2)) {
+            free(repairs);
+            return false;
+        }
+        repair->phi_capacity = 2;
+        repair->operands[0] = phi->result;
+        repair->phi_blocks[0] = join;
+        repair->operands[1] = incoming_for(phi, from);
+        repair->phi_blocks[1] = from;
+        repair->num_operands = repair->num_phi_incoming = 2;
+        repairs[k] = repair;
+    }
+    if (!redirect_through(ctx, join, from, target)) {
+        free(repairs);
+        return false;
+    }
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (anvil_instr_t *user = block->first; user; user = user->next) {
+            for (size_t operand = 0; operand < user->num_operands; operand++) {
+                size_t index = join_phi_index(join, user->operands[operand]);
+                if (index != SIZE_MAX && repairs[index] && region_of(cfg, mark, use_block(user, operand)) == REGION_DOMINATED)
+                    user->operands[operand] = repairs[index]->result;
+            }
+        }
+    }
+    for (k = phi_count; k-- > 0;) {
+        if (repairs[k])
+            anvil_opt_insert_before(target->first, repairs[k]);
+    }
+    free(repairs);
+    return true;
+}
+
+/* The CFG facts threading one join's edges needs, made on first use. */
+typedef struct {
+    anvil_opt_cfg_t cfg;
+    bool built;
+    unsigned char *mark;
+    bool *needs;
+    size_t phi_count;
+} thread_state_t;
+
+static void thread_state_destroy(thread_state_t *state)
+{
+    free(state->mark);
+    free(state->needs);
+    if (state->built)
+        anvil_opt_cfg_destroy(&state->cfg);
+}
+
+static bool any_needed(const bool *needs, size_t count)
+{
+    for (size_t k = 0; k < count; k++)
+        if (needs[k])
+            return true;
+    return false;
+}
+
+/* Whether threading `from`'s edge enters the loop `join` heads past its
+ * header: `from` lies outside it (join does not dominate it) and the
+ * target reaches one of its back edges.  That rotates the loop, which loop
+ * passes do not expect from CFG cleanup. */
+static bool rotates_loop(const anvil_opt_cfg_t *cfg, const unsigned char *mark, const anvil_block_t *join, const anvil_block_t *from)
+{
+    size_t header = anvil_opt_cfg_index(cfg, join), source = anvil_opt_cfg_index(cfg, from);
+    if (header >= cfg->count || source >= cfg->count || anvil_opt_cfg_dominates(cfg, header, source))
+        return false;
+    for (size_t edge = cfg->predecessor_offsets[header]; edge < cfg->predecessor_offsets[header + 1]; edge++) {
+        size_t latch = cfg->predecessors[edge];
+        if (anvil_opt_cfg_dominates(cfg, header, latch) && mark[latch])
+            return true;
+    }
+    return false;
+}
+
+/* Sends `from`'s edge into `join` straight to `target` where the join's
+ * PHIs can be repaired (repairable); *threaded tells whether it did.
+ * False only on allocation failure. */
+static bool try_thread(anvil_func_t *func, thread_state_t *state, anvil_block_t *join, anvil_block_t *from, anvil_block_t *target, bool *threaded)
+{
+    anvil_ctx_t *ctx = func->owner_ctx;
+    *threaded = false;
+    if (!state->built) {
+        for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next)
+            state->phi_count++;
+        if (!anvil_opt_cfg_build(func, &state->cfg))
+            return false;
+        state->built = true;
+        state->mark = anvil_ctx_calloc(ctx, state->cfg.count, sizeof(*state->mark));
+        state->needs = anvil_ctx_calloc(ctx, state->phi_count ? state->phi_count : 1, sizeof(*state->needs));
+        if (!state->mark || !state->needs)
+            return false;
+    }
+    memset(state->needs, 0, (state->phi_count ? state->phi_count : 1) * sizeof(*state->needs));
+    if (!mark_region(ctx, &state->cfg, anvil_opt_cfg_index(&state->cfg, join), anvil_opt_cfg_index(&state->cfg, target), state->mark))
+        return false;
+    if (!repairable(func, &state->cfg, state->mark, join, from, target, state->needs) ||
+        (any_needed(state->needs, state->phi_count) && rotates_loop(&state->cfg, state->mark, join, from)))
+        return true;
+    if (!redirect_repairing(func, &state->cfg, state->mark, join, from, target, state->needs, state->phi_count))
+        return false;
+    *threaded = true;
+    return true;
+}
+
 /* Jump threading on a known outcome.  `join` holds PHIs, at most one
  * comparison of a PHI with a constant, and a two-way branch on it (or on an
  * i1 PHI): a predecessor bringing a constant decides the branch, so its
- * edge goes straight to the chosen successor.  Returns false (context error
- * set) only on allocation failure; *threaded tells whether the IR changed. */
+ * edge goes straight to the chosen successor.  The PHIs may be read past
+ * the branch where `repairable` allows (a loop's body and exit read its
+ * header's PHIs).  Returns false (context error set) only on allocation
+ * failure; *threaded tells whether the IR changed. */
 static bool thread_known_branch(anvil_func_t *func, anvil_block_t *join, bool *threaded)
 {
     *threaded = false;
@@ -875,13 +1113,10 @@ static bool thread_known_branch(anvil_func_t *func, anvil_block_t *join, bool *t
     }
     if (!decided || (compare && !used_only_through(func, compare->result, join)))
         return true;
-    for (anvil_instr_t *phi = join->first; phi && phi->op == ANVIL_OP_PHI; phi = phi->next) {
-        if (!used_only_through(func, phi->result, join))
-            return true;
-    }
-
     anvil_ctx_t *ctx = func->owner_ctx;
-    for (size_t item = 0; item < decided->num_phi_incoming; item++) {
+    thread_state_t state = {0};
+    bool ok = true;
+    for (size_t item = 0; item < decided->num_phi_incoming && ok && !*threaded; item++) {
         anvil_block_t *from = decided->phi_blocks[item];
         anvil_value_t *value = decided->operands[item];
         if (value->kind != ANVIL_VAL_CONST_INT || !from->last || from == join)
@@ -898,14 +1133,12 @@ static bool thread_known_branch(anvil_func_t *func, anvil_block_t *join, bool *t
             taken = value->data.i != 0;
         }
         anvil_block_t *target = taken ? term->true_block : term->false_block;
-        if (block_targets(from, target))
+        if (target == join || block_targets(from, target))
             continue;  /* the edge would collide with one `from` has */
-        if (!redirect_through(ctx, join, from, target))
-            return false;
-        *threaded = true;
-        return true;  /* predecessor lists are now stale */
+        ok = try_thread(func, &state, join, from, target, threaded);  /* threaded: predecessor lists are stale */
     }
-    return true;
+    thread_state_destroy(&state);
+    return ok;
 }
 
 /* The most pure instructions sunk out of a join block before threading. */
@@ -1033,10 +1266,13 @@ static bool thread_implied_branch(anvil_func_t *func, anvil_block_t *join, bool 
         *threaded = true;
         return true;  /* the next round threads the emptied join */
     }
-    for (anvil_instr_t *instr = join->first; instr != term; instr = instr->next)
-        if (instr->op != ANVIL_OP_PHI || !used_only_through(func, instr->result, join))
-            return true;
-    for (size_t p = 0; p < join->num_preds; p++) {
+    /* PHIs read only through the join let it go with its last edge. */
+    bool contained = true;
+    for (anvil_instr_t *instr = join->first; instr != term && contained; instr = instr->next)
+        contained = used_only_through(func, instr->result, join);
+    thread_state_t state = {0};
+    bool ok = true;
+    for (size_t p = 0; p < join->num_preds && ok && !*threaded; p++) {
         anvil_block_t *from = join->preds[p];
         int known = from == join ? -1 : edge_implies(cond, from, join);
         if (known < 0)
@@ -1044,18 +1280,16 @@ static bool thread_implied_branch(anvil_func_t *func, anvil_block_t *join, bool 
         anvil_block_t *target = known ? term->true_block : term->false_block;
         if (target == join || block_targets(from, target))
             continue;
-        if (!redirect_through(func->owner_ctx, join, from, target))
-            return false;
-        if (join->num_preds == 1 && join != func->entry) {
+        ok = try_thread(func, &state, join, from, target, threaded);
+        if (*threaded && contained && join->num_preds == 1 && join != func->entry) {
             /* Its last edge went: the join goes now, with its PHI entries in
              * the successors (nothing to allocate). */
             (void)rewrite_successor_phis(term, join, NULL);
             remove_block(func, join);
         }
-        *threaded = true;
-        return true;  /* predecessor lists are now stale */
     }
-    return true;
+    thread_state_destroy(&state);
+    return ok;  /* threaded: predecessor lists are now stale */
 }
 
 /* Merge block with its single successor if possible */

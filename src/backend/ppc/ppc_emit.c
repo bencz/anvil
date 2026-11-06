@@ -2406,7 +2406,9 @@ bool anvil_ppc_mark_registerless(anvil_mir_func_t *mir, const anvil_ppc_target_d
 }
 
 /* A counter loop (anvil_mir_counter_loops) counts in CTR: -j goes there
- * after j's first value, the step and its test become bdnz. */
+ * after j's first value, the step and its test become bdnz.  CTR counts
+ * at the register's width; a narrower j runs (-j) modulo 2^bits times, or
+ * 2^bits from 0: CTR = ((-j - 1) mod 2^bits) + 1. */
 static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     if (!anvil_mir_isel_registerless_ok(emit->mir, &emit->isel, instr_index, info)) {
@@ -2426,8 +2428,24 @@ static void ppc_emit_instr(ppc_mir_emit_t *emit, size_t instr_index, const anvil
         return;
     }
     ppc_emit_instr_body(emit, instr_index, info);
-    if (role == ANVIL_MIR_COUNTER_INIT && !emit->failed)
-        anvil_strbuf_appendf(&emit->code, "\tneg %%r0, %s\n\tmtctr %%r0\n", ppc_reg_name(emit, info->def));
+    if (role == ANVIL_MIR_COUNTER_INIT && !emit->failed) {
+        const anvil_mir_vreg_info_t *counter = anvil_mir_get_vreg_info(emit->mir, info->def);
+        unsigned width = ppc_is_64(emit) ? 64 : 32, bits = counter && counter->size_bits ? counter->size_bits : width;
+        const char *counter_reg = ppc_reg_name(emit, info->def);
+        if (bits < width) {
+            /* -j - 1 is ~j; addic, as addi would read r0 as zero (it changes
+             * only CA, which no carry pair holds across a narrow counter). */
+            anvil_strbuf_appendf(&emit->code, "\tnor %%r0, %s, %s\n", counter_reg, counter_reg);
+            if (width == 64)
+                anvil_strbuf_appendf(&emit->code, "\trldicl %%r0, %%r0, 0, %u\n", 64 - bits);
+            else
+                anvil_strbuf_appendf(&emit->code, "\trlwinm %%r0, %%r0, 0, %u, 31\n", 32 - bits);
+            anvil_strbuf_append(&emit->code, "\taddic %r0, %r0, 1\n");
+        } else {
+            anvil_strbuf_appendf(&emit->code, "\tneg %%r0, %s\n", counter_reg);
+        }
+        anvil_strbuf_append(&emit->code, "\tmtctr %r0\n");
+    }
 }
 
 static void ppc_emit_instr_body(ppc_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -2704,7 +2722,7 @@ bool ppc_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant
     /* Calls clobber CTR. */
     /* The facts first: the frame saves the registers printed code writes. */
     if (!emit.counter_roles || !emit.update_disps || !anvil_mir_isel_facts_build(&emit.isel, mir, ppc_takes_immediate, NULL, &emit) || !ppc_prepare_frame(&emit) ||
-        !anvil_mir_counter_loops(mir, &emit.isel, true, false, emit.counter_roles) || !anvil_mir_layout_build(&emit.layout, mir)) {
+        !anvil_mir_counter_loops(mir, &emit.isel, true, false, 0, emit.counter_roles) || !anvil_mir_layout_build(&emit.layout, mir)) {
         anvil_mir_layout_destroy(&emit.layout);
         free(emit.counter_roles);
         free(emit.update_disps);

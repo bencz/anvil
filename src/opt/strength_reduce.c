@@ -16,6 +16,8 @@
  *   exposes (an invariant part of an index, an induction variable's own
  *   extension) are what loop passes and address modes take apart
  * - compares and extensions of exact truncations -> the wide values
+ * - gep p, x + c -> gep (gep p, c), x, and exact truncations out of GEP
+ *   indices
  */
 
 #include "anvil/anvil_internal.h"
@@ -38,15 +40,6 @@ static anvil_value_t *make_mask_const(anvil_ctx_t *ctx, anvil_type_t *type, int 
 {
     uint64_t mask = (UINT64_C(1) << (unsigned)shift) - 1;
     return anvil_opt_make_const_int(ctx, type, (int64_t)mask);
-}
-
-static anvil_instr_t *prepare_binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *left, anvil_value_t *right)
-{
-    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, "division.reduce");
-    if (!instr || !anvil_instr_add_operand(instr, left) || !anvil_instr_add_operand(instr, right))
-        return NULL;
-
-    return instr;
 }
 
 /* An exact division (no-wrap: no remainder) by a constant d = 2^k * o,
@@ -79,7 +72,7 @@ static bool reduce_exact_division(anvil_ctx_t *ctx, anvil_instr_t *instr)
     anvil_instr_t *shift = NULL;
     if (k) {
         anvil_value_t *amount = make_shift_const(ctx, type, (int)k);
-        if (!amount || !(shift = prepare_binary(ctx, is_signed ? ANVIL_OP_SAR : ANVIL_OP_SHR, type, n, amount)))
+        if (!amount || !(shift = anvil_opt_make_binary(ctx, is_signed ? ANVIL_OP_SAR : ANVIL_OP_SHR, type, n, amount, "division.reduce")))
             return false;
     }
     anvil_value_t *factor = odd == 1 ? NULL : anvil_opt_make_const_int(ctx, type, (int64_t)inverse);
@@ -118,15 +111,15 @@ static bool reduce_signed_power(anvil_ctx_t *ctx, anvil_instr_t *instr, unsigned
 
     /* Bias only negative dividends, preserving C-style truncation toward zero.
      * All nodes are prepared before touching the existing instruction chain. */
-    anvil_instr_t *sign = prepare_binary(ctx, ANVIL_OP_SAR, type, value, sign_shift);
+    anvil_instr_t *sign = anvil_opt_make_binary(ctx, ANVIL_OP_SAR, type, value, sign_shift, "division.reduce");
     if (!sign)
         return false;
 
-    anvil_instr_t *bias = prepare_binary(ctx, ANVIL_OP_AND, type, sign->result, mask);
+    anvil_instr_t *bias = anvil_opt_make_binary(ctx, ANVIL_OP_AND, type, sign->result, mask, "division.reduce");
     if (!bias)
         return false;
 
-    anvil_instr_t *biased = prepare_binary(ctx, ANVIL_OP_ADD, type, value, bias->result);
+    anvil_instr_t *biased = anvil_opt_make_binary(ctx, ANVIL_OP_ADD, type, value, bias->result, "division.reduce");
     if (!biased)
         return false;
 
@@ -134,11 +127,11 @@ static bool reduce_signed_power(anvil_ctx_t *ctx, anvil_instr_t *instr, unsigned
     anvil_instr_t *product = NULL;
     if (instr->op == ANVIL_OP_SMOD)
     {
-        quotient = prepare_binary(ctx, ANVIL_OP_SAR, type, biased->result, amount);
+        quotient = anvil_opt_make_binary(ctx, ANVIL_OP_SAR, type, biased->result, amount, "division.reduce");
         if (!quotient)
             return false;
 
-        product = prepare_binary(ctx, ANVIL_OP_SHL, type, quotient->result, amount);
+        product = anvil_opt_make_binary(ctx, ANVIL_OP_SHL, type, quotient->result, amount, "division.reduce");
         if (!product)
             return false;
     }
@@ -242,7 +235,7 @@ typedef struct {
 
 static anvil_value_t *division_step(division_steps_t *steps, anvil_op_t op, anvil_value_t *left, anvil_value_t *right)
 {
-    anvil_instr_t *step = left && right && steps->count < 8 ? prepare_binary(steps->ctx, op, steps->type, left, right) : NULL;
+    anvil_instr_t *step = left && right && steps->count < 8 ? anvil_opt_make_binary(steps->ctx, op, steps->type, left, right, "division.reduce") : NULL;
     if (!step)
         return NULL;
     steps->steps[steps->count++] = step;
@@ -460,6 +453,48 @@ static anvil_value_t *exact_source(const anvil_value_t *value)
 {
     const anvil_instr_t *trunc = value->kind == ANVIL_VAL_INSTR ? value->data.instr : NULL;
     return trunc && trunc->op == ANVIL_OP_TRUNC && trunc->no_wrap && trunc->num_operands == 1 ? trunc->operands[0] : NULL;
+}
+
+/* Single-index GEPs give their index's constant parts to the address: an
+ * exact truncation the GEP would extend back indexes as its wide source
+ * (pointer-wide, or extended alike), and a constant term
+ * (anvil_memory_index_term) moves into a base of its own,
+ * gep p, x + c -> gep (gep p, c), x, as LICM splits an invariant term.
+ * Accesses at constant distances from one index then share that index
+ * (t[k] and t[k - 1]): one stream for loop strength reduction, the
+ * distance a displacement or a base computed once. */
+static anvil_pass_result_t peel_gep_indices(anvil_func_t *func, anvil_ctx_t *ctx)
+{
+    size_t pointer_size = ctx->data_layout.pointer.size;
+    anvil_type_t *offset_type = pointer_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
+    bool changed = false;
+    for (anvil_block_t *block = func->blocks; block; block = block->next) {
+        for (anvil_instr_t *gep = block->first; gep; gep = gep->next) {
+            if (gep->op != ANVIL_OP_GEP || gep->num_operands != 2 || !gep->result)
+                continue;
+            anvil_value_t *index = gep->operands[1];
+            anvil_value_t *wide = exact_source(index);
+            if (wide && anvil_type_is_integer(wide->type) &&
+                (wide->type->size == pointer_size || (wide->type->size < pointer_size && wide->type->is_signed == index->type->is_signed))) {
+                gep->operands[1] = wide;
+                changed = true;
+                index = wide;
+            }
+            anvil_instr_t *term = index->kind == ANVIL_VAL_INSTR ? index->data.instr : NULL;
+            anvil_type_t *element = gep->aux_type;
+            anvil_gep_step_t step;
+            int64_t amount;
+            if (!term || term->num_operands != 2 || term->operands[0]->kind == ANVIL_VAL_CONST_INT ||
+                !anvil_gep_analyze_step(&element, index, 0, &step) || step.kind != ANVIL_GEP_STEP_SCALE ||
+                !anvil_memory_index_term(term, step.amount, pointer_size, &amount))
+                continue;
+            anvil_value_t *offset = anvil_opt_make_const_int(ctx, offset_type, amount);
+            if (!offset || !anvil_opt_split_gep(ctx, gep, gep, offset, term->operands[0]))
+                return ANVIL_PASS_RUN_ERROR;
+            changed = true;
+        }
+    }
+    return changed ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED;
 }
 
 /* `value` extended to `wide` (sign or zero) right where it is defined (a
@@ -700,7 +735,7 @@ static bool reduce_range_check(anvil_ctx_t *ctx, anvil_instr_t *instr)
         return false;
     anvil_value_t *lo = anvil_opt_make_const_int(ctx, type, low->bound);
     anvil_value_t *span = anvil_opt_make_const_int(ctx, unsigned_type, (int64_t)((uint64_t)high->bound - (uint64_t)low->bound));
-    anvil_instr_t *offset = lo && span ? prepare_binary(ctx, ANVIL_OP_SUB, type, low->x, lo) : NULL;
+    anvil_instr_t *offset = lo && span ? anvil_opt_make_binary(ctx, ANVIL_OP_SUB, type, low->x, lo, "division.reduce") : NULL;
     if (!offset)
         return false;
     anvil_opt_insert_before(instr, offset);
@@ -743,6 +778,10 @@ anvil_pass_result_t anvil_pass_strength_reduce(anvil_func_t *func)
         return distributed;
     bool changed = distributed == ANVIL_PASS_RUN_CHANGED;
     changed |= fold_exact_truncations(func, ctx);
+    anvil_pass_result_t peeled = peel_gep_indices(func, ctx);
+    if (peeled == ANVIL_PASS_RUN_ERROR)
+        return peeled;
+    changed |= peeled == ANVIL_PASS_RUN_CHANGED;
     
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {

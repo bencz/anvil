@@ -90,6 +90,19 @@ typedef struct {
     size_t num_geps;        /* SIZE_MAX: more than LS_STREAM_GEPS */
 } ls_stream_t;
 
+/* Whether an address `base`[`index`] of `element`s is a stream already
+ * made at a constant distance (the same family): it then costs only a
+ * displacement, whether or not a stream of its own would pay. */
+static bool joins_stream(const ls_stream_t *streams, size_t count, const anvil_value_t *base, const anvil_type_t *element, const anvil_value_t *index)
+{
+    ls_form_t form;
+    address_form(base, element, &form);
+    for (size_t s = 0; s < count; s++)
+        if (streams[s].element == element && streams[s].index == index && same_family(&streams[s].form, &form))
+            return true;
+    return false;
+}
+
 static bool in_loop(const anvil_opt_cfg_t *cfg, const anvil_loop_analysis_t *loops, size_t loop, const anvil_value_t *value)
 {
     if (value->kind != ANVIL_VAL_INSTR || !value->data.instr || !value->data.instr->parent)
@@ -258,6 +271,71 @@ static anvil_pass_result_t widen_iv(anvil_func_t *func, anvil_instr_t *phi, anvi
     return ANVIL_PASS_RUN_CHANGED;
 }
 
+/* An address computed from `address` alone: a pointer cast, or a GEP with
+ * constant indices. */
+static bool derived_address(const anvil_instr_t *instr)
+{
+    if (!instr->result || !instr->num_operands)
+        return false;
+    if (instr->op == ANVIL_OP_BITCAST)
+        return instr->num_operands == 1 && instr->operands[0]->type->kind == ANVIL_TYPE_PTR;
+    if (instr->op != ANVIL_OP_GEP)
+        return false;
+    for (size_t o = 1; o < instr->num_operands; o++)
+        if (instr->operands[o]->kind != ANVIL_VAL_CONST_INT)
+            return false;
+    return true;
+}
+
+enum { LS_MOVED_LIMIT = 8, LS_DERIVED_WALK = 64 };
+
+/* Whether `value` is `gep`'s address or may be one derived from it: a walk
+ * longer than LS_DERIVED_WALK (unreachable code may cycle) counts as one,
+ * which only makes place_advance refuse the move. */
+static bool reaches(const anvil_value_t *value, const anvil_instr_t *gep)
+{
+    for (unsigned step = 0; value->kind == ANVIL_VAL_INSTR; step++) {
+        if (value == gep->result || step == LS_DERIVED_WALK)
+            return true;
+        if (!derived_address(value->data.instr))
+            return false;
+        value = value->data.instr->operands[0];
+    }
+    return false;
+}
+
+static bool reads_stream(const anvil_instr_t *instr, const anvil_instr_t *gep)
+{
+    for (size_t o = 0; o < instr->num_operands; o++)
+        if (reaches(instr->operands[o], gep))
+            return true;
+    return false;
+}
+
+static bool comes_before(const anvil_instr_t *instr, const anvil_instr_t *later)
+{
+    for (const anvil_instr_t *scan = instr; scan; scan = scan->next)
+        if (scan == later)
+            return true;
+    return false;
+}
+
+/* Where a pre-increment stream's addresses meet its first access: the
+ * addresses derived from `gep` between it and `first`, which move down
+ * with it; false when something else there reads them. */
+static bool moved_with(const anvil_instr_t *gep, const anvil_instr_t *first, anvil_instr_t **moved, size_t *count)
+{
+    *count = 0;
+    for (anvil_instr_t *scan = gep->next; scan && scan != first; scan = scan->next) {
+        if (!reads_stream(scan, gep))
+            continue;
+        if (!derived_address(scan) || *count == LS_MOVED_LIMIT)
+            return false;
+        moved[(*count)++] = scan;
+    }
+    return true;
+}
+
 /* Where a stream's increment goes, when every access through it sits in
  * the latch: on a target whose accesses can advance their base after the
  * access (post-increment) right after the last access; on one that only
@@ -274,29 +352,30 @@ static bool place_advance(anvil_ctx_t *ctx, const anvil_arch_info_t *arch, ls_st
     for (size_t g = 0; g < stream->num_geps; g++)
         if (stream->geps[g]->parent != latch)
             return true;
-    /* The first and the last access through any of its addresses. */
+    /* The first and the last access through any of its addresses (or
+     * addresses derived from them). */
     anvil_instr_t *first = NULL, *last = NULL;
     for (anvil_instr_t *instr = latch->first; instr; instr = instr->next) {
+        if (instr->op != ANVIL_OP_LOAD && instr->op != ANVIL_OP_STORE)
+            continue;
         for (size_t g = 0; g < stream->num_geps; g++) {
-            for (size_t o = 0; o < instr->num_operands; o++) {
-                const anvil_value_t *operand = instr->operands[o];
-                bool through = operand == stream->geps[g]->result ||
-                               (operand->kind == ANVIL_VAL_INSTR && operand->data.instr->op == ANVIL_OP_BITCAST &&
-                                operand->data.instr->operands[0] == stream->geps[g]->result);
-                if (through && (instr->op == ANVIL_OP_LOAD || instr->op == ANVIL_OP_STORE)) {
-                    last = instr;
-                    if (!first)
-                        first = instr;
-                }
+            if (reads_stream(instr, stream->geps[g])) {
+                last = instr;
+                if (!first)
+                    first = instr;
             }
         }
     }
     if (!first || !last)
         return true;
-    anvil_opt_erase_instr(stream->advance);
     /* Post-increment where the target has it (the last access advances,
      * however many read the stream); pre-increment otherwise. */
     if (!(arch->address_increments & ANVIL_ADDRESS_POST_INCREMENT)) {
+        anvil_instr_t *moved[LS_STREAM_GEPS][LS_MOVED_LIMIT];
+        size_t moved_count[LS_STREAM_GEPS] = {0};
+        for (size_t g = 0; g < stream->num_geps; g++)
+            if (comes_before(stream->geps[g], first) && !moved_with(stream->geps[g], first, moved[g], &moved_count[g]))
+                return true;
         /* p starts one step before base[start] (a signed index: the
          * IV's type may be unsigned); the accesses read p + step. */
         anvil_type_t *signed_index = arch->ptr_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
@@ -305,34 +384,29 @@ static bool place_advance(anvil_ctx_t *ctx, const anvil_arch_info_t *arch, ls_st
         if (!earlier || !back || !anvil_instr_add_operand(earlier, stream->origin->result) || !anvil_instr_add_operand(earlier, back))
             return false;
         earlier->aux_type = stream->element;
+        anvil_opt_erase_instr(stream->advance);
         anvil_opt_insert_before(preheader->last, earlier);
         for (size_t item = 0; item < stream->phi->num_phi_incoming; item++)
             if (stream->phi->operands[item] == stream->origin->result)
                 stream->phi->operands[item] = earlier->result;
-        /* advance; the addresses (and pointer casts of them) the first
-         * access needs, moved down to it; the access: one update-form
-         * instruction. */
+        /* advance; the addresses the first access needs, moved down to
+         * it; the access: one update-form instruction. */
         anvil_opt_insert_before(first, stream->advance);
         for (size_t g = 0; g < stream->num_geps; g++) {
             anvil_instr_t *gep = stream->geps[g];
             gep->operands[0] = stream->advance->result;
-            (void)preheader;
-            bool before_first = false;
-            for (anvil_instr_t *scan = gep; scan; scan = scan->next)
-                before_first |= scan == first;
-            if (!before_first)
+            if (!comes_before(gep, first))
                 continue;
-            anvil_instr_t *cast = gep->next && gep->next->op == ANVIL_OP_BITCAST && gep->next->num_operands == 1 &&
-                                          gep->next->operands[0] == gep->result ? gep->next : NULL;
             anvil_opt_erase_instr(gep);
             anvil_opt_insert_before(first, gep);
-            if (cast) {
-                anvil_opt_erase_instr(cast);
-                anvil_opt_insert_before(first, cast);
+            for (size_t m = 0; m < moved_count[g]; m++) {
+                anvil_opt_erase_instr(moved[g][m]);
+                anvil_opt_insert_before(first, moved[g][m]);
             }
         }
         return true;
     }
+    anvil_opt_erase_instr(stream->advance);
     if (last->next)
         anvil_opt_insert_before(last->next, stream->advance);
     else
@@ -341,12 +415,6 @@ static bool place_advance(anvil_ctx_t *ctx, const anvil_arch_info_t *arch, ls_st
 }
 
 enum { LS_ZERO_BASES = 4 };
-
-static anvil_instr_t *ls_binary(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *a, anvil_value_t *b, const char *name)
-{
-    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, name);
-    return instr && anvil_instr_add_operand(instr, a) && anvil_instr_add_operand(instr, b) ? instr : NULL;
-}
 
 /* A counted loop whose index i (start s, step c, test i < n or i u< n with
  * c = 1, or i != n) is read only to index invariant bases (`gep T b, i`),
@@ -442,7 +510,7 @@ static anvil_pass_result_t count_to_zero(anvil_func_t *func, const anvil_opt_cfg
     anvil_type_t *type = iv->type;
     anvil_type_t *counting = type->is_signed ? type : pointer_bits == 64 ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
     anvil_value_t *zero = anvil_opt_make_const_int(ctx, counting, 0);
-    anvil_instr_t *distance = zero ? ls_binary(ctx, ANVIL_OP_SUB, type, start, bound, "count.start") : NULL;
+    anvil_instr_t *distance = zero ? anvil_opt_make_binary(ctx, ANVIL_OP_SUB, type, start, bound, "count.start") : NULL;
     if (!distance)
         return ANVIL_PASS_RUN_ERROR;
     anvil_opt_insert_before(preheader->last, distance);
@@ -461,7 +529,7 @@ static anvil_pass_result_t count_to_zero(anvil_func_t *func, const anvil_opt_cfg
      * n the index after the loop). */
     bool from_zero = test->op == ANVIL_OP_CMP_ULT && anvil_opt_is_zero(start);
     if (test->op != ANVIL_OP_CMP_NE && !from_zero) {
-        anvil_instr_t *enter = ls_binary(ctx, test->op, anvil_type_i1(ctx), start, bound, "count.enter");
+        anvil_instr_t *enter = anvil_opt_make_binary(ctx, test->op, anvil_type_i1(ctx), start, bound, "count.enter");
         anvil_instr_t *chosen = enter ? anvil_instr_create(ctx, ANVIL_OP_SELECT, counting, "count.start") : NULL;
         if (!chosen || !anvil_instr_add_operand(chosen, enter->result) || !anvil_instr_add_operand(chosen, initial) ||
             !anvil_instr_add_operand(chosen, zero))
@@ -488,7 +556,7 @@ static anvil_pass_result_t count_to_zero(anvil_func_t *func, const anvil_opt_cfg
     }
     anvil_instr_t *counter = anvil_instr_create(ctx, ANVIL_OP_PHI, counting, "count");
     anvil_value_t *stride = anvil_opt_make_const_int(ctx, counting, amount->data.i);
-    anvil_instr_t *advance = counter && stride ? ls_binary(ctx, ANVIL_OP_ADD, counting, counter->result, stride, "count.next") : NULL;
+    anvil_instr_t *advance = counter && stride ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, counting, counter->result, stride, "count.next") : NULL;
     if (!advance)
         return ANVIL_PASS_RUN_ERROR;
     anvil_opt_insert_before(header->first, counter);
@@ -678,7 +746,7 @@ static anvil_value_t *iv_from_stream(anvil_ctx_t *ctx, const anvil_arch_info_t *
     if (!now || !anvil_instr_add_operand(now, stream->phi->result))
         return NULL;
     anvil_opt_insert_before(user, now);
-    anvil_instr_t *bytes = ls_binary(ctx, ANVIL_OP_SUB, intptr, now->result, *first_address, "stream.bytes");
+    anvil_instr_t *bytes = anvil_opt_make_binary(ctx, ANVIL_OP_SUB, intptr, now->result, *first_address, "stream.bytes");
     if (!bytes)
         return NULL;
     anvil_opt_insert_before(user, bytes);
@@ -688,7 +756,7 @@ static anvil_value_t *iv_from_stream(anvil_ctx_t *ctx, const anvil_arch_info_t *
         log2++;
     if (log2) {
         anvil_value_t *shift = anvil_opt_make_const_int(ctx, intptr, log2);
-        anvil_instr_t *elements = shift ? ls_binary(ctx, ANVIL_OP_SAR, intptr, count, shift, "stream.count") : NULL;
+        anvil_instr_t *elements = shift ? anvil_opt_make_binary(ctx, ANVIL_OP_SAR, intptr, count, shift, "stream.count") : NULL;
         if (!elements)
             return NULL;
         anvil_opt_insert_before(user, elements);
@@ -704,7 +772,7 @@ static anvil_value_t *iv_from_stream(anvil_ctx_t *ctx, const anvil_arch_info_t *
     }
     if (anvil_opt_is_zero(start))
         return count;
-    anvil_instr_t *sum = ls_binary(ctx, ANVIL_OP_ADD, iv_type, start, count, "stream.iv");
+    anvil_instr_t *sum = anvil_opt_make_binary(ctx, ANVIL_OP_ADD, iv_type, start, count, "stream.iv");
     if (!sum)
         return NULL;
     anvil_opt_insert_before(user, sum);
@@ -830,11 +898,11 @@ static anvil_pass_result_t converge_narrow(anvil_func_t *func, anvil_block_t *pr
     }
     anvil_value_t *zero = anvil_opt_make_const_int(ctx, i64, 0), *one = anvil_opt_make_const_int(ctx, i64, 1);
     anvil_value_t *none = anvil_opt_make_const_int(ctx, u32, 0), *step = anvil_opt_make_const_int(ctx, u32, 1);
-    anvil_instr_t *distance = zero && one && none && step ? ls_binary(ctx, ANVIL_OP_SUB, i64, wide[1], wide[0], "meet.distance") : NULL;
-    anvil_instr_t *rounded = distance ? ls_binary(ctx, ANVIL_OP_ADD, i64, distance->result, one, "meet.rounded") : NULL;
-    anvil_instr_t *half = rounded ? ls_binary(ctx, ANVIL_OP_SAR, i64, rounded->result, one, "meet.half") : NULL;
+    anvil_instr_t *distance = zero && one && none && step ? anvil_opt_make_binary(ctx, ANVIL_OP_SUB, i64, wide[1], wide[0], "meet.distance") : NULL;
+    anvil_instr_t *rounded = distance ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, i64, distance->result, one, "meet.rounded") : NULL;
+    anvil_instr_t *half = rounded ? anvil_opt_make_binary(ctx, ANVIL_OP_SAR, i64, rounded->result, one, "meet.half") : NULL;
     anvil_instr_t *narrow = half ? anvil_instr_create(ctx, ANVIL_OP_TRUNC, u32, "meet.half") : NULL;
-    anvil_instr_t *apart = narrow ? ls_binary(ctx, ANVIL_OP_CMP_LT, anvil_type_i1(ctx), zero, distance->result, "meet.apart") : NULL;
+    anvil_instr_t *apart = narrow ? anvil_opt_make_binary(ctx, ANVIL_OP_CMP_LT, anvil_type_i1(ctx), zero, distance->result, "meet.apart") : NULL;
     anvil_instr_t *trips = apart ? anvil_instr_create(ctx, ANVIL_OP_SELECT, u32, "meet.trips") : NULL;
     if (!trips || !anvil_instr_add_operand(narrow, half->result) || !anvil_instr_add_operand(trips, apart->result) ||
         !anvil_instr_add_operand(trips, narrow->result) || !anvil_instr_add_operand(trips, none))
@@ -844,7 +912,7 @@ static anvil_pass_result_t converge_narrow(anvil_func_t *func, anvil_block_t *pr
     for (size_t m = 0; m < sizeof(made) / sizeof(made[0]); m++)
         anvil_opt_insert_before(preheader->last, made[m]);
     anvil_instr_t *counter = anvil_instr_create(ctx, ANVIL_OP_PHI, u32, "meet");
-    anvil_instr_t *advance = counter ? ls_binary(ctx, ANVIL_OP_ADD, u32, counter->result, step, "meet.next") : NULL;
+    anvil_instr_t *advance = counter ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, u32, counter->result, step, "meet.next") : NULL;
     if (!advance)
         return ANVIL_PASS_RUN_ERROR;
     advance->no_wrap = true;
@@ -911,12 +979,12 @@ static anvil_pass_result_t converge_to_count(anvil_func_t *func, const anvil_opt
     anvil_value_t *zero = anvil_opt_make_const_int(ctx, i64, 0), *one = anvil_opt_make_const_int(ctx, i64, 1);
     /* d = j0 - i0 (j0 itself when i0 is 0). */
     bool from_zero = anvil_opt_is_zero(values[0]);
-    anvil_instr_t *distance = zero && one && !from_zero ? ls_binary(ctx, ANVIL_OP_SUB, i64, values[1], values[0], "meet.distance") : NULL;
+    anvil_instr_t *distance = zero && one && !from_zero ? anvil_opt_make_binary(ctx, ANVIL_OP_SUB, i64, values[1], values[0], "meet.distance") : NULL;
     anvil_value_t *d = from_zero ? values[1] : distance ? distance->result : NULL;
-    anvil_instr_t *rounded = d && one ? ls_binary(ctx, ANVIL_OP_ADD, i64, d, one, "meet.rounded") : NULL;
+    anvil_instr_t *rounded = d && one ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, i64, d, one, "meet.rounded") : NULL;
     /* (d + 1) >> 1 is <= 0 exactly when d <= 0: the signed k < T then
      * fails at once, as i0 < j0 did. */
-    anvil_instr_t *trips = rounded ? ls_binary(ctx, ANVIL_OP_SAR, i64, rounded->result, one, "meet.trips") : NULL;
+    anvil_instr_t *trips = rounded ? anvil_opt_make_binary(ctx, ANVIL_OP_SAR, i64, rounded->result, one, "meet.trips") : NULL;
     if (!trips)
         return ANVIL_PASS_RUN_ERROR;
     rounded->no_wrap = true;
@@ -927,7 +995,7 @@ static anvil_pass_result_t converge_to_count(anvil_func_t *func, const anvil_opt
     anvil_opt_insert_before(preheader->last, rounded);
     anvil_opt_insert_before(preheader->last, trips);
     anvil_instr_t *counter = anvil_instr_create(ctx, ANVIL_OP_PHI, i64, "meet");
-    anvil_instr_t *advance = counter ? ls_binary(ctx, ANVIL_OP_ADD, i64, counter->result, one, "meet.next") : NULL;
+    anvil_instr_t *advance = counter ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, i64, counter->result, one, "meet.next") : NULL;
     if (!advance)
         return ANVIL_PASS_RUN_ERROR;
     advance->no_wrap = true;
@@ -1033,7 +1101,7 @@ static anvil_pass_result_t share_lockstep_index(anvil_func_t *func, const anvil_
     anvil_type_t *index_type = arch->ptr_size == 8 ? anvil_type_i64(ctx) : anvil_type_i32(ctx), *byte = anvil_type_i8(ctx);
     anvil_value_t *zero = anvil_opt_make_const_int(ctx, index_type, 0), *amount = anvil_opt_make_const_int(ctx, index_type, bytes);
     anvil_instr_t *index = zero && amount ? anvil_instr_create(ctx, ANVIL_OP_PHI, index_type, "lockstep") : NULL;
-    anvil_instr_t *next = index ? ls_binary(ctx, ANVIL_OP_ADD, index_type, index->result, amount, "lockstep.next") : NULL;
+    anvil_instr_t *next = index ? anvil_opt_make_binary(ctx, ANVIL_OP_ADD, index_type, index->result, amount, "lockstep.next") : NULL;
     if (!next)
         return ANVIL_PASS_RUN_ERROR;
     anvil_opt_insert_before(header->first, index);
@@ -1196,8 +1264,11 @@ static anvil_pass_result_t reduce_loop(anvil_func_t *func, const anvil_opt_cfg_t
                                    ? 2
                                    : 1;
                 anvil_type_t *element = level == 2 ? gep->aux_type->data.array.elem : gep->aux_type;
+                bool joins = gep->op == ANVIL_OP_GEP && gep->num_operands > level && element && level == 1 &&
+                             joins_stream(streams, num_streams, gep->operands[0], element, gep->operands[1]);
                 /* A step other than 1: the pointer-wide IV itself only. */
-                if (gep->op != ANVIL_OP_GEP || gep->num_operands <= level || !element || !(eliminate || frees_counter || stream_pays(arch, element, gep, late)) ||
+                if (gep->op != ANVIL_OP_GEP || gep->num_operands <= level || !element ||
+                    !(eliminate || frees_counter || joins || stream_pays(arch, element, gep, late)) ||
                     in_loop(cfg, loops, loop, gep->operands[0]) || gep->operands[0]->kind == ANVIL_VAL_CONST_INT ||
                     !exact_index(gep->operands[level], iv, pointer_bits, bounded && unit, unsigned_bound) ||
                     (!unit && (gep->operands[level] != iv || anvil_type_bit_width(iv->type) != pointer_bits)))

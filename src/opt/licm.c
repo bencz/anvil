@@ -104,20 +104,13 @@ static bool split_invariant_index(anvil_ctx_t *ctx, const anvil_opt_cfg_t *cfg, 
         return false;
     anvil_value_t *index = gep->operands[1];
     anvil_instr_t *sum = index->kind == ANVIL_VAL_INSTR ? index->data.instr : NULL;
-    if (!sum || sum->op != ANVIL_OP_ADD || sum->num_operands != 2 || (anvil_type_bit_width(index->type) != pointer_bits && !sum->no_wrap))
+    if (!sum || sum->op != ANVIL_OP_ADD || sum->num_operands != 2 || !anvil_memory_index_distributes(sum, pointer_bits / 8))
         return false;
     size_t side = defined_outside(cfg, loops, loop, preheader, sum->operands[0]) ? 0
                 : defined_outside(cfg, loops, loop, preheader, sum->operands[1]) ? 1 : 2;
     if (side == 2 || defined_outside(cfg, loops, loop, preheader, sum->operands[1 - side]))
         return false;
-    anvil_instr_t *base = anvil_instr_create(ctx, ANVIL_OP_GEP, gep->result->type, gep->result->name);
-    if (!base || !anvil_instr_copy_attributes(base, gep) || !anvil_instr_add_operand(base, gep->operands[0]) ||
-        !anvil_instr_add_operand(base, sum->operands[side]))
-        return false;
-    anvil_opt_insert_before(cfg->blocks[preheader]->last, base);
-    gep->operands[0] = base->result;
-    gep->operands[1] = sum->operands[1 - side];
-    return true;
+    return anvil_opt_split_gep(ctx, gep, cfg->blocks[preheader]->last, sum->operands[side], sum->operands[1 - side]);
 }
 
 enum { PROMOTE_ACCESS_LIMIT = 64, PROMOTE_EXIT_LIMIT = 4 };

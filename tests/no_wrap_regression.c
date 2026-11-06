@@ -213,8 +213,96 @@ static void test_exact_division(void)
     }
 }
 
+typedef enum { PEEL_SUB_ONE, PEEL_ADD_TWO, PEEL_EXACT_TRUNC } peel_shape_t;
+
+/* load (gep i32 p, x - 1) / (gep i32 p, x + 2) with x a parameter of
+ * `index` type, flagged as given; or gep i32 p, trunc nowrap w (w i64).
+ * Exact constant terms move into a base of their own (gep (gep p, c), x);
+ * an exact truncation the GEP would extend back indexes by its wide
+ * source. */
+static void gep_peel_case(anvil_arch_t arch, peel_shape_t shape, bool signed_index, bool flagged, bool expect)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *index = shape == PEEL_EXACT_TRUNC ? anvil_type_i64(ctx) : signed_index ? i32 : anvil_type_u32(ctx);
+    anvil_type_t *params[] = {anvil_type_ptr(ctx, i32), index};
+    anvil_module_t *mod = NULL;
+    anvil_func_t *fn = new_func(ctx, &mod, "peel", i32, params, 2);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_value_t *base = anvil_func_get_param(fn, 0), *x = anvil_func_get_param(fn, 1), *term;
+    if (shape == PEEL_EXACT_TRUNC)
+        term = anvil_build_trunc(ctx, x, signed_index ? i32 : anvil_type_u32(ctx), "narrow");
+    else if (shape == PEEL_SUB_ONE)
+        term = anvil_build_sub(ctx, x, signed_index ? anvil_const_i32(ctx, 1) : anvil_const_u32(ctx, 1), "before");
+    else
+        term = anvil_build_add(ctx, x, signed_index ? anvil_const_i32(ctx, 2) : anvil_const_u32(ctx, 2), "after");
+    anvil_set_no_wrap(term, flagged);
+    anvil_value_t *address = anvil_build_gep(ctx, i32, base, &term, 1, "at");
+    anvil_build_ret(ctx, anvil_build_load(ctx, i32, address, "value"));
+
+    anvil_pass_strength_reduce(fn);
+    anvil_instr_t *gep = address->data.instr;
+    bool peeled;
+    if (shape == PEEL_EXACT_TRUNC) {
+        peeled = gep->operands[1] == x;
+    } else {
+        anvil_value_t *inner = gep->operands[0], *offset = inner->kind == ANVIL_VAL_INSTR ? inner->data.instr->operands[1] : NULL;
+        peeled = gep->operands[1] == x && inner->kind == ANVIL_VAL_INSTR && inner->data.instr->op == ANVIL_OP_GEP &&
+                 inner->data.instr->operands[0] == base && offset->kind == ANVIL_VAL_CONST_INT && offset->data.i == (shape == PEEL_SUB_ONE ? -1 : 2);
+    }
+    char message[160];
+    snprintf(message, sizeof(message), "arch %d: GEP index %s (%s, %s) %s peel", (int)arch,
+             shape == PEEL_SUB_ONE ? "x - 1" : shape == PEEL_ADD_TWO ? "x + 2" : "trunc w", signed_index ? "signed" : "unsigned",
+             flagged ? "no-wrap" : "wrapping", expect ? "must" : "must not");
+    CHECK(peeled == expect && valid(fn), message);
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+/* gep double p, x + 2^61 (i64 x): the constant's bytes overflow, so the
+ * index stays computed at run time (wrapping) instead of becoming a
+ * constant GEP no target can lower. */
+static void test_gep_peel_overflow(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+    anvil_type_t *f64 = anvil_type_f64(ctx), *i64 = anvil_type_i64(ctx);
+    anvil_type_t *params[] = {anvil_type_ptr(ctx, f64), i64};
+    anvil_module_t *mod = NULL;
+    anvil_func_t *fn = new_func(ctx, &mod, "huge", f64, params, 2);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(fn));
+    anvil_value_t *x = anvil_func_get_param(fn, 1);
+    anvil_value_t *far = anvil_build_add(ctx, x, anvil_const_i64(ctx, INT64_C(1) << 61), "far");
+    anvil_value_t *address = anvil_build_gep(ctx, f64, anvil_func_get_param(fn, 0), &far, 1, "at");
+    anvil_build_ret(ctx, anvil_build_load(ctx, f64, address, "value"));
+    anvil_pass_strength_reduce(fn);
+    CHECK(address->data.instr->operands[1] == far && valid(fn), "a GEP index constant whose bytes overflow stays in the index");
+    anvil_module_destroy(mod);
+    anvil_ctx_destroy(ctx);
+}
+
+static void test_gep_index_peel(void)
+{
+    test_gep_peel_overflow();
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_SUB_ONE, true, true, true);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_ADD_TWO, false, true, true);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_SUB_ONE, true, false, false);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_SUB_ONE, false, true, true);
+    /* A pointer-wide index wraps as the address does. */
+    gep_peel_case(ANVIL_ARCH_X86, PEEL_SUB_ONE, true, false, true);
+    gep_peel_case(ANVIL_ARCH_PPC32, PEEL_ADD_TWO, false, false, true);
+    gep_peel_case(ANVIL_ARCH_ARM64, PEEL_SUB_ONE, true, true, true);
+    gep_peel_case(ANVIL_ARCH_PPC64, PEEL_SUB_ONE, true, true, true);
+    gep_peel_case(ANVIL_ARCH_ZARCH, PEEL_ADD_TWO, true, true, true);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_EXACT_TRUNC, true, true, true);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_EXACT_TRUNC, false, true, true);
+    gep_peel_case(ANVIL_ARCH_X86_64, PEEL_EXACT_TRUNC, true, false, false);
+    /* Wider than a pointer: the GEP would not extend it back. */
+    gep_peel_case(ANVIL_ARCH_X86, PEEL_EXACT_TRUNC, true, true, false);
+}
+
 int main(void)
 {
+    test_gep_index_peel();
     test_api_verifier_and_dump();
     test_exact_division();
     test_cse_intersects();

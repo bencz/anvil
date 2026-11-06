@@ -20,6 +20,10 @@
 
 enum { SYSTEMZ_INTERNAL_LABEL_CAP = 160 };
 
+/* BRCT decrements and tests 32 bits (BRCTG 64): a narrower counter would
+ * count modulo 2^32, not its own width. */
+enum { SYSTEMZ_NARROWEST_COUNTER = 32 };
+
 typedef struct {
     const anvil_mainframe_target_desc_t *desc;
     const anvil_mir_func_t *mir;

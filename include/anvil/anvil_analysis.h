@@ -113,6 +113,15 @@ anvil_alias_result_t anvil_memory_alias(const anvil_value_t *left, size_t left_s
  * is the first value that is none of those.  Two accesses through one root
  * (where one dominates the other) are apart by their offsets. */
 bool anvil_memory_offset(const anvil_value_t *pointer, const anvil_value_t **root, int64_t *offset);
+/* Whether a GEP index computed by `term` (an integer operation) splits
+ * into its operands as indices: the index is pointer-wide (the address
+ * wraps alike) or the operation no-wrap (the GEP's extension of the index
+ * distributes over it). */
+bool anvil_memory_index_distributes(const anvil_instr_t *term, size_t pointer_size);
+/* The constant a GEP index `term` (an add or sub of a constant integer)
+ * adds to its other operand, in elements of `scale` bytes, when the index
+ * distributes and the constant's bytes fit an int64_t. */
+bool anvil_memory_index_term(const anvil_instr_t *term, size_t scale, size_t pointer_size, int64_t *amount);
 /* Whether `pointer` addresses a read-only global (anvil_global_set_constant)
  * through any address arithmetic: nothing writes the memory it reads. */
 bool anvil_memory_read_only(const anvil_value_t *pointer);
