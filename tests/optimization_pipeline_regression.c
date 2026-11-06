@@ -1108,6 +1108,150 @@ static void test_licm_narrow_split(anvil_arch_t arch)
     }
 }
 
+/* for (i = 0; i < n; i++) total += i, total a global: the loop keeps it in
+ * a register (no load or store left inside) and writes it back on the
+ * exit where it stored.  A call that may touch memory, a store through a
+ * pointer that may alias, or a cell only the body reaches with an unproven
+ * range keep it in memory.  Allocation failure leaves valid IR. */
+static bool run_promotion_case(anvil_arch_t arch, int variant, size_t allowance, bool *completed)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_module_t *module = anvil_module_create(ctx, "promotion");
+    anvil_type_t *i32 = anvil_type_i32(ctx), *pointer = anvil_type_ptr(ctx, i32);
+    anvil_value_t *total = anvil_module_add_global(module, "total", i32, ANVIL_LINK_INTERNAL);
+    anvil_func_t *touch = anvil_func_declare(module, "touch", anvil_type_func(ctx, anvil_type_void(ctx), NULL, 0, false));
+    anvil_type_t *params[] = { i32, pointer };
+    anvil_func_t *func = anvil_func_create(module, "accumulate", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+    anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body"), *exit = anvil_block_create(func, "exit");
+    anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+    anvil_build_br(ctx, header);
+    anvil_set_insert_point(ctx, header);
+    anvil_value_t *i = anvil_build_phi(ctx, i32, "i");
+    anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, i, anvil_func_get_param(func, 0), "more"), body, exit);
+    anvil_set_insert_point(ctx, body);
+    anvil_value_t *cell = variant == 3 ? anvil_func_get_param(func, 1) : total;
+    anvil_build_store(ctx, anvil_build_add(ctx, anvil_build_load(ctx, i32, cell, "old"), i, "new"), cell);
+    if (variant == 1)
+        anvil_build_call_checked(ctx, anvil_func_get_value(touch), NULL, 0, "call", &(anvil_value_t *){ NULL });
+    if (variant == 2)
+        anvil_build_store(ctx, i, anvil_func_get_param(func, 1));
+    anvil_value_t *next = marked_no_wrap(anvil_build_add(ctx, i, anvil_const_i32(ctx, 1), "next"));
+    anvil_build_br(ctx, header);
+    anvil_phi_add_incoming(i, anvil_const_i32(ctx, 0), anvil_func_get_entry(func));
+    anvil_phi_add_incoming(i, next, body);
+    anvil_set_insert_point(ctx, exit);
+    anvil_build_ret(ctx, anvil_build_load(ctx, i32, total, "result"));
+
+    if (allowance != SIZE_MAX)
+        anvil_test_fail_alloc_after(ctx, allowance);
+    anvil_pass_result_t status = anvil_pass_licm(func);
+    anvil_test_disable_alloc_fail(ctx);
+    anvil_ctx_clear_error(ctx);
+    char error[256] = { 0 };
+    bool valid = anvil_func_verify(func, error, sizeof(error));
+    *completed = status != ANVIL_PASS_RUN_ERROR;
+    if (*completed)
+    {
+        size_t inside = 0;
+        for (anvil_instr_t *instr = body->first; instr; instr = instr->next)
+            inside += (instr->op == ANVIL_OP_LOAD || instr->op == ANVIL_OP_STORE) && (instr->op == ANVIL_OP_LOAD ? instr->operands[0] : instr->operands[1]) == cell;
+        valid &= variant == 0 ? inside == 0 : inside == 2;
+        char *assembly = NULL;
+        size_t length = 0;
+        valid &= anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && length > 0;
+        free(assembly);
+    }
+    if (!valid)
+        fprintf(stderr, "promotion: arch=%d variant=%d allowance=%zu status=%d error=%s\n", (int)arch, variant, allowance, status, error);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid;
+}
+
+static void test_promotion_of_cells(anvil_arch_t arch, bool sweep)
+{
+    for (int variant = 0; variant < 4; variant++) {
+        bool completed = false;
+        for (size_t allowance = sweep && variant == 0 ? 0 : SIZE_MAX; !completed; allowance = allowance == SIZE_MAX ? SIZE_MAX : allowance + 1) {
+            check(run_promotion_case(arch, variant, allowance, &completed), "LICM keeps a cell in a register only where nothing else may touch it");
+            if (allowance == SIZE_MAX || allowance > 400)
+                break;
+        }
+        check(completed, "promotion completes once allocations succeed");
+    }
+}
+
+/* Promotion shapes: a store under a condition (the write-back tests the
+ * flag), a loop with a second exit (each exit edge writes back), and a loop
+ * headed by the entry block (no preheader: nothing changes, no error). */
+static void test_promotion_shapes(anvil_arch_t arch)
+{
+    for (int shape = 0; shape < 3; shape++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+        anvil_module_t *module = anvil_module_create(ctx, "promotion_shapes");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_value_t *total = anvil_module_add_global(module, "total", i32, ANVIL_LINK_INTERNAL);
+        anvil_type_t *params[] = { i32 };
+        anvil_func_t *func = anvil_func_create(module, "shape", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_value_t *n = anvil_func_get_param(func, 0);
+        anvil_block_t *loop_blocks[4] = { NULL };
+        if (shape == 2) {
+            anvil_block_t *exit = anvil_block_create(func, "exit");
+            anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+            anvil_value_t *old = anvil_build_load(ctx, i32, total, "old");
+            anvil_build_store(ctx, anvil_build_add(ctx, old, n, "new"), total);
+            anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, old, anvil_const_i32(ctx, 100), "again"), anvil_func_get_entry(func), exit);
+            anvil_set_insert_point(ctx, exit);
+            anvil_build_ret(ctx, anvil_build_load(ctx, i32, total, "result"));
+        } else {
+            anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body");
+            anvil_block_t *then = anvil_block_create(func, "then"), *latch = anvil_block_create(func, "latch"), *exit = anvil_block_create(func, "exit");
+            loop_blocks[0] = header;
+            loop_blocks[1] = body;
+            loop_blocks[2] = then;
+            loop_blocks[3] = latch;
+            anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+            anvil_build_br(ctx, header);
+            anvil_set_insert_point(ctx, header);
+            anvil_value_t *i = anvil_build_phi(ctx, i32, "i");
+            anvil_value_t *seen = anvil_build_load(ctx, i32, total, "seen");
+            anvil_build_br_cond(ctx, anvil_build_cmp_lt(ctx, anvil_build_add(ctx, i, seen, "mix"), n, "more"), body, exit);
+            anvil_set_insert_point(ctx, body);
+            anvil_build_br_cond(ctx, anvil_build_cmp_ne(ctx, anvil_build_and(ctx, i, anvil_const_i32(ctx, 1), "odd"), anvil_const_i32(ctx, 0), "is_odd"),
+                                then, latch);
+            anvil_set_insert_point(ctx, then);
+            anvil_build_store(ctx, anvil_build_add(ctx, anvil_build_load(ctx, i32, total, "old"), i, "new"), total);
+            anvil_build_br(ctx, latch);
+            anvil_set_insert_point(ctx, latch);
+            anvil_value_t *next = marked_no_wrap(anvil_build_add(ctx, i, anvil_const_i32(ctx, 1), "next"));
+            if (shape == 1)
+                anvil_build_br_cond(ctx, anvil_build_cmp_eq(ctx, i, anvil_const_i32(ctx, 7), "stop"), exit, header);
+            else
+                anvil_build_br(ctx, header);
+            anvil_phi_add_incoming(i, anvil_const_i32(ctx, 0), anvil_func_get_entry(func));
+            anvil_phi_add_incoming(i, next, latch);
+            anvil_set_insert_point(ctx, exit);
+            anvil_build_ret(ctx, anvil_build_load(ctx, i32, total, "result"));
+        }
+        anvil_pass_result_t status = anvil_pass_licm(func);
+        size_t inside = 0;
+        for (size_t block = 0; block < 4; block++)
+            for (anvil_instr_t *instr = loop_blocks[block] ? loop_blocks[block]->first : NULL; instr; instr = instr->next)
+                inside += (instr->op == ANVIL_OP_LOAD && instr->operands[0] == total) || (instr->op == ANVIL_OP_STORE && instr->operands[1] == total);
+        char error[256] = { 0 };
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = status != ANVIL_PASS_RUN_ERROR && inside == 0 && anvil_func_verify(func, error, sizeof(error)) &&
+                     anvil_module_codegen(module, &assembly, &length) == ANVIL_OK;
+        if (!valid)
+            fprintf(stderr, "promotion shape %d arch %d: status=%d inside=%zu error=%s\n", shape, (int)arch, status, inside, error);
+        check(valid, "promotion handles conditional stores, several exits and entry-headed loops");
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* A call inlines only when caller and callee share their floating-point
  * policies: inlined code keeps its own. */
 static void test_inline_fp_policy(void)
@@ -1145,6 +1289,7 @@ int main(void)
 {
     test_word_copy(ANVIL_ARCH_X86_64, true);
     test_inline_fp_policy();
+    test_promotion_of_cells(ANVIL_ARCH_X86_64, true);
     test_promotion_allocation_failure();
     test_cfg_cache();
     test_parallel_copies();
@@ -1180,6 +1325,8 @@ int main(void)
         test_shift_speculation(targets[index]);
         test_licm_speculation(targets[index]);
         test_licm_narrow_split(targets[index]);
+        test_promotion_of_cells(targets[index], false);
+        test_promotion_shapes(targets[index]);
         test_inline_external(targets[index]);
         test_read_only_loads(targets[index]);
         test_memory_aliasing(targets[index], false);

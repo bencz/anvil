@@ -34,11 +34,7 @@ static bool may_read_memory(anvil_instr_t *instr)
         return true;
 
     if (instr->op == ANVIL_OP_CALL)
-    {
-        unsigned barriers = ANVIL_EFFECT_READ_MEMORY | ANVIL_EFFECT_MAY_TRAP | ANVIL_EFFECT_MAY_UNWIND |
-                            ANVIL_EFFECT_MAY_NOT_RETURN | ANVIL_EFFECT_OBSERVABLE;
-        return (anvil_opt_call_effects(instr) & barriers) != 0;
-    }
+        return anvil_opt_call_observes_memory(instr);
 
     return instr->op == ANVIL_OP_LOAD;
 }

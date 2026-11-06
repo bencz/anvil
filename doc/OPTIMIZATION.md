@@ -186,6 +186,9 @@ Replaces uses of copied values with the original value, enabling further optimiz
 - `x * 1`, `x / 1` → copy of x
 - `x & -1` → copy of x
 - `x << 0`, `x >> 0` → copy of x
+- a PHI that takes one value, ignoring itself (`phi(x, x)`, or `phi(x, self)`
+  in a loop the value only flows around) → copy of x (`anvil_opt_phi_single_value`,
+  shared with mem2reg)
 
 The dead copy instructions can then be removed by DCE.
 
@@ -304,6 +307,24 @@ leaves the loop: exactly when the index is pointer-wide, or narrower and
 without wrap (the GEP extends each index in its signedness, and then
 `ext(a + b) = ext(a) + ext(b)`). A C matrix indexed `i * n + j` in `int` then
 reaches the loop vectorizer as `row[j]`.
+
+Scalar promotion: a cell the loop reaches through one address from outside
+it, which no other access in the loop may touch (`anvil_memory_alias` says NO
+for all of them), lives in a register. Its type is one mem2reg keeps in values
+(`anvil_opt_scalar_type`). The loop must call nothing that may observe memory
+(`anvil_opt_call_observes_memory`: reads, traps, unwinds, calls that do not
+return) or write it, and have no atomic or volatile access; the entry block
+must have no predecessors (mem2reg's condition) and not head the loop. Loading the cell
+before the loop must not fault, so the header (run on every entry) accesses
+it, or its range lies inside a known object. Its value goes to a stack slot:
+loaded in the preheader, read and written in the loop. If the loop stores it,
+a flag records the store, and each exit edge writes the value back only when
+the flag is set, as a store the program did not make would be a data race.
+mem2reg then turns both slots into values. It runs, with copy propagation,
+right after each promotion, so an enclosing loop sees the cell's accesses
+around the inner loop as its own in the same run. A cell that only the body
+reaches (`for (...) *p += x;` through a pointer) is not promoted: that would
+need the loop rotated so that its body runs on entry.
 
 ### Complete Unrolling (`ANVIL_PASS_UNROLL`) - O2
 

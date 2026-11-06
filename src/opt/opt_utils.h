@@ -55,6 +55,39 @@ static inline bool anvil_opt_erase_instr(anvil_instr_t *instr)
     return true;
 }
 
+/* The one value a PHI takes, ignoring its own result (what only flows
+ * around a loop), or NULL when it takes more than one.  In a block other
+ * than the entry that value dominates the PHI's block, so it may replace
+ * the PHI (the entry can be a loop header whose PHI reads a later value). */
+static inline anvil_value_t *anvil_opt_phi_single_value(const anvil_instr_t *phi)
+{
+    anvil_value_t *single = NULL;
+    for (size_t incoming = 0; incoming < phi->num_operands; incoming++) {
+        anvil_value_t *value = phi->operands[incoming];
+        if (value == phi->result || value == single)
+            continue;
+        if (single)
+            return NULL;
+        single = value;
+    }
+    return single;
+}
+
+/* Types mem2reg keeps in values: integers, floating point, pointers. */
+static inline bool anvil_opt_scalar_type(const anvil_type_t *type)
+{
+    return type && ((type->kind >= ANVIL_TYPE_I1 && type->kind <= ANVIL_TYPE_F64) || type->kind == ANVIL_TYPE_PTR);
+}
+
+/* Whether a call may observe memory as it stands when it runs: it reads
+ * memory, or control may leave through it (a trap, an unwind, a call that
+ * does not return) and the state there is visible. */
+static inline bool anvil_opt_call_observes_memory(const anvil_instr_t *call)
+{
+    unsigned barriers = ANVIL_EFFECT_READ_MEMORY | ANVIL_EFFECT_MAY_TRAP | ANVIL_EFFECT_MAY_UNWIND | ANVIL_EFFECT_MAY_NOT_RETURN | ANVIL_EFFECT_OBSERVABLE;
+    return (anvil_opt_call_effects(call) & barriers) != 0;
+}
+
 /* Links a detached instruction into `position`'s block just before it. */
 static inline void anvil_opt_insert_before(anvil_instr_t *position, anvil_instr_t *instr)
 {

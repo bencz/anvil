@@ -15,11 +15,6 @@ typedef struct {
     anvil_value_t *outgoing;
 } promotion_block_t;
 
-static bool scalar_type(const anvil_type_t *type)
-{
-    return type && ((type->kind >= ANVIL_TYPE_I1 && type->kind <= ANVIL_TYPE_F64) || type->kind == ANVIL_TYPE_PTR);
-}
-
 static bool collect_accesses(const anvil_opt_cfg_t *cfg, const anvil_value_t *slot, promotion_block_t *states)
 {
     for (size_t block = 0; block < cfg->count; block++)
@@ -219,23 +214,8 @@ static void remove_trivial_phis(anvil_func_t *func, const anvil_opt_cfg_t *cfg, 
             if (!phi || !phi->parent)
                 continue;
 
-            anvil_value_t *replacement = NULL;
-            bool identical = true;
-            for (size_t incoming = 0; incoming < phi->num_operands; incoming++)
-            {
-                anvil_value_t *value = phi->operands[incoming];
-                if (value == phi->result)
-                    continue;
-                if (replacement && replacement != value)
-                {
-                    identical = false;
-                    break;
-                }
-
-                replacement = value;
-            }
-
-            if (identical && replacement)
+            anvil_value_t *replacement = anvil_opt_phi_single_value(phi);
+            if (replacement)
             {
                 anvil_opt_replace_uses_in_func(func, phi->result, replacement);
                 anvil_opt_erase_instr(phi);
@@ -258,7 +238,7 @@ anvil_pass_result_t anvil_pass_mem2reg(anvil_func_t *func)
     bool candidate = false;
     for (anvil_instr_t *instr = func->entry->first; instr; instr = instr->next)
     {
-        if (instr->op == ANVIL_OP_ALLOCA && !instr->num_operands && scalar_type(instr->result->type->data.pointee))
+        if (instr->op == ANVIL_OP_ALLOCA && !instr->num_operands && anvil_opt_scalar_type(instr->result->type->data.pointee))
             candidate = true;
     }
 
@@ -280,7 +260,7 @@ anvil_pass_result_t anvil_pass_mem2reg(anvil_func_t *func)
     anvil_pass_result_t result = ANVIL_PASS_RUN_UNCHANGED;
     for (anvil_instr_t *instr = func->entry->first; instr; instr = instr->next)
     {
-        if (instr->op != ANVIL_OP_ALLOCA || instr->num_operands || !scalar_type(instr->result->type->data.pointee))
+        if (instr->op != ANVIL_OP_ALLOCA || instr->num_operands || !anvil_opt_scalar_type(instr->result->type->data.pointee))
             continue;
 
         promotion_block_t *states = anvil_ctx_calloc(ctx, cfg.count, sizeof(*states));

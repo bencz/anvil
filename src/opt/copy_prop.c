@@ -59,9 +59,12 @@ static bool is_copy_instr(anvil_instr_t *instr)
     }
 }
 
-/* Get the source value of a copy instruction */
+/* Get the source value of a copy instruction: also a PHI that takes one
+ * value (around a loop, or the same from every predecessor). */
 static anvil_value_t *get_copy_source(anvil_instr_t *instr)
 {
+    if (instr->op == ANVIL_OP_PHI && instr->result)
+        return instr->parent && instr->parent->parent && instr->parent == instr->parent->parent->entry ? NULL : anvil_opt_phi_single_value(instr);
     if (!is_copy_instr(instr)) return NULL;
     return instr->operands[0];
 }
@@ -80,8 +83,6 @@ anvil_pass_result_t anvil_pass_copy_prop(anvil_func_t *func)
     /* Iterate through all instructions looking for copies */
     for (anvil_block_t *block = func->blocks; block; block = block->next) {
         for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            if (!is_copy_instr(instr)) continue;
-            
             anvil_value_t *src = get_copy_source(instr);
             anvil_value_t *dst = instr->result;
             

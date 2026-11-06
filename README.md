@@ -348,6 +348,7 @@ kernels this short):
 | lexer | a 74-case switch classifying bytes | 30 | 36 | 1.20 | 28 | 36 | 1.29 |
 | hex | hex encoding: signed division of promoted bytes, selects, two stores | 47 | 49 | 1.04 | 53 | 87 | 1.64 |
 | bigprime | transform butterflies: 64-bit products modulo a prime | 163 | 181 | 1.11 | 329 | 490 | 1.49 |
+| cells | a tape machine's drain loop (clang computes it in closed form) | 2 | 35 | 17.5 | 2 | 35 | 17.5 |
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
@@ -364,6 +365,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
 | hex | 1,149,427 | 1,346,047 | 1.17 | 1,183,965 | 1,380,549 | 1.17 |
 | bigprime | 722,178 | 940,628 | 1.30 | 931,585 | 1,028,757 | 1.10 |
+| cells | 201,973 | 3,135,633 | 15.5 | 267,726 | 4,290,296 | 16.0 |
 
 | kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
 |--------|-----------------:|------------:|------:|------------:|------------:|------:|
@@ -376,6 +378,7 @@ Under qemu-user, dynamic instructions executed (exact, the same on every run):
 | lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
 | hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
 | bigprime | 970,260 | 1,099,375 | 1.13 | 111,575,208 | 113,357,198 | 1.02 |
+| cells | 271,080 | 4,285,488 | 15.8 | 271,311 | 4,285,707 | 15.8 |
 
 ANVIL comes out ahead with counter branches and update-form streams on
 PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep
@@ -400,7 +403,7 @@ Best of 10 runs, in milliseconds:
 | matflat (double, run-time order, flat int indices) | 13 | 14 | 1.08 | 14 | 15 | 1.07 |
 | matmul (double) | 14 | 15 | 1.07 | 15 | 15 | 1.00 |
 | nbody (double) | 80 | 99 | 1.24 | 83 | 99 | 1.19 |
-| pidigits (a Brainfuck program as C, 30 digits of pi) | 8 | 15 | 1.88 | 6 | 17 | 2.83 |
+| pidigits (a Brainfuck program as C, 30 digits of pi) | 7 | 12 | 1.71 | 6 | 13 | 2.17 |
 | qsort | 107 | 109 | 1.02 | 106 | 109 | 1.03 |
 | sieve | 91 | 93 | 1.02 | 100 | 184 | 1.84 |
 | strings | 18 | 18 | 1.00 | 21 | 22 | 1.05 |

@@ -22,18 +22,18 @@ static void append_prepared(anvil_block_t *block, anvil_instr_t *instr)
         instr->result->owner_module = block->owner_module;
 }
 
-static void redirect_edge(anvil_instr_t *terminator, anvil_block_t *header, anvil_block_t *preheader)
+void anvil_opt_redirect_edge(anvil_instr_t *terminator, anvil_block_t *from, anvil_block_t *to)
 {
-    if (terminator->true_block == header)
-        terminator->true_block = preheader;
+    if (terminator->true_block == from)
+        terminator->true_block = to;
 
-    if (terminator->false_block == header)
-        terminator->false_block = preheader;
+    if (terminator->false_block == from)
+        terminator->false_block = to;
 
     for (size_t index = 0; index < terminator->num_switch_cases; index++)
     {
-        if (terminator->switch_blocks[index] == header)
-            terminator->switch_blocks[index] = preheader;
+        if (terminator->switch_blocks[index] == from)
+            terminator->switch_blocks[index] = to;
     }
 }
 
@@ -136,7 +136,7 @@ anvil_block_t *anvil_opt_create_preheader(const anvil_opt_cfg_t *cfg, const anvi
     {
         size_t predecessor = cfg->predecessors[edge];
         if (!anvil_loop_contains(loops, loop, predecessor))
-            redirect_edge(cfg->blocks[predecessor]->last, header, preheader);
+            anvil_opt_redirect_edge(cfg->blocks[predecessor]->last, header, preheader);
     }
 
     anvil_func_invalidate_cfg(func);
