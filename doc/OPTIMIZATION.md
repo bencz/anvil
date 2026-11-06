@@ -43,7 +43,7 @@ level is a strict superset of the one below it.
 | O0 | `ANVIL_OPT_NONE` | None (default) |
 | Og | `ANVIL_OPT_DEBUG` | copy_prop, store_load_prop |
 | O1 | `ANVIL_OPT_BASIC` | Og + const_fold, dce |
-| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, switch-table, inline (small bodies, internal or external and not preemptible, and internal single call sites), loop-vectorize; unrolling |
+| O2 | `ANVIL_OPT_STANDARD` | O1 + simplify_cfg, strength_reduce, dead_store, load_elim, cse, switch-table, inline (small bodies, internal or external and not preemptible, and internal single call sites), licm, closed-form, loop-vectorize; unrolling |
 | O3 | `ANVIL_OPT_AGGRESSIVE` | O2 + larger inlining budgets, vectorize (SLP) |
 
 The two vectorizers create vector operations only where the backend's
@@ -325,6 +325,25 @@ right after each promotion, so an enclosing loop sees the cell's accesses
 around the inner loop as its own in the same run. A cell that only the body
 reaches (`for (...) *p += x;` through a pointer) is not promoted: that would
 need the loop rotated so that its body runs on entry.
+
+### Closed Forms (`ANVIL_PASS_CLOSED_FORM`) - O2
+
+`src/opt/closed_form.c`. A loop of a header and one body block, where the
+header tests a counter against zero and the body steps it by one toward zero.
+Modulo its width the counter always gets there after T steps: T = c for
+`c - 1`, T = -c for `c + 1`. The body may only add invariants to the other
+PHIs (`v + k`), set them to invariants, or add invariants to cells (a load, the
+add, a store at an invariant address). It then runs what one closed form does
+once: `v + k * T`, `*p + k * T`. The body becomes that form with the counter
+set to zero, so the header's next test leaves. The loop is entered, and the
+cells written, exactly when they were before. Inside the loop the counter is
+read only by the test and its step, and each PHI only by its update; after the
+loop they hold their final values. Updates of cells keep their order, so equal
+addresses accumulate alike, and cells that may partly overlap keep the loop.
+The arithmetic wraps: no-wrap steps stay exact, and the closed form gives the
+same final value. It runs after LICM, whose scalar promotion has turned the
+cells the loop tests into PHIs. A tape machine's `while (t[k]) { t[k - 1] +=
+3; t[k]--; }` becomes `t[k - 1] += 3 * t[k]; t[k] = 0`.
 
 ### Complete Unrolling (`ANVIL_PASS_UNROLL`) - O2
 
@@ -756,16 +775,15 @@ The pass manager runs enabled built-in passes in an explicit order (defined by
 order. Opportunity-creating passes run first and DCE sweeps up at the end of each
 fixpoint iteration:
 
-1. Copy Propagation (`copy_prop`) — exposes constants
-2. Constant Folding (`const_fold`)
-3. Common Subexpression Elimination (`cse`)
-4. Strength Reduction (`strength_reduce`)
-5. Store-Load Propagation (`store_load_prop`)
-6. Dead Store Elimination (`dead_store`)
-7. Redundant Load Elimination (`load_elim`)
-8. CFG Simplification (`simplify_cfg`)
-9. Dead Code Elimination (`dce`)
-10. Custom passes (in registration order)
+1. SROA, mem2reg, SCCP, known bits
+2. Copy propagation, constant folding, CSE, GVN, strength reduction
+3. Store-load propagation, dead stores, redundant loads
+4. CFG simplification, switch tables, tail recursion
+5. LICM (with scalar promotion), closed forms, complete unrolling, loop tables
+6. Loop vectorization, loop strength reduction, runtime unrolling
+7. Inlining, SLP vectorization
+8. Dead code elimination
+9. Custom passes (in registration order)
 
 Only passes that are enabled for the current optimization level (or enabled
 individually) actually run; the order above is the sequence within each fixpoint
@@ -802,6 +820,7 @@ The pass manager is **not** thread-safe. Each thread should have its own context
 | `src/opt/load_elim.c` | Redundant load elimination |
 | `src/opt/ctx_opt.c` | Context integration |
 | `src/opt/cse.c` | Common subexpression elimination |
+| `src/opt/closed_form.c` | Closed forms of counting loops |
 | `src/opt/known_bits.c` | Known bits |
 | `src/opt/sroa.c` | Scalar replacement of aggregates |
 

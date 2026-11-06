@@ -130,6 +130,7 @@ OPT_SRCS = \
 	$(SRC_DIR)/opt/loop_strength.c \
 	$(SRC_DIR)/opt/tail_recursion.c \
 	$(SRC_DIR)/opt/runtime_unroll.c \
+	$(SRC_DIR)/opt/closed_form.c \
 	$(SRC_DIR)/opt/loop_table.c \
 	$(SRC_DIR)/opt/switch_table.c \
 	$(SRC_DIR)/opt/codegen_prepare.c \

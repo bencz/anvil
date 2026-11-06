@@ -88,6 +88,16 @@ static inline bool anvil_opt_call_observes_memory(const anvil_instr_t *call)
     return (anvil_opt_call_effects(call) & barriers) != 0;
 }
 
+/* A detached instruction of `op` on one or two operands (NULL: none). */
+static inline anvil_instr_t *anvil_opt_make_instr(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *first, anvil_value_t *second,
+                                                  const char *name)
+{
+    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, name);
+    if (!instr || (first && !anvil_instr_add_operand(instr, first)) || (second && !anvil_instr_add_operand(instr, second)))
+        return NULL;
+    return instr;
+}
+
 /* Links a detached instruction into `position`'s block just before it. */
 static inline void anvil_opt_insert_before(anvil_instr_t *position, anvil_instr_t *instr)
 {

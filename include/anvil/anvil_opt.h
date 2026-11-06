@@ -38,7 +38,7 @@ typedef enum {
     ANVIL_PASS_MEM2REG,         /* Promote local scalar storage to SSA (O1+) */
     ANVIL_PASS_GVN,             /* Dominance-based integer value numbering (O2+) */
     ANVIL_PASS_SROA,            /* Split disjoint constant aggregate accesses (O2+) */
-    ANVIL_PASS_LICM,            /* Hoist nontrapping integer loop invariants (O3) */
+    ANVIL_PASS_LICM,            /* Hoist loop invariants, keep invariant cells in registers (O2+) */
     ANVIL_PASS_SCCP,            /* Sparse conditional integer constants (O2+) */
     ANVIL_PASS_KNOWN_BITS,      /* Bit facts and unsigned range folding (O2+) */
     ANVIL_PASS_INLINE,         /* Inlining of small internal functions and single call sites (O2+) */
@@ -50,6 +50,7 @@ typedef enum {
     ANVIL_PASS_RUNTIME_UNROLL, /* Small counted loops run several body copies per test (O2+) */
     ANVIL_PASS_LOOP_TABLE,     /* Loops storing constants per index become read-only tables (O2+) */
     ANVIL_PASS_SWITCH_TABLE,   /* Switches choosing constants become table lookups (O2+) */
+    ANVIL_PASS_CLOSED_FORM,    /* Loops counting to zero that only add invariants run in closed form (O2+) */
     ANVIL_PASS_COUNT
 } anvil_pass_id_t;
 
@@ -222,6 +223,7 @@ anvil_pass_result_t anvil_pass_tail_recursion(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_runtime_unroll(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_loop_table(anvil_func_t *func);
 anvil_pass_result_t anvil_pass_switch_table(anvil_func_t *func);
+anvil_pass_result_t anvil_pass_closed_form(anvil_func_t *func);
 
 /* After optimization, before a backend lowers the module: recomputes each
  * address (GEP) in the other blocks that load or store through it, so the

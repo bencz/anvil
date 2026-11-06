@@ -1252,6 +1252,120 @@ static void test_promotion_shapes(anvil_arch_t arch)
     }
 }
 
+/* while (c != 0) { c -= 1 (or c += 1); v += k; *p += 3; } in closed form:
+ * the body runs once with v + k * T and *p + 3 * T (T = c, or -c), the
+ * counter set to zero.  Also v - k, k + v, the test as c == 0 with the body
+ * on its false side, a second update of the same cell (applied after the
+ * first one's store), and v wider, narrower or of another signedness than
+ * the counter (T extended, truncated or reinterpreted).  A step of 2, a
+ * call, cells that may partly overlap, or the counter read in the body keep
+ * the loop.  Allocation failure leaves valid IR. */
+static bool run_closed_form_case(anvil_arch_t arch, int variant, size_t allowance, bool *completed)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_module_t *module = anvil_module_create(ctx, "closed_form");
+    anvil_type_t *i32 = anvil_type_i32(ctx), *i8 = anvil_type_i8(ctx);
+    anvil_type_t *vt = variant == 10 ? anvil_type_i64(ctx) : variant == 11 ? anvil_type_i16(ctx) : variant == 12 ? anvil_type_u32(ctx) : i32;
+    anvil_type_t *params[] = { i32, i32, anvil_type_ptr(ctx, i32), anvil_type_ptr(ctx, i8) };
+    anvil_func_t *touch = anvil_func_declare(module, "touch", anvil_type_func(ctx, anvil_type_void(ctx), NULL, 0, false));
+    anvil_func_t *func = anvil_func_create(module, "count", anvil_type_func(ctx, vt, params, 4, false), ANVIL_LINK_EXTERNAL);
+    anvil_block_t *header = anvil_block_create(func, "header"), *body = anvil_block_create(func, "body"), *exit = anvil_block_create(func, "exit");
+    anvil_value_t *p = anvil_func_get_param(func, 2), *k = anvil_func_get_param(func, 1);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+    anvil_value_t *same = anvil_build_bitcast(ctx, p, anvil_type_ptr(ctx, i32), "same");
+    anvil_build_br(ctx, header);
+    anvil_set_insert_point(ctx, header);
+    anvil_value_t *c = anvil_build_phi(ctx, i32, "c");
+    anvil_value_t *v = anvil_build_phi(ctx, vt, "v");
+    if (variant == 8)
+        anvil_build_br_cond(ctx, anvil_build_cmp_eq(ctx, c, anvil_const_i32(ctx, 0), "done"), exit, body);
+    else
+        anvil_build_br_cond(ctx, anvil_build_cmp_ne(ctx, c, anvil_const_i32(ctx, 0), "more"), body, exit);
+    anvil_set_insert_point(ctx, body);
+    anvil_value_t *addend = variant == 5 ? c : variant == 10 ? anvil_const_i64(ctx, 5) : variant == 11 ? anvil_const_i16(ctx, 5)
+                          : variant == 12 ? anvil_const_u32(ctx, 5) : k;
+    anvil_value_t *next_v = variant == 6 ? anvil_build_sub(ctx, v, addend, "next_v") : variant == 7 ? anvil_build_add(ctx, addend, v, "next_v")
+                          : anvil_build_add(ctx, v, addend, "next_v");
+    anvil_build_store(ctx, anvil_build_add(ctx, anvil_build_load(ctx, i32, p, "cell"), anvil_const_i32(ctx, 3), "cell3"), p);
+    if (variant == 9)
+        anvil_build_store(ctx, anvil_build_add(ctx, anvil_build_load(ctx, i32, same, "again"), anvil_const_i32(ctx, 4), "again4"), same);
+    if (variant == 4) {
+        anvil_value_t *bytes = anvil_build_bitcast(ctx, p, anvil_type_ptr(ctx, i8), "bytes");
+        anvil_value_t *one = anvil_const_i32(ctx, 1);
+        anvil_value_t *inner = anvil_build_gep(ctx, i8, bytes, &one, 1, "inner");
+        anvil_build_store(ctx, anvil_build_add(ctx, anvil_build_load(ctx, i8, inner, "byte"), anvil_const_i8(ctx, 1), "byte1"), inner);
+    }
+    if (variant == 3)
+        anvil_build_call_checked(ctx, anvil_func_get_value(touch), NULL, 0, "call", &(anvil_value_t *){ NULL });
+    anvil_value_t *step = anvil_const_i32(ctx, variant == 2 ? 2 : 1);
+    anvil_value_t *next_c = variant == 1 ? anvil_build_add(ctx, c, step, "next_c") : anvil_build_sub(ctx, c, step, "next_c");
+    anvil_build_br(ctx, header);
+    anvil_phi_add_incoming(c, anvil_func_get_param(func, 0), anvil_func_get_entry(func));
+    anvil_phi_add_incoming(c, next_c, body);
+    anvil_phi_add_incoming(v, variant == 10 ? anvil_const_i64(ctx, 0) : variant == 11 ? anvil_const_i16(ctx, 0) : variant == 12 ? anvil_const_u32(ctx, 0)
+                                                                                                                 : anvil_const_i32(ctx, 0),
+                           anvil_func_get_entry(func));
+    anvil_phi_add_incoming(v, next_v, body);
+    anvil_set_insert_point(ctx, exit);
+    anvil_build_ret(ctx, v);
+
+    if (allowance != SIZE_MAX)
+        anvil_test_fail_alloc_after(ctx, allowance);
+    anvil_pass_result_t status = anvil_pass_closed_form(func);
+    anvil_test_disable_alloc_fail(ctx);
+    anvil_ctx_clear_error(ctx);
+    char error[256] = { 0 };
+    bool valid = anvil_func_verify(func, error, sizeof(error));
+    *completed = status != ANVIL_PASS_RUN_ERROR;
+    if (*completed) {
+        bool eligible = variant <= 1 || variant >= 6;
+        const anvil_instr_t *phi = c->data.instr;
+        bool settled = false;
+        for (size_t incoming = 0; incoming < phi->num_phi_incoming; incoming++)
+            settled |= phi->phi_blocks[incoming] == body && phi->operands[incoming]->kind == ANVIL_VAL_CONST_INT && phi->operands[incoming]->data.i == 0;
+        valid &= status == (eligible ? ANVIL_PASS_RUN_CHANGED : ANVIL_PASS_RUN_UNCHANGED) && settled == eligible;
+        if (eligible) {
+            valid &= count_opcode(func, ANVIL_OP_MUL) == (variant == 9 ? 3u : 2u) && count_opcode(func, ANVIL_OP_STORE) == (variant == 9 ? 2u : 1u);
+            valid &= variant != 10 || count_opcode(func, ANVIL_OP_ZEXT) == 1;
+            valid &= variant != 11 || count_opcode(func, ANVIL_OP_TRUNC) == 1;
+            valid &= variant != 12 || count_opcode(func, ANVIL_OP_BITCAST) == 2;
+            /* The second update of one cell reads the first one's store. */
+            const anvil_instr_t *first_store = NULL;
+            bool ordered = true;
+            for (const anvil_instr_t *instr = body->first; instr; instr = instr->next) {
+                if (instr->op == ANVIL_OP_STORE && !first_store)
+                    first_store = instr;
+                else if (instr->op == ANVIL_OP_LOAD && variant == 9 && instr->operands[0]->kind == ANVIL_VAL_INSTR &&
+                         instr->operands[0]->data.instr->op == ANVIL_OP_BITCAST)
+                    ordered = first_store != NULL;
+            }
+            valid &= ordered;
+        }
+        char *assembly = NULL;
+        size_t length = 0;
+        valid &= anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && length > 0;
+        free(assembly);
+    }
+    if (!valid)
+        fprintf(stderr, "closed form: arch=%d variant=%d allowance=%zu status=%d error=%s\n", (int)arch, variant, allowance, status, error);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid;
+}
+
+static void test_closed_form(anvil_arch_t arch, bool sweep)
+{
+    for (int variant = 0; variant < 13; variant++) {
+        bool completed = false;
+        for (size_t allowance = sweep && variant == 0 ? 0 : SIZE_MAX; !completed; allowance = allowance == SIZE_MAX ? SIZE_MAX : allowance + 1) {
+            check(run_closed_form_case(arch, variant, allowance, &completed), "counting loops run in closed form only when every update is an invariant add");
+            if (allowance == SIZE_MAX || allowance > 400)
+                break;
+        }
+        check(completed, "the closed form completes once allocations succeed");
+    }
+}
+
 /* A call inlines only when caller and callee share their floating-point
  * policies: inlined code keeps its own. */
 static void test_inline_fp_policy(void)
@@ -1290,6 +1404,7 @@ int main(void)
     test_word_copy(ANVIL_ARCH_X86_64, true);
     test_inline_fp_policy();
     test_promotion_of_cells(ANVIL_ARCH_X86_64, true);
+    test_closed_form(ANVIL_ARCH_X86_64, true);
     test_promotion_allocation_failure();
     test_cfg_cache();
     test_parallel_copies();
@@ -1327,6 +1442,7 @@ int main(void)
         test_licm_narrow_split(targets[index]);
         test_promotion_of_cells(targets[index], false);
         test_promotion_shapes(targets[index]);
+        test_closed_form(targets[index], false);
         test_inline_external(targets[index]);
         test_read_only_loads(targets[index]);
         test_memory_aliasing(targets[index], false);

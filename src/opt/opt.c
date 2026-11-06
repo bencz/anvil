@@ -51,6 +51,7 @@ static const int pass_exec_order[ANVIL_PASS_COUNT] = {
     ANVIL_PASS_SWITCH_TABLE,       /* after the CFG shares the switch's edges */
     ANVIL_PASS_TAIL_RECURSION,     /* recursive returns become loops LICM sees */
     ANVIL_PASS_LICM,
+    ANVIL_PASS_CLOSED_FORM,        /* after LICM: its cells are values */
     ANVIL_PASS_UNROLL,
     ANVIL_PASS_LOOP_TABLE,         /* after unrolling: inner loops are straight code */
     ANVIL_PASS_LOOP_VECTORIZE,
@@ -237,6 +238,13 @@ static const anvil_pass_info_t builtin_passes[ANVIL_PASS_COUNT] = {
         .name = "switch-table",
         .description = "Switches choosing constants become table lookups",
         .run = anvil_pass_switch_table,
+        .min_level = ANVIL_OPT_STANDARD,
+    },
+    {
+        .id = ANVIL_PASS_CLOSED_FORM,
+        .name = "closed-form",
+        .description = "Loops counting to zero that only add invariants run in closed form",
+        .run = anvil_pass_closed_form,
         .min_level = ANVIL_OPT_STANDARD,
     }
 };

@@ -122,13 +122,6 @@ static bool split_invariant_index(anvil_ctx_t *ctx, const anvil_opt_cfg_t *cfg, 
 
 enum { PROMOTE_ACCESS_LIMIT = 64, PROMOTE_EXIT_LIMIT = 4 };
 
-static anvil_instr_t *make_instr(anvil_ctx_t *ctx, anvil_op_t op, anvil_type_t *type, anvil_value_t *first, anvil_value_t *second)
-{
-    anvil_instr_t *instr = anvil_instr_create(ctx, op, type, op == ANVIL_OP_LOAD ? "promoted" : NULL);
-    if (!instr || (first && !anvil_instr_add_operand(instr, first)) || (second && !anvil_instr_add_operand(instr, second)))
-        return NULL;
-    return instr;
-}
 
 static anvil_type_t *access_type(const anvil_instr_t *access)
 {
@@ -277,15 +270,15 @@ static anvil_pass_result_t promote_memory(anvil_ctx_t *ctx, anvil_func_t *func, 
     anvil_value_t *yes = anvil_const_i1(ctx, true), *no = anvil_const_i1(ctx, false);
     anvil_instr_t *slot = pointer ? anvil_instr_create(ctx, ANVIL_OP_ALLOCA, pointer, "promoted.slot") : NULL;
     anvil_instr_t *flag = plan.stored && flag_pointer ? anvil_instr_create(ctx, ANVIL_OP_ALLOCA, flag_pointer, "promoted.stored") : NULL;
-    anvil_instr_t *initial = make_instr(ctx, ANVIL_OP_LOAD, type, address, NULL);
-    anvil_instr_t *keep = slot && initial ? make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, initial->result, slot->result) : NULL;
-    anvil_instr_t *clear = flag && no ? make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, no, flag->result) : NULL;
+    anvil_instr_t *initial = anvil_opt_make_instr(ctx, ANVIL_OP_LOAD, type, address, NULL, "promoted");
+    anvil_instr_t *keep = slot && initial ? anvil_opt_make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, initial->result, slot->result, NULL) : NULL;
+    anvil_instr_t *clear = flag && no ? anvil_opt_make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, no, flag->result, NULL) : NULL;
     if (!keep || (plan.stored && (!clear || !yes)) || (plan.template_load && !anvil_instr_copy_attributes(initial, plan.template_load)))
         return ANVIL_PASS_RUN_ERROR;
     anvil_instr_t *marks[PROMOTE_ACCESS_LIMIT] = { NULL };
     for (size_t index = 0; index < plan.count && plan.stored; index++)
     {
-        if (plan.group[index] && plan.accesses[index]->op == ANVIL_OP_STORE && !(marks[index] = make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, yes, flag->result)))
+        if (plan.group[index] && plan.accesses[index]->op == ANVIL_OP_STORE && !(marks[index] = anvil_opt_make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, yes, flag->result, NULL)))
             return ANVIL_PASS_RUN_ERROR;
     }
     /* Each exit edge: test the flag, write back where a store happened. */
@@ -295,10 +288,10 @@ static anvil_pass_result_t promote_memory(anvil_ctx_t *ctx, anvil_func_t *func, 
         tests[exit] = anvil_block_prepare(func, "promoted.exit");
         writes[exit] = anvil_block_prepare(func, "promoted.write");
         joins[exit] = anvil_block_prepare(func, "promoted.join");
-        anvil_instr_t *test = flag ? make_instr(ctx, ANVIL_OP_LOAD, flag_type, flag->result, NULL) : NULL;
-        anvil_instr_t *branch = test ? make_instr(ctx, ANVIL_OP_BR_COND, ctx->type_void, test->result, NULL) : NULL;
-        anvil_instr_t *value = make_instr(ctx, ANVIL_OP_LOAD, type, slot->result, NULL);
-        anvil_instr_t *write = value ? make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, value->result, address) : NULL;
+        anvil_instr_t *test = flag ? anvil_opt_make_instr(ctx, ANVIL_OP_LOAD, flag_type, flag->result, NULL, "promoted") : NULL;
+        anvil_instr_t *branch = test ? anvil_opt_make_instr(ctx, ANVIL_OP_BR_COND, ctx->type_void, test->result, NULL, NULL) : NULL;
+        anvil_instr_t *value = anvil_opt_make_instr(ctx, ANVIL_OP_LOAD, type, slot->result, NULL, "promoted");
+        anvil_instr_t *write = value ? anvil_opt_make_instr(ctx, ANVIL_OP_STORE, ctx->type_void, value->result, address, NULL) : NULL;
         anvil_instr_t *to_join = anvil_instr_create(ctx, ANVIL_OP_BR, ctx->type_void, NULL);
         anvil_instr_t *to_exit = anvil_instr_create(ctx, ANVIL_OP_BR, ctx->type_void, NULL);
         if (!tests[exit] || !writes[exit] || !joins[exit] || !branch || !write || !to_join || !to_exit ||
