@@ -501,6 +501,69 @@ anvil_value_t *anvil_opt_fold_integer(anvil_ctx_t *ctx, const anvil_instr_t *ins
 }
 
 /* Main constant folding pass */
+/* A constant addend as a direction and a magnitude: +c or -c, for `op`
+ * (ADD or SUB) and the constant's value in the type's signedness. */
+static void constant_term(anvil_op_t op, const anvil_value_t *constant, unsigned bits, bool is_signed, bool *negative, uint64_t *magnitude)
+{
+    uint64_t value = (uint64_t)constant->data.i & mask_for_bits(bits);
+    int64_t signed_value = sign_extend_to_bits(value, bits);
+    bool below_zero = is_signed && signed_value < 0;
+    *magnitude = below_zero ? UINT64_C(0) - (uint64_t)signed_value : value;
+    *negative = below_zero != (op == ANVIL_OP_SUB);
+}
+
+/* (x +- c1) +- c2 as x +- (c1 +- c2), modulo the width: x itself when the
+ * constants cancel, else the instruction rewritten in place.  When both had
+ * no-wrap, the final exact value is unchanged and the new form has no
+ * intermediate one, so the flag stays if the combined constant fits. */
+static bool fold_constant_chain(anvil_ctx_t *ctx, anvil_instr_t *instr, anvil_value_t **replacement)
+{
+    anvil_type_t *type = instr->result->type;
+    if ((instr->op != ANVIL_OP_ADD && instr->op != ANVIL_OP_SUB) || !anvil_type_is_integer(type) || type->kind == ANVIL_TYPE_I1 ||
+        !anvil_opt_is_const_int(instr->operands[1]) || instr->operands[0]->kind != ANVIL_VAL_INSTR)
+        return false;
+    anvil_instr_t *inner = instr->operands[0]->data.instr;
+    if ((inner->op != ANVIL_OP_ADD && inner->op != ANVIL_OP_SUB) || inner->num_operands != 2 || !anvil_opt_is_const_int(inner->operands[1]) ||
+        !anvil_types_equal(inner->result->type, type))
+        return false;
+
+    unsigned bits = type_int_bits(type);
+    bool is_signed = type->is_signed, first_negative, second_negative;
+    uint64_t first, second;
+    constant_term(inner->op, inner->operands[1], bits, is_signed, &first_negative, &first);
+    constant_term(instr->op, instr->operands[1], bits, is_signed, &second_negative, &second);
+    bool negative = first_negative, exact = true;
+    uint64_t magnitude;
+    if (first_negative == second_negative) {
+        magnitude = first + second;
+        exact = magnitude >= first;
+    } else if (first >= second) {
+        magnitude = first - second;
+    } else {
+        magnitude = second - first;
+        negative = second_negative;
+    }
+    uint64_t limit = is_signed ? mask_for_bits(bits) >> 1 : mask_for_bits(bits);
+    bool fits = exact && magnitude <= limit;
+    if (!fits) {
+        uint64_t wrapped = (negative ? UINT64_C(0) - magnitude : magnitude) & mask_for_bits(bits);
+        negative = false;
+        magnitude = wrapped;
+    }
+    if (!magnitude) {
+        *replacement = inner->operands[0];
+        return true;
+    }
+    anvil_value_t *constant = anvil_opt_make_const_int(ctx, type, (int64_t)magnitude);
+    if (!constant)
+        return false;
+    instr->no_wrap = fits && instr->no_wrap && inner->no_wrap;
+    instr->op = negative ? ANVIL_OP_SUB : ANVIL_OP_ADD;
+    instr->operands[0] = inner->operands[0];
+    instr->operands[1] = constant;
+    return true;
+}
+
 anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
 {
     if (!func || !func->parent || !func->parent->ctx)
@@ -517,8 +580,11 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
             
             anvil_value_t *folded = NULL;
             
+            if (instr->num_operands == 2 && fold_constant_chain(ctx, instr, &folded)) {
+                changed = true;
+            }
             /* Binary operations */
-            if (instr->num_operands == 2) {
+            else if (instr->num_operands == 2) {
                 anvil_value_t *lhs = instr->operands[0];
                 anvil_value_t *rhs = instr->operands[1];
                 

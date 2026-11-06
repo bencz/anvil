@@ -91,6 +91,7 @@ Evaluates constant expressions at compile time.
 | `x - x` | `0` |
 | `x << 0` | `x` |
 | `x >> 0` | `x` |
+| `(x + c1) - c2` (any of `+`, `-`) | `x + (c1 - c2)`, or `x` when the constants cancel (modulo the width; no-wrap kept when both had it and the constant fits) |
 
 **Comparison Folding:**
 
