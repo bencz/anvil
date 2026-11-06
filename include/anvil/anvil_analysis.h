@@ -102,8 +102,11 @@ typedef enum {
     ANVIL_ALIAS_MUST,
 } anvil_alias_result_t;
 
-/* Constant address walks and bounded allocation identity. Unknown offsets,
- * escaping pointer values and unsupported address expressions stay MAY. */
+/* Constant address walks and bounded allocation identity, and addresses of
+ * one base and one variable index value (the last GEP index, its constant
+ * terms peeled where exact) apart by their constant offsets.  Unknown
+ * offsets, escaping pointer values and unsupported address expressions stay
+ * MAY. */
 anvil_alias_result_t anvil_memory_alias(const anvil_value_t *left, size_t left_size, const anvil_value_t *right, size_t right_size);
 /* `pointer` as `root` plus a constant byte offset, through GEPs with
  * constant indices, struct field addresses and pointer bitcasts; the root

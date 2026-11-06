@@ -773,6 +773,56 @@ static void test_memory_aliasing(anvil_arch_t arch, bool overwrite)
     anvil_ctx_destroy(ctx);
 }
 
+static anvil_value_t *marked_no_wrap(anvil_value_t *value)
+{
+    anvil_set_no_wrap(value, true);
+    return value;
+}
+
+/* p[i] against p[i - 1], p[i + 1 - 1] and p[j], with i and j unknown: one
+ * base and one index value are apart by the peeled constants (a narrow
+ * index only without wrap); a load of p[i] survives a store to p[i - 1]. */
+static void test_index_aliasing(anvil_arch_t arch)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    anvil_module_t *module = anvil_module_create(ctx, "index_aliasing");
+    anvil_type_t *i32 = anvil_type_i32(ctx), *i64 = anvil_type_i64(ctx);
+    anvil_type_t *params[] = { anvil_type_ptr(ctx, i32), i32, i32, anvil_type_ptr(ctx, i64) };
+    anvil_func_t *func = anvil_func_create(module, "index_aliasing", anvil_type_func(ctx, i32, params, 4, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, anvil_func_get_entry(func));
+    anvil_value_t *p = anvil_func_get_param(func, 0), *i = anvil_func_get_param(func, 1), *j = anvil_func_get_param(func, 2);
+    anvil_value_t *one = anvil_const_i32(ctx, 1);
+    anvil_value_t *before = marked_no_wrap(anvil_build_sub(ctx, i, one, "before"));
+    anvil_value_t *wrapping = anvil_build_sub(ctx, i, one, "wrapping");
+    anvil_value_t *back = marked_no_wrap(anvil_build_sub(ctx, marked_no_wrap(anvil_build_add(ctx, i, one, "after")), one, "back"));
+    anvil_value_t *at_i = anvil_build_gep(ctx, i32, p, &i, 1, "at_i");
+    anvil_value_t *at_before = anvil_build_gep(ctx, i32, p, &before, 1, "at_before");
+    anvil_value_t *at_wrapping = anvil_build_gep(ctx, i32, p, &wrapping, 1, "at_wrapping");
+    anvil_value_t *at_back = anvil_build_gep(ctx, i32, p, &back, 1, "at_back");
+    anvil_value_t *at_j = anvil_build_gep(ctx, i32, p, &j, 1, "at_j");
+    anvil_value_t *wide_index = anvil_build_sext(ctx, i, i64, "wide");
+    anvil_value_t *wide_next = marked_no_wrap(anvil_build_add(ctx, wide_index, anvil_const_i64(ctx, 1), "next"));
+    anvil_value_t *q = anvil_func_get_param(func, 3);
+    anvil_value_t *q_i = anvil_build_gep(ctx, i64, q, &wide_index, 1, "q_i"), *q_next = anvil_build_gep(ctx, i64, q, &wide_next, 1, "q_next");
+    bool pointer_wide = anvil_ctx_get_arch_info(ctx)->ptr_size == 4;
+    check(anvil_memory_alias(at_i, 4, at_before, 4) == ANVIL_ALIAS_NO, "p[i] and p[i - 1] do not alias");
+    check(anvil_memory_alias(at_i, 4, at_back, 4) == ANVIL_ALIAS_MUST, "p[i] and p[i + 1 - 1] alias");
+    check(anvil_memory_alias(at_i, 4, at_j, 4) == ANVIL_ALIAS_MAY, "p[i] and p[j] may alias");
+    check(anvil_memory_alias(at_i, 4, at_wrapping, 4) == (pointer_wide ? ANVIL_ALIAS_NO : ANVIL_ALIAS_MAY),
+          "a narrow index peels only without wrap");
+    check(anvil_memory_alias(q_i, 8, q_next, 8) == ANVIL_ALIAS_NO && anvil_memory_alias(q_i, 16, q_next, 8) == ANVIL_ALIAS_MAY,
+          "q[i] and q[i + 1] are apart by one element");
+    anvil_value_t *first = anvil_build_load(ctx, i32, at_i, "first");
+    anvil_build_store(ctx, anvil_const_i32(ctx, 7), at_before);
+    anvil_value_t *second = anvil_build_load(ctx, i32, at_i, "second");
+    anvil_build_ret(ctx, anvil_build_add(ctx, first, second, "sum"));
+    check(anvil_pass_load_elim(func) == ANVIL_PASS_RUN_CHANGED && count_opcode(func, ANVIL_OP_LOAD) == 1, "a load of p[i] survives a store to p[i - 1]");
+    char error[256] = { 0 };
+    check(anvil_func_verify(func, error, sizeof(error)), "index aliasing keeps valid IR");
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+}
+
 static void test_store_before_trap(void)
 {
     anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
@@ -1093,6 +1143,7 @@ int main(void)
         test_read_only_loads(targets[index]);
         test_memory_aliasing(targets[index], false);
         test_memory_aliasing(targets[index], true);
+        test_index_aliasing(targets[index]);
     }
 
     return failures ? 1 : 0;
