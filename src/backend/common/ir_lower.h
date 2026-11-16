@@ -58,6 +58,11 @@ struct anvil_ir_lower {
     /* A new vreg of the register class, width and signedness the target
      * gives `type` (NO_VREG for a type it cannot hold). */
     anvil_mir_vreg_t (*vreg_for_type)(anvil_ir_lower_t *lower, anvil_type_t *type);
+    /* The parameters' registers, at the entry, by the target's ABI. */
+    bool (*lower_params)(anvil_ir_lower_t *lower);
+    /* What anvil_ir_lower_instr leaves to the target: calls, returns,
+     * VA_START and atomics (false for anything it does not lower). */
+    bool (*target_instr)(anvil_ir_lower_t *lower, anvil_instr_t *instr);
     /* Whether an access takes `displacement` (NULL: any); one that does
      * not reaches its address through a register of its own. */
     bool (*displacement_fits)(const anvil_ir_lower_t *lower, int64_t displacement);
@@ -74,6 +79,9 @@ struct anvil_ir_lower {
      * target's MIR SELECT picks a value; a select in another class
      * branches. */
     unsigned select_classes;
+    /* The narrowest width a binary operation computes at (narrower
+     * operands are extended to it; 0: any width). */
+    unsigned narrowest_operation_bits;
     unsigned pointer_bits;
     /* The stack's alignment (the ABI descriptor's): the most a frame
      * object is aligned to. */
@@ -97,6 +105,18 @@ bool anvil_ir_record_regs(anvil_ir_lower_t *lower, const anvil_value_t *value, c
 bool anvil_ir_prepare_phis(anvil_ir_lower_t *lower);
 /* A new 8-bit vreg for a boolean (a compare's result). */
 anvil_mir_vreg_t anvil_ir_bool_vreg(anvil_ir_lower_t *lower);
+/* An i1 in `def` from the low bit of the integer `value`. */
+bool anvil_ir_low_bit(anvil_ir_lower_t *lower, anvil_mir_vreg_t value, anvil_mir_vreg_t def);
+
+/* The function `lower->func` in a new MIR function (NULL on failure): its
+ * blocks, the parameters (lower_params), the PHI registers, then each
+ * instruction in the layout order (anvil_ir_lower_instr), annotated with
+ * its memory access and call effects.  The lowering's maps are freed. */
+anvil_mir_func_t *anvil_ir_lower_function(anvil_ir_lower_t *lower);
+/* One instruction: the shared forms (vector, word-pair, binary, unary and
+ * conversion operations, stack objects, addresses, SELECT, loads, stores,
+ * branches, switches), the target_instr hook for the rest. */
+bool anvil_ir_lower_instr(anvil_ir_lower_t *lower, anvil_instr_t *instr);
 /* An access instruction at `displacement` from its address (the last
  * use). */
 bool anvil_ir_add_access(anvil_ir_lower_t *lower, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t *uses, size_t num_uses, int64_t displacement);

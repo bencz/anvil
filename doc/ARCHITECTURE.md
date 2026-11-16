@@ -523,6 +523,9 @@ src/
 └── backend/
     ├── common/
     │   ├── lower_map.c, lower_map.h # IR value/block -> MachineIR maps of every lowerer
+    │   ├── ir_lower.c, ir_lower.h   # Shared IR-to-MIR lowering state, values, addresses, control flow
+    │   ├── ir_lower_instr.c         # Shared lowering driver and target-independent instructions
+    │   ├── ir_lower_pair.c          # SELECT and 64-bit word pairs on 32-bit targets
     │   └── gnu_data.c, gnu_data.h # GAS constants, relocations and aggregate layout
     ├── x86/                    # x86 family: 32-bit and 64-bit modes
     │   ├── x86_32_lower.c, x86_64_lower.c

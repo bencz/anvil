@@ -5,7 +5,9 @@
  *   - a load at a constant offset takes the offset as both words'
  *     displacements, SystemZ included;
  *   - a select picks each word with the target's SELECT where the CPU
- *     selects in a register (CMOVcc), and branches where it does not (i486). */
+ *     selects in a register (CMOVcc), and branches where it does not (i486);
+ *   - a 32-bit value shifted by a 64-bit count shifts by the count's low
+ *     word, the count a variable or a constant. */
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_x86_mir.h"
 #include "anvil/anvil_ppc_mir.h"
@@ -109,6 +111,16 @@ static void test_target(const target_t *target)
     snprintf(message, sizeof(message), "%s: a pair select %s (%zu selects, %zu branches)", target->name,
              target->selects_in_register ? "selects each word" : "branches", selects, branches);
     CHECK(mir && (target->selects_in_register ? selects == 2 && branches == 0 : selects == 0 && branches == 1), message);
+    anvil_mir_func_destroy(mir);
+
+    /* shift(x, n) = x << n, then x << 3, the counts 64-bit */
+    anvil_type_t *shift_params[] = {i32, i64};
+    anvil_func_t *shift = new_func(module, "shift", i32, shift_params, 2);
+    anvil_value_t *shifted = anvil_build_shl(ctx, anvil_func_get_param(shift, 0), anvil_func_get_param(shift, 1), "by_count");
+    anvil_build_ret(ctx, anvil_build_shl(ctx, shifted, anvil_const_i64(ctx, 3), "by_three"));
+    mir = lower(target->arch, shift);
+    snprintf(message, sizeof(message), "%s: a 32-bit value shifts by a 64-bit count", target->name);
+    CHECK(mir && count_op(mir, ANVIL_MIR_OP_SHL, false, 0) == 2, message);
     anvil_mir_func_destroy(mir);
 
     anvil_module_destroy(module);

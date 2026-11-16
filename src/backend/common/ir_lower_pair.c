@@ -107,18 +107,6 @@ static bool pair_unary(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
     return ok && record_pair(lower, instr->result, out);
 }
 
-/* The low bit of `value`: an i1. */
-static anvil_mir_vreg_t low_bit(anvil_ir_lower_t *lower, anvil_mir_vreg_t value, anvil_type_t *type)
-{
-    anvil_mir_vreg_t one = anvil_ir_bool_vreg(lower);
-    anvil_mir_vreg_t bit = lower->vreg_for_type(lower, type);
-    anvil_mir_vreg_t uses[] = {value, one};
-    return value != ANVIL_MIR_NO_VREG && one != ANVIL_MIR_NO_VREG && bit != ANVIL_MIR_NO_VREG && anvil_mir_add_instr_imm(lower->mir, ANVIL_MIR_OP_MOV, one, 1) &&
-                   anvil_mir_add_instr(lower->mir, ANVIL_MIR_OP_AND, bit, uses, 2)
-               ? bit
-               : ANVIL_MIR_NO_VREG;
-}
-
 /* Conversions to, from or between word pairs. */
 static bool pair_cast(anvil_ir_lower_t *lower, const anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
 {
@@ -155,9 +143,11 @@ static bool pair_cast(anvil_ir_lower_t *lower, const anvil_instr_t *instr, anvil
         return anvil_wide_to_fp(lower->mir, &lower->wide, a, mir_op == ANVIL_MIR_OP_UITOFP, bits, &result) && anvil_lower_vreg_put(&lower->values, instr->result, result);
     if (anvil_type_is_floating(to))
         return false;
-    if (to->kind == ANVIL_TYPE_I1)
-        result = low_bit(lower, anvil_wide_truncate(lower->mir, a, 8, false), to);
-    else
+    if (to->kind == ANVIL_TYPE_I1) {
+        result = lower->vreg_for_type(lower, to);
+        if (!anvil_ir_low_bit(lower, anvil_wide_truncate(lower->mir, a, 8, false), result))
+            return false;
+    } else
         result = anvil_wide_truncate(lower->mir, a, bits, to->is_signed);
     return result != ANVIL_MIR_NO_VREG && anvil_lower_vreg_put(&lower->values, instr->result, result);
 }
@@ -229,7 +219,9 @@ bool anvil_ir_pair_instr(const anvil_ir_lower_t *lower, const anvil_instr_t *ins
                      (instr->num_operands == 1 && anvil_ir_cast_op(instr->op, &mir_op) && !anvil_cast_keeps_value(instr));
     if (!operation)
         return false;
-    for (size_t operand = 0; operand < instr->num_operands; operand++)
+    /* A shift's count may be wider than the value it shifts. */
+    size_t operands = is_shift(instr->op) ? 1 : instr->num_operands;
+    for (size_t operand = 0; operand < operands; operand++)
         if (anvil_ir_is_pair(lower, instr->operands[operand]->type))
             return true;
     return instr->result && anvil_ir_is_pair(lower, instr->result->type);

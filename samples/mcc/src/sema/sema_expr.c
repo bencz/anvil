@@ -205,8 +205,12 @@ mcc_type_t *sema_analyze_binary_expr(mcc_sema_t *sema, mcc_ast_node_t *expr)
         }
     }
     
-    /* Usual arithmetic conversions */
-    expr->type = sema_apply_usual_conversions(sema, lhs_type, rhs_type);
+    /* A shift has the promoted type of its left operand (C11 6.5.7p3); the
+     * others take the usual arithmetic conversions. */
+    if (op == BINOP_LSHIFT || op == BINOP_RSHIFT)
+        expr->type = sema_apply_integer_promotions(sema, lhs_type);
+    else
+        expr->type = sema_apply_usual_conversions(sema, lhs_type, rhs_type);
     return expr->type;
 }
 

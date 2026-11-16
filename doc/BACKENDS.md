@@ -79,14 +79,27 @@ counter narrower than 32 bits (`SYSTEMZ_NARROWEST_COUNTER`).
 **Shared lowering.** Every lowerer's state begins with `anvil_ir_lower_t`
 (`src/backend/common/ir_lower.h`): the function, its MachineIR, the maps
 below and the target's hooks and facts: `vreg_for_type` (the register a
-type takes), `displacement_fits` (the displacements an access takes; NULL
+type takes), `lower_params` (the parameters by the ABI), `target_instr`
+(the instructions whose form is the target's: calls, returns, VA_START,
+atomics), `narrowest_operation_bits` (the width narrower operands are
+extended to: 32 on ARM64, PowerPC and SystemZ, none on x86),
+`displacement_fits` (the displacements an access takes; NULL
 for any), `pair_type` (on 32-bit targets, the types that travel as word
 pairs), the run-time helper calls of 64-bit operations (`wide`), the
 register classes the target's MIR SELECT picks in (`select_classes`), the
 pointer width and the stack alignment.  A value is read as one register or
 a word pair, high word first (`anvil_ir_value_regs`), and every PHI result
 gets its registers before any block is lowered (`anvil_ir_prepare_phis`).
-On that base the
+One driver lowers every function (`anvil_ir_lower_function`,
+`ir_lower_instr.c`): the MIR with the function's linkage and CPU features,
+its blocks, the parameters, the PHI registers, then each instruction in
+the layout order, annotated with its memory access and call effects.
+`anvil_ir_lower_instr` lowers what does not depend on the target: vector
+and priced scalar forms, word pairs, binary, unary and conversion
+operations (a conversion to i1 keeps the low bit; a pointer and an integer
+of another width truncate or zero-extend), loads and stores (an i1 as a
+byte holding 0 or 1), stack objects, addresses, SELECT, branches and
+switches.  On that base the
 control flow lowers the same way on every target: an edge into a block with
 PHIs carries their values as one parallel copy, in the branching block on an
 unconditional branch and in an edge block of its own on a conditional branch
@@ -263,7 +276,7 @@ src/backend/arm64/
 ```
 
 **Key ARM64 Components:**
-- **`arm64_mir.c`**: source IR lowering, PHI edge copies, switch lowering, MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission. Argument placement, `va_start` and every object-format spelling come from the ABI descriptor.
+- **`arm64_mir.c`**: the ARM64 parts of the IR lowering (parameters, calls, returns, VA_START, atomics), MachineIR legality checks, register allocation bridge, spill materialization, and assembly emission. Argument placement, `va_start` and every object-format spelling come from the ABI descriptor.
 - **`abi/`**: one `arm64_abi_desc_t` per ABI (`arm64_get_abi_desc()`), holding:
   - argument passing: register counts, the indirect result (x8) and indirect call (x16) registers, aggregate classification and `assign_scalar` / `assign_aggregate`;
   - variadic support: the MachineIR form of `va_start`, its prologue register save and emission, and IR-level `va_arg` / `va_copy`;

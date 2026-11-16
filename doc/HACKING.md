@@ -97,6 +97,9 @@ anvil/
 │   └── backend/             # Target backends
 │       ├── common/                   # Shared target-independent backend utilities
 │       │   ├── lower_map.c, lower_map.h # What each lowering made of IR values and blocks
+│       │   ├── ir_lower.c, ir_lower.h   # Shared IR-to-MIR lowering state, values, addresses, control flow
+│       │   ├── ir_lower_instr.c         # Shared lowering driver and target-independent instructions
+│       │   ├── ir_lower_pair.c          # SELECT and 64-bit word pairs on 32-bit targets
 │       │   └── gnu_data.c, gnu_data.h # GAS data emission with symbol callback
 │       ├── x86/                      # x86 family (32-bit and 64-bit)
 │       │   ├── x86_32_lower.c, x86_64_lower.c
