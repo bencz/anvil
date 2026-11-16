@@ -769,6 +769,49 @@ static void test_local_cse_reuses_pure_values_until_redefinition(void)
     }
 }
 
+/* a = 7; x = p + a; b = 7; y = x + b: the second 7 reads the first's
+ * register (one MOV goes), unless a clobber comes between, b is copied, is
+ * of another width or is registerless. */
+typedef enum { MERGE_PLAIN, MERGE_CLOBBER, MERGE_COPIED, MERGE_WIDER, MERGE_REGISTERLESS } merge_case_t;
+
+static void test_block_constants_merge(void)
+{
+    for (int kind = MERGE_PLAIN; kind <= MERGE_REGISTERLESS; kind++) {
+        anvil_mir_func_t *fn = anvil_mir_func_create("mir_block_constants");
+        anvil_mir_vreg_t p = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t a = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t x = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t b = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, kind == MERGE_WIDER ? 64 : 32);
+        anvil_mir_vreg_t y = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t c = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 32);
+        anvil_mir_vreg_t pa[] = { p, a }, xb[] = { x, kind == MERGE_COPIED ? c : b }, b_use[] = { b }, y_use[] = { y };
+        bool ok = anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, p, 100) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, a, 7) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, x, pa, 2) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, b, 7);
+        if (kind == MERGE_CLOBBER)
+            ok = ok && anvil_mir_set_instr_clobbers(fn, 2, ANVIL_MIR_REG_GPR, 1);
+        if (kind == MERGE_COPIED)
+            ok = ok && anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, c, b_use, 1);
+        if (kind == MERGE_WIDER)
+            ok = ok && anvil_mir_add_instr(fn, ANVIL_MIR_OP_TRUNC, c, b_use, 1) && (xb[1] = c, true);
+        if (kind == MERGE_REGISTERLESS)
+            ok = ok && anvil_mir_set_registerless(fn, b, true);
+        ok = ok && anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, y, xb, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, y_use, 1);
+        CHECK(ok, "block-constant MIR should build");
+        size_t before = anvil_mir_num_instrs(fn);
+        char error[256] = { 0 };
+        bool valid = anvil_mir_merge_block_constants(fn) && anvil_mir_verify(fn, error, sizeof(error));
+        if (!valid)
+            fprintf(stderr, "kind %d: %s\n", kind, error);
+        CHECK(valid, "merging block constants should keep valid MachineIR");
+        bool merged = anvil_mir_num_instrs(fn) == before - 1;
+        if (kind == MERGE_PLAIN)
+            CHECK(merged && anvil_mir_get_instr_use(fn, 3, 1) == a, "the second constant reads the first's register");
+        else
+            CHECK(!merged, "a clobber, a copy, another width or a registerless constant keeps its own MOV");
+        anvil_mir_func_destroy(fn);
+    }
+}
+
 /* Extending or truncating a constant known in the block is a MOV of the
  * converted constant: its users may take it as an immediate again. */
 static void test_local_cse_folds_conversions_of_constants(void)
@@ -1659,6 +1702,7 @@ int main(void)
     test_address_arithmetic_folds_into_accesses();
     test_local_cse_reuses_pure_values_until_redefinition();
     test_local_cse_folds_conversions_of_constants();
+    test_block_constants_merge();
     test_address_folding_absorbs_index_extension();
     test_shared_scaled_index_folds_after_cse();
     test_loop_tests_rotate_and_phi_copies_retarget();

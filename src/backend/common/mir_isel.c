@@ -491,6 +491,20 @@ static bool silent(const anvil_mir_isel_facts_t *facts, const anvil_mir_instr_in
            !anvil_mir_isel_materialize(facts, info->def);
 }
 
+size_t anvil_mir_isel_next_printed(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index)
+{
+    anvil_mir_instr_info_t info, next;
+    if (!anvil_mir_get_instr_info(mir, index, &info))
+        return SIZE_MAX;
+    for (size_t at = index + 1; at < anvil_mir_num_instrs(mir); at++) {
+        if (!anvil_mir_get_instr_info(mir, at, &next) || next.block != info.block)
+            return SIZE_MAX;
+        if (!silent(facts, &next))
+            return at;
+    }
+    return SIZE_MAX;
+}
+
 /* The register `vreg` is in (-1: none, spilled or unassigned). */
 static int fold_phys(const anvil_mir_func_t *mir, anvil_mir_vreg_t vreg)
 {

@@ -446,12 +446,23 @@ regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
   runs `anvil_mir_hoist_materialized_constants`: any constant still printed
   into a register, and any pure integer operation of values defined only
   outside the loop, leaves its innermost loop the same way (equal constants
-  merged).
+  merged). Then `anvil_mir_merge_block_constants`: a constant materialized
+  again later in its block, with no call or clobber between and not read by
+  a copy (copying a register costs what loading the constant does), reads
+  the first register that holds it.
 - **Registerless marking** (`anvil_<arch>_mark_registerless`, right before
   allocation, with the printer's own immediate rules): constants every
   reader takes as an immediate and integer compares only the next branch
   reads (`anvil_mir_sink_compares` first) get a nominal register the
-  allocator never reserves; printers fail rather than write one.
+  allocator never reserves; printers fail rather than write one. A stored
+  constant needs none where the target stores it directly: x86 `mov $imm`,
+  ARM64 a zero through `wzr`/`xzr` (paired as `stp` too: the pairing looks
+  past constants that print nothing, `anvil_mir_isel_next_printed`), SystemZ
+  `MVI` (a byte, every model) and `MVHHI`/`MVHI`/`MVGHI` (a sign-extended
+  halfword, general-instructions extension), going through R1 when the
+  address has an index or a displacement the form does not reach. PowerPC
+  has no store of an immediate and no zero register (`r0` reads as zero
+  only as a base), so its stored constants stay in registers.
 - **Address folding** (`anvil_mir_fold_address_arithmetic`): `ADD(base,
   index * 1|2|4|8)` feeding loads/stores becomes an indexed access
   (`index_scale` on LOAD/STORE) when the target's hook accepts the form:

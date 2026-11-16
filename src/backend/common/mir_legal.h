@@ -101,8 +101,8 @@ typedef struct {
 /* The pipeline every target allocates by: verified, the clobbers annotated,
  * optimized (anvil_mir_optimize_before_allocation), blocks ordered, copies
  * coalesced, early returns split, the printer's temporaries annotated,
- * verified, registerless operands marked, materialized constants hoisted,
- * allocated and verified again. */
+ * verified, registerless operands marked, materialized constants hoisted
+ * and merged within their blocks, allocated and verified again. */
 bool anvil_mir_allocate(anvil_mir_func_t *mir, const anvil_mir_allocation_t *target);
 
 #endif

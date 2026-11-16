@@ -288,6 +288,6 @@ bool anvil_mir_allocate(anvil_mir_func_t *mir, const anvil_mir_allocation_t *tar
     return mir && target->verify(mir, user) && (!target->annotate_clobbers || target->annotate_clobbers(mir, user)) &&
            anvil_mir_optimize_before_allocation(mir, target->address_mode, target->expensive_constant, target->mir_user) && anvil_mir_order_blocks(mir) &&
            anvil_mir_coalesce_copies(mir) && anvil_mir_split_early_return(mir) && (!target->annotate_printer || target->annotate_printer(mir, user)) &&
-           target->verify(mir, user) && target->mark_registerless(mir, user) && anvil_mir_hoist_materialized_constants(mir) &&
+           target->verify(mir, user) && target->mark_registerless(mir, user) && anvil_mir_hoist_materialized_constants(mir) && anvil_mir_merge_block_constants(mir) &&
            anvil_regalloc_allocate(mir, target->configs, target->num_configs, target->scratch_configs, target->num_scratch_configs) && target->verify(mir, user);
 }

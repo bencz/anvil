@@ -856,6 +856,66 @@ static void test_extending_loads(void)
     }
 }
 
+/* Constants stored to a record {i64, i64, i32, i32, i16, i8}: zeros and
+ * small values need no register where the target stores them directly
+ * (ARM64 the zero register, in pairs; SystemZ MVI on every model and
+ * MVGHI/MVHI/MVHHI with the general-instructions extension).  S/390 loads
+ * -3 with LHI (the relative-and-immediate facility), S/370 from the pool. */
+typedef struct {
+    anvil_arch_t arch;
+    anvil_cpu_model_t cpu;
+    int64_t value;
+    const char *present[4];
+    const char *absent[2];
+} constant_store_case_t;
+
+static const constant_store_case_t constant_store_cases[] = {
+    {ANVIL_ARCH_ARM64, 0, 0, {"stp xzr, xzr", "stp wzr, wzr", "strh wzr", "strb wzr"}, {"mov x", "mov w"}},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z10, 0, {"MVGHI 0(", "MVHI  16(", "MVHHI 24(", "MVI   26("}, {"LGHI", "\x01"}},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z9, 0, {"MVI   26(", "STG", "\x01", "\x01"}, {"MVHI", "MVGHI"}},
+    {ANVIL_ARCH_S390, 0, -3, {"MVI   26(", "LHI", "\x01", "\x01"}, {"=F'-3'", "\x01"}},
+    {ANVIL_ARCH_S370, 0, -3, {"MVI   26(", "=F'-3'", "\x01", "\x01"}, {"LHI", "\x01"}},
+};
+
+static void test_constant_stores(void)
+{
+    for (size_t t = 0; t < sizeof(constant_store_cases) / sizeof(constant_store_cases[0]); t++) {
+        const constant_store_case_t *test = &constant_store_cases[t];
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(test->arch);
+        if (test->cpu)
+            anvil_ctx_set_cpu(ctx, test->cpu);
+        anvil_module_t *module = anvil_module_create(ctx, "stores");
+        anvil_type_t *fields[] = {anvil_type_i64(ctx), anvil_type_i64(ctx), anvil_type_i32(ctx), anvil_type_i32(ctx), anvil_type_i16(ctx), anvil_type_i8(ctx)};
+        anvil_type_t *record = anvil_type_struct(ctx, "record", fields, 6);
+        anvil_type_t *params[] = {anvil_type_ptr(ctx, record)};
+        anvil_func_t *func = anvil_func_create(module, "fill", anvil_type_func(ctx, anvil_type_void(ctx), params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        for (unsigned f = 0; f < 6; f++) {
+            anvil_value_t *field = anvil_build_struct_gep(ctx, record, anvil_func_get_param(func, 0), f, "field");
+            anvil_value_t *constant = f < 2 ? anvil_const_i64(ctx, test->value) : f < 4 ? anvil_const_i32(ctx, (int32_t)test->value)
+                                    : f == 4  ? anvil_const_i16(ctx, (int16_t)test->value)
+                                              : anvil_const_i8(ctx, (int8_t)test->value);
+            anvil_build_store(ctx, constant, field);
+        }
+        anvil_build_ret_void(ctx);
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+        for (size_t k = 0; valid && k < 4; k++)
+            valid = test->present[k][0] == '\x01' || strstr(assembly, test->present[k]);
+        for (size_t k = 0; valid && k < 2; k++)
+            valid = !strstr(assembly, test->absent[k]);
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d cpu %d: constants stored without a register where the target can", (int)test->arch, (int)test->cpu);
+        CHECK(valid, message);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -913,6 +973,7 @@ int main(void)
     test_wide_32bit_immediates();
     test_free_zero_extension();
     test_extending_loads();
+    test_constant_stores();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

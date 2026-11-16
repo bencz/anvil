@@ -31,6 +31,12 @@ static inline bool systemz_short_displacement(int64_t disp)
     return disp >= 0 && disp <= SYSTEMZ_SHORT_DISP_MAX;
 }
 
+/* A signed halfword immediate (RI and SIL forms). */
+static inline bool systemz_simm16(int64_t value)
+{
+    return value >= INT16_MIN && value <= INT16_MAX;
+}
+
 static inline bool systemz_displacement_fits(int64_t disp, anvil_cpu_features_t features)
 {
     return systemz_short_displacement(disp) ||

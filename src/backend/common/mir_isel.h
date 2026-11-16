@@ -117,6 +117,11 @@ bool anvil_mir_isel_writes(const anvil_mir_func_t *mir, const anvil_mir_isel_fac
  * in the same block with no call between; SIZE_MAX when there is none. */
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window);
 
+/* The first instruction after `index` in its block that prints anything
+ * (constants never materialized print nothing); SIZE_MAX when there is
+ * none. */
+size_t anvil_mir_isel_next_printed(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index);
+
 /* The extension (SEXT or ZEXT into a wider general register) right after
  * `index` that is the only reader of its general-register result, in
  * *extension; SIZE_MAX when there is none.  A load followed by it is one

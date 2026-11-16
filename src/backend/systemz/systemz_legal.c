@@ -123,7 +123,7 @@ static bool systemz_expensive_constant(void *user, anvil_mir_reg_class_t reg_cla
 {
     (void)user;
     (void)size_bits;
-    return reg_class != ANVIL_MIR_REG_GPR || value < -32768 || value > 32767;
+    return reg_class != ANVIL_MIR_REG_GPR || !systemz_simm16(value);
 }
 
 bool anvil_mainframe_regalloc_mir(anvil_mir_func_t *mir, anvil_mainframe_variant_t variant)

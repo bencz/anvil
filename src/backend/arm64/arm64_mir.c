@@ -833,6 +833,11 @@ static bool mir_logical_imm(int64_t value, unsigned width)
 static bool mir_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
 {
     const anvil_mir_func_t *mir = ctx;
+    /* A stored zero: the zero register (mir_stored_name). */
+    if (info->op == ANVIL_MIR_OP_STORE) {
+        const anvil_mir_vreg_info_t *stored = use == 0 ? anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, index, 0)) : NULL;
+        return stored && stored->reg_class == ANVIL_MIR_REG_GPR && value == 0;
+    }
     const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(mir, info->def) : NULL;
     if (!def || def->reg_class != ANVIL_MIR_REG_GPR || info->num_uses != 2)
         return false;
@@ -2319,13 +2324,23 @@ static bool mir_pre_index(arm64_mir_emit_t *emit, size_t instr_index, const anvi
  * of the same class and width, and for loads into distinct registers
  * other than the base.  Marks it printed and prints the pair, written back
  * when it starts at [base] and an in-place add of the base follows. */
+/* The register a store reads `value` from: the zero register for a
+ * constant zero held in none (mir_takes_immediate). */
+static const char *mir_stored_name(arm64_mir_emit_t *emit, anvil_mir_vreg_t value, int size)
+{
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, value);
+    if (info && info->registerless && info->reg_class == ANVIL_MIR_REG_GPR)
+        return size <= 4 ? "wzr" : "xzr";
+    return mir_reg_name(emit, value);
+}
+
 static bool mir_emit_pair(arm64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info, anvil_mir_vreg_t base, anvil_mir_vreg_t value,
                           int size, int64_t offset, bool load)
 {
-    size_t next_index = index + 1;
+    size_t next_index = anvil_mir_isel_next_printed(emit->mir, &emit->isel, index);
     anvil_mir_instr_info_t next;
     if (!emit->skip || (size != 4 && size != 8 && size != 16) || offset % size || offset / size < -64 || offset / size > 62 ||
-        next_index >= anvil_mir_num_instrs(emit->mir) || !anvil_mir_get_instr_info(emit->mir, next_index, &next) || next.block != info->block ||
+        next_index == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, next_index, &next) || next.block != info->block ||
         next.op != info->op || next.index_scale || emit->skip[next_index] || (emit->pre_disp && emit->pre_disp[next_index]) ||
         next.clobbers[ANVIL_MIR_REG_GPR] || next.scratch[ANVIL_MIR_REG_GPR] || (next.has_imm ? next.imm : 0) != offset + size)
         return false;
@@ -2343,7 +2358,8 @@ static bool mir_emit_pair(arm64_mir_emit_t *emit, size_t index, const anvil_mir_
         return false;
     if (load && (v->phys_reg == nv->phys_reg || (gpr && (v->phys_reg == b->phys_reg || nv->phys_reg == b->phys_reg))))
         return false;
-    const char *first = mir_reg_name(emit, value), *second = mir_reg_name(emit, next_value), *base_name = mir_reg_name(emit, base);
+    const char *first = load ? mir_reg_name(emit, value) : mir_stored_name(emit, value, size);
+    const char *second = load ? mir_reg_name(emit, next_value) : mir_stored_name(emit, next_value, size), *base_name = mir_reg_name(emit, base);
     if (emit->failed)
         return false;
     emit->skip[next_index] = true;
@@ -2434,11 +2450,11 @@ static void mir_emit_store(arm64_mir_emit_t *emit, size_t instr_index)
         return;
     }
     const anvil_mir_vreg_info_t *value_info = mir_vreg_info_checked(emit, value);
-    const char *src = mir_reg_name(emit, value);
     const char *base = mir_reg_name(emit, ptr);
     if (!value_info || emit->failed) return;
 
     int size = mir_size_bytes(value_info->size_bits);
+    const char *src = mir_stored_name(emit, value, size);
     anvil_mir_instr_info_t info;
     int64_t offset = 0;
     if (anvil_mir_get_instr_info(emit->mir, instr_index, &info) &&

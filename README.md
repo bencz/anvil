@@ -413,6 +413,7 @@ How to reproduce:
 ```bash
 bench/ir/run.sh --arch=x86_64 --runs=10   # also x86 (i386, --cpu=pentium4 by default), arm64, ppc64, ppc64le, ppc32
 bench/ir/run.sh --arch=arm64 --asm=/tmp/asm   # keep both compilers' assembly side by side
+bench/ir/run.sh --arch=x86 --insns   # x86-64/i386: instructions executed (perf), unaffected by machine load
 samples/mcc/tests/bench/run_bench.sh --runs=10
 ```
 

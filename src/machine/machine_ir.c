@@ -4874,6 +4874,103 @@ bool anvil_mir_hoist_materialized_constants(anvil_mir_func_t *func)
     return func && mir_hoist_constants_once(func, NULL, NULL, &changed);
 }
 
+/* A MOV of a constant into a register a block may share: defined once,
+ * not fixed, live-in or registerless, and not copied (a copy of a shared
+ * register costs what materializing the constant again does). */
+static bool mir_shareable_constant(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr, const size_t *defs, const bool *copied)
+{
+    if (instr->op != ANVIL_MIR_OP_MOV || !instr->has_imm || instr->num_uses || instr->symbol || instr->def >= func->num_vregs || defs[instr->def] != 1 ||
+        copied[instr->def])
+        return false;
+    const anvil_mir_vreg_info_t *info = &func->vregs[instr->def];
+    return !info->has_fixed_reg && !info->registerless && !info->is_live_in;
+}
+
+bool anvil_mir_merge_block_constants(anvil_mir_func_t *func)
+{
+    if (!func)
+        return false;
+    if (!func->num_instrs || !func->num_vregs)
+        return true;
+    size_t *defs = calloc(func->num_vregs, sizeof(size_t));
+    bool *copied = calloc(func->num_vregs, sizeof(bool));
+    anvil_mir_vreg_t *renamed = malloc(func->num_vregs * sizeof(anvil_mir_vreg_t));
+    bool *removed = calloc(func->num_instrs, sizeof(bool));
+    size_t *seen = malloc(func->num_instrs * sizeof(size_t));
+    if (!defs || !copied || !renamed || !removed || !seen) {
+        free(defs);
+        free(copied);
+        free(renamed);
+        free(removed);
+        free(seen);
+        return false;
+    }
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        if (instr->def != ANVIL_MIR_NO_VREG && instr->def < func->num_vregs)
+            defs[instr->def]++;
+        for (size_t u = 0; instr->op == ANVIL_MIR_OP_COPY && u < instr->num_uses; u++)
+            if (instr->uses[u] < func->num_vregs)
+                copied[instr->uses[u]] = true;
+    }
+    for (size_t v = 0; v < func->num_vregs; v++)
+        renamed[v] = v;
+    /* The block's constants so far, forgotten at a call or a clobber (a
+     * value kept across it would cost a callee-saved register or a spill). */
+    size_t count = 0, merged = 0;
+    anvil_mir_block_t block = ANVIL_MIR_NO_BLOCK;
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        bool clobbers = instr->op == ANVIL_MIR_OP_CALL;
+        for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+            clobbers |= instr->clobbers[c] != 0;
+        if (instr->block != block || clobbers) {
+            block = instr->block;
+            count = 0;
+        }
+        if (!mir_shareable_constant(func, instr, defs, copied))
+            continue;
+        const anvil_mir_vreg_info_t *info = &func->vregs[instr->def];
+        size_t k = 0;
+        for (; k < count; k++) {
+            const anvil_mir_instr_t *earlier = &func->instrs[seen[k]];
+            const anvil_mir_vreg_info_t *other = &func->vregs[earlier->def];
+            if (earlier->imm == instr->imm && other->reg_class == info->reg_class && other->size_bits == info->size_bits && other->is_signed == info->is_signed)
+                break;
+        }
+        if (k < count) {
+            renamed[instr->def] = func->instrs[seen[k]].def;
+            removed[i] = true;
+            merged++;
+        } else {
+            seen[count++] = i;
+        }
+    }
+    if (merged) {
+        size_t kept = 0;
+        for (size_t i = 0; i < func->num_instrs; i++) {
+            anvil_mir_instr_t *instr = &func->instrs[i];
+            if (removed[i]) {
+                free(instr->uses);
+                free(instr->symbol);
+                continue;
+            }
+            for (size_t u = 0; u < instr->num_uses; u++)
+                if (instr->uses[u] < func->num_vregs)
+                    instr->uses[u] = renamed[instr->uses[u]];
+            func->instrs[kept++] = *instr;
+        }
+        func->num_instrs = kept;
+        recompute_block_instr_ranges(func);
+    }
+    free(defs);
+    free(copied);
+    free(renamed);
+    free(removed);
+    free(seen);
+    return true;
+}
+
 
 /* ------------------------------------------------------------------
  * Exit copies.  A copy, truncation or extension that ends every

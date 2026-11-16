@@ -175,7 +175,14 @@ Operation, SA22-7832-03); `LB`/`LGB` came with the long-displacement facility
 (marked LD), so a z900 sign-extends a byte with `IC` and shifts. A narrow
 load that its extension alone reads loads into the extension's register
 already extended, and a narrow load printed extended needs no second
-extension. A
+extension. Stores of constants go straight to storage: `MVI`/`MVIY` a byte on
+every model (`MVIY` with long displacements), `MVHHI`/`MVHI`/`MVGHI` a
+sign-extended halfword with the general-instructions extension (z10; marked GE
+in the instruction list of the Principles of Operation, SA22-7832-08). They
+take a base and a 12-bit unsigned displacement only, so an indexed or far
+address stores through R1. A 32-bit constant in a signed halfword loads with
+`LHI` where the relative-and-immediate facility exists (S/390 on), not from the
+literal pool. A
 constant address (a GEP of constant indices) becomes base + displacement
 where the CPU's forms reach it, and the displacement goes into an index
 register otherwise. The lowering, the MIR address folds and the legality

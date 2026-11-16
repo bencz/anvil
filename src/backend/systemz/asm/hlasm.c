@@ -143,7 +143,7 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
 void systemz_emit_load_imm(systemz_emit_t *emit, int reg, int64_t imm)
 {
     if (emit->desc->has_64bit_gprs) {
-        if (imm >= -32768 && imm <= 32767) {
+        if (systemz_simm16(imm)) {
             anvil_strbuf_appendf(&emit->code, "         LGHI  %s,%lld\n", systemz_gpr_name(reg), (long long)imm);
         } else if (imm >= -2147483648LL && imm <= 2147483647LL && (emit->features & ANVIL_FEATURE_ZARCH_EIMM)) {
             anvil_strbuf_appendf(&emit->code, "         LGFI  %s,%lld\n", systemz_gpr_name(reg), (long long)imm);
@@ -158,6 +158,8 @@ void systemz_emit_load_imm(systemz_emit_t *emit, int reg, int64_t imm)
 
     if (imm >= 0 && imm <= 4095) {
         anvil_strbuf_appendf(&emit->code, "         LA    %s,%lld\n", systemz_gpr_name(reg), (long long)imm);
+    } else if ((emit->features & ANVIL_FEATURE_ZARCH_IMMREL) && systemz_simm16(imm)) {
+        anvil_strbuf_appendf(&emit->code, "         LHI   %s,%lld\n", systemz_gpr_name(reg), (long long)imm);
     } else {
         anvil_strbuf_appendf(&emit->code, "         L     %s,=F'%lld'\n", systemz_gpr_name(reg), (long long)imm);
     }
@@ -393,11 +395,6 @@ static bool systemz_operand_wide(const systemz_emit_t *emit, anvil_mir_vreg_t vr
     return info && info->size_bits > 32 && emit->desc->has_64bit_gprs;
 }
 
-static bool systemz_simm16(int64_t value)
-{
-    return value >= -32768 && value <= 32767;
-}
-
 /* MHI/MGHI is one instruction: only a power of two becomes a shift. */
 static int systemz_pow2_shift(int64_t value, bool wide)
 {
@@ -419,9 +416,25 @@ static bool systemz_rotate_mask_form(const systemz_emit_t *emit, const anvil_rot
 }
 
 /* Mirrors the forms chosen by systemz_emit_binary and systemz_emit_cmp. */
+/* A constant `bits` wide (`value`, sign-extended from its width) that a
+ * storage-immediate store writes: MVI any byte on every model, MVHHI,
+ * MVHI and MVGHI a sign-extended halfword with the general-instructions
+ * extension. */
+static bool systemz_stores_immediate(const systemz_emit_t *emit, unsigned bits, int64_t value)
+{
+    if (bits <= 8)
+        return true;
+    int64_t v = bits <= 16 ? (int16_t)value : bits <= 32 ? (int32_t)value : value;
+    return bits <= 64 && (emit->features & ANVIL_FEATURE_ZARCH_GIE) && systemz_simm16(v);
+}
+
 static bool systemz_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
 {
     const systemz_emit_t *emit = ctx;
+    if (info->op == ANVIL_MIR_OP_STORE) {
+        const anvil_mir_vreg_info_t *stored = use == 0 ? anvil_mir_get_vreg_info(emit->mir, anvil_mir_get_instr_use(emit->mir, index, 0)) : NULL;
+        return stored && stored->reg_class == ANVIL_MIR_REG_GPR && systemz_stores_immediate(emit, stored->size_bits, value);
+    }
     const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(emit->mir, info->def) : NULL;
     if (!def || def->reg_class != ANVIL_MIR_REG_GPR || info->num_uses != 2 || use != 1)
         return false;
@@ -1417,8 +1430,27 @@ static void systemz_emit_store(systemz_emit_t *emit, anvil_mir_instr_info_t inst
     char address[64];
     bool overlaps;
     systemz_memory_operand(emit, instr, index, 1, -1, &overlaps, address, sizeof(address));
-    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_store_op(emit, info->size_bits, info->reg_class, systemz_long_disp(instr)),
-                         systemz_vreg_reg_name(emit, value), address);
+    const char *source = systemz_vreg_reg_name(emit, value);
+    int64_t imm;
+    if (info->registerless && anvil_mir_isel_constant(&emit->isel, value, &imm)) {
+        /* A constant held in no register: a storage-immediate store when
+         * the address is a base and a displacement the form reaches (SI and
+         * SIL: 12 bits unsigned; MVIY: 20 bits signed), else through R1. */
+        int64_t disp = instr.has_imm ? instr.imm : 0;
+        bool reach = !instr.index_scale && (systemz_short_displacement(disp) || (info->size_bits <= 8 && (emit->features & ANVIL_FEATURE_ZARCH_LONGDISP)));
+        if (reach && systemz_stores_immediate(emit, info->size_bits, imm)) {
+            const char *op = info->size_bits <= 8 ? (systemz_short_displacement(disp) ? "MVI" : "MVIY") : info->size_bits <= 16 ? "MVHHI"
+                           : info->size_bits <= 32                                                    ? "MVHI"
+                                                                                                      : "MVGHI";
+            long long operand = info->size_bits <= 8 ? (long long)(uint8_t)imm : (long long)(int16_t)imm;
+            anvil_strbuf_appendf(&emit->code, "         %-5s %lld(%s),%lld\n", op, (long long)disp, systemz_vreg_reg_name(emit, anvil_mir_get_instr_use(emit->mir, index, 1)),
+                                 operand);
+            return;
+        }
+        systemz_emit_load_imm(emit, 1, info->size_bits <= 32 ? (int64_t)(int32_t)imm : imm);
+        source = "R1";
+    }
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_store_op(emit, info->size_bits, info->reg_class, systemz_long_disp(instr)), source, address);
 }
 
 /* Register `reg` = R11 + offset (any offset: LA's displacement is 12 bits). */

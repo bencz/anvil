@@ -10,16 +10,18 @@
 # ppc64le and ppc32 run under qemu-user (freestanding, qemu/) on reduced
 # workloads (BENCH_SMALL) and report dynamic instruction counts.  Without
 # --cpu, ANVIL targets the CPU the reference compiler assumes by default.
+# --insns makes x86_64 and x86 report the user-mode instructions they
+# execute (perf stat), which a busy machine does not disturb.
 #
 # --asm=DIR keeps both compilers' assembly of each kernel, side by side
 # (DIR/<arch>/<kernel>.clang.s and .anvil.s), for reading the differences.
 #
-# Usage: bench/ir/run.sh [--arch=x86_64|x86|arm64|ppc64|ppc64le|ppc32] [--cpu=NAME] [--opt=-O2] [--runs=3] [--cc=clang] [--asm=DIR] [kernel ...]
+# Usage: bench/ir/run.sh [--arch=x86_64|x86|arm64|ppc64|ppc64le|ppc32] [--cpu=NAME] [--opt=-O2] [--runs=3] [--cc=clang] [--asm=DIR] [--insns] [kernel ...]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIR="$ROOT/bench/ir"
-ARCH=x86_64; CPU=""; OPT=-O2; RUNS=3; CC=clang; ASM_DIR=""; KERNELS=()
+ARCH=x86_64; CPU=""; OPT=-O2; RUNS=3; CC=clang; ASM_DIR=""; HOST_INSNS=0; KERNELS=()
 for arg in "$@"; do
     case "$arg" in
         --arch=*) ARCH="${arg#--arch=}" ;;
@@ -28,7 +30,8 @@ for arg in "$@"; do
         --runs=*) RUNS="${arg#--runs=}" ;;
         --cc=*) CC="${arg#--cc=}" ;;
         --asm=*) ASM_DIR="${arg#--asm=}" ;;
-        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+        --insns) HOST_INSNS=1 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) KERNELS+=("$arg") ;;
     esac
 done
@@ -60,9 +63,14 @@ best_ms() {
     echo "$best"
 }
 
-# Instructions the program executes under qemu (one instruction per
-# translation block, each block logged once per execution).
+# Instructions the program executes: under qemu one instruction per
+# translation block, each block logged once per execution; on the host the
+# user-mode instructions perf counts.
 insns() {
+    if [ -z "$QEMU" ]; then
+        perf stat -x, -e instructions:u "$1" 2>&1 >/dev/null | awk -F, '/instructions/ { print $1 }'
+        return
+    fi
     "$QEMU" -one-insn-per-tb -d exec,nochain -D /dev/stdout "$1" 2>/dev/null | grep -c '^Trace' || true
 }
 
@@ -89,7 +97,9 @@ fi
 GEN_FLAGS=(--arch="$ARCH" "$OPT")
 CPU="${CPU:-$DEFAULT_CPU}"
 [ -n "$CPU" ] && GEN_FLAGS+=(--cpu="$CPU")
-if [ "$MODE" = time ]; then
+REPORT=$MODE
+[ "$HOST_INSNS" = 1 ] && REPORT=count
+if [ "$REPORT" = time ]; then
     printf "%-8s %10s %10s %7s\n" kernel "$CC(ms)" "anvil(ms)" ratio
 else
     printf "%-8s %12s %12s %7s\n" kernel "$CC(insns)" "anvil(insns)" ratio
@@ -117,7 +127,7 @@ for k in "${KERNELS[@]}"; do
         status=1
         continue
     fi
-    if [ "$MODE" = time ]; then
+    if [ "$REPORT" = time ]; then
         ref=$(best_ms "$WORK/$k.ref"); anvil=$(best_ms "$WORK/$k.anvil")
         printf "%-8s %10s %10s %7s\n" "$k" "$ref" "$anvil" "$(awk -v a="$anvil" -v r="$ref" 'BEGIN { printf "%.2fx", r ? a / r : 0 }')"
     else
