@@ -500,6 +500,18 @@ bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
     return fold_into(gas, index, info, reader);
 }
 
+/* A general register loaded from `mem`: narrow integers extended to 32
+ * bits. */
+static void emit_gpr_load(x86_gas_t *gas, const char *mem, const anvil_mir_vreg_info_t *info, int phys)
+{
+    int bytes = (info->size_bits + 7) / 8;
+    const char *op = bytes == 1 ? (info->is_signed ? "movsbl" : "movzbl") : bytes == 2 ? (info->is_signed ? "movswl" : "movzwl") : NULL;
+    if (op)
+        anvil_strbuf_appendf(&gas->code, "\t%s %s, %%%s\n", op, mem, x86_gas_gpr(phys, 4));
+    else
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %s, %%%s\n", x86_gas_size_suffix(bytes), mem, x86_gas_gpr(phys, bytes));
+}
+
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
 {
     const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
@@ -515,13 +527,7 @@ void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
         gas->fp_load(gas, info->def, address);
         return;
     }
-    /* Narrow integers load extended to 32 bits. */
-    int bytes = (def_info->size_bits + 7) / 8;
-    const char *op = bytes == 1 ? (def_info->is_signed ? "movsbl" : "movzbl") : bytes == 2 ? (def_info->is_signed ? "movswl" : "movzwl") : NULL;
-    if (op)
-        anvil_strbuf_appendf(&gas->code, "\t%s %s, %%%s\n", op, address, x86_gas_gpr(def, 4));
-    else
-        anvil_strbuf_appendf(&gas->code, "\tmov%s %s, %%%s\n", x86_gas_size_suffix(bytes), address, x86_gas_gpr(def, bytes));
+    emit_gpr_load(gas, address, def_info, def);
 }
 
 void x86_gas_emit_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
@@ -1178,4 +1184,51 @@ void x86_gas_emit_instr(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
             gas->failed = true;
         break;
     }
+}
+
+void x86_gas_emit_incoming_stack_arg(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
+{
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    if (!info->has_imm || info->imm < 0 || info->imm > INT32_MAX - 32 || !def_info) {
+        gas->failed = true;
+        return;
+    }
+    int def = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    char mem[32];
+    snprintf(mem, sizeof(mem), "%s", x86_gas_frame(gas, gas->incoming_base + (int)info->imm));
+    if (def_info->reg_class == ANVIL_MIR_REG_FPR)
+        gas->fp_load(gas, info->def, mem);
+    else
+        emit_gpr_load(gas, mem, def_info, def);
+}
+
+void x86_gas_emit_dyn_alloca(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t count = anvil_mir_get_instr_use(gas->mir, index, 0);
+    if (!info->has_imm || info->imm <= 0 || info->num_uses != 1 || count == ANVIL_MIR_NO_VREG) {
+        gas->failed = true;
+        return;
+    }
+    int pointer = gas->pointer_bytes;
+    const char *suffix = x86_gas_size_suffix(pointer), *scratch = x86_gas_gpr(gas->alloca_scratch, pointer);
+    const char *count_reg = x86_gas_gpr(x86_gas_phys_of(gas, count), pointer);
+    int dst = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    /* The scratch register is the instruction's clobber: the count is read
+     * first. */
+    anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", suffix, count_reg, scratch);
+    if (info->imm != 1)
+        anvil_strbuf_appendf(&gas->code, "\timul%s $%lld, %%%s, %%%s\n", suffix, (long long)info->imm, scratch, scratch);
+    anvil_strbuf_appendf(&gas->code, "\tadd%s $15, %%%s\n\tand%s $-16, %%%s\n", suffix, scratch, suffix, scratch);
+    /* Relocate the outgoing area below each dynamic allocation; otherwise
+     * CALL_STACK_ARG (and Win64 callee home stores) overwrite the buffer. */
+    if (gas->outgoing_size)
+        anvil_strbuf_appendf(&gas->code, "\tadd%s $%d, %%%s\n", suffix, gas->outgoing_size, scratch);
+    if (gas->stack_probe)
+        gas->stack_probe(gas, index);
+    anvil_strbuf_appendf(&gas->code, "\tsub%s %%%s, %%%s\n", suffix, scratch, gas->stack_reg);
+    anvil_strbuf_appendf(&gas->code, "\tlea%s %d(%%%s), %%%s\n", suffix, gas->outgoing_size, gas->stack_reg, x86_gas_gpr(dst, pointer));
 }

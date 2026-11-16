@@ -70,6 +70,10 @@ typedef struct {
      * low bytes are the same); shifts keep their own width. */
     int min_operation_bytes;
     int outgoing_base;
+    /* Where the incoming stack arguments start from the frame base, and
+     * the register a dynamic allocation computes its size in. */
+    int incoming_base;
+    int alloca_scratch;
     bool (*has_byte)(int phys);
     void (*fp_load)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
     void (*fp_store)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
@@ -90,6 +94,9 @@ typedef struct {
      * arguments, calls, returns and their pseudos); false for one it does
      * not print. */
     bool (*target_instr)(void *gas, size_t index, const anvil_mir_instr_info_t *info);
+    /* Touches each page a stack allocation of the size in alloca_scratch
+     * crosses (NULL: the system grows the stack on any access). */
+    void (*stack_probe)(void *gas, size_t index);
     const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
@@ -155,6 +162,10 @@ void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr
 /* One MIR instruction: the shared forms here, the printer's own through
  * target_instr. */
 void x86_gas_emit_instr(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* INCOMING_STACK_ARG and DYN_ALLOCA (the outgoing area moved below the
+ * new block). */
+void x86_gas_emit_incoming_stack_arg(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_dyn_alloca(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

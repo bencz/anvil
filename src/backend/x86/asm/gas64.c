@@ -248,6 +248,12 @@ static void x64_emit_stack_probe(x64_mir_emit_t *emit, size_t id)
 
 static void x64_emit_frame_entry(x64_mir_emit_t *emit);
 
+/* Win64: a dynamic allocation probes the pages it crosses. */
+static void x64_alloca_probe(void *gas, size_t index)
+{
+    x64_emit_stack_probe(gas, index);
+}
+
 static void x64_emit_prologue(x64_mir_emit_t *emit)
 {
     const char *name = anvil_mir_func_name(emit->base.mir);
@@ -789,40 +795,6 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
     }
 }
 
-static void x64_emit_dyn_alloca(x64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    if (!info->has_imm || info->imm <= 0 || info->num_uses != 1) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_vreg_t count = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (count == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const char *count_reg = x86_gas_gpr(x86_gas_phys_of(&emit->base, count), 8);
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-
-    anvil_strbuf_appendf(&emit->base.code, "\tmovq %%%s, %%r11\n", count_reg);
-    if (info->imm != 1) {
-        anvil_strbuf_appendf(&emit->base.code, "\timulq $%lld, %%r11, %%r11\n", (long long)info->imm);
-    }
-    anvil_strbuf_append(&emit->base.code, "\taddq $15, %r11\n");
-    anvil_strbuf_append(&emit->base.code, "\tandq $-16, %r11\n");
-    /* Relocate the outgoing area below each dynamic allocation. Otherwise
-     * CALL_STACK_ARG (and Win64 callee home stores) overwrite the buffer. */
-    if (emit->base.outgoing_size)
-        anvil_strbuf_appendf(&emit->base.code, "\taddq $%d, %%r11\n", emit->base.outgoing_size);
-    if (emit->desc->is_win64)
-        x64_emit_stack_probe(emit, instr_index);
-    anvil_strbuf_append(&emit->base.code, "\tsubq %r11, %rsp\n");
-    anvil_strbuf_appendf(&emit->base.code, "\tleaq %d(%%rsp), %%%s\n", emit->base.outgoing_size, x86_gas_gpr(dst_phys, 8));
-}
-
 static void x64_emit_symbol_addr(x64_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
 {
     if (!info->symbol || !info->symbol[0]) {
@@ -856,35 +828,6 @@ static void x64_emit_symbol_addr(x64_mir_emit_t *emit, const anvil_mir_instr_inf
     }
 }
 
-static const char *x64_mem_load_op(anvil_mir_reg_class_t reg_class, int size, bool is_signed, int dst_size)
-{
-    if (reg_class == ANVIL_MIR_REG_FPR) {
-        return x64_fp_mov_op(size);
-    }
-    if (is_signed) {
-        switch (size) {
-        case 1:
-            return dst_size <= 4 ? "movsbl" : "movsbq";
-        case 2:
-            return dst_size <= 4 ? "movswl" : "movswq";
-        case 4:
-            return dst_size <= 4 ? "movl" : "movslq";
-        default:
-            return "movq";
-        }
-    }
-    switch (size) {
-    case 1:
-        return "movzbl";
-    case 2:
-        return "movzwl";
-    case 4:
-        return "movl";
-    default:
-        return "movq";
-    }
-}
-
 static bool x64_target_instr(void *user, size_t instr_index, const anvil_mir_instr_info_t *info);
 
 /* The x86-64 mode of the shared printer (`user`: the ABI, NULL for the
@@ -901,6 +844,10 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     gas->min_gpr_move = 1;
     gas->min_operation_bytes = 1;
     gas->outgoing_base = desc ? desc->shadow_space : 0;
+    /* Above the saved RBP and the return address, and the callee's home area. */
+    gas->incoming_base = 16 + gas->outgoing_base;
+    gas->alloca_scratch = X64_R11;
+    gas->stack_probe = desc && desc->is_win64 ? x64_alloca_probe : NULL;
     gas->fp_load = x64_fp_load;
     gas->fp_store = x64_fp_store;
     gas->fp_compare = x64_fp_compare;
@@ -916,37 +863,6 @@ static void x64_mode(x86_gas_t *gas, const void *user)
 bool anvil_x64_mark_registerless(anvil_mir_func_t *mir)
 {
     return x86_gas_mark_registerless(mir, x64_mode, NULL);
-}
-
-static void x64_emit_incoming_stack_arg(x64_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
-{
-    if (!info->has_imm || info->imm < 0 || info->imm > INT32_MAX - 32) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *def_info = x64_vreg_info_checked(emit, info->def);
-    int def_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (!def_info || emit->base.failed)
-        return;
-
-    int size = x64_size_bytes(def_info->size_bits);
-    int shadow = emit->desc->shadow_space;
-    int frame_offset = 16 + shadow + (int)info->imm;
-    if (emit->desc->is_win64)
-        frame_offset += emit->base.frame_size;
-    const char *op = x64_mem_load_op(def_info->reg_class, size, def_info->is_signed, size);
-    const char *dst;
-    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        dst = x86_gas_xmm(def_phys);
-    } else if (!def_info->is_signed && size < 4) {
-        dst = x86_gas_gpr(def_phys, 4);
-    } else if (def_info->is_signed && size <= 2) {
-        dst = x86_gas_gpr(def_phys, 4);
-    } else {
-        dst = x86_gas_gpr(def_phys, size);
-    }
-    anvil_strbuf_appendf(&emit->base.code, "\t%s %d(%%rbp), %%%s\n", op, frame_offset, dst);
 }
 
 static void x64_emit_call(x64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1159,10 +1075,10 @@ static bool x64_target_instr(void *user, size_t instr_index, const anvil_mir_ins
         return true;
     }
     case ANVIL_MIR_OP_DYN_ALLOCA:
-        x64_emit_dyn_alloca(emit, instr_index, info);
+        x86_gas_emit_dyn_alloca(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_INCOMING_STACK_ARG:
-        x64_emit_incoming_stack_arg(emit, info);
+        x86_gas_emit_incoming_stack_arg(&emit->base, info);
         return true;
     case ANVIL_MIR_OP_CALL:
         x64_emit_call(emit, instr_index, info);

@@ -511,39 +511,6 @@ static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_
     }
 }
 
-static void x86_emit_dyn_alloca(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    if (!info->has_imm || info->imm <= 0 || info->num_uses != 1) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_vreg_t count = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (count == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const char *count_reg = x86_gas_gpr(x86_gas_phys_of(&emit->base, count), 4);
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-
-    /* EAX is the instruction's clobber: the count is read first. */
-    anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %%eax\n", count_reg);
-    if (info->imm != 1) {
-        anvil_strbuf_appendf(&emit->base.code, "\timull $%lld, %%eax, %%eax\n", (long long)info->imm);
-    }
-    anvil_strbuf_append(&emit->base.code, "\taddl $15, %eax\n");
-    anvil_strbuf_append(&emit->base.code, "\tandl $-16, %eax\n");
-    /* Relocate the outgoing area below each dynamic allocation; otherwise
-     * CALL_STACK_ARG overwrites the buffer. */
-    if (emit->base.outgoing_size)
-        anvil_strbuf_appendf(&emit->base.code, "\taddl $%d, %%eax\n", emit->base.outgoing_size);
-    anvil_strbuf_append(&emit->base.code, "\tsubl %eax, %esp\n");
-    anvil_strbuf_appendf(&emit->base.code, "\tleal %d(%%esp), %%%s\n", emit->base.outgoing_size, x86_gas_gpr(dst_phys, 4));
-}
-
 void x86_emit_got_pointer(x86_mir_emit_t *emit, const char *reg)
 {
     const char *function = anvil_mir_func_name(emit->base.mir);
@@ -645,6 +612,9 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     gas->fp_memory_operands = false;
     gas->stack_reg = "esp";
     gas->min_gpr_move = 4;
+    /* Above the saved EBP and the return address. */
+    gas->incoming_base = 8;
+    gas->alloca_scratch = X86_EAX;
     gas->min_operation_bytes = 4;
     gas->has_byte = x86_reg_has_byte;
     gas->fp_load = x86_fp_load;
@@ -662,42 +632,6 @@ static void x86_mode(x86_gas_t *gas, const void *user)
 bool anvil_x86_mark_registerless(anvil_mir_func_t *mir)
 {
     return x86_gas_mark_registerless(mir, x86_mode, NULL);
-}
-
-static void x86_emit_incoming_stack_arg(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
-{
-    if (!info->has_imm || info->imm < 0 || info->imm > INT32_MAX - 32) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *def_info = x86_vreg_info_checked(emit, info->def);
-    int def_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (!def_info || emit->base.failed)
-        return;
-
-    int size = x86_size_bytes(def_info->size_bits);
-    int frame_offset = 8 + (int)info->imm;
-
-    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        char mem[32];
-        snprintf(mem, sizeof(mem), "%s", x86_gas_frame(&emit->base, (int)(frame_offset)));
-        emit->fp->load(emit, info->def, mem);
-        return;
-    }
-
-    const char *op;
-    if (def_info->is_signed && size == 1)
-        op = "movsbl";
-    else if (def_info->is_signed && size == 2)
-        op = "movswl";
-    else if (!def_info->is_signed && size == 1)
-        op = "movzbl";
-    else if (!def_info->is_signed && size == 2)
-        op = "movzwl";
-    else
-        op = "movl";
-    anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", op, x86_gas_frame(&emit->base, (int)(frame_offset)), x86_gas_gpr(def_phys, 4));
 }
 
 static void x86_emit_call(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -929,10 +863,10 @@ static bool x86_target_instr(void *user, size_t instr_index, const anvil_mir_ins
         x86_emit_symbol_addr(emit, info);
         return true;
     case ANVIL_MIR_OP_DYN_ALLOCA:
-        x86_emit_dyn_alloca(emit, instr_index, info);
+        x86_gas_emit_dyn_alloca(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_INCOMING_STACK_ARG:
-        x86_emit_incoming_stack_arg(emit, info);
+        x86_gas_emit_incoming_stack_arg(&emit->base, info);
         return true;
     case ANVIL_MIR_OP_VA_START:
         /* Address of the first unnamed stack argument. */
