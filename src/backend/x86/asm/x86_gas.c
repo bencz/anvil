@@ -1360,3 +1360,27 @@ void x86_gas_emit_atomic(x86_gas_t *gas, size_t index, const anvil_mir_instr_inf
     else if (def != X86_GAS_AX)
         anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", suffix, accumulator, x86_gas_gpr(def, size));
 }
+
+void x86_gas_emit_rotate(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const char *mnemonic)
+{
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, index, 0), rhs = anvil_mir_get_instr_use(gas->mir, index, 1);
+    if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG) {
+        gas->failed = true;
+        return;
+    }
+    int bytes = info->imm == 64 ? 8 : 4;
+    int a = x86_gas_phys_of(gas, lhs), dst = x86_gas_phys_of(gas, info->def);
+    int64_t count;
+    bool immediate = x86_gas_known_imm(gas, rhs, &count);
+    /* The count reaches CL first (dst may hold it), then a copy rotates. */
+    if (!immediate)
+        anvil_strbuf_appendf(&gas->code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(x86_gas_phys_of(gas, rhs), 4), x86_gas_gpr(X86_GAS_COUNT_REG, 4));
+    if (gas->failed)
+        return;
+    if (a != dst)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(a, bytes), x86_gas_gpr(dst, bytes));
+    if (immediate)
+        anvil_strbuf_appendf(&gas->code, "\t%s $%d, %%%s\n", mnemonic, (int)(count & (bytes * 8 - 1)), x86_gas_gpr(dst, bytes));
+    else
+        anvil_strbuf_appendf(&gas->code, "\t%s %%cl, %%%s\n", mnemonic, x86_gas_gpr(dst, bytes));
+}

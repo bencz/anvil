@@ -596,21 +596,7 @@ static void x64_emit_vector(x64_mir_emit_t *emit, size_t instr_index, const anvi
         return;
     }
     if (info->ir_op == ANVIL_OP_ROTL) {
-        /* The count into CL first (dst may hold it), then rotate a copy. */
-        int size = info->imm == 64 ? 8 : 4;
-        const char *a = x86_gas_gpr(x86_gas_phys_of(&emit->base, lhs), size), *dst = x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), size);
-        int64_t count;
-        bool immediate = x86_gas_known_imm(&emit->base, rhs, &count);
-        if (!immediate)
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %%ecx\n", x86_gas_gpr(x86_gas_phys_of(&emit->base, rhs), 4));
-        if (emit->base.failed)
-            return;
-        if (strcmp(a, dst) != 0)
-            anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(size), a, dst);
-        if (immediate)
-            anvil_strbuf_appendf(&emit->base.code, "\t%s $%d, %%%s\n", isa->mnemonic, (int)(count & (size * 8 - 1)), dst);
-        else
-            anvil_strbuf_appendf(&emit->base.code, "\t%s %%cl, %%%s\n", isa->mnemonic, dst);
+        x86_gas_emit_rotate(&emit->base, instr_index, info, isa->mnemonic);
         return;
     }
     if (info->ir_op == ANVIL_OP_UMULH || info->ir_op == ANVIL_OP_SMULH) {

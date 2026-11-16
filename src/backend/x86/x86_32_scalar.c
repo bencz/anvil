@@ -18,6 +18,7 @@ const anvil_vector_isa_t x86_scalar_isa[] = {
     /* High half of a product: one-operand mull/imull into edx:eax. */
     {ANVIL_OP_UMULH, 32, INT, S, 0, 3, "mull"},
     {ANVIL_OP_SMULH, 32, INT, S, 0, 3, "imull"},
+    {ANVIL_OP_ROTL, 32, INT, S, 0, 1, "roll"},
 };
 
 const size_t x86_scalar_isa_count = sizeof(x86_scalar_isa) / sizeof(x86_scalar_isa[0]);

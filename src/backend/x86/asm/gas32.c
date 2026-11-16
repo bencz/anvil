@@ -37,6 +37,9 @@ static uint64_t x86_printer_gpr_scratch(const anvil_mir_func_t *mir, const anvil
         return def && def->reg_class == ANVIL_MIR_REG_GPR && !x86_gas_facts_imm(facts, true, anvil_mir_get_instr_use(mir, index, 1), &count)
                    ? UINT64_C(1) << X86_ECX
                    : 0;
+    case ANVIL_MIR_OP_SCALAR:
+        /* A rotation by a variable count reads it from CL. */
+        return info->ir_op == ANVIL_OP_ROTL && !x86_gas_facts_imm(facts, true, anvil_mir_get_instr_use(mir, index, 1), &count) ? UINT64_C(1) << X86_ECX : 0;
     default:
         return 0;
     }
@@ -422,6 +425,10 @@ static void x86_emit_scalar(x86_mir_emit_t *emit, size_t instr_index, const anvi
     anvil_mir_vreg_t a = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
     if (!isa || a == ANVIL_MIR_NO_VREG) {
         emit->base.failed = true;
+        return;
+    }
+    if (info->ir_op == ANVIL_OP_ROTL) {
+        x86_gas_emit_rotate(&emit->base, instr_index, info, isa->mnemonic);
         return;
     }
     if (info->ir_op != ANVIL_OP_UMULH && info->ir_op != ANVIL_OP_SMULH) {

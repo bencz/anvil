@@ -180,6 +180,9 @@ void x86_gas_emit_cast(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
  * the operand in ECX, the result in EAX (lock-prefixed or xchg forms, a
  * cmpxchg loop for AND, OR and XOR). */
 void x86_gas_emit_atomic(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* A SCALAR ROTL with `mnemonic` (roll, rolq): by an immediate count, or
+ * by CL (the printer's temporary). */
+void x86_gas_emit_rotate(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const char *mnemonic);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

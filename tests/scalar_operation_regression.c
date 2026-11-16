@@ -179,6 +179,7 @@ typedef struct {
 
 static const lowering_case_t lowering_cases[] = {
     {ANVIL_ARCH_X86_64, 0, "roll $5", "roll %cl", "cmovg", "pushq %rbp"},
+    {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, "roll $5", "roll %cl", "cmovg", "pushl %ebp"},
     {ANVIL_ARCH_ARM64, 0, "ror w0, w0, #27", "neg w16", "csel w0", "stp x29"},
     {ANVIL_ARCH_PPC64LE, ANVIL_CPU_PPC64_POWER8, "rotlwi", "rotlw ", "isel", "mflr"},
     {ANVIL_ARCH_PPC64, ANVIL_CPU_PPC64_POWER4, "rotlwi", "rotlw ", "bc ", "mflr"},
