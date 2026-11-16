@@ -457,60 +457,6 @@ static void x86_emit_scalar(x86_mir_emit_t *emit, size_t instr_index, const anvi
 }
 
 
-static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (src == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *dst_info = x86_vreg_info_checked(emit, info->def);
-    const anvil_mir_vreg_info_t *src_info = x86_vreg_info_checked(emit, src);
-    if (!dst_info || !src_info)
-        return;
-
-    switch (info->op) {
-    case ANVIL_MIR_OP_ZEXT:
-        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, false);
-        break;
-    case ANVIL_MIR_OP_SEXT:
-        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, true);
-        break;
-    case ANVIL_MIR_OP_TRUNC:
-    case ANVIL_MIR_OP_BITCAST:
-        x86_gas_emit_copy(&emit->base, info->def, src);
-        break;
-    case ANVIL_MIR_OP_SITOFP:
-    case ANVIL_MIR_OP_UITOFP:
-        if (dst_info->reg_class != ANVIL_MIR_REG_FPR || src_info->reg_class != ANVIL_MIR_REG_GPR) {
-            emit->base.failed = true;
-            return;
-        }
-        emit->fp->convert(emit, info->op, info->def, src);
-        break;
-    case ANVIL_MIR_OP_FPTOSI:
-    case ANVIL_MIR_OP_FPTOUI:
-        if (dst_info->reg_class != ANVIL_MIR_REG_GPR || src_info->reg_class != ANVIL_MIR_REG_FPR) {
-            emit->base.failed = true;
-            return;
-        }
-        emit->fp->convert(emit, info->op, info->def, src);
-        break;
-    case ANVIL_MIR_OP_FPEXT:
-    case ANVIL_MIR_OP_FPTRUNC:
-        if (dst_info->reg_class != ANVIL_MIR_REG_FPR || src_info->reg_class != ANVIL_MIR_REG_FPR) {
-            emit->base.failed = true;
-            return;
-        }
-        emit->fp->convert(emit, info->op, info->def, src);
-        break;
-    default:
-        emit->base.failed = true;
-        break;
-    }
-}
-
 void x86_emit_got_pointer(x86_mir_emit_t *emit, const char *reg)
 {
     const char *function = anvil_mir_func_name(emit->base.mir);
@@ -593,6 +539,12 @@ static void x86_fp_unary(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst,
     emit->fp->unary(emit, op, dst, src);
 }
 
+static void x86_fp_convert(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->convert(emit, op, dst, src);
+}
+
 static void x86_fp_binary(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
     x86_mir_emit_t *emit = gas;
@@ -625,6 +577,7 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     gas->fp_copy = x86_fp_copy;
     gas->fp_constant = x86_fp_constant;
     gas->fp_unary = x86_fp_unary;
+    gas->fp_convert = x86_fp_convert;
     gas->target_instr = x86_target_instr;
     gas->local_label_prefix = plat ? plat->format->local_label_prefix : "";
 }
@@ -857,7 +810,7 @@ static bool x86_target_instr(void *user, size_t instr_index, const anvil_mir_ins
     case ANVIL_MIR_OP_FPTOUI:
     case ANVIL_MIR_OP_FPEXT:
     case ANVIL_MIR_OP_FPTRUNC:
-        x86_emit_cast(emit, instr_index, info);
+        x86_gas_emit_cast(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_SYMBOL_ADDR:
         x86_emit_symbol_addr(emit, info);

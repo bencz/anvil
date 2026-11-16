@@ -664,30 +664,16 @@ static void x64_fp_unary(void *user, anvil_mir_opcode_t op, anvil_mir_vreg_t def
         emit->base.emitted_fabs_mask = true;
 }
 
-static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+/* SSE conversions; into an XMM register they merge into its upper bits,
+ * so it is zeroed first, breaking the dependency on its old value. */
+static void x64_fp_convert(void *user, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t src)
 {
-    anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (src == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *dst_info = x64_vreg_info_checked(emit, info->def);
+    x64_mir_emit_t *emit = user;
+    const anvil_mir_vreg_info_t *dst_info = x64_vreg_info_checked(emit, def);
     const anvil_mir_vreg_info_t *src_info = x64_vreg_info_checked(emit, src);
     if (!dst_info || !src_info)
         return;
-
-    switch (info->op) {
-    case ANVIL_MIR_OP_ZEXT:
-        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, false);
-        break;
-    case ANVIL_MIR_OP_SEXT:
-        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, true);
-        break;
-    case ANVIL_MIR_OP_TRUNC:
-    case ANVIL_MIR_OP_BITCAST:
-        x86_gas_emit_copy(&emit->base, info->def, src);
-        break;
+    switch (op) {
     case ANVIL_MIR_OP_SITOFP: {
         if (dst_info->reg_class != ANVIL_MIR_REG_FPR || src_info->reg_class != ANVIL_MIR_REG_GPR) {
             emit->base.failed = true;
@@ -697,12 +683,10 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
         int src_size = x64_size_bytes(src_info->size_bits);
         if (src_size < 4)
             src_size = 4;
-        const char *dst = x64_reg_name(emit, info->def);
+        const char *dst = x64_reg_name(emit, def);
         const char *s = x86_gas_gpr(x86_gas_phys_of(&emit->base, src), src_size);
         if (emit->base.failed)
             return;
-        /* Conversions into an XMM register merge into its upper bits:
-         * zeroing it first breaks the dependency on its old value. */
         anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", dst, dst);
         anvil_strbuf_appendf(&emit->base.code, "\tcvtsi2s%s%s %%%s, %%%s\n", dst_size <= 4 ? "s" : "d", src_size <= 4 ? "l" : "q", s, dst);
         break;
@@ -714,7 +698,7 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
         }
         int dst_size = x64_size_bytes(dst_info->size_bits);
         int src_size = x64_size_bytes(src_info->size_bits);
-        const char *dst = x64_reg_name(emit, info->def);
+        const char *dst = x64_reg_name(emit, def);
         if (emit->base.failed)
             return;
         anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", dst, dst);
@@ -747,9 +731,9 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
             dst_size = 4;
         const char *s = x64_reg_name(emit, src);
         const char *sd = src_size <= 4 ? "s" : "d";
-        bool is_unsigned = info->op == ANVIL_MIR_OP_FPTOUI;
+        bool is_unsigned = op == ANVIL_MIR_OP_FPTOUI;
         /* An unsigned 32-bit result is the low half of the 64-bit one. */
-        const char *dst = x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), dst_size <= 4 && !is_unsigned ? 4 : 8);
+        const char *dst = x86_gas_gpr(x86_gas_phys_of(&emit->base, def), dst_size <= 4 && !is_unsigned ? 4 : 8);
         if (emit->base.failed)
             return;
         if (!is_unsigned || dst_size <= 4) {
@@ -770,7 +754,7 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
         break;
     }
     case ANVIL_MIR_OP_FPEXT: {
-        const char *dst = x64_reg_name(emit, info->def);
+        const char *dst = x64_reg_name(emit, def);
         const char *s = x64_reg_name(emit, src);
         if (emit->base.failed)
             return;
@@ -780,7 +764,7 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
         break;
     }
     case ANVIL_MIR_OP_FPTRUNC: {
-        const char *dst = x64_reg_name(emit, info->def);
+        const char *dst = x64_reg_name(emit, def);
         const char *s = x64_reg_name(emit, src);
         if (emit->base.failed)
             return;
@@ -856,6 +840,7 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     gas->fp_copy = x64_fp_copy;
     gas->fp_constant = x64_fp_constant;
     gas->fp_unary = x64_fp_unary;
+    gas->fp_convert = x64_fp_convert;
     gas->target_instr = x64_target_instr;
     gas->local_label_prefix = desc ? desc->format->local_label_prefix : "";
 }
@@ -1036,7 +1021,7 @@ static bool x64_target_instr(void *user, size_t instr_index, const anvil_mir_ins
     case ANVIL_MIR_OP_FPTOUI:
     case ANVIL_MIR_OP_FPEXT:
     case ANVIL_MIR_OP_FPTRUNC:
-        x64_emit_cast(emit, instr_index, info);
+        x86_gas_emit_cast(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_SYMBOL_ADDR:
         x64_emit_symbol_addr(emit, info);

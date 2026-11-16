@@ -1232,3 +1232,44 @@ void x86_gas_emit_dyn_alloca(x86_gas_t *gas, size_t index, const anvil_mir_instr
     anvil_strbuf_appendf(&gas->code, "\tsub%s %%%s, %%%s\n", suffix, scratch, gas->stack_reg);
     anvil_strbuf_appendf(&gas->code, "\tlea%s %d(%%%s), %%%s\n", suffix, gas->outgoing_size, gas->stack_reg, x86_gas_gpr(dst, pointer));
 }
+
+void x86_gas_emit_cast(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t src = anvil_mir_get_instr_use(gas->mir, index, 0);
+    const anvil_mir_vreg_info_t *dst_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    const anvil_mir_vreg_info_t *src_info = src == ANVIL_MIR_NO_VREG ? NULL : anvil_mir_get_vreg_info(gas->mir, src);
+    if (!dst_info || !src_info) {
+        gas->failed = true;
+        return;
+    }
+    anvil_mir_reg_class_t from = ANVIL_MIR_REG_FPR, to = ANVIL_MIR_REG_FPR;
+    switch (info->op) {
+    case ANVIL_MIR_OP_ZEXT:
+    case ANVIL_MIR_OP_SEXT:
+        x86_gas_emit_gpr_extend(gas, index, info, info->op == ANVIL_MIR_OP_SEXT);
+        return;
+    case ANVIL_MIR_OP_TRUNC:
+    case ANVIL_MIR_OP_BITCAST:
+        x86_gas_emit_copy(gas, info->def, src);
+        return;
+    case ANVIL_MIR_OP_SITOFP:
+    case ANVIL_MIR_OP_UITOFP:
+        from = ANVIL_MIR_REG_GPR;
+        break;
+    case ANVIL_MIR_OP_FPTOSI:
+    case ANVIL_MIR_OP_FPTOUI:
+        to = ANVIL_MIR_REG_GPR;
+        break;
+    case ANVIL_MIR_OP_FPEXT:
+    case ANVIL_MIR_OP_FPTRUNC:
+        break;
+    default:
+        gas->failed = true;
+        return;
+    }
+    if (src_info->reg_class != from || dst_info->reg_class != to) {
+        gas->failed = true;
+        return;
+    }
+    gas->fp_convert(gas, info->op, info->def, src);
+}

@@ -89,6 +89,9 @@ typedef struct {
     void (*fp_constant)(void *gas, anvil_mir_vreg_t dst, uint64_t bits);
     /* The FP unit's NEG and FABS. */
     void (*fp_unary)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
+    /* The FP unit's conversions: SITOFP, UITOFP, FPTOSI, FPTOUI, FPEXT,
+     * FPTRUNC. */
+    void (*fp_convert)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
     /* The printer's own instructions (atomics, vector and scalar forms,
      * conversions, symbol addresses, VA_START, dynamic allocation, incoming
      * arguments, calls, returns and their pseudos); false for one it does
@@ -166,6 +169,9 @@ void x86_gas_emit_instr(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
  * new block). */
 void x86_gas_emit_incoming_stack_arg(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
 void x86_gas_emit_dyn_alloca(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* A conversion: integer extensions, truncations and bitcasts here, those
+ * to, from or between FP values on the FP unit. */
+void x86_gas_emit_cast(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
