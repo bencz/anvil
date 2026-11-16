@@ -81,35 +81,8 @@ static bool has_side_effects(const anvil_instr_t *instr)
     if (instr->op == ANVIL_OP_CALL)
         return anvil_opt_call_effects(instr) != 0;
 
-    switch (instr->op) {
-        case ANVIL_OP_SDIV:
-        case ANVIL_OP_UDIV:
-        case ANVIL_OP_SMOD:
-        case ANVIL_OP_UMOD:
-        case ANVIL_OP_LOAD:
-        case ANVIL_OP_STORE:
-        case ANVIL_OP_ALLOCA:
-        case ANVIL_OP_BR:
-        case ANVIL_OP_BR_COND:
-        case ANVIL_OP_RET:
-        case ANVIL_OP_SWITCH:
-        case ANVIL_OP_FPTRUNC:
-        case ANVIL_OP_FPEXT:
-        case ANVIL_OP_FPTOSI:
-        case ANVIL_OP_FPTOUI:
-        case ANVIL_OP_SITOFP:
-        case ANVIL_OP_UITOFP:
-        case ANVIL_OP_FADD:
-        case ANVIL_OP_FSUB:
-        case ANVIL_OP_FMUL:
-        case ANVIL_OP_FDIV:
-        case ANVIL_OP_FCMP:
-        case ANVIL_OP_FMA:
-        case ANVIL_OP_FSQRT:
-            return true;
-        default:
-            return false;
-    }
+    /* A trap, memory, control flow or the floating-point environment. */
+    return anvil_op_has(instr->op, ANVIL_OPF_TRAPS | ANVIL_OPF_MEMORY | ANVIL_OPF_TERMINATOR | ANVIL_OPF_FP_ENV);
 }
 
 /* A load that cannot fault: its whole range lies inside a stack object or a

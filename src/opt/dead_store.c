@@ -98,10 +98,8 @@ static bool is_dead_store(anvil_instr_t *store)
             return false;
         
         /* If we hit a branch, stop (cross-block analysis not done here) */
-        if (instr->op == ANVIL_OP_BR || instr->op == ANVIL_OP_BR_COND ||
-            instr->op == ANVIL_OP_RET) {
+        if (anvil_op_has(instr->op, ANVIL_OPF_TERMINATOR))
             return false;
-        }
     }
     
     return false;

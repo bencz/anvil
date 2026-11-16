@@ -202,14 +202,6 @@ static anvil_type_t *callee_func_type(const anvil_value_t *callee)
     return anvil_sem_callee_func_type(callee);
 }
 
-static bool op_is_terminator(anvil_op_t op)
-{
-    return op == ANVIL_OP_RET ||
-           op == ANVIL_OP_BR ||
-           op == ANVIL_OP_BR_COND ||
-           op == ANVIL_OP_SWITCH;
-}
-
 static bool block_has_successor(const anvil_block_t *from,
                                 const anvil_block_t *to)
 {
@@ -1659,7 +1651,7 @@ bool anvil_func_verify(const anvil_func_t *func, char *error, size_t error_len)
 
             if (!verify_instr(mod, func, instr, error, error_len)) return false;
 
-            if (op_is_terminator(instr->op)) saw_terminator = true;
+            if (anvil_op_has(instr->op, ANVIL_OPF_TERMINATOR)) saw_terminator = true;
         }
 
         if (!saw_terminator) {

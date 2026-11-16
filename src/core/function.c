@@ -522,11 +522,7 @@ bool anvil_block_has_terminator(anvil_block_t *block)
 {
     if (!block || !block->last) return false;
     
-    anvil_op_t op = block->last->op;
-    return op == ANVIL_OP_RET ||
-           op == ANVIL_OP_BR ||
-           op == ANVIL_OP_BR_COND ||
-           op == ANVIL_OP_SWITCH;
+    return anvil_op_has(block->last->op, ANVIL_OPF_TERMINATOR);
 }
 
 void anvil_func_unlink_block(anvil_func_t *func, anvil_block_t *block)

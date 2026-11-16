@@ -106,23 +106,10 @@ static inline anvil_instr_t *anvil_opt_make_binary(anvil_ctx_t *ctx, anvil_op_t 
     return left && right ? anvil_opt_make_instr(ctx, op, type, left, right, name) : NULL;
 }
 
-/* Integer operations whose operands may swap (the comparisons included). */
+/* Operations whose operands may swap (the comparisons included). */
 static inline bool anvil_opt_commutative(anvil_op_t op)
 {
-    switch (op) {
-    case ANVIL_OP_ADD:
-    case ANVIL_OP_MUL:
-    case ANVIL_OP_UMULH:
-    case ANVIL_OP_SMULH:
-    case ANVIL_OP_AND:
-    case ANVIL_OP_OR:
-    case ANVIL_OP_XOR:
-    case ANVIL_OP_CMP_EQ:
-    case ANVIL_OP_CMP_NE:
-        return true;
-    default:
-        return false;
-    }
+    return anvil_op_has(op, ANVIL_OPF_COMMUTATIVE);
 }
 
 /* Links a detached instruction into `position`'s block just before it. */

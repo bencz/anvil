@@ -15,6 +15,29 @@ extern "C" {
 
 unsigned anvil_instr_call_effects(const anvil_instr_t *instr);
 bool anvil_op_is_atomic(anvil_op_t op);
+
+/* What an operation is, one table for every pass (src/core/op_info.c). */
+enum {
+    ANVIL_OPF_TERMINATOR = 1u << 0,  /* ends its block */
+    ANVIL_OPF_COMMUTATIVE = 1u << 1, /* its two operands may swap */
+    ANVIL_OPF_TRAPS = 1u << 2,       /* may trap (division by zero, a faulting access) */
+    ANVIL_OPF_MEMORY = 1u << 3,      /* reads or writes memory or the stack */
+    ANVIL_OPF_FP_ENV = 1u << 4,      /* reads or changes the floating-point environment */
+    ANVIL_OPF_PURE = 1u << 5,        /* its result depends on its operands alone: two alike compute one value */
+    ANVIL_OPF_UNARY = 1u << 6,       /* one value operand */
+};
+
+typedef struct {
+    const char *name; /* in dumps; NULL for none */
+    unsigned flags;
+} anvil_op_info_t;
+
+const anvil_op_info_t *anvil_op_info(anvil_op_t op);
+
+static inline bool anvil_op_has(anvil_op_t op, unsigned flags)
+{
+    return (anvil_op_info(op)->flags & flags) != 0;
+}
 bool anvil_atomic_info_valid(anvil_op_t op, const anvil_atomic_info_t *info);
 bool anvil_atomic_type_valid(const anvil_type_t *type);
 anvil_block_t *anvil_block_prepare(anvil_func_t *func, const char *name);

@@ -39,6 +39,7 @@ CORE_SRCS = \
 	$(SRC_DIR)/core/strbuf.c \
 	$(SRC_DIR)/core/backend.c \
 	$(SRC_DIR)/core/ir_dump.c \
+	$(SRC_DIR)/core/op_info.c \
 	$(SRC_DIR)/core/verify.c
 
 BACKEND_SRCS = \

@@ -53,75 +53,16 @@ typedef struct {
 
 #define EXPR_INITIAL_CAP 32
 
-/* Check if an operation is suitable for CSE */
+/* Pure operations (integer and pointer conversions included; FP
+ * conversions depend on the floating-point environment). */
 static bool is_cse_candidate(anvil_op_t op)
 {
-    switch (op) {
-        /* Arithmetic operations */
-        case ANVIL_OP_ADD:
-        case ANVIL_OP_SUB:
-        case ANVIL_OP_MUL:
-        case ANVIL_OP_UMULH:
-        case ANVIL_OP_SMULH:
-        case ANVIL_OP_SDIV:
-        case ANVIL_OP_UDIV:
-        case ANVIL_OP_SMOD:
-        case ANVIL_OP_UMOD:
-        /* Bitwise operations */
-        case ANVIL_OP_AND:
-        case ANVIL_OP_OR:
-        case ANVIL_OP_XOR:
-        case ANVIL_OP_SHL:
-        case ANVIL_OP_SHR:
-        case ANVIL_OP_SAR:
-        case ANVIL_OP_ROTL:
-        /* Comparison operations */
-        case ANVIL_OP_CMP_EQ:
-        case ANVIL_OP_CMP_NE:
-        case ANVIL_OP_CMP_LT:
-        case ANVIL_OP_CMP_LE:
-        case ANVIL_OP_CMP_GT:
-        case ANVIL_OP_CMP_GE:
-        case ANVIL_OP_CMP_ULT:
-        case ANVIL_OP_CMP_ULE:
-        case ANVIL_OP_CMP_UGT:
-        case ANVIL_OP_CMP_UGE:
-        case ANVIL_OP_FCMP:
-        /* Integer and pointer conversions (FP conversions depend on the
-         * floating-point environment) */
-        case ANVIL_OP_SEXT:
-        case ANVIL_OP_ZEXT:
-        case ANVIL_OP_TRUNC:
-        case ANVIL_OP_BITCAST:
-        case ANVIL_OP_PTRTOINT:
-        case ANVIL_OP_INTTOPTR:
-        case ANVIL_OP_NEG:
-        case ANVIL_OP_NOT:
-        /* Address arithmetic and selection */
-        case ANVIL_OP_GEP:
-        case ANVIL_OP_STRUCT_GEP:
-        case ANVIL_OP_SELECT:
-            return true;
-        default:
-            return false;
-    }
+    return anvil_op_has(op, ANVIL_OPF_PURE);
 }
 
 static bool is_unary(anvil_op_t op)
 {
-    switch (op) {
-        case ANVIL_OP_SEXT:
-        case ANVIL_OP_ZEXT:
-        case ANVIL_OP_TRUNC:
-        case ANVIL_OP_BITCAST:
-        case ANVIL_OP_PTRTOINT:
-        case ANVIL_OP_INTTOPTR:
-        case ANVIL_OP_NEG:
-        case ANVIL_OP_NOT:
-            return true;
-        default:
-            return false;
-    }
+    return anvil_op_has(op, ANVIL_OPF_UNARY);
 }
 
 /* The key of a candidate; false when it has no result or another shape. */
