@@ -83,6 +83,8 @@ typedef struct {
      * constants (their bits). */
     void (*fp_copy)(void *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
     void (*fp_constant)(void *gas, anvil_mir_vreg_t dst, uint64_t bits);
+    /* The FP unit's NEG and FABS. */
+    void (*fp_unary)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
     const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
@@ -138,6 +140,13 @@ void x86_gas_emit_binary(x86_gas_t *gas, size_t index, const anvil_mir_instr_inf
  * move otherwise). */
 void x86_gas_emit_copy(x86_gas_t *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
 void x86_gas_emit_mov(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
+/* NEG, NOT and FABS. */
+void x86_gas_emit_unary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* ZEXT and SEXT of a general register: nothing or a copy where the value
+ * is already extended (a narrow load of its signedness, a value known zero
+ * above its width, a 32-bit operation's result on x86-64), movz/movs
+ * otherwise. */
+void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, bool sign_extend);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

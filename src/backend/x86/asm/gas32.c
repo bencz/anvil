@@ -457,96 +457,6 @@ static void x86_emit_scalar(x86_mir_emit_t *emit, size_t instr_index, const anvi
 }
 
 
-static void x86_emit_unary(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (src == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *def_info = x86_vreg_info_checked(emit, info->def);
-    if (!def_info || emit->base.failed)
-        return;
-
-    if (info->op == ANVIL_MIR_OP_NEG) {
-        if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-            emit->fp->unary(emit, info->op, info->def, src);
-        } else {
-            int size = x86_size_bytes(def_info->size_bits);
-            if (size < 4)
-                size = 4;
-            const char *suf = x86_gas_size_suffix(size);
-            const char *dst = x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), size);
-            const char *s = x86_gas_gpr(x86_gas_phys_of(&emit->base, src), size);
-            if (emit->base.failed)
-                return;
-            anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", suf, s, dst);
-            anvil_strbuf_appendf(&emit->base.code, "\tneg%s %%%s\n", suf, dst);
-        }
-    } else if (info->op == ANVIL_MIR_OP_FABS && def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        emit->fp->unary(emit, info->op, info->def, src);
-    } else if (info->op == ANVIL_MIR_OP_NOT && def_info->reg_class == ANVIL_MIR_REG_GPR) {
-        int size = x86_size_bytes(def_info->size_bits);
-        if (size < 4)
-            size = 4;
-        const char *suf = x86_gas_size_suffix(size);
-        const char *dst = x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), size);
-        const char *s = x86_gas_gpr(x86_gas_phys_of(&emit->base, src), size);
-        if (emit->base.failed)
-            return;
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", suf, s, dst);
-        anvil_strbuf_appendf(&emit->base.code, "\tnot%s %%%s\n", suf, dst);
-    } else {
-        emit->base.failed = true;
-    }
-}
-
-static void x86_emit_gpr_extend(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info, bool sign_extend)
-{
-    anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (src == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *dst_info = x86_vreg_info_checked(emit, info->def);
-    const anvil_mir_vreg_info_t *src_info = x86_vreg_info_checked(emit, src);
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    int src_phys = x86_gas_phys_of(&emit->base, src);
-    if (!dst_info || !src_info || emit->base.failed)
-        return;
-    if (dst_info->reg_class != ANVIL_MIR_REG_GPR || src_info->reg_class != ANVIL_MIR_REG_GPR) {
-        emit->base.failed = true;
-        return;
-    }
-
-    int src_size = x86_size_bytes(src_info->size_bits);
-    int dst_size = x86_size_bytes(dst_info->size_bits);
-    if (dst_size < src_size)
-        dst_size = src_size;
-    if (dst_size < 4)
-        dst_size = 4;
-
-    /* A 32-bit source, a narrow load of the same signedness (which already
-     * extended the value, x86_emit_load), or a value already zero above
-     * its width. */
-    if (src_size >= 4 || (src_info->is_signed == sign_extend && anvil_mir_isel_def_op(&emit->base.isel, src) == ANVIL_MIR_OP_LOAD) ||
-        (!sign_extend && anvil_mir_isel_zero_extended(&emit->base.isel, src))) {
-        if (src_phys != dst_phys)
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(src_phys, 4), x86_gas_gpr(dst_phys, 4));
-        return;
-    }
-
-    const char *zs = sign_extend ? "movs" : "movz";
-    if (src_size == 1 && !x86_reg_has_byte(src_phys)) {
-        emit->base.failed = true;
-        return;
-    }
-    const char *suffix = src_size == 1 ? "bl" : "wl";
-    anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, %%%s\n", zs, suffix, x86_gas_gpr(src_phys, src_size), x86_gas_gpr(dst_phys, 4));
-}
-
 static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
@@ -562,10 +472,10 @@ static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_
 
     switch (info->op) {
     case ANVIL_MIR_OP_ZEXT:
-        x86_emit_gpr_extend(emit, instr_index, info, false);
+        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, false);
         break;
     case ANVIL_MIR_OP_SEXT:
-        x86_emit_gpr_extend(emit, instr_index, info, true);
+        x86_gas_emit_gpr_extend(&emit->base, instr_index, info, true);
         break;
     case ANVIL_MIR_OP_TRUNC:
     case ANVIL_MIR_OP_BITCAST:
@@ -710,6 +620,12 @@ static void x86_fp_constant(void *gas, anvil_mir_vreg_t dst, uint64_t bits)
     emit->fp->constant(emit, dst, bits);
 }
 
+static void x86_fp_unary(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->unary(emit, op, dst, src);
+}
+
 static void x86_fp_binary(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
     x86_mir_emit_t *emit = gas;
@@ -736,6 +652,7 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     gas->gpr_divide = x86_gpr_divide;
     gas->fp_copy = x86_fp_copy;
     gas->fp_constant = x86_fp_constant;
+    gas->fp_unary = x86_fp_unary;
     gas->local_label_prefix = plat ? plat->format->local_label_prefix : "";
 }
 
@@ -1039,7 +956,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
     case ANVIL_MIR_OP_NEG:
     case ANVIL_MIR_OP_NOT:
     case ANVIL_MIR_OP_FABS:
-        x86_emit_unary(emit, instr_index, info);
+        x86_gas_emit_unary(&emit->base, instr_index, info);
         break;
     case ANVIL_MIR_OP_SCALAR:
         x86_emit_scalar(emit, instr_index, info);

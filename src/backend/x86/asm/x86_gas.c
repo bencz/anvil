@@ -930,3 +930,117 @@ void x86_gas_emit_mov(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
     else
         anvil_strbuf_appendf(&gas->code, "\tmovabsq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
 }
+
+void x86_gas_emit_unary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t src = anvil_mir_get_instr_use(gas->mir, index, 0);
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    if (src == ANVIL_MIR_NO_VREG || !def_info) {
+        gas->failed = true;
+        return;
+    }
+    if (def_info->reg_class == ANVIL_MIR_REG_FPR && (info->op == ANVIL_MIR_OP_NEG || info->op == ANVIL_MIR_OP_FABS)) {
+        gas->fp_unary(gas, info->op, info->def, src);
+        return;
+    }
+    if (def_info->reg_class != ANVIL_MIR_REG_GPR || (info->op != ANVIL_MIR_OP_NEG && info->op != ANVIL_MIR_OP_NOT)) {
+        gas->failed = true;
+        return;
+    }
+    int bytes = (def_info->size_bits + 7) / 8;
+    if (bytes < gas->min_operation_bytes)
+        bytes = gas->min_operation_bytes;
+    const char *suffix = x86_gas_size_suffix(bytes);
+    const char *dst = x86_gas_gpr(x86_gas_phys_of(gas, info->def), bytes), *value = x86_gas_gpr(x86_gas_phys_of(gas, src), bytes);
+    if (!gas->failed)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n\t%s%s %%%s\n", suffix, value, dst, info->op == ANVIL_MIR_OP_NEG ? "neg" : "not", suffix, dst);
+}
+
+/* Operations whose 32-bit form zeroes the upper half of the register on
+ * x86-64. */
+static bool writes_zero_extended(anvil_mir_opcode_t op)
+{
+    switch (op) {
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+    case ANVIL_MIR_OP_SDIV:
+    case ANVIL_MIR_OP_UDIV:
+    case ANVIL_MIR_OP_SMOD:
+    case ANVIL_MIR_OP_UMOD:
+    case ANVIL_MIR_OP_LOAD:
+    case ANVIL_MIR_OP_MOV:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void move32_if_needed(x86_gas_t *gas, int src_phys, int dst_phys)
+{
+    if (src_phys != dst_phys)
+        anvil_strbuf_appendf(&gas->code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(src_phys, 4), x86_gas_gpr(dst_phys, 4));
+}
+
+void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, bool sign_extend)
+{
+    anvil_mir_vreg_t src = anvil_mir_get_instr_use(gas->mir, index, 0);
+    const anvil_mir_vreg_info_t *dst_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    const anvil_mir_vreg_info_t *src_info = src == ANVIL_MIR_NO_VREG ? NULL : anvil_mir_get_vreg_info(gas->mir, src);
+    int dst_phys = x86_gas_phys_of(gas, info->def), src_phys = x86_gas_phys_of(gas, src);
+    if (!dst_info || !src_info || gas->failed || dst_info->reg_class != ANVIL_MIR_REG_GPR || src_info->reg_class != ANVIL_MIR_REG_GPR) {
+        gas->failed = true;
+        return;
+    }
+    int src_size = (src_info->size_bits + 7) / 8, dst_size = (dst_info->size_bits + 7) / 8;
+    if (dst_size < src_size)
+        dst_size = src_size;
+    if (dst_size < gas->min_operation_bytes)
+        dst_size = gas->min_operation_bytes;
+    /* The whole register: a copy. */
+    if (src_size == dst_size && dst_size >= gas->pointer_bytes) {
+        if (src_phys != dst_phys)
+            anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(dst_size), x86_gas_gpr(src_phys, dst_size), x86_gas_gpr(dst_phys, dst_size));
+        return;
+    }
+    /* A narrow load of the same signedness already extended the value
+     * (x86_gas_emit_load: movs*l to 32 bits, movz*l to 64), and a value
+     * known zero above its width needs no zero extension. */
+    if ((src_size < 4 && src_info->is_signed == sign_extend && (!sign_extend || dst_size <= 4) &&
+         anvil_mir_isel_def_op(&gas->isel, src) == ANVIL_MIR_OP_LOAD) ||
+        (!sign_extend && src_size <= 4 && anvil_mir_isel_zero_extended(&gas->isel, src))) {
+        move32_if_needed(gas, src_phys, dst_phys);
+        return;
+    }
+    if (sign_extend) {
+        if (src_size == dst_size) {
+            anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(dst_size), x86_gas_gpr(src_phys, dst_size), x86_gas_gpr(dst_phys, dst_size));
+            return;
+        }
+        const char *suffix = src_size == 1 ? (dst_size <= 4 ? "bl" : "bq") : src_size == 2 ? (dst_size <= 4 ? "wl" : "wq") : "lq";
+        if (src_size == 1 && gas->has_byte && !gas->has_byte(src_phys)) {
+            gas->failed = true;
+            return;
+        }
+        anvil_strbuf_appendf(&gas->code, "\tmovs%s %%%s, %%%s\n", suffix, x86_gas_gpr(src_phys, src_size), x86_gas_gpr(dst_phys, dst_size));
+        return;
+    }
+    if (src_size >= 4) {
+        /* A 32-bit operation already zeroed the upper half (an omitted
+         * TRUNC or COPY in the same register did not). */
+        if (src_phys != dst_phys || !writes_zero_extended(anvil_mir_isel_def_op(&gas->isel, src)))
+            anvil_strbuf_appendf(&gas->code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(src_phys, 4), x86_gas_gpr(dst_phys, 4));
+        return;
+    }
+    if (src_size == 1 && gas->has_byte && !gas->has_byte(src_phys)) {
+        gas->failed = true;
+        return;
+    }
+    anvil_strbuf_appendf(&gas->code, "\tmovz%s %%%s, %%%s\n", src_size == 1 ? "bl" : "wl", x86_gas_gpr(src_phys, src_size), x86_gas_gpr(dst_phys, 4));
+}
