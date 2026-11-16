@@ -369,8 +369,8 @@ static bool x64_prepare_frame(x64_mir_emit_t *emit)
             return false;
     }
 
-    /* Addressed downward from RBP; the stack guarantees 16-byte alignment. */
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 8, 16, true, emit->frame_slot_offsets, &offset))
+    /* Addressed downward from RBP. */
+    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 8, emit->desc->stack_alignment, true, emit->frame_slot_offsets, &offset))
         return false;
 
     if (emit->num_spill_offsets > 0) {

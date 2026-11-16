@@ -134,12 +134,6 @@ static anvil_error_t arm64_emit_func(arm64_backend_t *be, anvil_func_t *func)
  * Global Variables
  * ============================================================================ */
 
-static size_t arm64_global_align(const anvil_type_t *type)
-{
-    int align = arm64_type_align((anvil_type_t *)type);
-    return align > 0 ? (size_t)align : 1;
-}
-
 static bool arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
 {
     const arm64_abi_desc_t *abi = arm64_backend_abi(be);
@@ -149,7 +143,6 @@ static bool arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
         .format = abi->format,
         .symbol_prefix = abi->symbol_prefix,
         .pointer_size = 8,
-        .type_align = arm64_global_align,
     };
     return anvil_gnu_emit_globals(&be->data, mod, &config);
 }

@@ -543,6 +543,40 @@ bool anvil_ir_match_operand_sizes(anvil_ir_lower_t *lower, anvil_mir_vreg_t *lhs
     return *lhs != ANVIL_MIR_NO_VREG && *rhs != ANVIL_MIR_NO_VREG;
 }
 
+anvil_mir_vreg_t anvil_ir_address_word(anvil_ir_lower_t *lower, anvil_value_t *value, bool sign_extend)
+{
+    anvil_mir_vreg_t regs[2];
+    size_t words = 0;
+    if (!lower->value_regs(lower, value, regs, &words) || !words)
+        return ANVIL_MIR_NO_VREG;
+    return words == 2 ? regs[1] : anvil_ir_pointer_width(lower, regs[0], sign_extend);
+}
+
+bool anvil_ir_lower_alloca(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
+{
+    if (!instr->result || !instr->result->type || instr->result->type->kind != ANVIL_TYPE_PTR || instr->num_operands > 1)
+        return false;
+    anvil_type_t *element = instr->aux_type ? instr->aux_type : instr->result->type->data.pointee;
+    if (!element)
+        return false;
+    anvil_mir_vreg_t address = lower->vreg_for_type(lower, instr->result->type);
+    if (address == ANVIL_MIR_NO_VREG)
+        return false;
+    /* A zero-sized object still has an address of its own. */
+    size_t size = anvil_type_size(element) ? anvil_type_size(element) : 1;
+    if (instr->num_operands == 0) {
+        size_t align = anvil_type_align(element) ? anvil_type_align(element) : 1;
+        if (align > lower->stack_alignment)
+            align = lower->stack_alignment;
+        int slot = anvil_mir_add_frame_slot(lower->mir, size, (uint32_t)align);
+        return slot >= 0 && anvil_mir_add_frame_addr(lower->mir, address, slot) && anvil_lower_vreg_put(&lower->values, instr->result, address);
+    }
+    anvil_mir_vreg_t count = anvil_ir_address_word(lower, instr->operands[0], false);
+    anvil_mir_vreg_t uses[] = {count};
+    return count != ANVIL_MIR_NO_VREG && size <= INT64_MAX && anvil_mir_add_instr_imm_uses(lower->mir, ANVIL_MIR_OP_DYN_ALLOCA, address, uses, 1, (int64_t)size) &&
+           anvil_lower_vreg_put(&lower->values, instr->result, address);
+}
+
 /* A pointer in a register at the pointer width (a constant address
  * materialized: an address advanced by a constant stays an add of its own,
  * which update-form accesses fuse with the access after it). */
@@ -577,12 +611,7 @@ bool anvil_ir_lower_gep(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
         if (step.kind != ANVIL_GEP_STEP_SCALE)
             return false;
         all_constant = false;
-        /* A word pair indexes by its low word: the address's width. */
-        anvil_mir_vreg_t regs[2];
-        size_t words = 0;
-        if (!lower->value_regs(lower, index_value, regs, &words))
-            return false;
-        anvil_mir_vreg_t index = words == 2 ? regs[1] : anvil_ir_pointer_width(lower, regs[0], index_value->type->is_signed);
+        anvil_mir_vreg_t index = anvil_ir_address_word(lower, index_value, index_value->type->is_signed);
         anvil_mir_vreg_t scaled = index;
         if (index != ANVIL_MIR_NO_VREG && step.amount != 1) {
             anvil_mir_vreg_t scale = anvil_mir_add_vreg_ex(lower->mir, ANVIL_MIR_REG_GPR, bits);

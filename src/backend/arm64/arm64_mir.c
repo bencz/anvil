@@ -64,20 +64,6 @@ static uint16_t arm64_bits_for_type(anvil_type_t *type)
     return (uint16_t)(size * 8);
 }
 
-static size_t arm64_slot_bytes_for_type(anvil_type_t *type)
-{
-    size_t size = type ? anvil_type_size(type) : 8;
-    return size ? size : 8;
-}
-
-static uint16_t arm64_align_for_type(anvil_type_t *type)
-{
-    int align = type ? arm64_type_align(type) : 8;
-    if (align <= 0) align = 8;
-    if (align > UINT16_MAX) align = UINT16_MAX;
-    return (uint16_t)align;
-}
-
 static anvil_mir_vreg_t arm64_add_vreg_for_type(arm64_mir_lower_t *lower,
                                                 anvil_type_t *type)
 {
@@ -251,7 +237,7 @@ static bool lower_params(arm64_mir_lower_t *lower)
         }
 
         arm64_arg_loc_t loc = abi->assign_scalar(abi, &state, arm64_type_is_fp(param->type),
-                                                 (unsigned)arm64_type_size(param->type), false);
+                                                 (unsigned)anvil_type_size(param->type), false);
         anvil_mir_vreg_t value = lower_incoming_value(lower, loc, arm64_reg_class_for_type(param->type),
                                                       arm64_bits_for_type(param->type), arm64_type_is_signed(param->type));
         if (value == ANVIL_MIR_NO_VREG || !anvil_lower_vreg_put(&lower->base.values, param, value))
@@ -411,7 +397,7 @@ static bool lower_call(arm64_mir_lower_t *lower, anvil_instr_t *instr)
 
         bool unnamed = is_variadic && i >= num_named;
         arm64_arg_loc_t loc = abi->assign_scalar(abi, &state, arm64_type_is_fp(arg->type),
-                                                 (unsigned)arm64_type_size(arg->type), unnamed);
+                                                 (unsigned)anvil_type_size(arg->type), unnamed);
         if (loc.reg >= 0 && abi->caller_extends_small_ints && !arm64_type_is_fp(arg->type) &&
             arm64_bits_for_type(arg->type) < 32) {
             /* Narrow integers arrive extended to 32 bits. */
@@ -498,47 +484,6 @@ static bool lower_call(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         return anvil_lower_vreg_put(&lower->base.values, instr->result, local_result);
     }
     return true;
-}
-
-static bool lower_alloca(arm64_mir_lower_t *lower, anvil_instr_t *instr)
-{
-    if (!instr->result || !instr->result->type ||
-        instr->result->type->kind != ANVIL_TYPE_PTR) {
-        return false;
-    }
-
-    anvil_type_t *element_type = instr->aux_type;
-    if (!element_type) {
-        element_type = instr->result->type->data.pointee;
-    }
-    if (!element_type) return false;
-
-    anvil_mir_vreg_t ptr = arm64_add_vreg_for_type(lower, instr->result->type);
-    if (ptr == ANVIL_MIR_NO_VREG) return false;
-
-    if (instr->num_operands == 0) {
-        int slot = anvil_mir_add_frame_slot(lower->base.mir,
-                                            arm64_slot_bytes_for_type(element_type),
-                                            arm64_align_for_type(element_type));
-        if (slot < 0) return false;
-        if (!anvil_mir_add_frame_addr(lower->base.mir, ptr, slot)) return false;
-        return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
-    }
-
-    if (instr->num_operands != 1) return false;
-    anvil_mir_vreg_t count = anvil_ir_lower_value(&lower->base, instr->operands[0]);
-    if (count == ANVIL_MIR_NO_VREG) return false;
-    count = anvil_ir_pointer_width(&lower->base, count, false);
-    if (count == ANVIL_MIR_NO_VREG) return false;
-
-    int64_t elem_size = arm64_type_size(element_type);
-    if (elem_size <= 0) elem_size = 1;
-    anvil_mir_vreg_t uses[] = { count };
-    if (!anvil_mir_add_instr_imm_uses(lower->base.mir, ANVIL_MIR_OP_DYN_ALLOCA,
-                                      ptr, uses, 1, elem_size)) {
-        return false;
-    }
-    return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
 }
 
 static bool lower_cast(arm64_mir_lower_t *lower,
@@ -731,7 +676,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         }
 
         case ANVIL_OP_ALLOCA:
-            return lower_alloca(lower, instr);
+            return anvil_ir_lower_alloca(&lower->base, instr);
         case ANVIL_OP_GEP:
             return anvil_ir_lower_gep(&lower->base, instr);
         case ANVIL_OP_STRUCT_GEP:
@@ -854,6 +799,7 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     lower.abi = func->parent && func->parent->ctx ? arm64_get_abi_desc(func->parent->ctx->abi) : NULL;
     if (!lower.abi)
         return NULL;
+    lower.base.stack_alignment = lower.abi->stack_alignment;
     lower.base.mir = anvil_mir_func_create(func->name);
     anvil_mir_func_set_linkage(lower.base.mir, func->linkage);
     anvil_mir_func_set_cpu_features(lower.base.mir, anvil_ctx_get_cpu_features(func->owner_ctx));
@@ -1887,8 +1833,8 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
         if (!emit->frame_slot_offsets) return false;
     }
 
-    /* Addressed downward from x29; SP is 16-byte aligned. */
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 8, 16, true, emit->frame_slot_offsets, &offset))
+    /* Addressed downward from x29. */
+    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 8, emit->abi->stack_alignment, true, emit->frame_slot_offsets, &offset))
         return false;
 
     if (emit->num_spill_offsets > 0) {

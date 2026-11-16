@@ -148,6 +148,8 @@ typedef struct arm64_abi_desc {
     /* The callee extends integer results narrower than this (bits) to it;
      * 0 when the ABI leaves the upper bits unspecified. */
     unsigned result_extend_bits;
+    /* Alignment SP keeps (bytes): the most a frame object can rely on. */
+    unsigned stack_alignment;
 } arm64_abi_desc_t;
 
 const arm64_abi_desc_t *arm64_get_abi_desc(anvil_abi_t abi);
@@ -251,8 +253,6 @@ extern const char *arm64_qreg_names[32];  /* q0-q31: 128-bit vectors */
 extern const char *arm64_sreg_names[32];  /* s0-s31 */
 
 /* Type size calculation */
-int arm64_type_size(anvil_type_t *type);
-int arm64_type_align(anvil_type_t *type);
 bool arm64_type_is_float(anvil_type_t *type);
 
 

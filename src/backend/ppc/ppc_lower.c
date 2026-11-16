@@ -75,24 +75,6 @@ static uint16_t ppc_bits_for_type(const anvil_ppc_target_desc_t *desc, anvil_typ
     return (uint16_t)(size * 8);
 }
 
-static size_t ppc_slot_bytes_for_type(const anvil_ppc_target_desc_t *desc, anvil_type_t *type)
-{
-    size_t size = type ? anvil_type_size(type) : desc->word_size;
-    return size ? size : desc->word_size;
-}
-
-static uint16_t ppc_align_for_type(const anvil_ppc_target_desc_t *desc, anvil_type_t *type)
-{
-    size_t align = type ? anvil_type_align(type) : desc->word_size;
-    if (align == 0)
-        align = desc->word_size;
-    if (align > desc->word_size)
-        align = desc->word_size;
-    if (align > UINT16_MAX)
-        align = UINT16_MAX;
-    return (uint16_t)align;
-}
-
 static anvil_mir_vreg_t ppc_add_vreg_for_type(ppc_mir_lower_t *lower, anvil_type_t *type)
 {
     /* Vectors live in VSX registers, only where the CPU has them. */
@@ -675,50 +657,6 @@ static bool lower_call(ppc_mir_lower_t *lower, anvil_instr_t *instr)
     return true;
 }
 
-static bool lower_alloca(ppc_mir_lower_t *lower, anvil_instr_t *instr)
-{
-    if (!instr->result || !instr->result->type || instr->result->type->kind != ANVIL_TYPE_PTR) {
-        return false;
-    }
-
-    anvil_type_t *element_type = instr->aux_type;
-    if (!element_type)
-        element_type = instr->result->type->data.pointee;
-    if (!element_type)
-        return false;
-
-    anvil_mir_vreg_t ptr = ppc_add_vreg_for_type(lower, instr->result->type);
-    if (ptr == ANVIL_MIR_NO_VREG)
-        return false;
-
-    if (instr->num_operands == 0) {
-        int slot = anvil_mir_add_frame_slot(lower->base.mir, ppc_slot_bytes_for_type(lower->desc, element_type), ppc_align_for_type(lower->desc, element_type));
-        if (slot < 0)
-            return false;
-        if (!anvil_mir_add_frame_addr(lower->base.mir, ptr, slot))
-            return false;
-        return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
-    }
-
-    if (instr->num_operands != 1)
-        return false;
-    anvil_mir_vreg_t count = anvil_ir_lower_value(&lower->base, instr->operands[0]);
-    if (count == ANVIL_MIR_NO_VREG)
-        return false;
-    count = anvil_ir_pointer_width(&lower->base, count, false);
-    if (count == ANVIL_MIR_NO_VREG)
-        return false;
-
-    int64_t elem_size = element_type ? (int64_t)anvil_type_size(element_type) : 1;
-    if (elem_size <= 0)
-        elem_size = 1;
-    anvil_mir_vreg_t uses[] = {count};
-    if (!anvil_mir_add_instr_imm_uses(lower->base.mir, ANVIL_MIR_OP_DYN_ALLOCA, ptr, uses, 1, elem_size)) {
-        return false;
-    }
-    return anvil_lower_vreg_put(&lower->base.values, instr->result, ptr);
-}
-
 static bool ppc_ensure_i64_pair(ppc_mir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t *hi, anvil_mir_vreg_t *lo, bool *is_unsigned);
 
 static bool lower_cast(ppc_mir_lower_t *lower, anvil_instr_t *instr, anvil_mir_opcode_t mir_op)
@@ -1220,7 +1158,7 @@ static bool lower_instr(ppc_mir_lower_t *lower, anvil_instr_t *instr)
                anvil_lower_vreg_put(&lower->base.values, instr->result, def);
     }
     case ANVIL_OP_ALLOCA:
-        return lower_alloca(lower, instr);
+        return anvil_ir_lower_alloca(&lower->base, instr);
     case ANVIL_OP_GEP:
         return anvil_ir_lower_gep(&lower->base, instr);
     case ANVIL_OP_STRUCT_GEP:
@@ -1361,6 +1299,7 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func, anvil_ppc_vari
     lower.base.value = anvil_ir_lower_value;
     lower.base.vreg_for_type = ir_vreg_for_type;
     lower.base.pointer_bits = (unsigned)(desc->word_size * 8);
+    lower.base.stack_alignment = desc->stack_alignment;
     lower.base.value_regs = ir_value_regs;
     lower.base.mir = anvil_mir_func_create(func->name);
     anvil_mir_func_set_linkage(lower.base.mir, func->linkage);

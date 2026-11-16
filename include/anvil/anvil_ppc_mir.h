@@ -31,6 +31,9 @@ typedef struct {
     bool little_endian;
     bool uses_function_descriptors;
     unsigned min_frame_size;
+    /* Alignment the stack pointer keeps (bytes): the most a frame object
+     * can rely on. */
+    unsigned stack_alignment;
     unsigned lr_save_offset;
     unsigned toc_save_offset;
     unsigned outgoing_arg_offset;

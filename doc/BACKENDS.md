@@ -101,8 +101,15 @@ take as their displacement (`anvil_ir_lower_gep`,
 `anvil_ir_lower_struct_gep`, `anvil_ir_lower_memory_address`; SystemZ keeps
 only the displacements its CPU reaches), a variable index adds its scaled
 value at the pointer width (a 64-bit index on a word-pair target by its
-low word), and GPR operands of a binary operation take its result's width
-(`anvil_ir_resize`, `anvil_ir_match_operand_sizes`).  The IR-to-MIR operation tables
+low word, `anvil_ir_address_word`), and GPR operands of a binary operation
+take its result's width (`anvil_ir_resize`, `anvil_ir_match_operand_sizes`).
+Stack objects too (`anvil_ir_lower_alloca`): a frame slot of the IR type's
+own size and alignment (`anvil_type_size`, `anvil_type_align`, so a packed
+struct is byte aligned), the alignment capped at the stack's, which each ABI
+descriptor states (`stack_alignment`) and the printer's frame layout reads
+too; a counted ALLOCA allocates count elements dynamically, the count at
+the address width.  Globals take the same IR alignment on every target
+(`anvil_gnu_emit_globals`).  The IR-to-MIR operation tables
 (`anvil_ir_binary_op`, `anvil_ir_unary_op`, `anvil_ir_cast_op`,
 `anvil_ir_compare_op`) and a call's direct target (`anvil_ir_call_symbol`,
 `anvil_ir_call_type`) are shared too.

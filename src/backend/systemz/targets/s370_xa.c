@@ -17,6 +17,7 @@ const anvil_mainframe_target_desc_t s370_xa_target_desc = {
     .num_fpr = 4,
     .save_area_size = 72,
     .fp_temp_offset = 72,
+    .stack_alignment = 8,
     .local_area_offset = 88,
     .amode = "31",
     .rmode = "ANY",

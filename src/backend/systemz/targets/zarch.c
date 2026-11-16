@@ -18,6 +18,7 @@ const anvil_mainframe_target_desc_t zarch_target_desc = {
     .num_fpr = 16,
     .save_area_size = 144,
     .fp_temp_offset = 144,
+    .stack_alignment = 8,
     .local_area_offset = 160,
     .amode = "64",
     .rmode = "ANY",

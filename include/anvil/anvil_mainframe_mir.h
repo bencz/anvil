@@ -38,6 +38,9 @@ typedef struct {
     unsigned save_area_size;
     unsigned fp_temp_offset;
     unsigned local_area_offset;
+    /* Alignment of the frame's storage (bytes): the most a frame object
+     * can rely on. */
+    unsigned stack_alignment;
     const char *amode;
     const char *rmode;
     anvil_fp_format_t fp_format;

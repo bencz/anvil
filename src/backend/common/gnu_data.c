@@ -284,7 +284,7 @@ bool anvil_gnu_emit_globals(anvil_strbuf_t *out, const anvil_module_t *mod, cons
             anvil_strbuf_appendf(out, "\t.extern %s\n", symbol);
             continue;
         }
-        size_t align = config->type_align ? config->type_align(global->type) : anvil_type_align(global->type);
+        size_t align = anvil_type_align(global->type);
         if (!align)
             align = 1;
         /* COMMON: an uninitialized tentative definition the linker merges. */

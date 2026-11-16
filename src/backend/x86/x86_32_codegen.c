@@ -102,12 +102,6 @@ static anvil_error_t x86_emit_func(x86_backend_priv_t *priv, anvil_func_t *func)
     return ANVIL_OK;
 }
 
-static size_t x86_global_align(const anvil_type_t *type)
-{
-    int align = x86_type_align((anvil_type_t *)type);
-    return align > 0 ? (size_t)align : 1;
-}
-
 static bool x86_emit_globals(x86_backend_priv_t *priv, anvil_module_t *mod)
 {
     const anvil_x86_plat_desc_t *plat = anvil_x86_get_plat_desc(priv->ctx ? priv->ctx->abi : ANVIL_ABI_DEFAULT);
@@ -117,7 +111,6 @@ static bool x86_emit_globals(x86_backend_priv_t *priv, anvil_module_t *mod)
         .format = plat->format,
         .symbol_prefix = x86_symbol_prefix(priv),
         .pointer_size = 4,
-        .type_align = x86_global_align,
         .format_symbol = x86_format_data_symbol,
         .format_user = priv,
     };

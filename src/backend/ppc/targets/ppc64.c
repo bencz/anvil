@@ -28,6 +28,7 @@ const anvil_ppc_target_desc_t ppc64_target_desc = {
     .word_size = 8,
     .little_endian = false,
     .uses_function_descriptors = true,
+    .stack_alignment = 16,
     .min_frame_size = 112,
     .lr_save_offset = 16,
     .toc_save_offset = 40,

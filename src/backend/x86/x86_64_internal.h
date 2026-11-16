@@ -55,6 +55,8 @@ typedef struct {
      * Apple callees assume). */
     bool caller_extends_narrow_args;
     int shadow_space;
+    /* Alignment RSP has at every call (bytes): the most a frame object can rely on. */
+    unsigned stack_alignment;
     const int *int_arg_regs;
     int num_int_arg_regs;
     const int *fp_arg_regs;
@@ -161,8 +163,6 @@ extern const char *x64_reg16_names[16];
 extern const char *x64_reg8_names[16];
 extern const char *x64_xmm_names[16];
 
-int x64_type_size(anvil_type_t *type);
-int x64_type_align(anvil_type_t *type);
 bool x64_type_is_float(anvil_type_t *type);
 anvil_value_t *anvil_x64_build_va_arg(anvil_backend_t *be, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name);
 anvil_value_t *anvil_x64_build_va_copy(anvil_backend_t *be, anvil_value_t *cursor, const char *name);

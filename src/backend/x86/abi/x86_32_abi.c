@@ -140,7 +140,7 @@ bool x86_needs_pair(anvil_type_t *type)
 
 int64_t x86_stack_arg_slot_size(anvil_type_t *type)
 {
-    int64_t size = type ? x86_type_size(type) : 4;
+    int64_t size = (int64_t)anvil_type_size(type);
     if (size <= 0)
         size = 4;
     return (size + 3) & ~INT64_C(3);

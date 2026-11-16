@@ -62,6 +62,9 @@ struct anvil_ir_lower {
      * gives `type` (NO_VREG for a type it cannot hold). */
     anvil_mir_vreg_t (*vreg_for_type)(anvil_ir_lower_t *lower, anvil_type_t *type);
     unsigned pointer_bits;
+    /* The stack's alignment (the ABI descriptor's): the most a frame
+     * object is aligned to. */
+    unsigned stack_alignment;
 };
 
 /* `value` in a register where the code being emitted reads it: the vreg it
@@ -104,6 +107,13 @@ anvil_mir_vreg_t anvil_ir_resize(anvil_ir_lower_t *lower, anvil_mir_vreg_t value
 anvil_mir_vreg_t anvil_ir_pointer_width(anvil_ir_lower_t *lower, anvil_mir_vreg_t value, bool sign_extend);
 /* GPR operands of a binary operation resized to its result's width. */
 bool anvil_ir_match_operand_sizes(anvil_ir_lower_t *lower, anvil_mir_vreg_t *lhs, anvil_mir_vreg_t *rhs, anvil_mir_vreg_t def);
+/* An integer `value` at the address width, extended by `sign_extend` (a
+ * word pair by its low word). */
+anvil_mir_vreg_t anvil_ir_address_word(anvil_ir_lower_t *lower, anvil_value_t *value, bool sign_extend);
+/* ALLOCA: a frame slot of the allocated type's size and alignment (capped
+ * at the stack's), or, with an element count, a dynamic allocation of
+ * count elements. */
+bool anvil_ir_lower_alloca(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
 /* GEP and STRUCT_GEP from their base pointer in a register: a constant
  * address is recorded as base + offset (the accesses take the offset as
  * their displacement); a variable index adds its scaled value (a 64-bit

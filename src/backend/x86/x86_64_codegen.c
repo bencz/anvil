@@ -79,12 +79,6 @@ static anvil_error_t x64_emit_func(x64_backend_t *be, anvil_func_t *func)
     return ANVIL_OK;
 }
 
-static size_t x64_global_align(const anvil_type_t *type)
-{
-    int align = x64_type_align((anvil_type_t *)type);
-    return align > 0 ? (size_t)align : 1;
-}
-
 static bool x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
 {
     const anvil_x64_abi_desc_t *desc = anvil_x64_get_abi_desc(be->ctx ? be->ctx->abi : ANVIL_ABI_DEFAULT);
@@ -94,7 +88,6 @@ static bool x64_emit_globals(x64_backend_t *be, anvil_module_t *mod)
         .format = desc->format,
         .symbol_prefix = x64_symbol_prefix(be),
         .pointer_size = 8,
-        .type_align = x64_global_align,
     };
     return anvil_gnu_emit_globals(&be->data, mod, &config);
 }

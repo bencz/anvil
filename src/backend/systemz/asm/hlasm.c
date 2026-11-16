@@ -68,9 +68,8 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
         emit->call_arg_value_offsets[i] = -1;
     }
 
-    /* Save areas are doubleword aligned. */
     int offset;
-    if (!anvil_mir_layout_frame_slots(emit->mir, (int)emit->desc->local_area_offset, 1, 8, false, emit->frame_offsets, &offset))
+    if (!anvil_mir_layout_frame_slots(emit->mir, (int)emit->desc->local_area_offset, 1, emit->desc->stack_alignment, false, emit->frame_offsets, &offset))
         return false;
 
     for (size_t i = 0; i < num_spills; i++) {

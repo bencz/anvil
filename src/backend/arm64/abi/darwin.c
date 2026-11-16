@@ -141,6 +141,7 @@ const arm64_abi_desc_t arm64_darwin_abi = {
     .num_fpr_args = 8,
     .indirect_result_reg = ARM64_X8,
     .indirect_call_reg = ARM64_X16,
+    .stack_alignment = 16,
     .caller_extends_small_ints = true,
     .classify_aggregate = arm64_aapcs64_classify_aggregate,
     .assign_scalar = assign_scalar,

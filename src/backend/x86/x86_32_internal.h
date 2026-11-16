@@ -116,8 +116,6 @@ extern const char *x86_xmm_names[8];
 bool x86_reg_has_byte(int phys_reg);
 const char *x86_byte_reg_name(int phys_reg);
 
-int x86_type_size(anvil_type_t *type);
-int x86_type_align(anvil_type_t *type);
 bool x86_type_is_float(anvil_type_t *type);
 
 typedef struct {

@@ -295,8 +295,8 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
             return false;
     }
 
-    /* Addressed downward from EBP; the stack guarantees 16-byte alignment. */
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 4, 16, true, emit->frame_slot_offsets, &offset))
+    /* Addressed downward from EBP. */
+    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 4, (uint32_t)emit->plat->stack_alignment, true, emit->frame_slot_offsets, &offset))
         return false;
 
     if (emit->num_spill_offsets > 0) {

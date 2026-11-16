@@ -33,8 +33,6 @@ typedef struct {
     const anvil_obj_format_t *format;
     const char *symbol_prefix;
     size_t pointer_size;
-    /* The target's alignment of a type, in bytes. */
-    size_t (*type_align)(const anvil_type_t *type);
     anvil_gnu_format_symbol_fn format_symbol; /* NULL: prefix + name */
     void *format_user;
 } anvil_gnu_globals_config_t;

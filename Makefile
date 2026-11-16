@@ -203,6 +203,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/count_loop_regression \
 	$(BUILD_DIR)/tests/operand_fold_regression \
 	$(BUILD_DIR)/tests/switch_lowering_regression \
+	$(BUILD_DIR)/tests/frame_object_regression \
 	$(BUILD_DIR)/tests/jump_threading_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \

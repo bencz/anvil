@@ -494,8 +494,7 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
             return false;
     }
 
-    /* The ABIs keep the stack 16-byte aligned. */
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, (uint32_t)word, 16, true, emit->frame_slot_offsets, &offset))
+    if (!anvil_mir_layout_frame_slots(emit->mir, offset, (uint32_t)word, emit->desc->stack_alignment, true, emit->frame_slot_offsets, &offset))
         return false;
 
     emit->num_spill_offsets = anvil_mir_num_spills(emit->mir);
