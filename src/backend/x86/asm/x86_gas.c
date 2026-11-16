@@ -357,6 +357,11 @@ void x86_gas_emit_call_stack_arg(x86_gas_t *gas, size_t index, const anvil_mir_i
     int bytes = (value_info->size_bits + 7) / 8;
     if (bytes < gas->min_gpr_move)
         bytes = gas->min_gpr_move;
+    int64_t imm;
+    if (x86_gas_known_imm(gas, value, &imm)) {
+        anvil_strbuf_appendf(&gas->code, "\tmov%s $%lld, %s\n", x86_gas_size_suffix(bytes), (long long)imm, mem);
+        return;
+    }
     int src = x86_gas_phys_of(gas, value);
     if (!gas->failed)
         anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), mem);
@@ -398,8 +403,9 @@ bool x86_gas_use_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_
     /* x & 0xffffffff on 64 bits: movl (x86_gas_emit_gpr_arith). */
     if (info->op == ANVIL_MIR_OP_AND && use == 1 && value == UINT32_MAX && def && def->reg_class == ANVIL_MIR_REG_GPR && def->size_bits == 64)
         return true;
-    /* A stored integer: mov $imm, mem (64-bit: a sign-extended imm32). */
-    if (info->op == ANVIL_MIR_OP_STORE && use == 0) {
+    /* A stored integer, or one passed on the stack: mov $imm, mem (64-bit:
+     * a sign-extended imm32). */
+    if ((info->op == ANVIL_MIR_OP_STORE || info->op == ANVIL_MIR_OP_CALL_STACK_ARG) && use == 0) {
         const anvil_mir_vreg_info_t *stored = anvil_mir_get_vreg_info(gas->mir, anvil_mir_get_instr_use(gas->mir, index, 0));
         return stored && stored->reg_class == ANVIL_MIR_REG_GPR && stored->size_bits <= gas->pointer_bytes * 8 && (stored->size_bits <= 32 || fits);
     }

@@ -1152,6 +1152,34 @@ static void test_x86_carry_add_keeps_its_load(void)
     anvil_ctx_destroy(ctx);
 }
 
+/* i386 passes constant arguments on the stack as immediates: callee(7, 0)
+ * stores $7 and $0 into the outgoing area, with no register for them. */
+static void test_x86_constant_stack_arguments(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86);
+    anvil_module_t *module = anvil_module_create(ctx, "arguments");
+    anvil_type_t *i32 = anvil_type_i32(ctx);
+    anvil_type_t *params[] = {i32, i32};
+    anvil_type_t *callee_type = anvil_type_func(ctx, i32, params, 2, false);
+    anvil_func_t *callee = anvil_func_declare(module, "callee", callee_type);
+    anvil_func_t *func = anvil_func_create(module, "caller", anvil_type_func(ctx, i32, NULL, 0, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, func->entry);
+    anvil_value_t *args[] = {anvil_const_i32(ctx, 7), anvil_const_i32(ctx, 0)};
+    anvil_value_t *result = NULL;
+    bool built = anvil_build_call_checked(ctx, anvil_func_get_value(callee), args, 2, "result", &result) && result;
+    anvil_build_ret(ctx, result);
+    char *assembly = NULL;
+    size_t length = 0;
+    bool valid = built && anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, "movl $7, 0(%esp)") &&
+                 strstr(assembly, "movl $0, 4(%esp)");
+    CHECK(valid, "i386: constant stack arguments are stored as immediates");
+    if (!valid && assembly)
+        fprintf(stderr, "%s\n", assembly);
+    free(assembly);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -1216,6 +1244,7 @@ int main(void)
     test_systemz_storage_operands();
     test_systemz_carry_and_shift();
     test_x86_carry_add_keeps_its_load();
+    test_x86_constant_stack_arguments();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();
