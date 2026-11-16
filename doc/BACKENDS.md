@@ -645,7 +645,12 @@ the passes shape code for: `index_scales` and `index_scale_access` (scaled
 indexes the accesses fold), `address_increments` and
 `address_increment_bytes` (pre/post-increment accesses), `counter_branches`
 (decrement-and-branch counters) and `small_loop_unroll` (body copies per
-iteration for small counted loops). What depends on the CPU model, or on a
+iteration for small counted loops), and the core's own target policy:
+`syntax` (the one assembly syntax printed), `wide_scalar_align` (the ABI
+alignment of 64-bit integers and doubles: four on i386) and `cc_rules` (per
+group of ABIs, the convention the default and its synonyms mean and those
+kept as they are), which `anvil_cc_resolve`, the data layout and
+`anvil_ctx_set_syntax` read instead of switching on the architecture. What depends on the CPU model, or on a
 value, is a hook of `anvil_backend_ops_t` instead:
 `vector_operation_cost` (lane operations per CPU features),
 `indexed_displacement` (whether base + index + a given displacement is one

@@ -638,64 +638,17 @@ bool anvil_cc_resolve(const anvil_ctx_t *ctx, anvil_cc_t requested,
         return false;
     }
 
-    anvil_abi_t abi = ctx->abi;
-    switch (ctx->arch) {
-        case ANVIL_ARCH_X86:
-            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
-                abi != ANVIL_ABI_DARWIN && abi != ANVIL_ABI_WIN64)
-                return false; /* WIN64 names the repository's COFF platform
-                                 selector for both x86 widths. */
-            if (requested == ANVIL_CC_DEFAULT || requested == ANVIL_CC_CDECL)
-                *effective = ANVIL_CC_CDECL;
-            else if (requested == ANVIL_CC_STDCALL ||
-                     requested == ANVIL_CC_FASTCALL)
-                *effective = requested;
-            else
-                return false;
-            return true;
-
-        case ANVIL_ARCH_X86_64:
-            if (abi == ANVIL_ABI_WIN64) {
-                if (requested != ANVIL_CC_DEFAULT &&
-                    requested != ANVIL_CC_CDECL &&
-                    requested != ANVIL_CC_WIN64) return false;
-                *effective = ANVIL_CC_WIN64;
-                return true;
-            }
-            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
-                abi != ANVIL_ABI_DARWIN) return false;
-            if (requested != ANVIL_CC_DEFAULT &&
-                requested != ANVIL_CC_CDECL &&
-                requested != ANVIL_CC_SYSV) return false;
-            *effective = ANVIL_CC_SYSV;
-            return true;
-
-        case ANVIL_ARCH_ARM64:
-        case ANVIL_ARCH_PPC32:
-        case ANVIL_ARCH_PPC64:
-        case ANVIL_ARCH_PPC64LE:
-            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_SYSV &&
-                abi != ANVIL_ABI_DARWIN) return false;
-            if (requested != ANVIL_CC_DEFAULT &&
-                requested != ANVIL_CC_CDECL &&
-                requested != ANVIL_CC_SYSV) return false;
-            *effective = ANVIL_CC_SYSV;
-            return true;
-
-        case ANVIL_ARCH_S370:
-        case ANVIL_ARCH_S370_XA:
-        case ANVIL_ARCH_S390:
-        case ANVIL_ARCH_ZARCH:
-            if (abi != ANVIL_ABI_DEFAULT && abi != ANVIL_ABI_MVS)
-                return false;
-            if (requested != ANVIL_CC_DEFAULT && requested != ANVIL_CC_MVS)
-                return false;
-            *effective = ANVIL_CC_MVS;
-            return true;
-
-        case ANVIL_ARCH_NONE:
-        case ANVIL_ARCH_COUNT:
+    const anvil_arch_info_t *info = anvil_arch_get_info(ctx->arch);
+    for (size_t r = 0; info && r < sizeof(info->cc_rules) / sizeof(info->cc_rules[0]); r++) {
+        if (!(info->cc_rules[r].abis & ANVIL_ABI_BIT(ctx->abi)))
+            continue;
+        if (requested == ANVIL_CC_DEFAULT || (info->cc_rules[r].synonyms & ANVIL_CC_BIT(requested)))
+            *effective = info->cc_rules[r].cc;
+        else if (info->cc_rules[r].own & ANVIL_CC_BIT(requested))
+            *effective = requested;
+        else
             return false;
+        return true;
     }
     return false;
 }

@@ -10,6 +10,11 @@
 
 
 /* Architecture information table */
+/* The ABIs of the GAS targets but Windows, and the conventions that name
+ * the System V one there. */
+#define UNIX_ABIS (ANVIL_ABI_BIT(ANVIL_ABI_DEFAULT) | ANVIL_ABI_BIT(ANVIL_ABI_SYSV) | ANVIL_ABI_BIT(ANVIL_ABI_DARWIN))
+#define SYSV_SYNONYMS (ANVIL_CC_BIT(ANVIL_CC_CDECL) | ANVIL_CC_BIT(ANVIL_CC_SYSV))
+
 static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
     [ANVIL_ARCH_X86] = {
         .arch = ANVIL_ARCH_X86,
@@ -34,7 +39,12 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = false,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 4, /* i386 SysV: four, preferring eight */
+        /* WIN64 also selects the COFF platform of both x86 widths. */
+        .cc_rules = {{UNIX_ABIS | ANVIL_ABI_BIT(ANVIL_ABI_WIN64), ANVIL_CC_CDECL, ANVIL_CC_BIT(ANVIL_CC_CDECL),
+                       ANVIL_CC_BIT(ANVIL_CC_STDCALL) | ANVIL_CC_BIT(ANVIL_CC_FASTCALL)}}
     },
     [ANVIL_ARCH_X86_64] = {
         .arch = ANVIL_ARCH_X86_64,
@@ -59,7 +69,11 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = false,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 8,
+        .cc_rules = {{ANVIL_ABI_BIT(ANVIL_ABI_WIN64), ANVIL_CC_WIN64, ANVIL_CC_BIT(ANVIL_CC_CDECL) | ANVIL_CC_BIT(ANVIL_CC_WIN64), 0},
+                     {UNIX_ABIS, ANVIL_CC_SYSV, SYSV_SYNONYMS, 0}}
     },
     [ANVIL_ARCH_S370] = {
         .arch = ANVIL_ARCH_S370,
@@ -84,7 +98,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_HLASM,
+        .wide_scalar_align = 8,
+        .cc_rules = {{ANVIL_ABI_BIT(ANVIL_ABI_DEFAULT) | ANVIL_ABI_BIT(ANVIL_ABI_MVS), ANVIL_CC_MVS, ANVIL_CC_BIT(ANVIL_CC_MVS), 0}}
     },
     [ANVIL_ARCH_S370_XA] = {
         .arch = ANVIL_ARCH_S370_XA,
@@ -109,7 +126,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_HLASM,
+        .wide_scalar_align = 8,
+        .cc_rules = {{ANVIL_ABI_BIT(ANVIL_ABI_DEFAULT) | ANVIL_ABI_BIT(ANVIL_ABI_MVS), ANVIL_CC_MVS, ANVIL_CC_BIT(ANVIL_CC_MVS), 0}}
     },
     [ANVIL_ARCH_S390] = {
         .arch = ANVIL_ARCH_S390,
@@ -134,7 +154,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_HLASM,
+        .wide_scalar_align = 8,
+        .cc_rules = {{ANVIL_ABI_BIT(ANVIL_ABI_DEFAULT) | ANVIL_ABI_BIT(ANVIL_ABI_MVS), ANVIL_CC_MVS, ANVIL_CC_BIT(ANVIL_CC_MVS), 0}}
     },
     [ANVIL_ARCH_ZARCH] = {
         .arch = ANVIL_ARCH_ZARCH,
@@ -159,7 +182,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = 0,
         .address_increment_bytes = 0,
         .counter_branches = true,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_HLASM,
+        .wide_scalar_align = 8,
+        .cc_rules = {{ANVIL_ABI_BIT(ANVIL_ABI_DEFAULT) | ANVIL_ABI_BIT(ANVIL_ABI_MVS), ANVIL_CC_MVS, ANVIL_CC_BIT(ANVIL_CC_MVS), 0}}
     },
     [ANVIL_ARCH_PPC32] = {
         .arch = ANVIL_ARCH_PPC32,
@@ -184,7 +210,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .small_loop_unroll = 4
+        .small_loop_unroll = 4,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 8,
+        .cc_rules = {{UNIX_ABIS, ANVIL_CC_SYSV, SYSV_SYNONYMS, 0}}
     },
     [ANVIL_ARCH_PPC64] = {
         .arch = ANVIL_ARCH_PPC64,
@@ -209,7 +238,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .small_loop_unroll = 4
+        .small_loop_unroll = 4,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 8,
+        .cc_rules = {{UNIX_ABIS, ANVIL_CC_SYSV, SYSV_SYNONYMS, 0}}
     },
     [ANVIL_ARCH_PPC64LE] = {
         .arch = ANVIL_ARCH_PPC64LE,
@@ -234,7 +266,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT,
         .address_increment_bytes = 8,
         .counter_branches = true,
-        .small_loop_unroll = 4
+        .small_loop_unroll = 4,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 8,
+        .cc_rules = {{UNIX_ABIS, ANVIL_CC_SYSV, SYSV_SYNONYMS, 0}}
     },
     [ANVIL_ARCH_ARM64] = {
         .arch = ANVIL_ARCH_ARM64,
@@ -259,7 +294,10 @@ static const anvil_arch_info_t arch_info_table[ANVIL_ARCH_COUNT] = {
         .address_increments = ANVIL_ADDRESS_PRE_INCREMENT | ANVIL_ADDRESS_POST_INCREMENT,
         .address_increment_bytes = 16,
         .counter_branches = false,
-        .small_loop_unroll = 1
+        .small_loop_unroll = 1,
+        .syntax = ANVIL_SYNTAX_GAS,
+        .wide_scalar_align = 8,
+        .cc_rules = {{UNIX_ABIS, ANVIL_CC_SYSV, SYSV_SYNONYMS, 0}}
     }
 };
 
@@ -286,25 +324,9 @@ static anvil_data_layout_t data_layout_for(anvil_arch_t arch, anvil_abi_t abi)
     dl.aggregate_abi_align = 1;
     dl.aggregate_preferred_align = ptr;
 
-    /* i386 SysV permits 64-bit scalars at four-byte object alignment while
-     * still preferring eight-byte alignment. PPC32 keeps the natural
-     * eight-byte ABI alignment. */
-    if (arch == ANVIL_ARCH_X86) {
-        dl.i64.abi_align = 4;
-        dl.f64.abi_align = 4;
-    }
-    /* The currently supported SysV, Darwin, Win64 and MVS variants share
-     * scalar/object alignment for their corresponding architecture. Keep the
-     * ABI dispatch explicit so future ABI-specific vector/long-double rules
-     * cannot accidentally become an architecture-only global. */
-    switch (abi) {
-        case ANVIL_ABI_DEFAULT:
-        case ANVIL_ABI_SYSV:
-        case ANVIL_ABI_DARWIN:
-        case ANVIL_ABI_WIN64:
-        case ANVIL_ABI_MVS:
-            break;
-    }
+    dl.i64.abi_align = arch_info_table[arch].wide_scalar_align;
+    dl.f64.abi_align = arch_info_table[arch].wide_scalar_align;
+    (void)abi;
     return dl;
 }
 
@@ -587,12 +609,7 @@ anvil_error_t anvil_ctx_set_syntax(anvil_ctx_t *ctx, anvil_syntax_t syntax)
                         "Select a target before setting assembly syntax");
         return ANVIL_ERR_NO_TARGET;
     }
-    bool mainframe = ctx->arch == ANVIL_ARCH_S370 ||
-                     ctx->arch == ANVIL_ARCH_S370_XA ||
-                     ctx->arch == ANVIL_ARCH_S390 ||
-                     ctx->arch == ANVIL_ARCH_ZARCH;
-    if ((syntax == ANVIL_SYNTAX_HLASM && !mainframe) ||
-        (syntax == ANVIL_SYNTAX_GAS && mainframe)) {
+    if (syntax != ANVIL_SYNTAX_DEFAULT && syntax != arch_info_table[ctx->arch].syntax) {
         anvil_set_error(ctx, ANVIL_ERR_INVALID_ARG,
                         "Assembly syntax is not supported by the selected target");
         return ANVIL_ERR_INVALID_ARG;

@@ -376,7 +376,24 @@ typedef struct {
      * on by one instruction (a counter register or branch on count): a
      * loop whose index only counts needs no add and compare of its own. */
     bool counter_branches;
+    /* The assembly syntax the architecture prints. */
+    anvil_syntax_t syntax;
+    /* The ABI alignment of 64-bit integers and doubles (their size is the
+     * preferred one). */
+    uint8_t wide_scalar_align;
+    /* Calling conventions: under the ABIs in `abis` (ANVIL_ABI_BIT), the
+     * default convention and those in `synonyms` (ANVIL_CC_BIT) mean `cc`,
+     * those in `own` stay what they are, and any other is refused. */
+    struct {
+        unsigned abis;
+        anvil_cc_t cc;
+        unsigned synonyms;
+        unsigned own;
+    } cc_rules[2];
 } anvil_arch_info_t;
+
+#define ANVIL_ABI_BIT(abi) (1u << (abi))
+#define ANVIL_CC_BIT(cc) (1u << (cc))
 
 /* base += displacement, then the access at the new base. */
 #define ANVIL_ADDRESS_PRE_INCREMENT 1u
