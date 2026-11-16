@@ -322,7 +322,8 @@ algorithms, and check that both programs print the same output.
   against the ANVIL API (`bench/ir/kernels`) and in C for clang
   (`bench/ir/ref`, built with `-fno-builtin`). Both are linked with the same
   driver, and neither is inlined into it. x86-64 and i386 run natively and
-  report the best of N runs in milliseconds (`--runs`, 10 below). ARM64 and PowerPC run under
+  report the best of N runs in milliseconds (`--runs`, 10 below) or, with
+  `--insns`, the instructions executed. ARM64 and PowerPC run under
   qemu-user on reduced workloads and report dynamic instruction counts.
   Instruction counts are not time, but they are exact and reproducible.
 * **`samples/mcc/tests/bench`** compiles the same C files with MCC (the C
@@ -352,33 +353,50 @@ kernels this short):
 
 i386 targets `pentium4` (SSE2), the CPU clang assumes for `-m32`.
 
+The same native kernels as user-mode instructions executed (`--insns`, perf;
+exact, unaffected by the machine's load), which the milliseconds above do not
+always follow (crc32 executes more instructions at the same speed):
+
+| kernel | x86-64 clang | x86-64 ANVIL | ratio | i386 clang | i386 ANVIL | ratio |
+|--------|--------------:|--------------:|------:|------------:|------------:|------:|
+| fib | 328,621,600 | 322,918,710 | 0.98 | 322,929,604 | 283,841,443 | 0.88 |
+| crc32 | 414,343,615 | 697,458,782 | 1.68 | 412,061,703 | 695,176,604 | 1.69 |
+| sieve | 880,172,207 | 725,446,363 | 0.82 | 910,532,955 | 725,453,653 | 0.80 |
+| matmul | 336,776,352 | 323,004,503 | 0.96 | 339,846,086 | 330,012,636 | 0.97 |
+| strings | 1,278,589,312 | 953,092,283 | 0.75 | 1,180,373,797 | 953,200,232 | 0.81 |
+| qsort | 676,961,091 | 600,197,481 | 0.89 | 614,017,327 | 587,575,995 | 0.96 |
+| lexer | 563,240,143 | 521,296,989 | 0.93 | 565,348,754 | 439,519,459 | 0.78 |
+| hex | 1,053,827,775 | 1,011,885,313 | 0.96 | 1,179,668,230 | 1,850,757,290 | 1.57 |
+| bigprime | 2,138,931,447 | 2,602,455,191 | 1.22 | 7,216,349,375 | 10,068,704,161 | 1.40 |
+| cells | 27,322,725 | 28,921,641 | 1.06 | 23,446,035 | 25,045,765 | 1.07 |
+
 Under qemu-user, dynamic instructions executed (exact, the same on every run):
 
 | kernel | ARM64 clang | ARM64 ANVIL | ratio | ppc64le clang | ppc64le ANVIL | ratio |
-|--------|------------:|------------:|------:|--------------:|--------------:|------:|
+|--------|-------------:|-------------:|------:|---------------:|---------------:|------:|
 | fib | 201,459 | 193,099 | 0.96 | 322,936 | 280,749 | 0.87 |
-| crc32 | 533,510 | 533,301 | 1.00 | 468,161 | 451,974 | 0.97 |
+| crc32 | 533,510 | 533,301 | 1.00 | 468,161 | 451,910 | 0.97 |
 | sieve | 2,109,042 | 1,620,757 | 0.77 | 2,123,809 | 1,620,784 | 0.76 |
-| matmul | 214,390 | 207,910 | 0.97 | 340,798 | 286,037 | 0.84 |
-| strings | 253,432 | 196,936 | 0.78 | 292,630 | 242,296 | 0.83 |
+| matmul | 214,390 | 207,916 | 0.97 | 340,798 | 286,037 | 0.84 |
+| strings | 253,432 | 196,936 | 0.78 | 292,630 | 242,272 | 0.83 |
 | qsort | 800,784 | 826,725 | 1.03 | 1,138,113 | 994,093 | 0.87 |
-| lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 981,481 | 0.97 |
+| lexer | 835,870 | 966,950 | 1.16 | 1,014,229 | 883,177 | 0.87 |
 | hex | 1,149,427 | 1,346,047 | 1.17 | 1,183,965 | 1,380,549 | 1.17 |
-| bigprime | 722,178 | 940,628 | 1.30 | 931,585 | 1,028,757 | 1.10 |
-| cells | 201,973 | 185,633 | 0.92 | 267,726 | 276,208 | 1.03 |
+| bigprime | 722,178 | 922,084 | 1.28 | 931,585 | 1,024,025 | 1.10 |
+| cells | 201,973 | 185,617 | 0.92 | 267,726 | 276,192 | 1.03 |
 
-| kernel | ppc64 (BE) clang | ppc64 ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
-|--------|-----------------:|------------:|------:|------------:|------------:|------:|
+| kernel | ppc64 (BE) clang | ppc64 (BE) ANVIL | ratio | ppc32 clang | ppc32 ANVIL | ratio |
+|--------|------------------:|------------------:|------:|-------------:|-------------:|------:|
 | fib | 316,168 | 294,276 | 0.93 | 294,383 | 261,546 | 0.89 |
 | crc32 | 534,069 | 484,989 | 0.91 | 534,616 | 485,157 | 0.91 |
 | sieve | 2,014,004 | 1,620,785 | 0.80 | 2,800,582 | 1,620,889 | 0.58 |
-| matmul | 388,710 | 371,253 | 0.96 | 390,554 | 373,096 | 0.96 |
-| strings | 289,547 | 289,559 | 1.00 | 289,618 | 289,810 | 1.00 |
+| matmul | 388,710 | 371,249 | 0.96 | 390,554 | 373,092 | 0.96 |
+| strings | 289,547 | 289,559 | 1.00 | 289,618 | 289,786 | 1.00 |
 | qsort | 1,012,850 | 998,492 | 0.99 | 1,049,861 | 877,019 | 0.84 |
-| lexer | 991,606 | 1,073,602 | 1.08 | 991,637 | 942,565 | 0.95 |
+| lexer | 991,606 | 975,298 | 0.98 | 991,637 | 844,261 | 0.85 |
 | hex | 1,386,276 | 1,574,924 | 1.14 | 1,386,524 | 1,575,180 | 1.14 |
-| bigprime | 970,260 | 1,099,375 | 1.13 | 111,575,208 | 113,357,198 | 1.02 |
-| cells | 271,080 | 271,396 | 1.00 | 271,311 | 271,631 | 1.00 |
+| bigprime | 970,260 | 1,082,867 | 1.12 | 111,575,208 | 113,389,994 | 1.02 |
+| cells | 271,080 | 271,396 | 1.00 | 271,311 | 271,615 | 1.00 |
 
 ANVIL comes out ahead with counter branches and update-form streams on
 PowerPC (`lbzu`/`stbu` + `bdnz`), compile-time tables (crc32), lockstep
@@ -483,7 +501,7 @@ const anvil_backend_ops_t anvil_backend_myarch = {
 
 * **MCC** (`samples/mcc`): a C89–C23 compiler (with GNU extensions) on ANVIL,
   and the integration stress test for the IR, verifier, optimizer and every
-  backend. Its 103 execution tests are checked against clang on x86-64
+  backend. Its 119 execution tests are checked against clang on x86-64
   (all opt levels, haswell with and without FP vectorization), i386 (i486 and
   pentium4) and, under qemu, ARM64, ppc64le, ppc64 and ppc32. Generated code
   is checked to be deterministic. See [samples/mcc/README.md](samples/mcc/README.md).
