@@ -282,10 +282,11 @@ bool anvil_mir_hoist_loop_constants(anvil_mir_func_t *func, anvil_mir_expensive_
  * register kept through the loop is the cost; under pressure the
  * allocator spills it and rematerializes it where it is read. */
 bool anvil_mir_hoist_materialized_constants(anvil_mir_func_t *func);
-/* After the hoisting: a constant materialized again later in its block,
- * with no call or clobber between, is read from the first register that
- * holds it (the later MOV goes).  The allocator rematerializes it where
- * pressure spills it. */
+/* After the hoisting: a constant or a symbol's address materialized again
+ * later in its block, with no call or clobber between and not read by a
+ * copy, is read from the first register that holds it (the later
+ * definition goes).  The allocator rematerializes it where pressure spills
+ * it. */
 bool anvil_mir_merge_block_constants(anvil_mir_func_t *func);
 /* Moves each compare whose only reader is a later BR_COND or SELECT of its
  * block down to just before it (the allocator does so first; a backend

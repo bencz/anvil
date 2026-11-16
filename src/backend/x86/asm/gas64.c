@@ -772,6 +772,8 @@ static void x64_emit_symbol_addr(x64_mir_emit_t *emit, const anvil_mir_instr_inf
         return;
     }
 
+    if (!anvil_mir_isel_materialize(&emit->base.isel, info->def))
+        return;
     int dst_phys = x86_gas_phys_of(&emit->base, info->def);
     if (emit->base.failed)
         return;
@@ -807,6 +809,7 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     const anvil_x64_abi_desc_t *desc = user;
     gas->pointer_bytes = 8;
     gas->symbol_prefix = desc ? desc->sym_prefix : "";
+    gas->symbol_operands = X86_GAS_SYMBOL_PC_RELATIVE;
     gas->wraps_imm32 = false;
     gas->fp_memory_operands = true;
     gas->stack_reg = "rsp";
@@ -1048,7 +1051,7 @@ bool anvil_x86_64_emit_mir_abi(const anvil_mir_func_t *mir, anvil_abi_t abi, anv
         return false;
 
     /* The facts first: the frame saves the registers printed code writes. */
-    if (!anvil_mir_isel_facts_build(&emit.base.isel, mir, x86_gas_use_takes_immediate, NULL, &emit) || !x64_prepare_frame(&emit) ||
+    if (!anvil_mir_isel_facts_build(&emit.base.isel, mir, x86_gas_use_takes_immediate, x86_gas_takes_address, &emit.base) || !x64_prepare_frame(&emit) ||
         !anvil_mir_layout_build(&emit.base.layout, mir)) {
         emit.base.wrapped = false;
         anvil_mir_layout_destroy(&emit.base.layout);

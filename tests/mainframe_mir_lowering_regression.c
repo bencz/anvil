@@ -1096,6 +1096,9 @@ static void test_mainframe_unsigned_divmod_and_not64_are_real(void)
               anvil_mir_add_instr(mir, ANVIL_MIR_OP_UMOD, rem, operands, 2) &&
               anvil_mir_add_instr(mir, ANVIL_MIR_OP_NOT, inv, unary, 1),
               "unsigned div/mod and NOT should be represented");
+        /* Read by nothing else: kept so that the NOT prints. */
+        anvil_mir_vreg_t kept[] = { inv };
+        CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, kept, 1), "NOT result should be kept alive");
         CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_RET,
                                   ANVIL_MIR_NO_VREG, NULL, 0),
               "unsigned arithmetic MIR should terminate");

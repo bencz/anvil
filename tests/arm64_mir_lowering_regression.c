@@ -1306,6 +1306,10 @@ static void test_arm64_emits_allocated_mir_with_integer_fp_memory_call_and_cfg(v
     anvil_mir_vreg_t fone[] = { d0 };
     CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_NEG, fneg, fone, 1),
           "emitter test should add FP NEG");
+    /* Results read by nothing else, kept so that they print. */
+    anvil_mir_vreg_t printed[] = { diff, prod, andv, orv, xorv, shlv, shrv, sarv, negv, notv, fsub, fmul, fdiv, fneg };
+    CHECK(anvil_mir_add_instr(mir, ANVIL_MIR_OP_KEEPALIVE, ANVIL_MIR_NO_VREG, printed, sizeof(printed) / sizeof(printed[0])),
+          "emitter test should keep its results alive");
     CHECK(anvil_mir_add_cond_branch(mir, cmp, then_block, else_block),
           "emitter test should add conditional branch");
 

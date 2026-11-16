@@ -210,6 +210,42 @@ static bool cast_chains(void)
     return true;
 }
 
+/* a[1][2] through two GEPs of constant indices is one GEP of a (its
+ * offset one displacement); a variable row (a[i][2]) keeps its own GEP. */
+static bool gep_chains(void)
+{
+    for (int variable = 0; variable < 2; variable++)
+    {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+        anvil_module_t *module = anvil_module_create(ctx, "geps");
+        anvil_type_t *i32 = anvil_type_i32(ctx), *i64 = anvil_type_i64(ctx);
+        anvil_type_t *row = anvil_type_array(ctx, i32, 4);
+        anvil_type_t *params[] = { anvil_type_ptr(ctx, row), i64 };
+        anvil_func_t *function = anvil_func_create(module, "element", anvil_type_func(ctx, i32, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, anvil_func_get_entry(function));
+        anvil_value_t *base = anvil_func_get_param(function, 0);
+        anvil_value_t *outer[] = { variable ? anvil_func_get_param(function, 1) : anvil_const_i64(ctx, 1) };
+        anvil_value_t *line = anvil_build_gep(ctx, row, base, outer, 1, "row");
+        anvil_value_t *inner[] = { anvil_const_i64(ctx, 0), anvil_const_i64(ctx, 2) };
+        anvil_value_t *cell = anvil_build_gep(ctx, row, line, inner, 2, "cell");
+        anvil_build_ret(ctx, anvil_build_load(ctx, i32, cell, "value"));
+        bool valid = anvil_pass_const_fold(function) != ANVIL_PASS_RUN_ERROR;
+        const anvil_instr_t *load = anvil_func_get_entry(function)->last->operands[0]->data.instr;
+        const anvil_instr_t *gep = load->operands[0]->kind == ANVIL_VAL_INSTR ? load->operands[0]->data.instr : NULL;
+        valid &= gep && gep->op == ANVIL_OP_GEP && (variable ? gep->operands[0] == line : gep->operands[0] == base && gep->num_operands == 3);
+        char error[256] = { 0 };
+        valid &= anvil_func_verify(function, error, sizeof(error));
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+        if (!valid)
+        {
+            fprintf(stderr, "gep chain failed (variable=%d): %s\n", variable, error);
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(void)
 {
     for (int value = -128; value <= 127; value++)
@@ -221,5 +257,5 @@ int main(void)
         }
     }
 
-    return allocation_failures(false) && allocation_failures(true) && constant_chains() && cast_chains() ? 0 : 1;
+    return allocation_failures(false) && allocation_failures(true) && constant_chains() && cast_chains() && gep_chains() ? 0 : 1;
 }

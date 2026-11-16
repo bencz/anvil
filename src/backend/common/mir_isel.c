@@ -37,6 +37,7 @@ void anvil_mir_isel_facts_destroy(anvil_mir_isel_facts_t *facts)
     free(facts->use_count);
     free(facts->constant);
     free(facts->symbol);
+    free(facts->frame_slot);
     free(facts->materialize);
     free(facts->def_op);
     free(facts->width);
@@ -105,12 +106,14 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
     facts->use_count = calloc(n, sizeof(*facts->use_count));
     facts->constant = calloc(n, sizeof(*facts->constant));
     facts->symbol = calloc(n, sizeof(*facts->symbol));
+    facts->frame_slot = calloc(n, sizeof(*facts->frame_slot));
     facts->materialize = calloc(n, sizeof(*facts->materialize));
     facts->def_op = calloc(n, sizeof(*facts->def_op));
     facts->width = calloc(n, sizeof(*facts->width));
     anvil_mir_vreg_t *copy_of = malloc(n * sizeof(*copy_of));
     uint8_t *definitions = calloc(n, sizeof(*definitions));
-    if (!facts->def_count || !facts->use_count || !facts->constant || !facts->symbol || !facts->materialize || !facts->def_op || !facts->width || !copy_of || !definitions) {
+    if (!facts->def_count || !facts->use_count || !facts->constant || !facts->symbol || !facts->frame_slot || !facts->materialize || !facts->def_op || !facts->width ||
+        !copy_of || !definitions) {
         free(copy_of);
         free(definitions);
         anvil_mir_isel_facts_destroy(facts);
@@ -135,7 +138,9 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
                          ((info.op == ANVIL_MIR_OP_MOV && info.has_imm && info.num_uses == 0 && !facts->symbol[info.def] &&
                            facts->constant[info.def] == info.imm) ||
                           (info.op == ANVIL_MIR_OP_SYMBOL_ADDR && info.symbol && !info.symbol_got && info.num_uses == 0 && facts->symbol[info.def] &&
-                           strcmp(facts->symbol[info.def], info.symbol) == 0 && facts->constant[info.def] == (info.has_imm ? info.imm : 0)));
+                           strcmp(facts->symbol[info.def], info.symbol) == 0 && facts->constant[info.def] == (info.has_imm ? info.imm : 0)) ||
+                          (info.op == ANVIL_MIR_OP_FRAME_ADDR && info.frame_slot >= 0 && facts->frame_slot[info.def] == info.frame_slot + 1 &&
+                           facts->constant[info.def] == (info.has_imm ? info.imm : 0)));
             if (again)
                 continue;
             count(facts->def_count, info.def);
@@ -143,6 +148,9 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
                 facts->constant[info.def] = info.imm;
             else if (info.op == ANVIL_MIR_OP_SYMBOL_ADDR && info.symbol && !info.symbol_got && info.num_uses == 0) {
                 facts->symbol[info.def] = info.symbol;
+                facts->constant[info.def] = info.has_imm ? info.imm : 0;
+            } else if (info.op == ANVIL_MIR_OP_FRAME_ADDR && info.frame_slot >= 0 && info.num_uses == 0) {
+                facts->frame_slot[info.def] = info.frame_slot + 1;
                 facts->constant[info.def] = info.has_imm ? info.imm : 0;
             } else if (info.op == ANVIL_MIR_OP_COPY && info.num_uses == 1)
                 copy_of[info.def] = anvil_mir_get_instr_use(mir, i, 0);
@@ -175,6 +183,7 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
             from->reg_class == to->reg_class && from->size_bits == to->size_bits) {
             facts->constant[v] = facts->constant[source];
             facts->symbol[v] = facts->symbol[source];
+            facts->frame_slot[v] = facts->frame_slot[source];
         } else
             copy_of[v] = v;
     }
@@ -220,11 +229,13 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
             anvil_mir_vreg_t use = anvil_mir_get_instr_use(mir, i, u);
             int64_t value;
             const char *symbol;
+            int slot;
             if (use >= facts->num_vregs)
                 continue;
-            bool in_place = anvil_mir_isel_constant(facts, use, &value) ? takes_imm && takes_imm(ctx, i, &info, u, value)
-                          : anvil_mir_isel_symbol(facts, use, &symbol, &value) ? takes_symbol && takes_symbol(ctx, i, &info, u, symbol, value)
-                          : false;
+            bool in_place = anvil_mir_isel_constant(facts, use, &value)            ? takes_imm && takes_imm(ctx, i, &info, u, value)
+                          : anvil_mir_isel_symbol(facts, use, &symbol, &value)       ? takes_symbol && takes_symbol(ctx, i, &info, u, symbol, value)
+                          : anvil_mir_isel_frame_address(facts, use, &slot, &value) ? takes_symbol && takes_symbol(ctx, i, &info, u, NULL, value)
+                                                                                     : false;
             if (!in_place)
                 facts->materialize[use] = true;
         }
@@ -232,7 +243,9 @@ bool anvil_mir_isel_facts_build(anvil_mir_isel_facts_t *facts, const anvil_mir_f
     for (size_t v = 0; v < facts->num_vregs; v++) {
         int64_t value;
         const char *symbol;
-        if (!anvil_mir_isel_constant(facts, (anvil_mir_vreg_t)v, &value) && !anvil_mir_isel_symbol(facts, (anvil_mir_vreg_t)v, &symbol, &value))
+        int slot;
+        if (!anvil_mir_isel_constant(facts, (anvil_mir_vreg_t)v, &value) && !anvil_mir_isel_symbol(facts, (anvil_mir_vreg_t)v, &symbol, &value) &&
+            !anvil_mir_isel_frame_address(facts, (anvil_mir_vreg_t)v, &slot, &value))
             facts->materialize[v] = true;
     }
 
@@ -303,9 +316,18 @@ static bool known_value(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vr
 
 bool anvil_mir_isel_constant(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg, int64_t *out)
 {
-    if (!known_value(facts, vreg) || facts->symbol[vreg])
+    if (!known_value(facts, vreg) || facts->symbol[vreg] || facts->frame_slot[vreg])
         return false;
     *out = facts->constant[vreg];
+    return true;
+}
+
+bool anvil_mir_isel_frame_address(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg, int *slot, int64_t *offset)
+{
+    if (!known_value(facts, vreg) || !facts->frame_slot[vreg])
+        return false;
+    *slot = facts->frame_slot[vreg] - 1;
+    *offset = facts->constant[vreg];
     return true;
 }
 
@@ -487,7 +509,7 @@ bool anvil_mir_counter_loops(const anvil_mir_func_t *mir, const anvil_mir_isel_f
 /* A constant the printers never materialize: it writes no register. */
 static bool silent(const anvil_mir_isel_facts_t *facts, const anvil_mir_instr_info_t *info)
 {
-    return (info->op == ANVIL_MIR_OP_MOV || info->op == ANVIL_MIR_OP_SYMBOL_ADDR) && info->def != ANVIL_MIR_NO_VREG &&
+    return (info->op == ANVIL_MIR_OP_MOV || info->op == ANVIL_MIR_OP_SYMBOL_ADDR || info->op == ANVIL_MIR_OP_FRAME_ADDR) && info->def != ANVIL_MIR_NO_VREG &&
            !anvil_mir_isel_materialize(facts, info->def);
 }
 

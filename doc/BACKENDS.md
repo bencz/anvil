@@ -420,10 +420,11 @@ its register pools:
 verify-legal  ->  call and instruction clobbers  ->
 anvil_mir_optimize_before_allocation (order_blocks, local_cse,
 fold_address_arithmetic, hoist_loop_constants, coalescing,
-duplicate_branch_targets, exit-copy sinking)  ->  order_blocks  ->
-coalesce_copies  ->  split_early_return  ->  printer scratch  ->
-verify-legal  ->  registerless operands  ->  hoist materialized constants  ->
-regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
+duplicate_branch_targets, exit-copy sinking, dead pure values)  ->
+order_blocks  ->  coalesce_copies  ->  split_early_return  ->  printer scratch
+->  verify-legal  ->  registerless operands  ->  hoist materialized constants
+->  merge block constants  ->  regalloc + materialize_spills
+(anvil_regalloc_allocate)  ->  verify-legal
 ```
 
 - **Legality verification** (`anvil_<arch>_verify_mir_legal`): one checker for
@@ -455,7 +456,9 @@ regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
   merged). Then `anvil_mir_merge_block_constants`: a constant materialized
   again later in its block, with no call or clobber between and not read by
   a copy (copying a register costs what loading the constant does), reads
-  the first register that holds it.
+  the first register that holds it; symbol addresses alike. Pure values
+  nothing reads (a call's unused result copied out of its register) go
+  before allocation (`mir_remove_dead_values`).
 - **Registerless marking** (`anvil_<arch>_mark_registerless`, right before
   allocation, with the printer's own immediate rules): constants every
   reader takes as an immediate and integer compares only the next branch
@@ -468,7 +471,17 @@ regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
   halfword, general-instructions extension), going through R1 when the
   address has an index or a displacement the form does not reach. PowerPC
   has no store of an immediate and no zero register (`r0` reads as zero
-  only as a base), so its stored constants stay in registers.
+  only as a base), so its stored constants stay in registers. An address
+  can be spelled in place too: the isel facts know a frame slot's address
+  as they know a symbol's (`anvil_mir_isel_frame_address`), and the
+  target's address hook (the `takes_symbol` argument, symbol NULL for a
+  frame slot) says which loads and stores take it as their base. x86 does
+  (`x86_gas_takes_address`): a local's elements are `disp(%esp)`/
+  `disp(%rbp)` operands and a global's `sym+disp` (i386 position-dependent)
+  or `sym+disp(%rip)` (x86-64, no index), with no `lea`. ARM64, PowerPC and
+  SystemZ keep the address in a register: their displacements are short
+  (scaled 12 bits, 16 bits, 12 or 20 bits) and a frame slot's offset is
+  known only after allocation lays the frame out.
 - **Address folding** (`anvil_mir_fold_address_arithmetic`): `ADD(base,
   index * 1|2|4|8)` feeding loads/stores becomes an indexed access
   (`index_scale` on LOAD/STORE) when the target's hook accepts the form:

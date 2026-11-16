@@ -96,6 +96,7 @@ Evaluates constant expressions at compile time.
 | `sext(sext x)`, `zext(zext x)`, `sext(zext x)` | one extension of `x` (`sext` of a `zext` is the `zext`: its top bit is clear); `zext(sext x)` stays |
 | `trunc(trunc x)` | one truncation of `x` |
 | `trunc(ext x)` | `x` at its own width and type, `trunc x` narrower, `ext x` wider (`fold_cast_chain`) |
+| `gep T (gep S p, c...), 0, j...`, the inner indices constant | `gep S p, c..., j...`: `a[1][2]` one offset from `a` (`fold_gep_chain`; a variable inner index keeps its own GEP, which LICM and loop strength reduction may share) |
 
 **Comparison Folding:**
 

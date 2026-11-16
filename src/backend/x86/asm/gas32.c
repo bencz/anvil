@@ -12,17 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Position-dependent code addresses a symbol absolutely: the base of a
- * load or store becomes the displacement (x86_memory_operand). */
-static bool x86_use_takes_symbol(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset)
-{
-    const x86_mir_emit_t *emit = ctx;
-    (void)index;
-    (void)symbol;
-    return emit->reloc == ANVIL_RELOC_STATIC && offset >= INT32_MIN && offset <= INT32_MAX &&
-           ((info->op == ANVIL_MIR_OP_LOAD && use == 0) || (info->op == ANVIL_MIR_OP_STORE && use == 1));
-}
-
 /* GPRs the emitters below write before reading all of an instruction's
  * operands: CL for a variable shift count. */
 static uint64_t x86_printer_gpr_scratch(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index,
@@ -560,6 +549,9 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     const anvil_x86_plat_desc_t *plat = user;
     gas->pointer_bytes = 4;
     gas->symbol_prefix = plat ? plat->sym_prefix : "";
+    /* Known only when printing (the relocation model): absolute when
+     * position-dependent. */
+    gas->symbol_operands = X86_GAS_SYMBOL_IN_REGISTER;
     gas->wraps_imm32 = true;
     gas->fp_memory_operands = false;
     gas->stack_reg = "esp";
@@ -848,13 +840,14 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
      * otherwise on the x87 FPU. */
     emit.fp = (features & ANVIL_FEATURE_X86_SSE2) ? &x86_fp_sse2_unit : &x86_fp_x87_unit;
     x86_mode(&emit.base, plat);
+    emit.base.symbol_operands = emit.reloc == ANVIL_RELOC_STATIC ? X86_GAS_SYMBOL_ABSOLUTE : X86_GAS_SYMBOL_IN_REGISTER;
     emit.ret_hi_phys = -1;
     anvil_strbuf_init(&emit.base.code);
     if (!emit.base.code.data)
         return false;
 
     /* The facts first: the frame saves the registers printed code writes. */
-    if (!anvil_mir_isel_facts_build(&emit.base.isel, mir, x86_gas_use_takes_immediate, x86_use_takes_symbol, &emit)) {
+    if (!anvil_mir_isel_facts_build(&emit.base.isel, mir, x86_gas_use_takes_immediate, x86_gas_takes_address, &emit.base)) {
         anvil_strbuf_destroy(&emit.base.code);
         return false;
     }

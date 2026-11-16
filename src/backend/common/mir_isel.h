@@ -16,7 +16,9 @@
 /* Whether operand `use` of instruction `index` will be encoded as the
  * immediate `value` by the target's printer. */
 typedef bool (*anvil_mir_isel_takes_imm_fn)(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value);
-/* The same for the address `symbol` + `offset` (absolute addressing). */
+/* The same for an address: `symbol` + `offset`, or (symbol NULL) the frame
+ * slot's address + `offset`, which the printer spells in the instruction
+ * (as a memory operand's displacement and base). */
 typedef bool (*anvil_mir_isel_takes_symbol_fn)(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol,
                                                int64_t offset);
 
@@ -27,6 +29,7 @@ typedef struct {
     uint8_t *use_count;  /* saturating */
     int64_t *constant;   /* the immediate, or the offset from `symbol` */
     const char **symbol; /* a known symbol address, else NULL */
+    int32_t *frame_slot; /* a known frame slot's address: the slot + 1, else 0 */
     bool *materialize;   /* false: no use needs the register */
     anvil_mir_opcode_t *def_op;  /* of the only definition (INVALID: several) */
     uint8_t *width;      /* low bits that can be nonzero in the register (0: unknown) */
@@ -42,6 +45,8 @@ void anvil_mir_isel_facts_destroy(anvil_mir_isel_facts_t *facts);
 bool anvil_mir_isel_constant(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg, int64_t *out);
 /* The symbol address (plus offset) a GPR vreg holds. */
 bool anvil_mir_isel_symbol(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg, const char **symbol, int64_t *offset);
+/* The frame slot whose address (plus offset) a GPR vreg holds. */
+bool anvil_mir_isel_frame_address(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg, int *slot, int64_t *offset);
 
 /* The opcode of `vreg`'s definitions, when they all share it
  * (ANVIL_MIR_OP_INVALID when they differ or there is none): a printer that knows what its form of that instruction

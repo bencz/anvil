@@ -606,6 +606,49 @@ static bool fold_cast_chain(anvil_instr_t *instr, anvil_value_t **replacement)
     return true;
 }
 
+/* gep T (gep S p, c...), 0, j... is gep S p, c..., j... when the inner walk
+ * ends at T with constant indices only (a struct_gep S p, k walks as
+ * gep S p, 0, k): one address, the constants one offset (a[1][2] a
+ * displacement, not a register).  A variable inner index stays apart: its
+ * address may be shared or loop-invariant (a row of a[i][j]).  The inner
+ * GEP stays for its other readers. */
+static bool fold_gep_chain(anvil_ctx_t *ctx, anvil_instr_t *outer)
+{
+    if (outer->op != ANVIL_OP_GEP || outer->num_operands < 2 || !outer->aux_type || outer->operands[0]->kind != ANVIL_VAL_INSTR ||
+        outer->operands[1]->kind != ANVIL_VAL_CONST_INT || outer->operands[1]->data.i != 0)
+        return false;
+    anvil_instr_t *inner = outer->operands[0]->data.instr;
+    if ((inner->op != ANVIL_OP_GEP && inner->op != ANVIL_OP_STRUCT_GEP) || inner->num_operands < 2 || !inner->aux_type || !inner->result ||
+        inner->result->type->kind != ANVIL_TYPE_PTR || !anvil_types_equal(inner->result->type->data.pointee, outer->aux_type))
+        return false;
+    for (size_t i = 1; i < inner->num_operands; i++)
+        if (inner->operands[i]->kind != ANVIL_VAL_CONST_INT)
+            return false;
+    bool field = inner->op == ANVIL_OP_STRUCT_GEP;
+    size_t inner_indices = field ? 2 : inner->num_operands - 1, outer_indices = outer->num_operands - 2;
+    size_t count = 1 + inner_indices + outer_indices;
+    anvil_value_t *zero = field ? anvil_opt_make_const_int(ctx, inner->operands[1]->type, 0) : NULL;
+    anvil_value_t **operands = malloc(count * sizeof(*operands));
+    if ((field && !zero) || !operands || !anvil_instr_reserve_operands(outer, count)) {
+        free(operands);
+        return false;
+    }
+    size_t k = 0;
+    operands[k++] = inner->operands[0];
+    if (field)
+        operands[k++] = zero;
+    for (size_t i = 1; i < inner->num_operands; i++)
+        operands[k++] = inner->operands[i];
+    for (size_t i = 2; i < outer->num_operands; i++)
+        operands[k++] = outer->operands[i];
+    for (size_t i = 0; i < count; i++)
+        outer->operands[i] = operands[i];
+    outer->num_operands = count;
+    outer->aux_type = inner->aux_type;
+    free(operands);
+    return true;
+}
+
 anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
 {
     if (!func || !func->parent || !func->parent->ctx)
@@ -630,6 +673,10 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
                 instr->operands[0] = instr->operands[1];
                 instr->operands[1] = constant;
                 changed = true;
+            }
+            if (fold_gep_chain(ctx, instr)) {
+                changed = true;
+                continue;
             }
             if (instr->num_operands == 2 && fold_constant_chain(ctx, instr, &folded)) {
                 changed = true;

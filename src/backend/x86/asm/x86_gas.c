@@ -252,6 +252,9 @@ void x86_gas_emit_frame_addr(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
         gas->failed = true;
         return;
     }
+    /* Spelled by the memory operands that read it. */
+    if (!anvil_mir_isel_materialize(&gas->isel, info->def))
+        return;
     int dst = x86_gas_phys_of(gas, info->def);
     if (gas->failed)
         return;
@@ -436,16 +439,28 @@ bool x86_gas_memory_operand(x86_gas_t *gas, size_t index, const anvil_mir_instr_
     }
     int64_t imm = info->has_imm ? info->imm : 0, offset;
     const char *symbol;
+    int slot;
     char disp[300] = "";
-    bool absolute = !anvil_mir_isel_materialize(&gas->isel, base) && anvil_mir_isel_symbol(&gas->isel, base, &symbol, &offset);
+    bool in_place = !anvil_mir_isel_materialize(&gas->isel, base);
+    bool absolute = in_place && anvil_mir_isel_symbol(&gas->isel, base, &symbol, &offset);
+    bool frame = in_place && !absolute && anvil_mir_isel_frame_address(&gas->isel, base, &slot, &offset);
     const char *prefix = absolute ? x86_gas_symbol_ref_prefix(gas, symbol) : "";
+    if (frame && (slot < 0 || (size_t)slot >= gas->num_frame_slot_offsets)) {
+        gas->failed = true;
+        return false;
+    }
     if (absolute && imm + offset)
         snprintf(disp, sizeof(disp), "%s%s%+lld", prefix, symbol, (long long)(imm + offset));
     else if (absolute)
         snprintf(disp, sizeof(disp), "%s%s", prefix, symbol);
+    else if (frame)
+        snprintf(disp, sizeof(disp), "%lld", (long long)(imm + offset - gas->frame_slot_offsets[slot] + gas->frame_bias));
     else if (imm)
         snprintf(disp, sizeof(disp), "%lld", (long long)imm);
-    const char *base_name = absolute ? NULL : x86_gas_gpr(x86_gas_phys_of(gas, base), gas->pointer_bytes);
+    /* A symbol relative to the instruction, a frame slot relative to the
+     * frame register. */
+    const char *base_name = frame ? gas->frame_reg : absolute ? (gas->symbol_operands == X86_GAS_SYMBOL_PC_RELATIVE ? "rip" : NULL)
+                                                              : x86_gas_gpr(x86_gas_phys_of(gas, base), gas->pointer_bytes);
     if (info->index_scale)
         snprintf(out, out_len, "%s(%s%s,%%%s,%u)", disp, base_name ? "%" : "", base_name ? base_name : "",
                  x86_gas_gpr(x86_gas_phys_of(gas, index_vreg), gas->pointer_bytes), info->index_scale);
@@ -576,13 +591,25 @@ void x86_gas_emit_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
     anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), address);
 }
 
+bool x86_gas_takes_address(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset)
+{
+    const x86_gas_t *gas = ctx;
+    (void)index;
+    bool base = (info->op == ANVIL_MIR_OP_LOAD && use == 0) || (info->op == ANVIL_MIR_OP_STORE && use == 1);
+    if (!base || offset < INT32_MIN || offset > INT32_MAX)
+        return false;
+    if (!symbol)
+        return true;
+    return gas->symbol_operands == X86_GAS_SYMBOL_ABSOLUTE || (gas->symbol_operands == X86_GAS_SYMBOL_PC_RELATIVE && !info->index_scale);
+}
+
 bool x86_gas_mark_registerless(anvil_mir_func_t *mir, void (*mode)(x86_gas_t *gas, const void *user), const void *user)
 {
     x86_gas_t probe;
     memset(&probe, 0, sizeof(probe));
     probe.mir = mir;
     mode(&probe, user);
-    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&probe.isel, mir, x86_gas_use_takes_immediate, NULL, &probe))
+    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&probe.isel, mir, x86_gas_use_takes_immediate, x86_gas_takes_address, &probe))
         return false;
     bool ok = anvil_mir_isel_mark_registerless(mir, &probe.isel);
     anvil_mir_isel_facts_destroy(&probe.isel);

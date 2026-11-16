@@ -999,6 +999,48 @@ static void test_x86_zero_extending_masks(void)
         }
 }
 
+/* Accesses through a frame slot's address or a global's need no register
+ * for it on x86: a local array's elements are frame operands (no lea), a
+ * global's a displacement from the symbol (absolute on i386, RIP-relative
+ * on x86-64). */
+static void test_x86_address_operands(void)
+{
+    static const anvil_arch_t arches[] = {ANVIL_ARCH_X86_64, ANVIL_ARCH_X86};
+    static const char *const globals[] = {"table+8(%rip)", "table+8,"};
+    for (size_t a = 0; a < 2; a++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arches[a]);
+        anvil_module_t *module = anvil_module_create(ctx, "addresses");
+        anvil_type_t *i32 = anvil_type_i32(ctx);
+        anvil_type_t *array = anvil_type_array(ctx, i32, 4);
+        anvil_value_t *table = anvil_module_add_global(module, "table", array, ANVIL_LINK_EXTERNAL);
+        anvil_type_t *params[] = {i32};
+        anvil_func_t *func = anvil_func_create(module, "touch", anvil_type_func(ctx, i32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_value_t *slots = anvil_build_alloca(ctx, array, "slots");
+        anvil_value_t *x = anvil_func_get_param(func, 0);
+        for (int k = 0; k < 4; k++) {
+            anvil_value_t *index[] = {anvil_const_i32(ctx, 0), anvil_const_i32(ctx, k)};
+            anvil_build_store(ctx, x, anvil_build_gep(ctx, array, slots, index, 2, "slot"));
+        }
+        anvil_value_t *third[] = {anvil_const_i32(ctx, 0), anvil_const_i32(ctx, 2)};
+        anvil_value_t *global = anvil_build_load(ctx, i32, anvil_build_gep(ctx, array, table, third, 2, "cell"), "global");
+        anvil_value_t *local = anvil_build_load(ctx, i32, anvil_build_gep(ctx, array, slots, third, 2, "slot"), "local");
+        anvil_build_ret(ctx, anvil_build_add(ctx, global, local, "sum"));
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && !strstr(assembly, "\tlea") &&
+                     strstr(assembly, globals[a]);
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d: frame and global addresses are memory operands", (int)arches[a]);
+        CHECK(valid, message);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -1059,6 +1101,7 @@ int main(void)
     test_constant_stores();
     test_arm64_bitfields();
     test_x86_zero_extending_masks();
+    test_x86_address_operands();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

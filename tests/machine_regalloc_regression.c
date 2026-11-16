@@ -812,6 +812,39 @@ static void test_block_constants_merge(void)
     }
 }
 
+/* Pure values nothing reads go before allocation, with what only they read
+ * (a call's unused result copied out of its register, a sum of it); the
+ * call and a value a store reads stay. */
+static void test_dead_values_removed(void)
+{
+    anvil_mir_func_t *fn = anvil_mir_func_create("mir_dead_values");
+    anvil_mir_vreg_t result = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t copied = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t one = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t sum = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t address = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t kept = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+    anvil_mir_vreg_t result_use[] = { result }, sum_uses[] = { copied, one }, store_uses[] = { kept, address };
+    CHECK(anvil_mir_set_fixed_reg(fn, result, 0) && anvil_mir_add_call(fn, result, NULL, 0, "callee", ANVIL_CC_SYSV, false, 0) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_COPY, copied, result_use, 1) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, one, 1) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, sum, sum_uses, 2) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, address, 4096) &&
+              anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, kept, 7) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_STORE, ANVIL_MIR_NO_VREG, store_uses, 2) &&
+              anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, NULL, 0),
+          "dead-value MIR should build");
+    char error[256] = { 0 };
+    CHECK(anvil_mir_optimize_before_allocation(fn, NULL, NULL, NULL) && anvil_mir_verify(fn, error, sizeof(error)), "dead values should go, leaving valid MachineIR");
+    bool call = false, copy = false, add = false, store = false;
+    anvil_mir_instr_info_t info;
+    for (size_t i = 0; i < anvil_mir_num_instrs(fn) && anvil_mir_get_instr_info(fn, i, &info); i++) {
+        call |= info.op == ANVIL_MIR_OP_CALL;
+        copy |= info.op == ANVIL_MIR_OP_COPY;
+        add |= info.op == ANVIL_MIR_OP_ADD;
+        store |= info.op == ANVIL_MIR_OP_STORE;
+    }
+    CHECK(call && store && !copy && !add, "the unused copy and sum go; the call and the store stay");
+    anvil_mir_func_destroy(fn);
+}
+
 /* Extending or truncating a constant known in the block is a MOV of the
  * converted constant: its users may take it as an immediate again. */
 static void test_local_cse_folds_conversions_of_constants(void)
@@ -1703,6 +1736,7 @@ int main(void)
     test_local_cse_reuses_pure_values_until_redefinition();
     test_local_cse_folds_conversions_of_constants();
     test_block_constants_merge();
+    test_dead_values_removed();
     test_address_folding_absorbs_index_extension();
     test_shared_scaled_index_folds_after_cse();
     test_loop_tests_rotate_and_phi_copies_retarget();

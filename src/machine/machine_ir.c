@@ -4874,13 +4874,14 @@ bool anvil_mir_hoist_materialized_constants(anvil_mir_func_t *func)
     return func && mir_hoist_constants_once(func, NULL, NULL, &changed);
 }
 
-/* A MOV of a constant into a register a block may share: defined once,
- * not fixed, live-in or registerless, and not copied (a copy of a shared
- * register costs what materializing the constant again does). */
+/* A constant or a symbol's address put in a register that a block may
+ * share: defined once, not fixed, live-in or registerless, and not copied
+ * (a copy of a shared register costs what materializing it again does). */
 static bool mir_shareable_constant(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr, const size_t *defs, const bool *copied)
 {
-    if (instr->op != ANVIL_MIR_OP_MOV || !instr->has_imm || instr->num_uses || instr->symbol || instr->def >= func->num_vregs || defs[instr->def] != 1 ||
-        copied[instr->def])
+    bool constant = instr->op == ANVIL_MIR_OP_MOV && instr->has_imm && !instr->symbol;
+    bool address = instr->op == ANVIL_MIR_OP_SYMBOL_ADDR && instr->symbol;
+    if (!(constant || address) || instr->num_uses || instr->def >= func->num_vregs || defs[instr->def] != 1 || copied[instr->def])
         return false;
     const anvil_mir_vreg_info_t *info = &func->vregs[instr->def];
     return !info->has_fixed_reg && !info->registerless && !info->is_live_in;
@@ -4935,7 +4936,9 @@ bool anvil_mir_merge_block_constants(anvil_mir_func_t *func)
         for (; k < count; k++) {
             const anvil_mir_instr_t *earlier = &func->instrs[seen[k]];
             const anvil_mir_vreg_info_t *other = &func->vregs[earlier->def];
-            if (earlier->imm == instr->imm && other->reg_class == info->reg_class && other->size_bits == info->size_bits && other->is_signed == info->is_signed)
+            bool same_symbol = earlier->symbol ? instr->symbol && strcmp(earlier->symbol, instr->symbol) == 0 : !instr->symbol;
+            if (earlier->op == instr->op && same_symbol && (earlier->has_imm ? earlier->imm : 0) == (instr->has_imm ? instr->imm : 0) &&
+                other->reg_class == info->reg_class && other->size_bits == info->size_bits && other->is_signed == info->is_signed)
                 break;
         }
         if (k < count) {
@@ -5317,6 +5320,90 @@ static void mir_bitcasts_to_copies(anvil_mir_func_t *func)
     }
 }
 
+/* An operation with no effect but its result, which cannot trap. */
+static bool mir_pure_operation(const anvil_mir_instr_t *instr)
+{
+    switch (instr->op) {
+    case ANVIL_MIR_OP_MOV:
+    case ANVIL_MIR_OP_COPY:
+    case ANVIL_MIR_OP_SYMBOL_ADDR:
+    case ANVIL_MIR_OP_FRAME_ADDR:
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+    case ANVIL_MIR_OP_NEG:
+    case ANVIL_MIR_OP_NOT:
+    case ANVIL_MIR_OP_ZEXT:
+    case ANVIL_MIR_OP_SEXT:
+    case ANVIL_MIR_OP_TRUNC:
+    case ANVIL_MIR_OP_BITCAST:
+        break;
+    default:
+        return false;
+    }
+    for (size_t c = 0; c < ANVIL_MIR_REG_CLASS_COUNT; c++)
+        if (instr->clobbers[c] || instr->scratch[c])
+            return false;
+    return true;
+}
+
+/* Pure operations whose results nothing reads (the copy out of a call's
+ * result register when the result goes unused, say) go, and then what only
+ * they read. */
+static bool mir_remove_dead_values(anvil_mir_func_t *func)
+{
+    if (!func->num_instrs || !func->num_vregs)
+        return true;
+    size_t *uses = calloc(func->num_vregs, sizeof(size_t));
+    bool *dead = calloc(func->num_instrs, sizeof(bool));
+    if (!uses || !dead) {
+        free(uses);
+        free(dead);
+        return false;
+    }
+    for (size_t i = 0; i < func->num_instrs; i++)
+        for (size_t u = 0; u < func->instrs[i].num_uses; u++)
+            if (func->instrs[i].uses[u] < func->num_vregs)
+                uses[func->instrs[i].uses[u]]++;
+    size_t removed = 0;
+    for (bool again = true; again;) {
+        again = false;
+        for (size_t i = func->num_instrs; i-- > 0;) {
+            const anvil_mir_instr_t *instr = &func->instrs[i];
+            anvil_mir_vreg_t def = instr->def;
+            if (dead[i] || def >= func->num_vregs || uses[def] || func->vregs[def].has_fixed_reg || func->vregs[def].is_live_in || !mir_pure_operation(instr))
+                continue;
+            dead[i] = true;
+            again = true;
+            removed++;
+            for (size_t u = 0; u < instr->num_uses; u++)
+                if (instr->uses[u] < func->num_vregs)
+                    uses[instr->uses[u]]--;
+        }
+    }
+    if (removed) {
+        size_t kept = 0;
+        for (size_t i = 0; i < func->num_instrs; i++) {
+            if (dead[i]) {
+                free_instr_contents(&func->instrs[i]);
+                continue;
+            }
+            func->instrs[kept++] = func->instrs[i];
+        }
+        func->num_instrs = kept;
+        recompute_block_instr_ranges(func);
+    }
+    free(uses);
+    free(dead);
+    return true;
+}
+
 bool anvil_mir_optimize_before_allocation(anvil_mir_func_t *func, anvil_mir_address_mode_fn legal, anvil_mir_expensive_constant_fn expensive,
                                           void *user)
 {
@@ -5328,5 +5415,5 @@ bool anvil_mir_optimize_before_allocation(anvil_mir_func_t *func, anvil_mir_addr
      * those sources a second definition. */
     return anvil_mir_order_blocks(func) && anvil_mir_local_cse(func) && (!legal || anvil_mir_fold_address_arithmetic(func, legal, user)) &&
            anvil_mir_hoist_loop_constants(func, expensive, user) && mir_coalesce(func, true) && anvil_mir_duplicate_branch_targets(func, 4) &&
-           mir_sink_exit_copies(func);
+           mir_sink_exit_copies(func) && mir_remove_dead_values(func);
 }

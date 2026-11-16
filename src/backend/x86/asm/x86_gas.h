@@ -17,6 +17,11 @@
  * each one's own state: the allocated function, the text, the frame
  * layout, the blocks' layout and the compare, carry and load folds in
  * progress. */
+/* How a load or store reaches a symbol's storage: through a register
+ * holding the address, absolutely (`sym+off`, position-dependent i386) or
+ * relative to the instruction (`sym+off(%rip)`, which takes no index). */
+typedef enum { X86_GAS_SYMBOL_IN_REGISTER, X86_GAS_SYMBOL_ABSOLUTE, X86_GAS_SYMBOL_PC_RELATIVE } x86_gas_symbol_mode_t;
+
 typedef struct {
     const anvil_mir_func_t *mir;
     anvil_syntax_t syntax;
@@ -57,6 +62,7 @@ typedef struct {
      * between a register and memory. */
     int pointer_bytes;
     const char *symbol_prefix;
+    x86_gas_symbol_mode_t symbol_operands;
     /* Constants live in 32-bit registers: an immediate takes any value
      * modulo 2^32 (else only a value of 32 bits or less does, and a wider
      * one must fit a sign-extended imm32). */
@@ -126,6 +132,10 @@ const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol);
 /* A vreg the isel facts know as a constant that fits an instruction's
  * immediate: a value of 32 bits or less (or any, when `wraps_imm32`)
  * modulo 2^32, a wider one when it fits a sign-extended imm32. */
+/* The isel facts' address hook: a load's or store's base that is a frame
+ * slot's address, or a symbol's as symbol_operands allows, needs no
+ * register (x86_gas_memory_operand spells it). */
+bool x86_gas_takes_address(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset);
 bool x86_gas_facts_imm(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out);
 bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out);
 /* The isel facts' callback: whether the printers encode operand `use` of
