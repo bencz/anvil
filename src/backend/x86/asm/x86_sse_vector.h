@@ -15,10 +15,8 @@
 typedef struct {
     anvil_strbuf_t *code;
     const anvil_mir_func_t *mir;
-    const char *const *xmm;     /* XMM names by register number */
-    int num_xmm;
-    const char *const *gpr32;   /* 32-bit general register names */
-    const char *const *gpr64;   /* 64-bit ones; NULL where there are none */
+    int num_xmm;                /* XMM registers (x86_gas_xmm names them) */
+    bool gpr64;                 /* 64-bit general registers exist */
     /* XMM registers the printer may overwrite at any instruction (`temp`)
      * and at those declaring it as scratch (`temp2`: reductions and
      * accumulations). */

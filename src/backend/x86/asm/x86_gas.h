@@ -7,10 +7,58 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_machine.h"
 #include "../../common/mir_isel.h"
+#include "../../common/print_flags.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+
+/* What both printers keep while they print a function, the first member of
+ * each one's own state: the allocated function, the text, the frame
+ * layout, the blocks' layout and the compare, carry and load folds in
+ * progress. */
+typedef struct {
+    const anvil_mir_func_t *mir;
+    anvil_syntax_t syntax;
+    anvil_strbuf_t code;
+    int *spill_offsets;
+    size_t num_spill_offsets;
+    int *frame_slot_offsets;
+    size_t num_frame_slot_offsets;
+    int outgoing_size;
+    int frame_size;
+    /* The prologue at the MIR's frame block (anvil_mir_isel_frameless_prefix). */
+    bool wrapped;
+    bool emitted_fneg_mask;
+    bool emitted_fabs_mask;
+    bool failed;
+    anvil_mir_isel_facts_t isel;
+    anvil_mir_layout_t layout; /* blocks printed, and where branches land */
+    anvil_mir_block_t block;   /* being emitted (blocks print in order) */
+    const char *fused_jcc;     /* set by a compare folded into the next BR_COND or SELECT */
+    /* x + (a u< b): the extension at adc_skip prints nothing, the add at
+     * adc_at is adc $0 on the compare's carry (SIZE_MAX: none). */
+    size_t adc_skip, adc_at;
+    /* x & c read only by `== 0` / `!= 0` feeding the branch: printed as
+     * test, the compare at test_at prints nothing (SIZE_MAX: none). */
+    size_t test_at;
+    anvil_mir_vreg_t adc_other;
+    anvil_print_flags_t flags; /* what the flags tell */
+    /* A load folded into a later instruction as its memory operand: that
+     * instruction's index and the address. */
+    size_t fold_target, fold_load;
+    char fold_address[400];
+} x86_gas_t;
+
+/* A general register's name at `bytes` (1, 2, 4 or 8) and an XMM
+ * register's ("?" out of range); i386 uses the first eight. */
+const char *x86_gas_gpr(int phys, int bytes);
+const char *x86_gas_xmm(int phys);
+/* The AT&T operand-size suffix of `bytes` (1, 2, 4 or 8). */
+const char *x86_gas_size_suffix(int bytes);
+/* The register an allocated vreg holds (-1, marking the printing failed,
+ * when it was spilled or not allocated). */
+int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg);
 
 /* The setcc mnemonic of an integer compare; the jcc suffix is the text
  * after "set". */

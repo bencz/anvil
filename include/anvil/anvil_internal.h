@@ -427,6 +427,13 @@ void anvil_strbuf_appendf(anvil_strbuf_t *sb, const char *fmt, ...) ANVIL_PRINTF
  * verifiers and legalizers that report through a caller buffer. */
 bool anvil_format_failure(char *error, size_t error_len, const char *fmt, ...) ANVIL_PRINTF_LIKE(3, 4);
 
+/* `value` rounded up to a multiple of `align` (a power of two; 0 and 1
+ * leave it as it is). */
+static inline int anvil_align_int(int value, int align)
+{
+    return align > 1 ? (value + align - 1) & ~(align - 1) : value;
+}
+
 /* Whether code must take `symbol`'s address from the global offset table
  * (and call it through the PLT) under the context's relocation model: in a
  * shared object every symbol another module could preempt (not internal),

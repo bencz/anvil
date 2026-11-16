@@ -157,11 +157,6 @@ typedef struct {
     size_t strings_cap;
 } x64_backend_t;
 
-extern const char *x64_reg64_names[16];
-extern const char *x64_reg32_names[16];
-extern const char *x64_reg16_names[16];
-extern const char *x64_reg8_names[16];
-extern const char *x64_xmm_names[16];
 
 bool x64_type_is_float(anvil_type_t *type);
 anvil_value_t *anvil_x64_build_va_arg(anvil_backend_t *be, anvil_value_t *cursor_storage, anvil_type_t *type, const char *name);

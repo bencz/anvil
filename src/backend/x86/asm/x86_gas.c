@@ -174,3 +174,40 @@ void x86_gas_emit_memory_compare(anvil_strbuf_t *code, const char *suffix, const
     else
         anvil_strbuf_appendf(code, "\tcmp%s %s, %%%s\n", suffix, address, other_reg);
 }
+
+static const char *const gpr_names[4][16] = {
+    {"al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"},
+    {"ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"},
+    {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d"},
+    {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"},
+};
+
+static const char *const xmm_names[16] = {"xmm0", "xmm1", "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
+                                          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
+
+const char *x86_gas_gpr(int phys, int bytes)
+{
+    if (phys < 0 || phys >= 16)
+        return "?";
+    return gpr_names[bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3][phys];
+}
+
+const char *x86_gas_xmm(int phys)
+{
+    return phys >= 0 && phys < 16 ? xmm_names[phys] : "?";
+}
+
+const char *x86_gas_size_suffix(int bytes)
+{
+    return bytes == 1 ? "b" : bytes == 2 ? "w" : bytes == 4 ? "l" : "q";
+}
+
+int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg)
+{
+    const anvil_regalloc_assignment_t *assignment = anvil_mir_get_assignment(gas->mir, vreg);
+    if (!assignment || assignment->spilled || assignment->phys_reg < 0) {
+        gas->failed = true;
+        return -1;
+    }
+    return assignment->phys_reg;
+}

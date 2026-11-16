@@ -6,8 +6,8 @@
 
 static const char *xmm(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
 {
-    int phys = x86_phys_of(emit, vreg);
-    return phys >= 0 && phys < 8 ? x86_xmm_names[phys] : "?";
+    int phys = x86_gas_phys_of(&emit->base, vreg);
+    return phys >= 0 && phys < 8 ? x86_gas_xmm(phys) : "?";
 }
 
 /* A scalar, or a whole vector (unaligned: element-aligned streams). */
@@ -30,18 +30,18 @@ static void copy(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_vreg_t sr
 {
     const anvil_mir_vreg_info_t *dst_info = x86_vreg_info_checked(emit, dst);
     const anvil_mir_vreg_info_t *src_info = x86_vreg_info_checked(emit, src);
-    int dst_phys = x86_phys_of(emit, dst);
-    int src_phys = x86_phys_of(emit, src);
-    if (!dst_info || !src_info || emit->failed)
+    int dst_phys = x86_gas_phys_of(&emit->base, dst);
+    int src_phys = x86_gas_phys_of(&emit->base, src);
+    if (!dst_info || !src_info || emit->base.failed)
         return;
 
     if (dst_info->reg_class == ANVIL_MIR_REG_FPR && src_info->reg_class == ANVIL_MIR_REG_FPR) {
         if (dst_phys != src_phys)
-            anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", copy_op, x86_xmm_names[src_phys], x86_xmm_names[dst_phys]);
+            anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", copy_op, x86_gas_xmm(src_phys), x86_gas_xmm(dst_phys));
     } else if (dst_info->reg_class == ANVIL_MIR_REG_FPR) {
-        anvil_strbuf_appendf(&emit->code, "\tmovd %%%s, %%%s\n", x86_gpr_name(src_phys, 4), x86_xmm_names[dst_phys]);
+        anvil_strbuf_appendf(&emit->base.code, "\tmovd %%%s, %%%s\n", x86_gas_gpr(src_phys, 4), x86_gas_xmm(dst_phys));
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tmovd %%%s, %%%s\n", x86_xmm_names[src_phys], x86_gpr_name(dst_phys, 4));
+        anvil_strbuf_appendf(&emit->base.code, "\tmovd %%%s, %%%s\n", x86_gas_xmm(src_phys), x86_gas_gpr(dst_phys, 4));
     }
 }
 
@@ -72,31 +72,31 @@ static void constant(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, uint64_t bits)
 {
     int size = x86_fp_size(emit, dst);
     const char *reg = xmm(emit, dst);
-    if (emit->failed)
+    if (emit->base.failed)
         return;
     if (size <= 4)
         bits &= UINT32_MAX;
     if (bits == 0) {
-        anvil_strbuf_appendf(&emit->code, "\txorps %%%s, %%%s\n", reg, reg);
+        anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", reg, reg);
         return;
     }
     if (emit->reloc == ANVIL_RELOC_STATIC) {
         long entry = pool_entry(emit, bits, size);
         if (entry < 0) {
-            emit->failed = true;
+            emit->base.failed = true;
             return;
         }
-        anvil_strbuf_appendf(&emit->code, "\t%s %s%s_fpc%ld, %%%s\n", mov_op(size), emit->plat->format->local_label_prefix,
-                             anvil_mir_func_name(emit->mir), entry, reg);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %s%s_fpc%ld, %%%s\n", mov_op(size), emit->plat->format->local_label_prefix,
+                             anvil_mir_func_name(emit->base.mir), entry, reg);
         return;
     }
     if (size <= 4) {
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)bits, x86_frame(emit, -(emit->scratch_a_off)));
-        anvil_strbuf_appendf(&emit->code, "\tmovss %s, %%%s\n", x86_frame(emit, -(emit->scratch_a_off)), reg);
+        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%u, %s\n", (uint32_t)bits, x86_frame(emit, -(emit->scratch_a_off)));
+        anvil_strbuf_appendf(&emit->base.code, "\tmovss %s, %%%s\n", x86_frame(emit, -(emit->scratch_a_off)), reg);
     } else {
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)(bits & 0xffffffffu), x86_frame(emit, -(emit->scratch_b_off)));
-        anvil_strbuf_appendf(&emit->code, "\tmovl $%u, %s\n", (uint32_t)(bits >> 32), x86_frame(emit, -(emit->scratch_b_off - 4)));
-        anvil_strbuf_appendf(&emit->code, "\tmovsd %s, %%%s\n", x86_frame(emit, -(emit->scratch_b_off)), reg);
+        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%u, %s\n", (uint32_t)(bits & 0xffffffffu), x86_frame(emit, -(emit->scratch_b_off)));
+        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%u, %s\n", (uint32_t)(bits >> 32), x86_frame(emit, -(emit->scratch_b_off - 4)));
+        anvil_strbuf_appendf(&emit->base.code, "\tmovsd %s, %%%s\n", x86_frame(emit, -(emit->scratch_b_off)), reg);
     }
 }
 
@@ -108,69 +108,69 @@ static void binary(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_t
     const char *name = op == ANVIL_MIR_OP_ADD ? "add" : op == ANVIL_MIR_OP_SUB ? "sub" : op == ANVIL_MIR_OP_MUL ? "mul"
                      : op == ANVIL_MIR_OP_DIV || op == ANVIL_MIR_OP_FDIV ? "div" : NULL;
     if (!name)
-        emit->failed = true;
-    if (emit->failed)
+        emit->base.failed = true;
+    if (emit->base.failed)
         return;
     /* dst may hold b: a commutative operation applies a to it, any other
      * moves b aside to XMM4, never allocated. */
     if (strcmp(d, rb) == 0 && strcmp(d, ra) != 0) {
         if (commutative) {
-            anvil_strbuf_appendf(&emit->code, "\t%s%s %%%s, %%%s\n", name, size <= 4 ? "ss" : "sd", ra, d);
+            anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, %%%s\n", name, size <= 4 ? "ss" : "sd", ra, d);
             return;
         }
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%xmm4\n", copy_op, rb);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%xmm4\n", copy_op, rb);
         rb = "xmm4";
     }
     if (strcmp(d, ra) != 0)
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", copy_op, ra, d);
-    anvil_strbuf_appendf(&emit->code, "\t%s%s %%%s, %%%s\n", name, size <= 4 ? "ss" : "sd", rb, d);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", copy_op, ra, d);
+    anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, %%%s\n", name, size <= 4 ? "ss" : "sd", rb, d);
 }
 
 static void unary(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
 {
     int size = x86_fp_size(emit, dst);
     const char *d = xmm(emit, dst), *s = xmm(emit, src);
-    if (emit->failed)
+    if (emit->base.failed)
         return;
     if (strcmp(d, s) != 0)
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", copy_op, s, d);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", copy_op, s, d);
     if (emit->reloc != ANVIL_RELOC_STATIC && (op == ANVIL_MIR_OP_NEG || op == ANVIL_MIR_OP_FABS)) {
         /* No absolute mask address: flip the sign bit in a stack copy. */
         int high = size <= 4 ? 0 : 4;
-        anvil_strbuf_appendf(&emit->code, "\tsubl $8, %%esp\n\t%s %%%s, (%%esp)\n", mov_op(size), d);
-        anvil_strbuf_appendf(&emit->code, op == ANVIL_MIR_OP_NEG ? "\txorl $0x80000000, %d(%%esp)\n" : "\tandl $0x7fffffff, %d(%%esp)\n", high);
-        anvil_strbuf_appendf(&emit->code, "\t%s (%%esp), %%%s\n\taddl $8, %%esp\n", mov_op(size), d);
+        anvil_strbuf_appendf(&emit->base.code, "\tsubl $8, %%esp\n\t%s %%%s, (%%esp)\n", mov_op(size), d);
+        anvil_strbuf_appendf(&emit->base.code, op == ANVIL_MIR_OP_NEG ? "\txorl $0x80000000, %d(%%esp)\n" : "\tandl $0x7fffffff, %d(%%esp)\n", high);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s (%%esp), %%%s\n\taddl $8, %%esp\n", mov_op(size), d);
         return;
     }
     if (op == ANVIL_MIR_OP_NEG) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s%s_fneg_mask%s, %%%s\n", size <= 4 ? "xorps" : "xorpd", emit->plat->format->local_label_prefix, anvil_mir_func_name(emit->mir), size <= 4 ? "32" : "64", d);
-        emit->emitted_fneg_mask = true;
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %s%s_fneg_mask%s, %%%s\n", size <= 4 ? "xorps" : "xorpd", emit->plat->format->local_label_prefix, anvil_mir_func_name(emit->base.mir), size <= 4 ? "32" : "64", d);
+        emit->base.emitted_fneg_mask = true;
     } else if (op == ANVIL_MIR_OP_FABS) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s%s_fabs_mask%s, %%%s\n", size <= 4 ? "andps" : "andpd", emit->plat->format->local_label_prefix, anvil_mir_func_name(emit->mir), size <= 4 ? "32" : "64", d);
-        emit->emitted_fabs_mask = true;
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %s%s_fabs_mask%s, %%%s\n", size <= 4 ? "andps" : "andpd", emit->plat->format->local_label_prefix, anvil_mir_func_name(emit->base.mir), size <= 4 ? "32" : "64", d);
+        emit->base.emitted_fabs_mask = true;
     } else {
-        emit->failed = true;
+        emit->base.failed = true;
     }
 }
 
 static void apply(x86_mir_emit_t *emit, const char *mnemonic, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
 {
     const char *d = xmm(emit, dst), *s = xmm(emit, src);
-    if (emit->failed)
+    if (emit->base.failed)
         return;
     /* Only the low lane is written: zeroing the rest first breaks the
      * dependency on the old value. */
     if (strcmp(d, s) != 0)
-        anvil_strbuf_appendf(&emit->code, "\txorps %%%s, %%%s\n", d, d);
-    anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", mnemonic, s, d);
+        anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", d, d);
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", mnemonic, s, d);
 }
 
 static void compare(x86_mir_emit_t *emit, anvil_mir_vreg_t a, anvil_mir_vreg_t b)
 {
     int size = x86_fp_size(emit, a);
     const char *ra = xmm(emit, a), *rb = xmm(emit, b);
-    if (!emit->failed)
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", size <= 4 ? "ucomiss" : "ucomisd", rb, ra);
+    if (!emit->base.failed)
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", size <= 4 ? "ucomiss" : "ucomisd", rb, ra);
 }
 
 static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
@@ -178,55 +178,55 @@ static void convert(x86_mir_emit_t *emit, anvil_mir_opcode_t op, anvil_mir_vreg_
     switch (op) {
     case ANVIL_MIR_OP_SITOFP: {
         int size = x86_fp_size(emit, dst);
-        const char *d = xmm(emit, dst), *s = x86_gpr_name(x86_phys_of(emit, src), 4);
+        const char *d = xmm(emit, dst), *s = x86_gas_gpr(x86_gas_phys_of(&emit->base, src), 4);
         /* Conversions into an XMM register merge into its upper bits:
          * zeroing it first breaks the dependency on its old value. */
-        if (!emit->failed)
-            anvil_strbuf_appendf(&emit->code, "\txorps %%%s, %%%s\n\tcvtsi2s%sl %%%s, %%%s\n", d, d, size <= 4 ? "s" : "d", s, d);
+        if (!emit->base.failed)
+            anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n\tcvtsi2s%sl %%%s, %%%s\n", d, d, size <= 4 ? "s" : "d", s, d);
         break;
     }
     case ANVIL_MIR_OP_UITOFP: {
         /* As the 64-bit value (0, src): exact, then one rounding. */
         int size = x86_fp_size(emit, dst);
-        const char *d = xmm(emit, dst), *s = x86_gpr_name(x86_phys_of(emit, src), 4);
-        if (emit->failed)
+        const char *d = xmm(emit, dst), *s = x86_gas_gpr(x86_gas_phys_of(&emit->base, src), 4);
+        if (emit->base.failed)
             break;
-        anvil_strbuf_appendf(&emit->code, "\tmovl %%%s, %s\n\tmovl $0, %s\n", s, x86_frame(emit, -(emit->scratch_b_off)), x86_frame(emit, -(emit->scratch_b_off - 4)));
-        anvil_strbuf_appendf(&emit->code, "\tfildll %s\n\tfstp%s %s\n", x86_frame(emit, -(emit->scratch_b_off)), size <= 4 ? "s" : "l", x86_frame(emit, -(emit->scratch_b_off)));
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
+        anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %s\n\tmovl $0, %s\n", s, x86_frame(emit, -(emit->scratch_b_off)), x86_frame(emit, -(emit->scratch_b_off - 4)));
+        anvil_strbuf_appendf(&emit->base.code, "\tfildll %s\n\tfstp%s %s\n", x86_frame(emit, -(emit->scratch_b_off)), size <= 4 ? "s" : "l", x86_frame(emit, -(emit->scratch_b_off)));
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
         break;
     }
     case ANVIL_MIR_OP_FPTOSI:
     case ANVIL_MIR_OP_FPTOUI: {
         int size = x86_fp_size(emit, src);
-        const char *s = xmm(emit, src), *d = x86_gpr_name(x86_phys_of(emit, dst), 4);
+        const char *s = xmm(emit, src), *d = x86_gas_gpr(x86_gas_phys_of(&emit->base, dst), 4);
         const char *sd = size <= 4 ? "s" : "d";
-        if (emit->failed)
+        if (emit->base.failed)
             break;
-        anvil_strbuf_appendf(&emit->code, "\tcvtts%s2si %%%s, %%%s\n", sd, s, d);
+        anvil_strbuf_appendf(&emit->base.code, "\tcvtts%s2si %%%s, %%%s\n", sd, s, d);
         if (op == ANVIL_MIR_OP_FPTOUI) {
             /* From 2^31 up the signed conversion overflows: convert
              * x - 2^31 instead (exact there) and set bit 31.  XMM4 is never
              * allocated; -2^31 comes from the integer conversion. */
-            anvil_strbuf_appendf(&emit->code, "\ttestl %%%s, %%%s\n\tjns 1f\n", d, d);
-            anvil_strbuf_appendf(&emit->code, "\tmovl $-2147483648, %s\n\tcvtsi2s%sl %s, %%xmm4\n", x86_frame(emit, -(emit->scratch_a_off)), sd, x86_frame(emit, -(emit->scratch_a_off)));
-            anvil_strbuf_appendf(&emit->code, "\tadds%s %%%s, %%xmm4\n\tcvtts%s2si %%xmm4, %%%s\n", sd, s, sd, d);
-            anvil_strbuf_appendf(&emit->code, "\txorl $0x80000000, %%%s\n1:\n", d);
+            anvil_strbuf_appendf(&emit->base.code, "\ttestl %%%s, %%%s\n\tjns 1f\n", d, d);
+            anvil_strbuf_appendf(&emit->base.code, "\tmovl $-2147483648, %s\n\tcvtsi2s%sl %s, %%xmm4\n", x86_frame(emit, -(emit->scratch_a_off)), sd, x86_frame(emit, -(emit->scratch_a_off)));
+            anvil_strbuf_appendf(&emit->base.code, "\tadds%s %%%s, %%xmm4\n\tcvtts%s2si %%xmm4, %%%s\n", sd, s, sd, d);
+            anvil_strbuf_appendf(&emit->base.code, "\txorl $0x80000000, %%%s\n1:\n", d);
         }
         break;
     }
     case ANVIL_MIR_OP_FPEXT:
     case ANVIL_MIR_OP_FPTRUNC: {
         const char *d = xmm(emit, dst), *s = xmm(emit, src);
-        if (emit->failed)
+        if (emit->base.failed)
             break;
         if (strcmp(d, s) != 0)
-            anvil_strbuf_appendf(&emit->code, "\txorps %%%s, %%%s\n", d, d);
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %%%s\n", op == ANVIL_MIR_OP_FPEXT ? "cvtss2sd" : "cvtsd2ss", s, d);
+            anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", d, d);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", op == ANVIL_MIR_OP_FPEXT ? "cvtss2sd" : "cvtsd2ss", s, d);
         break;
     }
     default:
-        emit->failed = true;
+        emit->base.failed = true;
         break;
     }
 }
@@ -235,36 +235,36 @@ static void load(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, const char *mem)
 {
     int size = x86_fp_size(emit, dst);
     const char *d = xmm(emit, dst);
-    if (!emit->failed)
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", mov_op(size), mem, d);
+    if (!emit->base.failed)
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", mov_op(size), mem, d);
 }
 
 static void store(x86_mir_emit_t *emit, anvil_mir_vreg_t src, const char *mem)
 {
     int size = x86_fp_size(emit, src);
     const char *s = xmm(emit, src);
-    if (!emit->failed)
-        anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %s\n", mov_op(size), s, mem);
+    if (!emit->base.failed)
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %s\n", mov_op(size), s, mem);
 }
 
 static void push_result(x86_mir_emit_t *emit, anvil_mir_vreg_t src)
 {
     int size = x86_fp_size(emit, src);
     const char *s = xmm(emit, src);
-    if (emit->failed)
+    if (emit->base.failed)
         return;
-    anvil_strbuf_appendf(&emit->code, "\t%s %%%s, %s\n", mov_op(size), s, x86_frame(emit, -(emit->scratch_b_off)));
-    anvil_strbuf_appendf(&emit->code, "\t%s %s\n", size <= 4 ? "flds" : "fldl", x86_frame(emit, -(emit->scratch_b_off)));
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %s\n", mov_op(size), s, x86_frame(emit, -(emit->scratch_b_off)));
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %s\n", size <= 4 ? "flds" : "fldl", x86_frame(emit, -(emit->scratch_b_off)));
 }
 
 static void pop_result(x86_mir_emit_t *emit, anvil_mir_vreg_t dst)
 {
     int size = x86_fp_size(emit, dst);
     const char *d = xmm(emit, dst);
-    if (emit->failed)
+    if (emit->base.failed)
         return;
-    anvil_strbuf_appendf(&emit->code, "\t%s %s\n", size <= 4 ? "fstps" : "fstpl", x86_frame(emit, -(emit->scratch_b_off)));
-    anvil_strbuf_appendf(&emit->code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %s\n", size <= 4 ? "fstps" : "fstpl", x86_frame(emit, -(emit->scratch_b_off)));
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", mov_op(size), x86_frame(emit, -(emit->scratch_b_off)), d);
 }
 
 const x86_fp_unit_t x86_fp_sse2_unit = {

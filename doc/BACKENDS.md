@@ -230,7 +230,7 @@ emission, because their register sets and ABI requirements differ.
 ```text
 src/backend/x86/
     x86_32_internal.h, x86_64_internal.h   Internal mode-specific contracts
-    x86_32_helpers.c, x86_64_helpers.c     Register names and type helpers
+    x86_32_helpers.c, x86_64_helpers.c     Mode-specific helpers
     x86_32_lower.c, x86_64_lower.c         Source IR to MIR
     x86_32_legal.c, x86_64_legal.c         Legality and allocation bridge
     x86_32_codegen.c, x86_64_codegen.c     Function/module coordination and globals
@@ -242,6 +242,9 @@ src/backend/x86/
         x86_64_abi.c                     SysV/Darwin/Win64 descriptors and aggregate classification
         x86_64_varargs.c                 Native va_list operations
     asm/
+        x86_gas.c, x86_gas.h            What both printers share: their common state
+                                        (x86_gas_t, the first member of each), register
+                                        names, condition codes, labels and branches
         gas32.c                         Allocated MIR to 32-bit GAS/AT&T
         gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```

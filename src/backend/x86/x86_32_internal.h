@@ -108,13 +108,8 @@ bool anvil_x86_build_va_copy_into(anvil_backend_t *be, anvil_value_t *destinatio
 const anvil_x86_cc_desc_t *anvil_x86_get_cc_desc(anvil_cc_t cc);
 const anvil_x86_plat_desc_t *anvil_x86_get_plat_desc(anvil_abi_t abi);
 
-extern const char *x86_reg32_names[8];
-extern const char *x86_reg16_names[8];
-extern const char *x86_reg8_names[8];
-extern const char *x86_xmm_names[8];
 
 bool x86_reg_has_byte(int phys_reg);
-const char *x86_byte_reg_name(int phys_reg);
 
 bool x86_type_is_float(anvil_type_t *type);
 

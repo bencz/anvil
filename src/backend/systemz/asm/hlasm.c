@@ -44,13 +44,6 @@ static int systemz_size_bytes(uint16_t bits)
     return bits <= 8 ? 1 : bits <= 16 ? 2 : bits <= 32 ? 4 : 8;
 }
 
-static int systemz_align_int(int value, int align)
-{
-    if (align <= 1)
-        return value;
-    return (value + align - 1) & ~(align - 1);
-}
-
 static bool systemz_prepare_frame(systemz_emit_t *emit)
 {
     size_t num_frame = anvil_mir_num_frame_slots(emit->mir);
@@ -100,7 +93,7 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
                 return false;
             int size = systemz_size_bytes(info->size_bits);
             int align = size > 8 ? 8 : size;
-            value_bytes = systemz_align_int(value_bytes, align);
+            value_bytes = anvil_align_int(value_bytes, align);
             emit->call_arg_value_offsets[i] = value_bytes;
             value_bytes += size;
             count++;
@@ -132,10 +125,10 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
     }
 
     if (emit->max_call_args > 0) {
-        offset = systemz_align_int(offset, (int)emit->desc->word_size);
+        offset = anvil_align_int(offset, (int)emit->desc->word_size);
         emit->outgoing_values_offset = offset;
         offset += max_call_value_bytes;
-        offset = systemz_align_int(offset, (int)emit->desc->ptr_size);
+        offset = anvil_align_int(offset, (int)emit->desc->ptr_size);
         emit->outgoing_param_list_offset = offset;
         offset += (int)(emit->max_call_args * emit->desc->ptr_size);
     } else {
@@ -143,7 +136,7 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
         emit->outgoing_param_list_offset = -1;
     }
 
-    emit->frame_size = systemz_align_int(offset, emit->desc->ptr_size == 8 ? 16 : 8);
+    emit->frame_size = anvil_align_int(offset, emit->desc->ptr_size == 8 ? 16 : 8);
     return true;
 }
 

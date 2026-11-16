@@ -1,5 +1,6 @@
 /* The SSE printer both x86 GAS printers share (see x86_sse_vector.h). */
 #include "x86_sse_vector.h"
+#include "x86_gas.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,19 +22,18 @@ static const char *sse_xmm(x86_sse_printer_t *p, anvil_mir_vreg_t vreg)
         p->failed = true;
         return "?";
     }
-    return p->xmm[phys];
+    return x86_gas_xmm(phys);
 }
 
 /* The general register `phys` with `bits` (64 only where the target has
  * them). */
 static const char *sse_gpr(x86_sse_printer_t *p, int phys, unsigned bits)
 {
-    const char *const *names = bits > 32 ? p->gpr64 : p->gpr32;
-    if (!names || phys < 0) {
+    if ((bits > 32 && !p->gpr64) || phys < 0) {
         p->failed = true;
         return "?";
     }
-    return names[phys];
+    return x86_gas_gpr(phys, bits > 32 ? 8 : 4);
 }
 
 void x86_sse_emit_destructive(x86_sse_printer_t *p, const char *mnemonic, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs,
@@ -73,8 +73,8 @@ static void sse_splat(x86_sse_printer_t *p, const anvil_vector_isa_t *isa, const
             p->failed = true;
             return;
         }
-        if (strcmp(dst, p->xmm[phys]) != 0)
-            anvil_strbuf_appendf(p->code, "\tmovaps %%%s, %%%s\n", p->xmm[phys], dst);
+        if (strcmp(dst, x86_gas_xmm(phys)) != 0)
+            anvil_strbuf_appendf(p->code, "\tmovaps %%%s, %%%s\n", x86_gas_xmm(phys), dst);
         if (info->imm == 32)
             anvil_strbuf_appendf(p->code, "\tshufps $0, %%%s, %%%s\n", dst, dst);
         else

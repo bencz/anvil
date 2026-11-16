@@ -16,7 +16,7 @@
 typedef struct x86_fp_unit x86_fp_unit_t;
 
 typedef struct {
-    const anvil_mir_func_t *mir;
+    x86_gas_t base;
     const anvil_func_t *source_func;
     const anvil_x86_cc_desc_t *desc;
     const anvil_x86_plat_desc_t *plat;
@@ -24,28 +24,15 @@ typedef struct {
     anvil_cpu_features_t features;
     anvil_reloc_model_t reloc;      /* STATIC, or position-independent (ELF) */
     unsigned pic_labels;
-    anvil_syntax_t syntax;
-    anvil_strbuf_t code;
-    int *spill_offsets;
-    size_t num_spill_offsets;
-    int *frame_slot_offsets;
-    size_t num_frame_slot_offsets;
     int gpr_save_offsets[8];
     int scratch_a_off;
     int scratch_b_off;  /* 8 bytes; its high word is scratch_a */
     int fp_area_off;    /* the FP unit's frame area, at -fp_area_off(%ebp) */
-    int outgoing_size;
-    int frame_size;
     int num_pushes;     /* callee-saved registers pushed (no frame pointer) */
     /* Without a frame pointer EBP is allocated and the frame is addressed
      * from ESP, which stays frame_size bytes below where EBP would be
      * (the prologue reserves EBP's push slot too). */
     bool frame_pointer;
-    /* The prologue at the MIR's frame block (anvil_mir_isel_frameless_prefix). */
-    bool wrapped;
-    /* A load folded into a later instruction as its memory operand. */
-    size_t fold_target, fold_load;
-    char fold_address[400];
     char frame_text[8][24];
     unsigned frame_next;
     bool fp_returns;
@@ -53,20 +40,6 @@ typedef struct {
     int ret_hi_phys;
     /* The CALL already moved EDX into the following CALL_RESULT. */
     bool call_hi_moved;
-    anvil_mir_isel_facts_t isel;
-    anvil_mir_layout_t layout;    /* blocks printed, and where branches land */
-    anvil_mir_block_t block;     /* being emitted */
-    const char *fused_jcc;       /* set by a compare folded into the next BR_COND */
-    /* x + (a u< b): the extension at adc_skip prints nothing, the add at
-     * adc_at is adc $0 on the compare's carry (SIZE_MAX: none). */
-    size_t adc_skip, adc_at;
-    /* x & c read only by `== 0` / `!= 0` feeding the branch: printed as
-     * test, the compare at test_at prints nothing (SIZE_MAX: none). */
-    size_t test_at;
-    anvil_mir_vreg_t adc_other;
-    anvil_print_flags_t flags;   /* what the flags tell */
-    bool emitted_fneg_mask;
-    bool emitted_fabs_mask;
     /* Floating constants the function reads from its literal pool
      * (position-dependent code), `size` bytes of `bits` each. */
     struct {
@@ -74,7 +47,6 @@ typedef struct {
         int size;
     } *fp_pool;
     size_t fp_pool_count, fp_pool_cap;
-    bool failed;
 } x86_mir_emit_t;
 
 /* Every operation names FPR vregs by their assignment; `mem` is an AT&T
@@ -124,34 +96,10 @@ static inline int x86_size_bytes(uint16_t size_bits)
 
 static inline const anvil_mir_vreg_info_t *x86_vreg_info_checked(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
 {
-    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->mir, vreg);
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->base.mir, vreg);
     if (!info)
-        emit->failed = true;
+        emit->base.failed = true;
     return info;
-}
-
-static inline int x86_phys_of(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
-{
-    const anvil_regalloc_assignment_t *assignment = anvil_mir_get_assignment(emit->mir, vreg);
-    if (!assignment || assignment->spilled || assignment->phys_reg < 0) {
-        emit->failed = true;
-        return -1;
-    }
-    return assignment->phys_reg;
-}
-
-static inline const char *x86_gpr_name(int phys_reg, int size)
-{
-    if (phys_reg < 0 || phys_reg >= 8)
-        return "?";
-    switch (size) {
-    case 1:
-        return x86_reg8_names[phys_reg];
-    case 2:
-        return x86_reg16_names[phys_reg];
-    default:
-        return x86_reg32_names[phys_reg];
-    }
 }
 
 /* Width in bytes of an FPR vreg (4, 8, or 16 for a vector), or 0 after
@@ -165,7 +113,7 @@ static inline const char *x86_frame(x86_mir_emit_t *emit, int offset)
     if (emit->frame_pointer)
         snprintf(text, sizeof(emit->frame_text[0]), "%d(%%ebp)", offset);
     else
-        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%esp)", offset + emit->frame_size);
+        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%esp)", offset + emit->base.frame_size);
     return text;
 }
 

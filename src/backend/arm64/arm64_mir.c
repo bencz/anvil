@@ -888,11 +888,6 @@ static bool mir_rhs_immediate(arm64_mir_emit_t *emit, size_t index, const anvil_
     return true;
 }
 
-static int align_int(int value, int align)
-{
-    return (value + align - 1) & ~(align - 1);
-}
-
 static int mir_size_bytes(uint16_t size_bits)
 {
     if (size_bits == 0) return 8;
@@ -1150,7 +1145,7 @@ static bool mir_scan_outgoing_stack_args(arm64_mir_emit_t *emit)
     int outgoing_size = 0;
     if (!anvil_mir_outgoing_stack_bytes(emit->mir, 8, &outgoing_size))
         return false;
-    emit->outgoing_size = align_int(outgoing_size, 16);
+    emit->outgoing_size = anvil_align_int(outgoing_size, 16);
     return true;
 }
 
@@ -1195,7 +1190,7 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
         return false;
 
     offset += emit->outgoing_size;
-    emit->frame_size = align_int(offset, 16);
+    emit->frame_size = anvil_align_int(offset, 16);
     emit->has_frame = emit->frame_size > 0 || anvil_mir_needs_frame_record(emit->mir);
     /* Only saves, in whole pairs per class, and sp never moves otherwise:
      * each pair goes with a pre-indexed stp. */

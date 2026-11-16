@@ -19,11 +19,6 @@ static const char *ppc_vector_vsr(int vr)
     return ppc_vsr_names[32 + vr];
 }
 
-static int align_int(int value, int align)
-{
-    return (value + align - 1) & ~(align - 1);
-}
-
 static int ppc_mir_size_bytes(uint16_t size_bits)
 {
     if (size_bits == 0)
@@ -437,7 +432,7 @@ static bool ppc_scan_outgoing_stack_args(ppc_mir_emit_t *emit)
     if (arguments > outgoing_size)
         outgoing_size = arguments;
 
-    emit->outgoing_size = align_int(outgoing_size, 16);
+    emit->outgoing_size = anvil_align_int(outgoing_size, 16);
     return true;
 }
 
@@ -471,7 +466,7 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
     }
     for (int reg = 14; reg <= 31; reg++) {
         if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, reg))
-            emit->fpr_save_offsets[reg] = offset = align_int(offset, 8) + 8;
+            emit->fpr_save_offsets[reg] = offset = anvil_align_int(offset, 8) + 8;
     }
 
     emit->num_frame_slot_offsets = anvil_mir_num_frame_slots(emit->mir);
@@ -495,7 +490,7 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
         return false;
 
     if (ppc_instr_needs_fp_scratch(emit)) {
-        offset = align_int(offset, 8);
+        offset = anvil_align_int(offset, 8);
         offset += 8;
         emit->fp_const_scratch_offset = offset;
     }
@@ -517,7 +512,7 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
     if (needed < (int)emit->desc->min_frame_size) {
         needed = (int)emit->desc->min_frame_size;
     }
-    emit->frame_size = align_int(needed, 16);
+    emit->frame_size = anvil_align_int(needed, 16);
     return true;
 }
 
@@ -1390,7 +1385,7 @@ static void ppc_emit_dyn_alloca(ppc_mir_emit_t *emit, size_t instr_index, const 
     if (prefix < (int)emit->desc->min_frame_size) {
         prefix = (int)emit->desc->min_frame_size;
     }
-    prefix = align_int(prefix, 16);
+    prefix = anvil_align_int(prefix, 16);
     if (prefix <= 32752) {
         anvil_strbuf_appendf(&emit->code, "\taddi %%r11, %%r11, %d\n", prefix + 15);
     } else {
