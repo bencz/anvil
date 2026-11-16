@@ -56,6 +56,12 @@ typedef struct {
      * registers have a byte form (NULL: all), and the FP unit's moves
      * between a register and memory. */
     int pointer_bytes;
+    const char *symbol_prefix;
+    /* Constants live in 32-bit registers: an immediate takes any value
+     * modulo 2^32 (else a value must fit a sign-extended imm32). */
+    bool wraps_imm32;
+    /* SSE arithmetic takes a folded load as its memory operand. */
+    bool fp_memory_operands;
     const char *stack_reg;
     const char *frame_reg;
     int frame_bias;
@@ -78,6 +84,30 @@ const char *x86_gas_size_suffix(int bytes);
 /* The register an allocated vreg holds (-1, marking the printing failed,
  * when it was spilled or not allocated). */
 int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg);
+
+/* The prefix a reference to `symbol` takes (none for a local label). */
+const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol);
+/* A vreg the isel facts know as a constant that fits an instruction's
+ * immediate (wrapped to 32 bits when `wraps_imm32`). */
+bool x86_gas_facts_imm(const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out);
+bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out);
+/* The isel facts' callback: whether the printers encode operand `use` of
+ * the instruction as an immediate (`ctx` is the printer state). */
+bool x86_gas_use_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value);
+/* The AT&T memory operand of the access at `index` whose base is use
+ * `base_use` (an absolute symbol where the isel facts fold it). */
+bool x86_gas_memory_operand(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, size_t base_use, char *out, size_t out_len);
+/* Folds the load at `index` into the instruction reading it, a few
+ * instructions on (a compare, or an arithmetic operation's second
+ * operand), as its memory operand; false when it does not fold. */
+bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const anvil_mir_vreg_info_t *def_info);
+/* Marks the operands the printers encode with no register (immediates
+ * only: symbols stay materialized), for a mode set up by `mode`. */
+bool x86_gas_mark_registerless(anvil_mir_func_t *mir, void (*mode)(x86_gas_t *gas, const void *user), const void *user);
+/* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
+ * where it takes one). */
+void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 
 /* The frame operand `disp` bytes from the frame base (negative: locals,
  * spills and saves; positive: incoming arguments), from a small ring of

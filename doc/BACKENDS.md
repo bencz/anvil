@@ -246,7 +246,9 @@ src/backend/x86/
                                         (x86_gas_t, the first member of each, with the
                                         mode's facts and FP-unit hooks), register names,
                                         condition codes, labels, branches, frame
-                                        addresses, spills, selects, stack arguments
+                                        addresses, spills, selects, stack arguments,
+                                        loads and stores with their memory operands,
+                                        load folding and immediate rules
         gas32.c                         Allocated MIR to 32-bit GAS/AT&T
         gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```

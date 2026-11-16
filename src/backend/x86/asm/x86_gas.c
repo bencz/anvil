@@ -356,3 +356,215 @@ void x86_gas_emit_call_stack_arg(x86_gas_t *gas, size_t index, const anvil_mir_i
     if (!gas->failed)
         anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), mem);
 }
+
+bool x86_gas_facts_imm(const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out)
+{
+    int64_t value;
+    if (!anvil_mir_isel_constant(facts, vreg, &value))
+        return false;
+    if (wraps_imm32)
+        value = (int32_t)value;
+    else if (value < INT32_MIN || value > INT32_MAX)
+        return false;
+    *out = value;
+    return true;
+}
+
+bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out)
+{
+    return x86_gas_facts_imm(&gas->isel, gas->wraps_imm32, vreg, out);
+}
+
+/* Mirrors the binary-operation and compare printers. */
+bool x86_gas_use_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
+{
+    const x86_gas_t *gas = ctx;
+    const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(gas->mir, info->def) : NULL;
+    bool fits = gas->wraps_imm32 || (value >= INT32_MIN && value <= INT32_MAX);
+    int64_t other;
+    /* A stored integer: mov $imm, mem (64-bit: a sign-extended imm32). */
+    if (info->op == ANVIL_MIR_OP_STORE && use == 0) {
+        const anvil_mir_vreg_info_t *stored = anvil_mir_get_vreg_info(gas->mir, anvil_mir_get_instr_use(gas->mir, index, 0));
+        return stored && stored->reg_class == ANVIL_MIR_REG_GPR && stored->size_bits <= gas->pointer_bytes * 8 && (stored->size_bits <= 32 || fits);
+    }
+    if (!def || def->reg_class != ANVIL_MIR_REG_GPR || info->num_uses != 2 || !fits)
+        return false;
+    switch (info->op) {
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+        /* The right operand when constant, else a constant left one. */
+        return use == 1 || !x86_gas_known_imm(gas, anvil_mir_get_instr_use(gas->mir, index, 1), &other);
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+        return use == 1;
+    case ANVIL_MIR_OP_SCALAR:
+        return info->ir_op == ANVIL_OP_ROTL && use == 1;
+    default:
+        if (anvil_mir_isel_is_compare(info->op) && info->op != ANVIL_MIR_OP_FCMP) {
+            const anvil_mir_vreg_info_t *lhs = anvil_mir_get_vreg_info(gas->mir, anvil_mir_get_instr_use(gas->mir, index, 0));
+            return use == 1 && lhs && lhs->reg_class == ANVIL_MIR_REG_GPR;
+        }
+        return false;
+    }
+}
+
+bool x86_gas_memory_operand(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, size_t base_use, char *out, size_t out_len)
+{
+    anvil_mir_vreg_t base = anvil_mir_get_instr_use(gas->mir, index, base_use);
+    anvil_mir_vreg_t index_vreg = info->index_scale ? anvil_mir_get_instr_use(gas->mir, index, base_use + 1) : ANVIL_MIR_NO_VREG;
+    if (base == ANVIL_MIR_NO_VREG || (info->index_scale && index_vreg == ANVIL_MIR_NO_VREG)) {
+        gas->failed = true;
+        return false;
+    }
+    int64_t imm = info->has_imm ? info->imm : 0, offset;
+    const char *symbol;
+    char disp[300] = "";
+    bool absolute = !anvil_mir_isel_materialize(&gas->isel, base) && anvil_mir_isel_symbol(&gas->isel, base, &symbol, &offset);
+    const char *prefix = absolute ? x86_gas_symbol_ref_prefix(gas, symbol) : "";
+    if (absolute && imm + offset)
+        snprintf(disp, sizeof(disp), "%s%s%+lld", prefix, symbol, (long long)(imm + offset));
+    else if (absolute)
+        snprintf(disp, sizeof(disp), "%s%s", prefix, symbol);
+    else if (imm)
+        snprintf(disp, sizeof(disp), "%lld", (long long)imm);
+    const char *base_name = absolute ? NULL : x86_gas_gpr(x86_gas_phys_of(gas, base), gas->pointer_bytes);
+    if (info->index_scale)
+        snprintf(out, out_len, "%s(%s%s,%%%s,%u)", disp, base_name ? "%" : "", base_name ? base_name : "",
+                 x86_gas_gpr(x86_gas_phys_of(gas, index_vreg), gas->pointer_bytes), info->index_scale);
+    else if (base_name)
+        snprintf(out, out_len, "%s(%%%s)", disp, base_name);
+    else
+        snprintf(out, out_len, "%s", disp);
+    return !gas->failed;
+}
+
+static bool fold_into(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, size_t reader)
+{
+    if (!x86_gas_memory_operand(gas, index, info, 0, gas->fold_address, sizeof(gas->fold_address)))
+        return false;
+    gas->fold_target = reader;
+    gas->fold_load = index;
+    return true;
+}
+
+bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const anvil_mir_vreg_info_t *def_info)
+{
+    bool fpr = def_info->reg_class == ANVIL_MIR_REG_FPR;
+    /* One fold at a time: a pending one keeps its operand. */
+    if (gas->fold_target != SIZE_MAX || (fpr && !gas->fp_memory_operands) || (!fpr && def_info->reg_class != ANVIL_MIR_REG_GPR) ||
+        def_info->size_bits > gas->pointer_bytes * 8 || info->memory_access.is_volatile || gas->isel.use_count[info->def] != 1)
+        return false;
+    /* The reader, a few instructions on in the block: nothing between may
+     * write memory or the address's registers. */
+    anvil_mir_instr_info_t next;
+    size_t reader = anvil_mir_isel_fold_reader(gas->mir, &gas->isel, index, 8, true);
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(gas->mir, reader, &next))
+        return false;
+    /* An integer compare of the load's width with a register, either side
+     * (narrow loads too: the compare reads just their bytes); a byte
+     * compare's register is a byte register. */
+    bool load_is_lhs;
+    anvil_mir_vreg_t compared;
+    int64_t imm;
+    if (!fpr && x86_gas_compare_folds(gas->mir, reader, info->def, def_info->size_bits, &load_is_lhs, &compared) &&
+        !x86_gas_known_imm(gas, compared, &imm)) {
+        int phys = x86_gas_phys_of(gas, compared);
+        if (gas->failed || (def_info->size_bits == 8 && gas->has_byte && !gas->has_byte(phys)))
+            return false;
+        return fold_into(gas, index, info, reader);
+    }
+    if (def_info->size_bits < 32 || next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
+        return false;
+    bool gpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
+                  next.op == ANVIL_MIR_OP_XOR || next.op == ANVIL_MIR_OP_MUL;
+    bool fpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_DIV ||
+                  next.op == ANVIL_MIR_OP_FDIV;
+    const anvil_mir_vreg_info_t *result = anvil_mir_get_vreg_info(gas->mir, next.def);
+    if (!result || result->reg_class != def_info->reg_class || result->size_bits != def_info->size_bits || !(fpr ? fpr_op : gpr_op))
+        return false;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, reader, 0), rhs = anvil_mir_get_instr_use(gas->mir, reader, 1);
+    bool commutes = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
+                    next.op == ANVIL_MIR_OP_XOR;
+    if (lhs == rhs || (rhs != info->def && !(commutes && lhs == info->def)))
+        return false;
+    anvil_mir_vreg_t other = rhs == info->def ? lhs : rhs;
+    int dst = x86_gas_phys_of(gas, next.def), keep = x86_gas_phys_of(gas, other);
+    if (gas->failed || (!fpr && x86_gas_known_imm(gas, other, &imm)) || (!fpr && dst != keep && x86_gas_address_reads(gas, index, info, dst)))
+        return false;
+    return fold_into(gas, index, info, reader);
+}
+
+void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    char address[sizeof(gas->fold_address)];
+    if (!def_info) {
+        gas->failed = true;
+        return;
+    }
+    int def = x86_gas_phys_of(gas, info->def);
+    if (gas->failed || x86_gas_fold_load(gas, index, info, def_info) || !x86_gas_memory_operand(gas, index, info, 0, address, sizeof(address)))
+        return;
+    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_load(gas, info->def, address);
+        return;
+    }
+    /* Narrow integers load extended to 32 bits. */
+    int bytes = (def_info->size_bits + 7) / 8;
+    const char *op = bytes == 1 ? (def_info->is_signed ? "movsbl" : "movzbl") : bytes == 2 ? (def_info->is_signed ? "movswl" : "movzwl") : NULL;
+    if (op)
+        anvil_strbuf_appendf(&gas->code, "\t%s %s, %%%s\n", op, address, x86_gas_gpr(def, 4));
+    else
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %s, %%%s\n", x86_gas_size_suffix(bytes), address, x86_gas_gpr(def, bytes));
+}
+
+void x86_gas_emit_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(gas->mir, index, 0);
+    const anvil_mir_vreg_info_t *value_info = value == ANVIL_MIR_NO_VREG ? NULL : anvil_mir_get_vreg_info(gas->mir, value);
+    char address[sizeof(gas->fold_address)];
+    if (!value_info || gas->failed || !x86_gas_memory_operand(gas, index, info, 1, address, sizeof(address))) {
+        gas->failed = true;
+        return;
+    }
+    if (value_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_store(gas, value, address);
+        return;
+    }
+    int bytes = (value_info->size_bits + 7) / 8;
+    int64_t imm;
+    if (anvil_mir_isel_constant(&gas->isel, value, &imm) && x86_gas_use_takes_immediate(gas, index, info, 0, imm)) {
+        long long shown = bytes == 1 ? (long long)(uint8_t)imm : bytes == 2 ? (long long)(uint16_t)imm : bytes == 4 ? (long long)(uint32_t)imm : (long long)imm;
+        anvil_strbuf_appendf(&gas->code, "\tmov%s $%lld, %s\n", x86_gas_size_suffix(bytes), shown, address);
+        return;
+    }
+    int src = x86_gas_phys_of(gas, value);
+    if (gas->failed || (bytes == 1 && gas->has_byte && !gas->has_byte(src))) {
+        gas->failed = true;
+        return;
+    }
+    anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), address);
+}
+
+bool x86_gas_mark_registerless(anvil_mir_func_t *mir, void (*mode)(x86_gas_t *gas, const void *user), const void *user)
+{
+    x86_gas_t probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.mir = mir;
+    mode(&probe, user);
+    if (!anvil_mir_sink_compares(mir) || !anvil_mir_isel_facts_build(&probe.isel, mir, x86_gas_use_takes_immediate, NULL, &probe))
+        return false;
+    bool ok = anvil_mir_isel_mark_registerless(mir, &probe.isel);
+    anvil_mir_isel_facts_destroy(&probe.isel);
+    return ok;
+}
+
+const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol)
+{
+    return symbol && symbol[0] == '.' ? "" : gas->symbol_prefix;
+}
