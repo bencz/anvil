@@ -53,7 +53,8 @@ finds a model by name among those that run the architecture (names such as
 MachineIR printer the same facts: which GPR vregs hold a known constant (their
 only definition is a `MOV` of an immediate), how often each vreg is used, and
 which constant `MOV`s are still needed.  Each printer supplies one callback
-saying which operands it encodes as immediates (x86-64 imm32, ARM64 12-bit
+saying which operands it encodes as immediates (x86 imm32: any constant of a
+32-bit operation, modulo 2^32, and a sign-extended one of a 64-bit operation; ARM64 12-bit
 arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
 facility), so a folded constant never occupies a register.  A multiply by a
 constant runs without the multiplier where `anvil_mir_isel_mul_form` says
