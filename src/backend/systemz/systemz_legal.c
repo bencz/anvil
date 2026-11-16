@@ -1,33 +1,6 @@
 #include "systemz_internal.h"
-
-static bool systemz_size_legal(const anvil_mainframe_target_desc_t *desc, const anvil_mir_vreg_info_t *info)
-{
-    if (!info)
-        return false;
-    if (info->reg_class == ANVIL_MIR_REG_FPR) {
-        return info->size_bits == 32 || info->size_bits == 64;
-    }
-    if (info->reg_class != ANVIL_MIR_REG_GPR)
-        return false;
-    if (info->size_bits == 8 || info->size_bits == 16 || info->size_bits == 32) {
-        return true;
-    }
-    return desc->has_64bit_gprs && info->size_bits == 64;
-}
-
-static const anvil_mir_vreg_info_t *systemz_vreg_info(const anvil_mainframe_target_desc_t *desc, const anvil_mir_func_t *mir, anvil_mir_vreg_t vreg, char *error, size_t error_len)
-{
-    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, vreg);
-    if (!info) {
-        anvil_format_failure(error, error_len, "invalid vreg %u", vreg);
-        return NULL;
-    }
-    if (!systemz_size_legal(desc, info)) {
-        anvil_format_failure(error, error_len, "illegal vreg %u size %u for %s", vreg, info->size_bits, desc->name);
-        return NULL;
-    }
-    return info;
-}
+#include "../common/ir_lower.h"
+#include "../common/mir_legal.h"
 
 bool systemz_is_call_preparation(const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *instr)
 {
@@ -73,120 +46,56 @@ static bool systemz_verify_call_bundles(const anvil_mir_func_t *mir, char *error
     return true;
 }
 
-static bool systemz_verify_numeric_cast(const anvil_mir_func_t *mir, size_t index, anvil_mir_instr_info_t instr, char *error, size_t error_len)
+static bool systemz_legal_hook(const anvil_mir_legal_target_t *target, const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *instr,
+                               char *error, size_t error_len, bool *decided)
 {
-    if (instr.num_uses != 1 || instr.def == ANVIL_MIR_NO_VREG) {
-        return anvil_format_failure(error, error_len, "numeric conversion must have one source and one result");
-    }
-    const anvil_mir_vreg_info_t *dst = anvil_mir_get_vreg_info(mir, instr.def);
-    anvil_mir_vreg_t src_vreg = anvil_mir_get_instr_use(mir, index, 0);
-    const anvil_mir_vreg_info_t *src = anvil_mir_get_vreg_info(mir, src_vreg);
-    if (!src || !dst)
-        return anvil_format_failure(error, error_len, "invalid conversion vreg");
-
-    bool valid = false;
-    switch (instr.op) {
-    case ANVIL_MIR_OP_SITOFP:
-    case ANVIL_MIR_OP_UITOFP:
-        valid = src->reg_class == ANVIL_MIR_REG_GPR && dst->reg_class == ANVIL_MIR_REG_FPR && (src->size_bits == 8 || src->size_bits == 16 || src->size_bits == 32 || src->size_bits == 64) &&
-                (dst->size_bits == 32 || dst->size_bits == 64);
-        break;
-    case ANVIL_MIR_OP_FPTOSI:
-    case ANVIL_MIR_OP_FPTOUI:
-        valid = src->reg_class == ANVIL_MIR_REG_FPR && dst->reg_class == ANVIL_MIR_REG_GPR && (src->size_bits == 32 || src->size_bits == 64) &&
-                (dst->size_bits == 8 || dst->size_bits == 16 || dst->size_bits == 32 || dst->size_bits == 64);
-        break;
-    case ANVIL_MIR_OP_FPEXT:
-        valid = src->reg_class == ANVIL_MIR_REG_FPR && dst->reg_class == ANVIL_MIR_REG_FPR && src->size_bits == 32 && dst->size_bits == 64;
-        break;
-    case ANVIL_MIR_OP_FPTRUNC:
-        valid = src->reg_class == ANVIL_MIR_REG_FPR && dst->reg_class == ANVIL_MIR_REG_FPR && src->size_bits == 64 && dst->size_bits == 32;
-        break;
-    default:
+    const anvil_mainframe_target_desc_t *desc = target->user;
+    *decided = true;
+    switch (instr->op) {
+    case ANVIL_MIR_OP_CALL:
+        /* Arguments travel in the parameter list (the call bundle). */
+        return instr->call_cc == ANVIL_CC_MVS || anvil_format_failure(error, error_len, "%s call uses an unsupported calling convention", desc->name);
+    case ANVIL_MIR_OP_CALL_RESULT: {
+        /* The low word of a pair result (see systemz_abi_ops_t). */
+        const anvil_mir_vreg_info_t *def = anvil_mir_get_vreg_info(mir, instr->def);
+        anvil_mir_instr_info_t call;
+        if (desc->abi_ops->pair_low_gpr < 0 || !def || def->reg_class != ANVIL_MIR_REG_GPR || def->size_bits != 32 || index == 0 ||
+            !anvil_mir_get_instr_info(mir, index - 1, &call) || call.op != ANVIL_MIR_OP_CALL || call.def == ANVIL_MIR_NO_VREG)
+            return anvil_format_failure(error, error_len, "%s call result %zu must be the low word of a pair result", desc->name, index);
         return true;
     }
-    return valid || anvil_format_failure(error, error_len, "invalid numeric conversion register classes or widths");
+    case ANVIL_MIR_OP_RET_VALUE_PART:
+        return desc->abi_ops->pair_low_gpr >= 0 || anvil_format_failure(error, error_len, "%s cannot return a word pair", desc->name);
+    case ANVIL_MIR_OP_LOAD:
+    case ANVIL_MIR_OP_STORE:
+        *decided = false;
+        if (instr->has_imm && !systemz_displacement_fits(instr->imm, anvil_mir_func_cpu_features(mir)))
+            return anvil_format_failure(error, error_len, "%s memory displacement %lld is out of range", desc->name, (long long)instr->imm);
+        return true;
+    default:
+        *decided = false;
+        return true;
+    }
 }
 
 bool anvil_mainframe_verify_mir_legal(const anvil_mir_func_t *mir, anvil_mainframe_variant_t variant, char *error, size_t error_len)
 {
     const anvil_mainframe_target_desc_t *desc = anvil_mainframe_get_target_desc(variant);
-    if (!desc || !mir) {
+    if (!desc || !mir)
         return anvil_format_failure(error, error_len, "invalid mainframe MIR input");
-    }
-    if (!anvil_mir_verify(mir, error, error_len))
-        return false;
-    if (!systemz_verify_call_bundles(mir, error, error_len))
-        return false;
-
-    for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
-        anvil_mir_instr_info_t instr;
-        if (!anvil_mir_get_instr_info(mir, i, &instr)) {
-            return anvil_format_failure(error, error_len, "cannot inspect instruction %zu", i);
-        }
-        if (instr.def != ANVIL_MIR_NO_VREG && !systemz_vreg_info(desc, mir, instr.def, error, error_len)) {
-            return false;
-        }
-        for (size_t u = 0; u < instr.num_uses; u++) {
-            anvil_mir_vreg_t use = anvil_mir_get_instr_use(mir, i, u);
-            if (!systemz_vreg_info(desc, mir, use, error, error_len))
-                return false;
-        }
-
-        switch (instr.op) {
-        case ANVIL_MIR_OP_CALL:
-            if (instr.call_cc != ANVIL_CC_MVS) {
-                return anvil_format_failure(error, error_len, "%s call uses an unsupported calling convention", desc->name);
-            }
-            break;
-        case ANVIL_MIR_OP_SITOFP:
-        case ANVIL_MIR_OP_UITOFP:
-        case ANVIL_MIR_OP_FPTOSI:
-        case ANVIL_MIR_OP_FPTOUI:
-        case ANVIL_MIR_OP_FPEXT:
-        case ANVIL_MIR_OP_FPTRUNC:
-            if (!systemz_verify_numeric_cast(mir, i, instr, error, error_len)) {
-                return false;
-            }
-            if (!desc->has_64bit_gprs) {
-                const anvil_mir_vreg_info_t *dst = anvil_mir_get_vreg_info(mir, instr.def);
-                anvil_mir_vreg_t src_vreg = anvil_mir_get_instr_use(mir, i, 0);
-                const anvil_mir_vreg_info_t *src = anvil_mir_get_vreg_info(mir, src_vreg);
-                if ((src && src->reg_class == ANVIL_MIR_REG_GPR && src->size_bits > 32) || (dst && dst->reg_class == ANVIL_MIR_REG_GPR && dst->size_bits > 32)) {
-                    return anvil_format_failure(error, error_len, "%s cannot represent a 64-bit integer conversion vreg", desc->name);
-                }
-            }
-            break;
-        case ANVIL_MIR_OP_SMOD:
-        case ANVIL_MIR_OP_UMOD:
-            break;
-        case ANVIL_MIR_OP_LOAD:
-        case ANVIL_MIR_OP_STORE:
-            if (instr.has_imm && !systemz_displacement_fits(instr.imm, anvil_mir_func_cpu_features(mir)))
-                return anvil_format_failure(error, error_len, "%s memory displacement %lld is out of range", desc->name, (long long)instr.imm);
-            break;
-        case ANVIL_MIR_OP_KEEPALIVE:
-            break;
-        case ANVIL_MIR_OP_CALL_RESULT: {
-            /* The low word of a pair result (see systemz_abi_ops_t). */
-            const anvil_mir_vreg_info_t *def = anvil_mir_get_vreg_info(mir, instr.def);
-            anvil_mir_instr_info_t call;
-            if (desc->abi_ops->pair_low_gpr < 0 || !def || def->reg_class != ANVIL_MIR_REG_GPR || def->size_bits != 32 || i == 0 ||
-                !anvil_mir_get_instr_info(mir, i - 1, &call) || call.op != ANVIL_MIR_OP_CALL || call.def == ANVIL_MIR_NO_VREG)
-                return anvil_format_failure(error, error_len, "%s call result %zu must be the low word of a pair result", desc->name, i);
-            break;
-        }
-        case ANVIL_MIR_OP_RET_VALUE_PART:
-            if (desc->abi_ops->pair_low_gpr < 0)
-                return anvil_format_failure(error, error_len, "%s cannot return a word pair", desc->name);
-            break;
-        case ANVIL_MIR_OP_INVALID:
-            return anvil_format_failure(error, error_len, "%s has illegal MachineIR opcode", desc->name);
-        default:
-            break;
-        }
-    }
-    return true;
+    uint8_t gpr_widths = ANVIL_MIR_WIDTH(8) | ANVIL_MIR_WIDTH(16) | ANVIL_MIR_WIDTH(32) | (desc->has_64bit_gprs ? ANVIL_MIR_WIDTH(64) : 0);
+    anvil_mir_legal_target_t target = {
+        .name = desc->name,
+        .widths = {[ANVIL_MIR_REG_GPR] = gpr_widths, [ANVIL_MIR_REG_FPR] = ANVIL_MIR_WIDTH(32) | ANVIL_MIR_WIDTH(64)},
+        .num_regs = {[ANVIL_MIR_REG_GPR] = 16, [ANVIL_MIR_REG_FPR] = 16},
+        .pointer_bits = (uint16_t)(desc->ptr_size * 8),
+        /* Stack-argument immediates number the parameter-list entries. */
+        .stack_arg_align = 1,
+        .select_classes = ANVIL_IR_SELECT_EVERY_CLASS,
+        .hook = systemz_legal_hook,
+        .user = desc,
+    };
+    return anvil_mir_verify_legal(&target, mir, error, error_len) && systemz_verify_call_bundles(mir, error, error_len);
 }
 
 enum { SYSTEMZ_GPR_ACCESS_MAX = 8 };
@@ -224,13 +133,30 @@ bool anvil_mainframe_regalloc_mir(anvil_mir_func_t *mir, anvil_mainframe_variant
     return anvil_mainframe_regalloc_mir_features(mir, variant, anvil_cpu_model_features(anvil_arch_default_cpu(desc->arch)));
 }
 
+typedef struct {
+    const anvil_mainframe_target_desc_t *desc;
+    anvil_mainframe_variant_t variant;
+    anvil_cpu_features_t features;
+} systemz_allocation_t;
+
+static bool systemz_allocation_verify(const anvil_mir_func_t *mir, const void *user)
+{
+    const systemz_allocation_t *target = user;
+    return anvil_mainframe_verify_mir_legal(mir, target->variant, NULL, 0);
+}
+
+static bool systemz_allocation_registerless(anvil_mir_func_t *mir, const void *user)
+{
+    const systemz_allocation_t *target = user;
+    return anvil_systemz_mark_registerless(mir, target->desc, target->features);
+}
+
 bool anvil_mainframe_regalloc_mir_features(anvil_mir_func_t *mir, anvil_mainframe_variant_t variant, anvil_cpu_features_t features)
 {
     const anvil_mainframe_target_desc_t *desc = anvil_mainframe_get_target_desc(variant);
-    if (!desc || !mir)
+    if (!desc)
         return false;
-    if (!anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0))
-        return false;
+    systemz_allocation_t target = {desc, variant, features};
 
     /* The FP register file depends on the CPU model (see systemz_target.c). */
     bool afp = (features & ANVIL_FEATURE_ZARCH_BFP) != 0;
@@ -248,15 +174,17 @@ bool anvil_mainframe_regalloc_mir_features(anvil_mir_func_t *mir, anvil_mainfram
                                                         .phys_regs = desc->scratch_gpr_regs, .printer_declares_writes = true},
                                                        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = num_scratch_fprs, .phys_regs = scratch_fprs,
                                                         .printer_declares_writes = true}};
-
-    if (!anvil_mir_optimize_before_allocation(mir, systemz_address_mode, systemz_expensive_constant, mir))
-        return false;
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir) ||
-        !anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0) ||
-        !anvil_systemz_mark_registerless(mir, desc, features) || !anvil_mir_hoist_materialized_constants(mir))
-        return false;
-    if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
-                                 sizeof(scratch_configs) / sizeof(scratch_configs[0])))
-        return false;
-    return anvil_mainframe_verify_mir_legal(mir, variant, NULL, 0);
+    anvil_mir_allocation_t allocation = {
+        .verify = systemz_allocation_verify,
+        .address_mode = systemz_address_mode,
+        .expensive_constant = systemz_expensive_constant,
+        .mir_user = mir,
+        .mark_registerless = systemz_allocation_registerless,
+        .configs = configs,
+        .num_configs = sizeof(configs) / sizeof(configs[0]),
+        .scratch_configs = scratch_configs,
+        .num_scratch_configs = sizeof(scratch_configs) / sizeof(scratch_configs[0]),
+        .user = &target,
+    };
+    return anvil_mir_allocate(mir, &allocation);
 }

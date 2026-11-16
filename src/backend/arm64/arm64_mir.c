@@ -15,6 +15,7 @@
 #include "arm64_internal.h"
 #include "../common/mir_isel.h"
 #include "../common/narrow_mir.h"
+#include "../common/mir_legal.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -541,432 +542,91 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     return anvil_ir_lower_function(&lower.base);
 }
 
-static bool arm64_legal_size_for_class(const anvil_mir_vreg_info_t *info)
+/* AAPCS64: a call's result in x0/v0, further parts in x1 or v1-v3. */
+static bool arm64_legal_result(const anvil_mir_legal_target_t *target, const anvil_mir_vreg_info_t *info)
 {
-    if (!info) return false;
-    if (info->reg_class == ANVIL_MIR_REG_GPR) {
-        return info->size_bits == 8 ||
-               info->size_bits == 16 ||
-               info->size_bits == 32 ||
-               info->size_bits == 64;
-    }
-    if (info->reg_class == ANVIL_MIR_REG_FPR) {
-        return info->size_bits == 32 || info->size_bits == 64 || info->size_bits == 128;
-    }
-    return false;
+    (void)target;
+    return info->fixed_phys_reg == 0;
 }
 
-static bool arm64_legal_fixed_reg(const anvil_mir_vreg_info_t *info)
+/* Arguments in x0-x7/v0-v7, and x8 for the address of a result returned in
+ * memory. */
+static bool arm64_legal_argument(const anvil_mir_legal_target_t *target, const anvil_mir_vreg_info_t *info)
 {
-    if (!info || !info->has_fixed_reg) return true;
-    if (info->fixed_phys_reg < 0) return false;
-    if (info->reg_class == ANVIL_MIR_REG_GPR) return info->fixed_phys_reg <= 30;
-    if (info->reg_class == ANVIL_MIR_REG_FPR) return info->fixed_phys_reg <= 31;
-    return false;
+    (void)target;
+    return (info->fixed_phys_reg >= 0 && info->fixed_phys_reg < ARM64_NUM_ARG_REGS) ||
+           (info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits == 64 && info->fixed_phys_reg == ARM64_X8);
 }
 
-static const anvil_mir_vreg_info_t *arm64_legal_vreg_info(
-    const anvil_mir_func_t *mir,
-    anvil_mir_vreg_t vreg,
-    size_t instr_index,
-    char *error,
-    size_t error_len)
+static bool arm64_legal_hook(const anvil_mir_legal_target_t *target, const anvil_mir_func_t *mir, size_t index, const anvil_mir_instr_info_t *instr,
+                             char *error, size_t error_len, bool *decided)
 {
-    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, vreg);
-    if (!info) {
-        anvil_format_failure(error, error_len,
-                         "ARM64 MIR instruction %zu uses invalid vreg",
-                         instr_index);
-        return NULL;
+    static const anvil_mir_legal_call_t call_rules = {.fixed_result = true, .result_ok = arm64_legal_result, .fixed_target = true,
+                                                      .target_reg = ARM64_X16, .fixed_args = true, .arg_ok = arm64_legal_argument};
+    *decided = true;
+    switch (instr->op) {
+    case ANVIL_MIR_OP_CALL:
+        if (instr->call_cc != ANVIL_CC_SYSV)
+            return anvil_format_failure(error, error_len, "ARM64 MIR call %zu uses an unsupported calling convention", index);
+        return anvil_mir_legal_call(target, &call_rules, mir, index, instr, error, error_len);
+    case ANVIL_MIR_OP_VA_START: {
+        /* Register save area cursor (frame object) or plain pointer to
+         * the first unnamed stack slot (immediate offset). */
+        anvil_mir_frame_slot_info_t slot;
+        if (!anvil_mir_legal_pointer(target, mir, instr->def, index, error, error_len))
+            return false;
+        if (instr->frame_slot < 0)
+            return instr->has_imm && instr->imm >= 0 && instr->imm <= INT32_MAX - 16 && instr->imm % 8 == 0;
+        return anvil_mir_get_frame_slot_info(mir, instr->frame_slot, &slot) && slot.size_bytes >= 224 && slot.align_bytes >= 16 && instr->named_gpr <= 8 &&
+               instr->named_fpr <= 8 && instr->named_stack_bytes <= INT32_MAX - 16 && instr->named_stack_bytes % 8 == 0;
     }
-    if (!arm64_legal_size_for_class(info)) {
-        anvil_format_failure(error, error_len,
-                         "ARM64 MIR instruction %zu uses unsupported vreg class/size",
-                         instr_index);
-        return NULL;
+    case ANVIL_MIR_OP_CALL_RESULT: {
+        const anvil_mir_vreg_info_t *def = anvil_mir_get_vreg_info(mir, instr->def);
+        if (def && def->has_fixed_reg && def->fixed_phys_reg >= 1 && def->fixed_phys_reg <= 3)
+            return true;
+        return anvil_format_failure(error, error_len, "ARM64 MIR call result %zu must be fixed to x1 or v1-v3", index);
     }
-    if (!arm64_legal_fixed_reg(info)) {
-        anvil_format_failure(error, error_len,
-                         "ARM64 MIR instruction %zu uses invalid fixed register",
-                         instr_index);
-        return NULL;
-    }
-    return info;
-}
-
-/* A 32-bit general register: an index the address extends (sxtw/uxtw). */
-static bool arm64_legal_word_index(const anvil_mir_func_t *mir, anvil_mir_vreg_t vreg)
-{
-    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, vreg);
-    return info && info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits == 32;
-}
-
-static bool arm64_legal_pointer_operand(const anvil_mir_func_t *mir,
-                                        anvil_mir_vreg_t vreg,
-                                        size_t instr_index,
-                                        char *error,
-                                        size_t error_len)
-{
-    const anvil_mir_vreg_info_t *info =
-        arm64_legal_vreg_info(mir, vreg, instr_index, error, error_len);
-    if (!info) return false;
-    if (info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits == 64) {
+    case ANVIL_MIR_OP_ATOMIC:
+        /* x9-x11 are the printer's temporaries for the exclusive loops. */
+        *decided = false;
+        for (size_t operand = 0; operand < instr->num_uses; operand++) {
+            const anvil_mir_vreg_info_t *use = anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, index, operand));
+            if (use && use->has_fixed_reg && use->fixed_phys_reg >= 9 && use->fixed_phys_reg <= 11)
+                return anvil_format_failure(error, error_len, "ARM64 atomic instruction %zu uses a reserved temporary", index);
+        }
+        return true;
+    case ANVIL_MIR_OP_LOAD:
+    case ANVIL_MIR_OP_STORE:
+        /* A register index takes no displacement. */
+        *decided = false;
+        return !instr->index_scale || !instr->has_imm || instr->imm == 0 ||
+               anvil_format_failure(error, error_len, "ARM64 MIR access %zu: indexed forms take no displacement", index);
+    default:
+        *decided = false;
         return true;
     }
-    return anvil_format_failure(error, error_len,
-                            "ARM64 MIR instruction %zu requires a 64-bit pointer operand",
-                            instr_index);
 }
 
-static bool arm64_legal_same_class_and_size(const anvil_mir_vreg_info_t *a,
-                                            const anvil_mir_vreg_info_t *b)
+bool anvil_arm64_verify_mir_legal(const anvil_mir_func_t *mir, char *error, size_t error_len)
 {
-    return a && b &&
-           a->reg_class == b->reg_class &&
-           a->size_bits == b->size_bits;
-}
-
-static bool arm64_legal_binary(const anvil_mir_func_t *mir,
-                               size_t instr_index,
-                               const anvil_mir_instr_info_t *instr,
-                               char *error,
-                               size_t error_len)
-{
-    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(mir, instr_index, 0);
-    anvil_mir_vreg_t rhs = anvil_mir_get_instr_use(mir, instr_index, 1);
-    const anvil_mir_vreg_info_t *def =
-        arm64_legal_vreg_info(mir, instr->def, instr_index, error, error_len);
-    const anvil_mir_vreg_info_t *lhs_info =
-        arm64_legal_vreg_info(mir, lhs, instr_index, error, error_len);
-    const anvil_mir_vreg_info_t *rhs_info =
-        arm64_legal_vreg_info(mir, rhs, instr_index, error, error_len);
-    if (!def || !lhs_info || !rhs_info) return false;
-
-    if (!arm64_legal_same_class_and_size(def, lhs_info) ||
-        !arm64_legal_same_class_and_size(lhs_info, rhs_info)) {
-        return anvil_format_failure(error, error_len,
-                                "ARM64 MIR instruction %zu has incompatible binary operands",
-                                instr_index);
-    }
-
-    bool fp_op = def->reg_class == ANVIL_MIR_REG_FPR;
-    switch (instr->op) {
-        case ANVIL_MIR_OP_ADD:
-        case ANVIL_MIR_OP_SUB:
-        case ANVIL_MIR_OP_MUL:
-            return true;
-        case ANVIL_MIR_OP_DIV:
-        case ANVIL_MIR_OP_FDIV:
-            return fp_op || def->reg_class == ANVIL_MIR_REG_GPR;
-        case ANVIL_MIR_OP_SDIV:
-        case ANVIL_MIR_OP_UDIV:
-        case ANVIL_MIR_OP_SMOD:
-        case ANVIL_MIR_OP_UMOD:
-        case ANVIL_MIR_OP_AND:
-        case ANVIL_MIR_OP_OR:
-        case ANVIL_MIR_OP_XOR:
-        case ANVIL_MIR_OP_SHL:
-        case ANVIL_MIR_OP_SHR:
-        case ANVIL_MIR_OP_SAR:
-            if (def->reg_class == ANVIL_MIR_REG_GPR) return true;
-            break;
-        default:
-            break;
-    }
-
-    return anvil_format_failure(error, error_len,
-                            "ARM64 MIR instruction %zu uses an illegal binary opcode/class pair",
-                            instr_index);
-}
-
-static bool arm64_legal_call(const anvil_mir_func_t *mir,
-                             size_t instr_index,
-                             const anvil_mir_instr_info_t *instr,
-                             char *error,
-                             size_t error_len)
-{
-    if (instr->call_cc != ANVIL_CC_SYSV) {
-        return anvil_format_failure(error, error_len,
-                                "ARM64 MIR call %zu uses an unsupported calling convention",
-                                instr_index);
-    }
-    if (instr->def != ANVIL_MIR_NO_VREG) {
-        const anvil_mir_vreg_info_t *def =
-            arm64_legal_vreg_info(mir, instr->def, instr_index,
-                                  error, error_len);
-        if (!def) return false;
-        if (!def->has_fixed_reg || def->fixed_phys_reg != 0) {
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR call %zu result must be fixed to ABI result register",
-                                    instr_index);
-        }
-    }
-
-    size_t arg_start = 0;
-    if (!instr->symbol || !instr->symbol[0]) {
-        if (instr->num_uses == 0) {
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR indirect call %zu requires a target register",
-                                    instr_index);
-        }
-
-        anvil_mir_vreg_t target = anvil_mir_get_instr_use(mir, instr_index, 0);
-        const anvil_mir_vreg_info_t *target_info =
-            arm64_legal_vreg_info(mir, target, instr_index, error, error_len);
-        if (!target_info) return false;
-        if (target_info->reg_class != ANVIL_MIR_REG_GPR ||
-            target_info->size_bits != 64 ||
-            !target_info->has_fixed_reg ||
-            target_info->fixed_phys_reg != 16) {
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR indirect call %zu target must be fixed to x16",
-                                    instr_index);
-        }
-        arg_start = 1;
-    }
-
-    for (size_t u = arg_start; u < instr->num_uses; u++) {
-        anvil_mir_vreg_t use = anvil_mir_get_instr_use(mir, instr_index, u);
-        const anvil_mir_vreg_info_t *info =
-            arm64_legal_vreg_info(mir, use, instr_index, error, error_len);
-        if (!info) return false;
-        if (!info->has_fixed_reg) {
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR call %zu argument %zu must use a fixed ABI register",
-                                    instr_index, u - arg_start);
-        }
-        if ((info->reg_class == ANVIL_MIR_REG_GPR ||
-             info->reg_class == ANVIL_MIR_REG_FPR) &&
-            info->fixed_phys_reg >= 0 && info->fixed_phys_reg < ARM64_NUM_ARG_REGS) {
-            continue;
-        }
-        /* x8 carries the address of a result returned in memory. */
-        if (info->reg_class == ANVIL_MIR_REG_GPR && info->size_bits == 64 &&
-            info->fixed_phys_reg == ARM64_X8) {
-            continue;
-        }
-        return anvil_format_failure(error, error_len,
-                                "ARM64 MIR call %zu argument %zu has an invalid fixed ABI register",
-                                instr_index, u - arg_start);
-    }
-
-    return true;
-}
-
-static bool arm64_legal_instr(const anvil_mir_func_t *mir,
-                              size_t instr_index,
-                              const anvil_mir_instr_info_t *instr,
-                              char *error,
-                              size_t error_len)
-{
-    if (instr->def != ANVIL_MIR_NO_VREG &&
-        !arm64_legal_vreg_info(mir, instr->def, instr_index,
-                               error, error_len)) {
-        return false;
-    }
-    for (size_t u = 0; u < instr->num_uses; u++) {
-        anvil_mir_vreg_t use = anvil_mir_get_instr_use(mir, instr_index, u);
-        if (!arm64_legal_vreg_info(mir, use, instr_index,
-                                   error, error_len)) {
-            return false;
-        }
-    }
-
-    switch (instr->op) {
-        case ANVIL_MIR_OP_VA_START: {
-            /* Register save area cursor (frame object) or plain pointer to
-             * the first unnamed stack slot (immediate offset). */
-            anvil_mir_frame_slot_info_t slot;
-            if (!arm64_legal_pointer_operand(mir, instr->def, instr_index, error, error_len))
-                return false;
-            if (instr->frame_slot < 0)
-                return instr->has_imm && instr->imm >= 0 && instr->imm <= INT32_MAX - 16 && instr->imm % 8 == 0;
-            return anvil_mir_get_frame_slot_info(mir, instr->frame_slot, &slot) && slot.size_bytes >= 224 && slot.align_bytes >= 16 &&
-                   instr->named_gpr <= 8 && instr->named_fpr <= 8 && instr->named_stack_bytes <= INT32_MAX - 16 && instr->named_stack_bytes % 8 == 0;
-        }
-
-        case ANVIL_MIR_OP_ATOMIC:
-            for (size_t operand = 0; operand < instr->num_uses; operand++)
-            {
-                const anvil_mir_vreg_info_t *use = anvil_mir_get_vreg_info(mir, anvil_mir_get_instr_use(mir, instr_index, operand));
-                if (use->has_fixed_reg && use->fixed_phys_reg >= 9 && use->fixed_phys_reg <= 11)
-                    return anvil_format_failure(error, error_len, "ARM64 atomic instruction %zu uses a reserved temporary", instr_index);
-            }
-
-            return instr->ir_op == ANVIL_OP_ATOMIC_FENCE ||
-                   arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, 0), instr_index, error, error_len);
-
-        case ANVIL_MIR_OP_VECTOR:
-        case ANVIL_MIR_OP_SCALAR:
-            if (anvil_vector_isa_for_mir(arm64_vector_isa, arm64_vector_isa_count, mir, instr_index, instr, anvil_mir_func_cpu_features(mir)))
-                return true;
-            return anvil_format_failure(error, error_len, "ARM64 MIR instruction %zu has no form on this CPU", instr_index);
-
-        case ANVIL_MIR_OP_ADD:
-        case ANVIL_MIR_OP_SUB:
-        case ANVIL_MIR_OP_MUL:
-        case ANVIL_MIR_OP_DIV:
-        case ANVIL_MIR_OP_SDIV:
-        case ANVIL_MIR_OP_UDIV:
-        case ANVIL_MIR_OP_FDIV:
-        case ANVIL_MIR_OP_SMOD:
-        case ANVIL_MIR_OP_UMOD:
-        case ANVIL_MIR_OP_AND:
-        case ANVIL_MIR_OP_OR:
-        case ANVIL_MIR_OP_XOR:
-        case ANVIL_MIR_OP_SHL:
-        case ANVIL_MIR_OP_SHR:
-        case ANVIL_MIR_OP_SAR:
-            return arm64_legal_binary(mir, instr_index, instr,
-                                      error, error_len);
-
-        case ANVIL_MIR_OP_LOAD:
-        case ANVIL_MIR_OP_STORE: {
-            size_t base = instr->op == ANVIL_MIR_OP_LOAD ? 0 : 1;
-            return arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, base), instr_index, error, error_len) &&
-                   (!instr->index_scale ||
-                    (!instr->has_imm || instr->imm == 0)) &&
-                   (!instr->index_scale ||
-                    (instr->index_extend ? arm64_legal_word_index(mir, anvil_mir_get_instr_use(mir, instr_index, base + 1))
-                                         : arm64_legal_pointer_operand(mir, anvil_mir_get_instr_use(mir, instr_index, base + 1), instr_index, error, error_len)));
-        }
-
-        case ANVIL_MIR_OP_SYMBOL_ADDR:
-        case ANVIL_MIR_OP_FRAME_ADDR:
-        case ANVIL_MIR_OP_DYN_ALLOCA: {
-            const anvil_mir_vreg_info_t *def =
-                arm64_legal_vreg_info(mir, instr->def, instr_index,
-                                      error, error_len);
-            if (def && def->reg_class == ANVIL_MIR_REG_GPR &&
-                def->size_bits == 64) {
-                return true;
-            }
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR instruction %zu must define a 64-bit pointer",
-                                    instr_index);
-        }
-
-        case ANVIL_MIR_OP_INCOMING_STACK_ARG:
-        case ANVIL_MIR_OP_CALL_STACK_ARG: {
-            /* Naturally aligned for the value (ABIs may pack narrow
-             * arguments below a doubleword). */
-            anvil_mir_vreg_t value = instr->op == ANVIL_MIR_OP_CALL_STACK_ARG
-                ? anvil_mir_get_instr_use(mir, instr_index, 0) : instr->def;
-            const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, value);
-            int64_t natural = info ? (info->size_bits + 7) / 8 : 8;
-            if (natural > 8) natural = 8;
-            if (instr->has_imm && instr->imm >= 0 && natural > 0 && (instr->imm % natural) == 0) {
-                return true;
-            }
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR stack instruction %zu needs an aligned stack offset",
-                                    instr_index);
-        }
-
-        case ANVIL_MIR_OP_CALL:
-            return arm64_legal_call(mir, instr_index, instr,
-                                    error, error_len);
-
-        case ANVIL_MIR_OP_CALL_RESULT: {
-            /* Further registers of an aggregate result: x1, v1-v3. */
-            const anvil_mir_vreg_info_t *def =
-                arm64_legal_vreg_info(mir, instr->def, instr_index,
-                                      error, error_len);
-            if (def && def->has_fixed_reg && def->fixed_phys_reg >= 1 &&
-                def->fixed_phys_reg <= 3) {
-                return true;
-            }
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR call result %zu must be fixed to x1 or v1-v3",
-                                    instr_index);
-        }
-
-        case ANVIL_MIR_OP_SELECT: {
-            const anvil_mir_vreg_info_t *def =
-                arm64_legal_vreg_info(mir, instr->def, instr_index,
-                                      error, error_len);
-            const anvil_mir_vreg_info_t *then_info =
-                arm64_legal_vreg_info(
-                    mir, anvil_mir_get_instr_use(mir, instr_index, 1),
-                    instr_index, error, error_len);
-            const anvil_mir_vreg_info_t *else_info =
-                arm64_legal_vreg_info(
-                    mir, anvil_mir_get_instr_use(mir, instr_index, 2),
-                    instr_index, error, error_len);
-            if (arm64_legal_same_class_and_size(def, then_info) &&
-                arm64_legal_same_class_and_size(then_info, else_info)) {
-                return true;
-            }
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR select %zu has incompatible value operands",
-                                    instr_index);
-        }
-
-        case ANVIL_MIR_OP_SPILL_LOAD:
-        case ANVIL_MIR_OP_SPILL_STORE:
-        case ANVIL_MIR_OP_MOV:
-        case ANVIL_MIR_OP_COPY:
-        case ANVIL_MIR_OP_NEG:
-        case ANVIL_MIR_OP_NOT:
-        case ANVIL_MIR_OP_FABS:
-        case ANVIL_MIR_OP_ZEXT:
-        case ANVIL_MIR_OP_SEXT:
-        case ANVIL_MIR_OP_TRUNC:
-        case ANVIL_MIR_OP_BITCAST:
-        case ANVIL_MIR_OP_SITOFP:
-        case ANVIL_MIR_OP_UITOFP:
-        case ANVIL_MIR_OP_FPTOSI:
-        case ANVIL_MIR_OP_FPTOUI:
-        case ANVIL_MIR_OP_FPEXT:
-        case ANVIL_MIR_OP_FPTRUNC:
-        case ANVIL_MIR_OP_CMP:
-        case ANVIL_MIR_OP_FCMP:
-        case ANVIL_MIR_OP_CMP_EQ:
-        case ANVIL_MIR_OP_CMP_NE:
-        case ANVIL_MIR_OP_CMP_LT:
-        case ANVIL_MIR_OP_CMP_LE:
-        case ANVIL_MIR_OP_CMP_GT:
-        case ANVIL_MIR_OP_CMP_GE:
-        case ANVIL_MIR_OP_CMP_ULT:
-        case ANVIL_MIR_OP_CMP_ULE:
-        case ANVIL_MIR_OP_CMP_UGT:
-        case ANVIL_MIR_OP_CMP_UGE:
-        case ANVIL_MIR_OP_RET:
-        case ANVIL_MIR_OP_BR:
-        case ANVIL_MIR_OP_BR_COND:
-        case ANVIL_MIR_OP_KEEPALIVE:
-            return true;
-
-        case ANVIL_MIR_OP_INVALID:
-        default:
-            break;
-    }
-
-    return anvil_format_failure(error, error_len,
-                            "ARM64 MIR instruction %zu uses unsupported opcode",
-                            instr_index);
-}
-
-bool anvil_arm64_verify_mir_legal(const anvil_mir_func_t *mir,
-                                  char *error,
-                                  size_t error_len)
-{
-    if (error && error_len > 0) error[0] = '\0';
-    if (!anvil_mir_verify(mir, error, error_len)) return false;
-
-    for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
-        anvil_mir_instr_info_t instr;
-        if (!anvil_mir_get_instr_info(mir, i, &instr)) {
-            return anvil_format_failure(error, error_len,
-                                    "ARM64 MIR instruction %zu is not inspectable",
-                                    i);
-        }
-        if (!arm64_legal_instr(mir, i, &instr, error, error_len)) {
-            return false;
-        }
-    }
-
-    return true;
+    static const anvil_mir_legal_target_t target = {
+        .name = "ARM64",
+        .widths = {[ANVIL_MIR_REG_GPR] = ANVIL_MIR_WIDTH(8) | ANVIL_MIR_WIDTH(16) | ANVIL_MIR_WIDTH(32) | ANVIL_MIR_WIDTH(64),
+                   [ANVIL_MIR_REG_FPR] = ANVIL_MIR_WIDTH(32) | ANVIL_MIR_WIDTH(64) | ANVIL_MIR_WIDTH(128)},
+        /* x0-x30 (31 is SP or XZR), v0-v31. */
+        .num_regs = {[ANVIL_MIR_REG_GPR] = 31, [ANVIL_MIR_REG_FPR] = 32},
+        .pointer_bits = 64,
+        .fp_vector_bits = 128,
+        /* Naturally aligned for the value (ABIs may pack narrow arguments below a doubleword). */
+        .stack_arg_align = 0,
+        .select_classes = ANVIL_IR_SELECT_EVERY_CLASS,
+        .vector_isa = arm64_vector_isa,
+        .scalar_isa = arm64_vector_isa,
+        .hook = arm64_legal_hook,
+    };
+    anvil_mir_legal_target_t sized = target;
+    sized.scalar_isa_count = sized.vector_isa_count = arm64_vector_isa_count;
+    return anvil_mir_verify_legal(&sized, mir, error, error_len);
 }
 
 /* [base, index{, lsl #log2(size)}]: no displacement, the index scaled by
@@ -999,13 +659,16 @@ static bool arm64_expensive_constant(void *user, anvil_mir_reg_class_t reg_class
 
 static bool arm64_mark_registerless(anvil_mir_func_t *mir);
 
-bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
+static bool arm64_allocation_verify(const anvil_mir_func_t *mir, const void *user)
 {
-    if (!mir) return false;
-    const arm64_register_convention_t *registers = &arm64_aapcs64_registers;
+    (void)user;
+    return anvil_arm64_verify_mir_legal(mir, NULL, 0);
+}
 
-    for (size_t index = 0; index < anvil_mir_num_instrs(mir); index++)
-    {
+static bool arm64_allocation_clobbers(anvil_mir_func_t *mir, const void *user)
+{
+    const arm64_register_convention_t *registers = user;
+    for (size_t index = 0; index < anvil_mir_num_instrs(mir); index++) {
         anvil_mir_instr_info_t instruction;
         if (!anvil_mir_get_instr_info(mir, index, &instruction))
             return false;
@@ -1026,30 +689,42 @@ bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
              !anvil_mir_set_instr_clobbers(mir, index, ANVIL_MIR_REG_FPR, instruction.clobbers[ANVIL_MIR_REG_FPR] | registers->call_fpr_clobbers)))
             return false;
     }
+    return true;
+}
 
+static bool arm64_allocation_registerless(anvil_mir_func_t *mir, const void *user)
+{
+    (void)user;
+    return arm64_mark_registerless(mir);
+}
+
+bool anvil_arm64_regalloc_mir(anvil_mir_func_t *mir)
+{
+    const arm64_register_convention_t *registers = &arm64_aapcs64_registers;
     anvil_regalloc_class_config_t configs[] = {
-        { .reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_gprs, .phys_regs = registers->gprs },
-        { .reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_fprs, .phys_regs = registers->fprs,
-          .partially_preserved = registers->fpr_partially_preserved, .preserved_bits = registers->fpr_preserved_bits },
+        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_gprs, .phys_regs = registers->gprs},
+        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_fprs, .phys_regs = registers->fprs,
+         .partially_preserved = registers->fpr_partially_preserved, .preserved_bits = registers->fpr_preserved_bits},
     };
     /* The printer writes pool registers only as results, declared scratch
      * (atomics) or clobbers (calls); its own temporaries are outside. */
     anvil_regalloc_class_config_t scratch_configs[] = {
-        { .reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_scratch_gprs, .phys_regs = registers->scratch_gprs,
-          .printer_declares_writes = true },
-        { .reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_scratch_fprs, .phys_regs = registers->scratch_fprs,
-          .printer_declares_writes = true },
+        {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = registers->num_scratch_gprs, .phys_regs = registers->scratch_gprs, .printer_declares_writes = true},
+        {.reg_class = ANVIL_MIR_REG_FPR, .num_phys_regs = registers->num_scratch_fprs, .phys_regs = registers->scratch_fprs, .printer_declares_writes = true},
     };
-
-    if (!anvil_arm64_verify_mir_legal(mir, NULL, 0)) return false;
-    if (!anvil_mir_optimize_before_allocation(mir, arm64_address_mode, arm64_expensive_constant, NULL)) return false;
-    if (!anvil_mir_order_blocks(mir) || !anvil_mir_coalesce_copies(mir) || !anvil_mir_split_early_return(mir)) return false;
-    if (!anvil_arm64_verify_mir_legal(mir, NULL, 0) || !arm64_mark_registerless(mir) ||
-        !anvil_mir_hoist_materialized_constants(mir)) return false;
-    if (!anvil_regalloc_allocate(mir, configs, sizeof(configs) / sizeof(configs[0]), scratch_configs,
-                                 sizeof(scratch_configs) / sizeof(scratch_configs[0])))
-        return false;
-    return anvil_arm64_verify_mir_legal(mir, NULL, 0);
+    anvil_mir_allocation_t allocation = {
+        .verify = arm64_allocation_verify,
+        .annotate_clobbers = arm64_allocation_clobbers,
+        .address_mode = arm64_address_mode,
+        .expensive_constant = arm64_expensive_constant,
+        .mark_registerless = arm64_allocation_registerless,
+        .configs = configs,
+        .num_configs = sizeof(configs) / sizeof(configs[0]),
+        .scratch_configs = scratch_configs,
+        .num_scratch_configs = sizeof(scratch_configs) / sizeof(scratch_configs[0]),
+        .user = registers,
+    };
+    return anvil_mir_allocate(mir, &allocation);
 }
 
 typedef struct {

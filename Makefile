@@ -54,6 +54,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/ir_lower.c \
 	$(SRC_DIR)/backend/common/ir_lower_pair.c \
 	$(SRC_DIR)/backend/common/ir_lower_instr.c \
+	$(SRC_DIR)/backend/common/mir_legal.c \
 	$(SRC_DIR)/backend/common/lower_map.c \
 	$(SRC_DIR)/backend/common/vector_isa.c \
 	$(SRC_DIR)/backend/common/print_flags.c \
@@ -207,6 +208,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/switch_lowering_regression \
 	$(BUILD_DIR)/tests/frame_object_regression \
 	$(BUILD_DIR)/tests/pair_lowering_regression \
+	$(BUILD_DIR)/tests/mir_legal_regression \
 	$(BUILD_DIR)/tests/jump_threading_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \

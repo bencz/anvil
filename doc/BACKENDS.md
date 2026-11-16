@@ -214,8 +214,9 @@ Empty modules and declarations also validate their requested configuration.
 **x86 family organization**
 
 `src/backend/x86/` owns both 32-bit x86 and x86-64. The family name does not
-imply a pointer width. Each target keeps its own lowering, legality checks and
-instruction emission because their register sets and ABI requirements differ.
+imply a pointer width. Each target keeps the parts of lowering and legality
+its ABI decides (on the shared lowering and checker) and its own instruction
+emission, because their register sets and ABI requirements differ.
 
 ```text
 src/backend/x86/
@@ -372,20 +373,33 @@ split in two) along with it, so the per-block address folding below
 reaches every access; a base other addresses share stays one register.
 
 Every backend listed above lowers source IR into target MachineIR and then runs
-the shared pipeline. The per-target driver (e.g. `anvil_x86_64_regalloc_mir`)
-calls into the generic passes in this order (every backend runs all of them;
-the optional ones are one shared call, `anvil_mir_optimize_before_allocation`,
-fed the target's addressing-mode and constant-cost hooks):
+the shared pipeline, one driver for all (`anvil_mir_allocate`,
+`src/backend/common/mir_legal.c`); a target's entry point (e.g.
+`anvil_x86_64_regalloc_mir`) only fills `anvil_mir_allocation_t` with its
+legality check, its clobber and printer-temporary annotations, its
+addressing-mode and constant-cost hooks, its registerless-operand marking and
+its register pools:
 
 ```
-verify-legal  ->  order_blocks  ->  local_cse  ->  fold_address_arithmetic  ->
-hoist_loop_constants  ->  duplicate_branch_targets  ->  call clobbers  ->
-coalesce_copies  ->  verify-legal  ->  printer scratch  ->
+verify-legal  ->  call and instruction clobbers  ->
+anvil_mir_optimize_before_allocation (order_blocks, local_cse,
+fold_address_arithmetic, hoist_loop_constants, coalescing,
+duplicate_branch_targets, exit-copy sinking)  ->  order_blocks  ->
+coalesce_copies  ->  split_early_return  ->  printer scratch  ->
+verify-legal  ->  registerless operands  ->  hoist materialized constants  ->
 regalloc + materialize_spills (anvil_regalloc_allocate)  ->  verify-legal
 ```
 
-- **Legality verification** (`anvil_<arch>_verify_mir_legal`): per-target rules,
-  run before coalescing, after coalescing, and once more after spill insertion.
+- **Legality verification** (`anvil_<arch>_verify_mir_legal`): one checker for
+  every target (`anvil_mir_verify_legal`) fed the target's facts in
+  `anvil_mir_legal_target_t`: the widths each register class holds and its
+  physical register count, the pointer width, a vector held in the FP class,
+  the alignment of stack-argument offsets, the classes SELECT picks in, the
+  CPU's SCALAR and VECTOR forms (the vector ISA tables), and one hook for
+  what only the target knows (its ABI registers in calls through
+  `anvil_mir_legal_call`, VA_START, its call-result and return pseudos, its
+  indexed address forms, SystemZ's displacement range and call bundles). It
+  runs before coalescing, after it, and once more after spill insertion.
 - **Branch-target duplication** (`anvil_mir_duplicate_branch_targets`): a jump
   to a small test block (pure instructions and a conditional branch) becomes a
   copy of it, keeping one incoming edge, so top-tested loops branch back from
