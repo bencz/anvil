@@ -248,23 +248,6 @@ static bool lower_params(arm64_mir_lower_t *lower)
     return true;
 }
 
-static bool prepare_phi_results(arm64_mir_lower_t *lower)
-{
-    for (anvil_block_t *block = lower->base.func->blocks; block; block = block->next) {
-        for (anvil_instr_t *instr = block->first; instr; instr = instr->next) {
-            if (instr->op != ANVIL_OP_PHI) break;
-            if (!instr->result) return false;
-
-            anvil_mir_vreg_t vreg = arm64_add_vreg_for_type(lower,
-                                                            instr->result->type);
-            if (vreg == ANVIL_MIR_NO_VREG) return false;
-            if (!anvil_lower_vreg_put(&lower->base.values, instr->result, vreg)) return false;
-        }
-    }
-
-    return true;
-}
-
 
 static bool add_return_copy(arm64_mir_lower_t *lower, anvil_value_t *value)
 {
@@ -564,28 +547,6 @@ static bool lower_cast(arm64_mir_lower_t *lower,
     return anvil_lower_vreg_put(&lower->base.values, instr->result, def);
 }
 
-static bool lower_select(arm64_mir_lower_t *lower, anvil_instr_t *instr)
-{
-    if (instr->num_operands != 3 || !instr->result) return false;
-    anvil_mir_vreg_t cond = anvil_ir_lower_value(&lower->base, instr->operands[0]);
-    anvil_mir_vreg_t then_v = anvil_ir_lower_value(&lower->base, instr->operands[1]);
-    anvil_mir_vreg_t else_v = anvil_ir_lower_value(&lower->base, instr->operands[2]);
-    anvil_mir_vreg_t def = arm64_add_vreg_for_type(lower, instr->result->type);
-    if (cond == ANVIL_MIR_NO_VREG ||
-        then_v == ANVIL_MIR_NO_VREG ||
-        else_v == ANVIL_MIR_NO_VREG ||
-        def == ANVIL_MIR_NO_VREG) {
-        return false;
-    }
-
-    anvil_mir_vreg_t uses[] = { cond, then_v, else_v };
-    if (!anvil_mir_add_instr(lower->base.mir, ANVIL_MIR_OP_SELECT,
-                             def, uses, 3)) {
-        return false;
-    }
-    return anvil_lower_vreg_put(&lower->base.values, instr->result, def);
-}
-
 static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
 {
     if (instr->op == ANVIL_OP_NOP) return true;
@@ -682,7 +643,7 @@ static bool lower_instr(arm64_mir_lower_t *lower, anvil_instr_t *instr)
         case ANVIL_OP_STRUCT_GEP:
             return anvil_ir_lower_struct_gep(&lower->base, instr);
         case ANVIL_OP_SELECT:
-            return lower_select(lower, instr);
+            return anvil_ir_lower_select(&lower->base, instr);
         case ANVIL_OP_LOAD: {
             if (instr->num_operands != 1 || !instr->result) return false;
             anvil_mir_vreg_t ptr = ANVIL_MIR_NO_VREG;
@@ -776,13 +737,6 @@ static anvil_mir_vreg_t ir_vreg_for_type(anvil_ir_lower_t *base, anvil_type_t *t
     return arm64_add_vreg_for_type((arm64_mir_lower_t *)base, type);
 }
 
-static bool ir_value_regs(anvil_ir_lower_t *base, anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count)
-{
-    regs[0] = anvil_ir_lower_value(base, value);
-    *count = 1;
-    return regs[0] != ANVIL_MIR_NO_VREG;
-}
-
 anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
 {
     if (!func || func->is_declaration || !func->type ||
@@ -792,10 +746,9 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     arm64_mir_lower_t lower;
     memset(&lower, 0, sizeof(lower));
     lower.base.func = func;
-    lower.base.value = anvil_ir_lower_value;
     lower.base.vreg_for_type = ir_vreg_for_type;
     lower.base.pointer_bits = 64;
-    lower.base.value_regs = ir_value_regs;
+    lower.base.select_classes = ANVIL_IR_SELECT_EVERY_CLASS;
     lower.abi = func->parent && func->parent->ctx ? arm64_get_abi_desc(func->parent->ctx->abi) : NULL;
     if (!lower.abi)
         return NULL;
@@ -816,7 +769,7 @@ anvil_mir_func_t *anvil_arm64_lower_func_to_mir(anvil_func_t *func)
     if (!anvil_opt_cfg_build_layout(&cfg) ||
         !anvil_lower_create_blocks(lower.base.mir, lower.base.func, &lower.base.blocks) ||
         !lower_params(&lower) ||
-        !prepare_phi_results(&lower)) {
+        !anvil_ir_prepare_phis(&lower.base)) {
         anvil_opt_cfg_destroy(&cfg);
         anvil_mir_func_destroy(lower.base.mir);
         anvil_ir_lower_destroy(&lower.base);

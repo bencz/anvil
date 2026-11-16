@@ -222,6 +222,8 @@ void anvil_ir_lower_destroy(anvil_ir_lower_t *lower)
     anvil_lower_map_destroy(&lower->values);
     anvil_lower_map_destroy(&lower->addresses);
     anvil_lower_map_destroy(&lower->blocks);
+    anvil_lower_map_destroy(&lower->pairs);
+    anvil_lower_map_destroy(&lower->constants);
 }
 
 static bool starts_with_phi(const anvil_block_t *block)
@@ -243,8 +245,8 @@ static bool edge_copies(anvil_ir_lower_t *lower, const anvil_block_t *from, cons
                 incoming = phi->operands[item];
         anvil_mir_vreg_t target[2], source[2];
         size_t words = 0, source_words = 0;
-        ok = phi->result && incoming && lower->value_regs(lower, phi->result, target, &words) &&
-             lower->value_regs(lower, incoming, source, &source_words) && words == source_words;
+        ok = phi->result && incoming && anvil_ir_value_regs(lower, phi->result, target, &words) &&
+             anvil_ir_value_regs(lower, incoming, source, &source_words) && words == source_words;
         for (size_t word = 0; ok && word < words; word++) {
             if (target[word] == source[word])
                 continue;
@@ -304,7 +306,7 @@ bool anvil_ir_lower_cond_branch(anvil_ir_lower_t *lower, const anvil_instr_t *in
 {
     if (instr->num_operands != 1 || !instr->true_block || !instr->false_block)
         return false;
-    anvil_mir_vreg_t condition = lower->value(lower, instr->operands[0]);
+    anvil_mir_vreg_t condition = anvil_ir_lower_value(lower, instr->operands[0]);
     anvil_mir_block_t on_true = anvil_ir_edge_target(lower, instr->parent, instr->true_block);
     anvil_mir_block_t on_false = on_true != ANVIL_MIR_NO_BLOCK ? anvil_ir_edge_target(lower, instr->parent, instr->false_block) : ANVIL_MIR_NO_BLOCK;
     return condition != ANVIL_MIR_NO_VREG && on_false != ANVIL_MIR_NO_BLOCK && anvil_mir_add_cond_branch(lower->mir, condition, on_true, on_false);
@@ -330,7 +332,7 @@ static anvil_mir_block_t switch_case_target(void *opaque, size_t index)
 static anvil_mir_vreg_t switch_bool(void *opaque)
 {
     switch_user_t *user = opaque;
-    return anvil_mir_add_vreg_typed(user->lower->mir, ANVIL_MIR_REG_GPR, 8, false);
+    return anvil_ir_bool_vreg(user->lower);
 }
 
 /* The shared compare tree for a one-register 32- or 64-bit selector and
@@ -369,7 +371,7 @@ bool anvil_ir_lower_switch(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
         return false;
     anvil_mir_vreg_t selector[2];
     size_t words = 0;
-    if (!lower->value_regs(lower, instr->operands[0], selector, &words))
+    if (!anvil_ir_value_regs(lower, instr->operands[0], selector, &words))
         return false;
     anvil_mir_block_t default_target = anvil_ir_edge_target(lower, instr->parent, instr->true_block);
     if (default_target == ANVIL_MIR_NO_BLOCK)
@@ -388,7 +390,7 @@ bool anvil_ir_lower_switch(anvil_ir_lower_t *lower, const anvil_instr_t *instr)
         size_t value_words = 0;
         anvil_mir_vreg_t match = anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false);
         if (on_match == ANVIL_MIR_NO_BLOCK || next == ANVIL_MIR_NO_BLOCK || match == ANVIL_MIR_NO_VREG ||
-            !lower->value_regs(lower, instr->operands[i + 1], value, &value_words) || value_words != words)
+            !anvil_ir_value_regs(lower, instr->operands[i + 1], value, &value_words) || value_words != words)
             return false;
         anvil_mir_vreg_t uses[] = {selector[0], value[0]};
         bool compared = words == 2 ? anvil_wide_compare(lower->mir, ANVIL_MIR_OP_CMP_EQ, (anvil_wide_pair_t){selector[0], selector[1]},
@@ -547,7 +549,7 @@ anvil_mir_vreg_t anvil_ir_address_word(anvil_ir_lower_t *lower, anvil_value_t *v
 {
     anvil_mir_vreg_t regs[2];
     size_t words = 0;
-    if (!lower->value_regs(lower, value, regs, &words) || !words)
+    if (!anvil_ir_value_regs(lower, value, regs, &words) || !words)
         return ANVIL_MIR_NO_VREG;
     return words == 2 ? regs[1] : anvil_ir_pointer_width(lower, regs[0], sign_extend);
 }
@@ -643,13 +645,105 @@ bool anvil_ir_lower_struct_gep(anvil_ir_lower_t *lower, const anvil_instr_t *ins
     return base != ANVIL_MIR_NO_VREG && offset <= INT64_MAX && anvil_lower_address_put(&lower->addresses, instr->result, base, (int64_t)offset);
 }
 
+bool anvil_ir_access_address(anvil_ir_lower_t *lower, anvil_value_t *pointer, int64_t span, anvil_mir_vreg_t *base, int64_t *displacement)
+{
+    if (anvil_lower_address_get(&lower->addresses, pointer, base, displacement))
+        *base = anvil_ir_pointer_width(lower, *base, false);
+    else {
+        *displacement = 0;
+        *base = pointer_register(lower, pointer);
+    }
+    if (*base == ANVIL_MIR_NO_VREG || *displacement > INT64_MAX - span)
+        return false;
+    if (!lower->displacement_fits || (lower->displacement_fits(lower, *displacement) && lower->displacement_fits(lower, *displacement + span)))
+        return true;
+    int64_t offset = *displacement;
+    *displacement = 0;
+    return anvil_ir_add_offset(lower, *base, offset, base);
+}
+
 bool anvil_ir_lower_memory_address(anvil_ir_lower_t *lower, anvil_value_t *pointer, anvil_mir_vreg_t *base, int64_t *displacement)
 {
-    if (anvil_lower_address_get(&lower->addresses, pointer, base, displacement)) {
-        *base = anvil_ir_pointer_width(lower, *base, false);
-        return *base != ANVIL_MIR_NO_VREG;
+    return anvil_ir_access_address(lower, pointer, 0, base, displacement);
+}
+
+bool anvil_ir_add_access(anvil_ir_lower_t *lower, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t *uses, size_t num_uses, int64_t displacement)
+{
+    return displacement == 0 ? anvil_mir_add_instr(lower->mir, op, def, uses, num_uses) : anvil_mir_add_instr_imm_uses(lower->mir, op, def, uses, num_uses, displacement);
+}
+
+bool anvil_ir_is_pair(const anvil_ir_lower_t *lower, anvil_type_t *type)
+{
+    return lower->pair_type && type && lower->pair_type(lower, type);
+}
+
+bool anvil_ir_value_pair(anvil_ir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t *pair)
+{
+    int64_t constant = 0;
+    if (value->kind == ANVIL_VAL_CONST_INT)
+        constant = value->data.i;
+    else if (value->kind != ANVIL_VAL_CONST_NULL && !anvil_lower_constant_get(&lower->constants, value, &constant))
+        return anvil_lower_pair_get(&lower->pairs, value, &pair->hi, &pair->lo, NULL);
+    /* Materialized at each use: a constant may be used in blocks the first
+     * use does not dominate. */
+    return anvil_wide_constant(lower->mir, constant, anvil_wide_value_unsigned(value), pair);
+}
+
+bool anvil_ir_value_regs(anvil_ir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count)
+{
+    regs[0] = regs[1] = ANVIL_MIR_NO_VREG;
+    if (anvil_ir_is_pair(lower, value->type)) {
+        anvil_wide_pair_t pair;
+        *count = 2;
+        if (!anvil_ir_value_pair(lower, value, &pair))
+            return false;
+        regs[0] = pair.hi;
+        regs[1] = pair.lo;
+        return true;
     }
-    *displacement = 0;
-    *base = pointer_register(lower, pointer);
-    return *base != ANVIL_MIR_NO_VREG;
+    *count = 1;
+    regs[0] = anvil_ir_lower_value(lower, value);
+    return regs[0] != ANVIL_MIR_NO_VREG;
+}
+
+bool anvil_ir_result_regs(anvil_ir_lower_t *lower, const anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count)
+{
+    regs[0] = regs[1] = ANVIL_MIR_NO_VREG;
+    if (anvil_ir_is_pair(lower, value->type)) {
+        anvil_wide_pair_t pair;
+        *count = 2;
+        if (!anvil_wide_new(lower->mir, anvil_wide_value_unsigned(value), &pair))
+            return false;
+        regs[0] = pair.hi;
+        regs[1] = pair.lo;
+        return true;
+    }
+    *count = 1;
+    regs[0] = lower->vreg_for_type(lower, value->type);
+    return regs[0] != ANVIL_MIR_NO_VREG;
+}
+
+bool anvil_ir_record_regs(anvil_ir_lower_t *lower, const anvil_value_t *value, const anvil_mir_vreg_t regs[2], size_t count)
+{
+    if (count == 2)
+        return anvil_lower_pair_put(&lower->pairs, value, regs[0], regs[1], anvil_wide_value_unsigned(value));
+    return anvil_lower_vreg_put(&lower->values, value, regs[0]);
+}
+
+bool anvil_ir_prepare_phis(anvil_ir_lower_t *lower)
+{
+    for (anvil_block_t *block = lower->func->blocks; block; block = block->next) {
+        for (anvil_instr_t *instr = block->first; instr && instr->op == ANVIL_OP_PHI; instr = instr->next) {
+            anvil_mir_vreg_t regs[2];
+            size_t count = 0;
+            if (!instr->result || !anvil_ir_result_regs(lower, instr->result, regs, &count) || !anvil_ir_record_regs(lower, instr->result, regs, count))
+                return false;
+        }
+    }
+    return true;
+}
+
+anvil_mir_vreg_t anvil_ir_bool_vreg(anvil_ir_lower_t *lower)
+{
+    return anvil_mir_add_vreg_typed(lower->mir, ANVIL_MIR_REG_GPR, 8, false);
 }

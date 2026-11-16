@@ -9,9 +9,13 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_machine.h"
 #include "lower_map.h"
+#include "wide_mir.h"
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* select_classes of a target whose MIR SELECT takes every class. */
+#define ANVIL_IR_SELECT_EVERY_CLASS (~0u)
 
 /* The most operands a lane operation has (select: mask, then, else). */
 enum { ANVIL_VECTOR_MAX_USES = 3 };
@@ -51,21 +55,60 @@ struct anvil_ir_lower {
     anvil_lower_map_t addresses;
     anvil_lower_map_t blocks;
     size_t num_edge_blocks;
-    /* The registers holding `value` where the code being emitted reads it,
-     * lowering it there when needed: one, or a word pair (high word first)
-     * for a 64-bit integer on a 32-bit target. */
-    bool (*value_regs)(anvil_ir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count);
-    /* `value` in one register (a branch condition, a switch selector or
-     * case value), lowered where the code being emitted reads it. */
-    anvil_mir_vreg_t (*value)(anvil_ir_lower_t *lower, anvil_value_t *value);
     /* A new vreg of the register class, width and signedness the target
      * gives `type` (NO_VREG for a type it cannot hold). */
     anvil_mir_vreg_t (*vreg_for_type)(anvil_ir_lower_t *lower, anvil_type_t *type);
+    /* Whether an access takes `displacement` (NULL: any); one that does
+     * not reaches its address through a register of its own. */
+    bool (*displacement_fits)(const anvil_ir_lower_t *lower, int64_t displacement);
+    /* Word-pair targets (NULL on the others): whether values of `type`
+     * travel as a pair of words, each such value's pair, the 64-bit
+     * constants bitcasts pass on (materialized at each use, like the
+     * constants themselves), and the run-time helper calls of 64-bit
+     * operations. */
+    bool (*pair_type)(const anvil_ir_lower_t *lower, anvil_type_t *type);
+    anvil_lower_map_t pairs;
+    anvil_lower_map_t constants;
+    anvil_wide_target_t wide;
+    /* Register classes (bit per anvil_mir_reg_class_t) in which the
+     * target's MIR SELECT picks a value; a select in another class
+     * branches. */
+    unsigned select_classes;
     unsigned pointer_bits;
     /* The stack's alignment (the ABI descriptor's): the most a frame
      * object is aligned to. */
     unsigned stack_alignment;
 };
+
+/* Whether values of `type` travel as a word pair. */
+bool anvil_ir_is_pair(const anvil_ir_lower_t *lower, anvil_type_t *type);
+/* A pair-type value's pair where the code being emitted reads it (a
+ * constant materialized there). */
+bool anvil_ir_value_pair(anvil_ir_lower_t *lower, anvil_value_t *value, anvil_wide_pair_t *pair);
+/* The registers holding `value` where the code being emitted reads it:
+ * one, or a word pair (high word first). */
+bool anvil_ir_value_regs(anvil_ir_lower_t *lower, anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count);
+/* New registers for `value` (one, or a pair, high word first), and the
+ * record that `value` is in them. */
+bool anvil_ir_result_regs(anvil_ir_lower_t *lower, const anvil_value_t *value, anvil_mir_vreg_t regs[2], size_t *count);
+bool anvil_ir_record_regs(anvil_ir_lower_t *lower, const anvil_value_t *value, const anvil_mir_vreg_t regs[2], size_t count);
+/* The registers of every PHI result, made before any block is lowered
+ * (an edge copy may reach a PHI before its block). */
+bool anvil_ir_prepare_phis(anvil_ir_lower_t *lower);
+/* A new 8-bit vreg for a boolean (a compare's result). */
+anvil_mir_vreg_t anvil_ir_bool_vreg(anvil_ir_lower_t *lower);
+/* An access instruction at `displacement` from its address (the last
+ * use). */
+bool anvil_ir_add_access(anvil_ir_lower_t *lower, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t *uses, size_t num_uses, int64_t displacement);
+/* SELECT: per word, the target's MIR SELECT in the classes it selects in
+ * a register, a branch to copies in either arm otherwise. */
+bool anvil_ir_lower_select(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
+/* Whether `instr` is an operation, conversion, load or store on word
+ * pairs, which anvil_ir_lower_pair_instr lowers through the 64-bit
+ * legalizer (wide_mir.h), loads and stores word by word in the target's
+ * byte order. */
+bool anvil_ir_pair_instr(const anvil_ir_lower_t *lower, const anvil_instr_t *instr);
+bool anvil_ir_lower_pair_instr(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
 
 /* `value` in a register where the code being emitted reads it: the vreg it
  * was lowered to, or, materialized at each use (a register from the first
@@ -121,8 +164,11 @@ bool anvil_ir_lower_alloca(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
  * constant parts summed into one offset. */
 bool anvil_ir_lower_gep(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
 bool anvil_ir_lower_struct_gep(anvil_ir_lower_t *lower, const anvil_instr_t *instr);
-/* The register and displacement a load or store through `pointer` uses. */
+/* The register and displacement a load or store through `pointer` uses;
+ * for accesses spanning `span` bytes past the first, a displacement the
+ * target does not take at both ends is added to the register instead. */
 bool anvil_ir_lower_memory_address(anvil_ir_lower_t *lower, anvil_value_t *pointer, anvil_mir_vreg_t *base, int64_t *displacement);
+bool anvil_ir_access_address(anvil_ir_lower_t *lower, anvil_value_t *pointer, int64_t span, anvil_mir_vreg_t *base, int64_t *displacement);
 
 /* The MIR opcode of an IR operation: two operands (integer and FP
  * arithmetic, shifts, compares), one (negations, NOT, FABS), or a

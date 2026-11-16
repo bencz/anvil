@@ -78,9 +78,15 @@ counter narrower than 32 bits (`SYSTEMZ_NARROWEST_COUNTER`).
 
 **Shared lowering.** Every lowerer's state begins with `anvil_ir_lower_t`
 (`src/backend/common/ir_lower.h`): the function, its MachineIR, the maps
-below and two hooks the target supplies, `value` (an IR value in one
-register, lowered where it is read) and `value_regs` (one register, or a
-word pair for a 64-bit integer on a 32-bit target).  On that base the
+below and the target's hooks and facts: `vreg_for_type` (the register a
+type takes), `displacement_fits` (the displacements an access takes; NULL
+for any), `pair_type` (on 32-bit targets, the types that travel as word
+pairs), the run-time helper calls of 64-bit operations (`wide`), the
+register classes the target's MIR SELECT picks in (`select_classes`), the
+pointer width and the stack alignment.  A value is read as one register or
+a word pair, high word first (`anvil_ir_value_regs`), and every PHI result
+gets its registers before any block is lowered (`anvil_ir_prepare_phis`).
+On that base the
 control flow lowers the same way on every target: an edge into a block with
 PHIs carries their values as one parallel copy, in the branching block on an
 unconditional branch and in an edge block of its own on a conditional branch
@@ -130,6 +136,19 @@ MachineIR (carries through unsigned compares, constant shifts inline).  A target
 supplies one hook, `anvil_wide_target_t.call_helper`, to call the libgcc/compiler-rt
 helpers (`__muldi3`, `__divdi3`, variable shifts, floating conversions) in its
 calling convention; x86-32, PPC32 and the 31-bit SystemZ targets use it.
+The lowering of pair operations is shared too
+(`src/backend/common/ir_lower_pair.c`): binary operations, shifts by a count
+of any width, compares, NEG/NOT, conversions to, from and between pairs (a
+truncation to i1 keeps the low bit; a bitcast of a constant stays a
+constant, materialized at each use), and loads and stores word by word in
+the target's byte order, their displacements folded where the target takes
+both.  The target only says which types are pairs (`pair_type`) and how
+the helpers are called; calls, returns and parameters stay with each ABI.
+SELECT is one lowering for every value (`anvil_ir_lower_select`): per word,
+the target's MIR SELECT in the classes it selects in (`select_classes`:
+general registers on x86-64, and on i386 only with CMOVcc; every class on
+ARM64, PowerPC and SystemZ, whose printers expand it), a branch to copies
+otherwise.
 
 All actively maintained backends now follow the same MachineIR pipeline that
 ARM64 established as the reference path: **lower source IR to MachineIR ->
