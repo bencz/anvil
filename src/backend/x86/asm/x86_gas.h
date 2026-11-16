@@ -79,6 +79,10 @@ typedef struct {
      * division (the operands' registers given). */
     void (*fp_binary)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs);
     void (*gpr_divide)(void *gas, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size);
+    /* The FP unit's copies (to, from or between FP registers) and FP
+     * constants (their bits). */
+    void (*fp_copy)(void *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
+    void (*fp_constant)(void *gas, anvil_mir_vreg_t dst, uint64_t bits);
     const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
@@ -129,6 +133,11 @@ void x86_gas_emit_cmp(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t
  * next branch (x & c compared with zero), on the FP unit, or on general
  * registers. */
 void x86_gas_emit_binary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* COPY (a general register at least min_operation_bytes wide; the FP
+ * unit's otherwise) and MOV of a constant (xor for zero, the shortest
+ * move otherwise). */
+void x86_gas_emit_copy(x86_gas_t *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
+void x86_gas_emit_mov(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

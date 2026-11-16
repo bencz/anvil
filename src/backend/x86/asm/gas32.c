@@ -364,52 +364,6 @@ static void x86_emit_call_pair_move(x86_mir_emit_t *emit, int def_phys, int hi_p
     x86_emit_parallel_move(emit, dst, src, count);
 }
 
-static void x86_emit_copy(x86_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
-{
-    const anvil_mir_vreg_info_t *dst_info = x86_vreg_info_checked(emit, dst);
-    const anvil_mir_vreg_info_t *src_info = x86_vreg_info_checked(emit, src);
-    if (!dst_info || !src_info || emit->base.failed)
-        return;
-
-    if (dst_info->reg_class == ANVIL_MIR_REG_FPR || src_info->reg_class == ANVIL_MIR_REG_FPR) {
-        emit->fp->copy(emit, dst, src);
-        return;
-    }
-    int dst_phys = x86_gas_phys_of(&emit->base, dst);
-    int src_phys = x86_gas_phys_of(&emit->base, src);
-    if (emit->base.failed || dst_phys == src_phys)
-        return;
-    int size = x86_size_bytes(dst_info->size_bits);
-    if (size < 4)
-        size = 4;
-    anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(size), x86_gas_gpr(src_phys, size), x86_gas_gpr(dst_phys, size));
-}
-
-static void x86_emit_mov(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
-{
-    const anvil_mir_vreg_info_t *def_info = x86_vreg_info_checked(emit, info->def);
-    if (!def_info || !anvil_mir_isel_materialize(&emit->base.isel, info->def))
-        return;
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-
-    int64_t imm = info->has_imm ? info->imm : 0;
-
-    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        emit->fp->constant(emit, info->def, (uint64_t)imm);
-        return;
-    }
-
-    /* xor for zero: the flags are dead here (a compare fused with its
-     * branch is adjacent to it). */
-    const char *dst = x86_gas_gpr(dst_phys, 4);
-    if ((int32_t)imm == 0)
-        anvil_strbuf_appendf(&emit->base.code, "\txorl %%%s, %%%s\n", dst, dst);
-    else
-        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%lld, %%%s\n", (long long)(int32_t)imm, dst);
-}
-
 /* Integer arithmetic.  ADD..XOR and MUL work on the full registers (the
  * low bits of a narrow result are the same); shifts use the operand width.
  * Variable shift counts go through CL, the instruction's printer scratch
@@ -615,7 +569,7 @@ static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_
         break;
     case ANVIL_MIR_OP_TRUNC:
     case ANVIL_MIR_OP_BITCAST:
-        x86_emit_copy(emit, info->def, src);
+        x86_gas_emit_copy(&emit->base, info->def, src);
         break;
     case ANVIL_MIR_OP_SITOFP:
     case ANVIL_MIR_OP_UITOFP:
@@ -744,6 +698,18 @@ static void x86_fp_compare(void *gas, anvil_mir_vreg_t a, anvil_mir_vreg_t b)
     emit->fp->compare(emit, a, b);
 }
 
+static void x86_fp_copy(void *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->copy(emit, dst, src);
+}
+
+static void x86_fp_constant(void *gas, anvil_mir_vreg_t dst, uint64_t bits)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->constant(emit, dst, bits);
+}
+
 static void x86_fp_binary(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
     x86_mir_emit_t *emit = gas;
@@ -768,6 +734,8 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     gas->fp_compare = x86_fp_compare;
     gas->fp_binary = x86_fp_binary;
     gas->gpr_divide = x86_gpr_divide;
+    gas->fp_copy = x86_fp_copy;
+    gas->fp_constant = x86_fp_constant;
     gas->local_label_prefix = plat ? plat->format->local_label_prefix : "";
 }
 
@@ -1040,7 +1008,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         x86_emit_atomic(emit, instr_index, info);
         return;
     case ANVIL_MIR_OP_MOV:
-        x86_emit_mov(emit, info);
+        x86_gas_emit_mov(&emit->base, info);
         break;
     case ANVIL_MIR_OP_COPY: {
         anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
@@ -1048,7 +1016,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
             emit->base.failed = true;
             break;
         }
-        x86_emit_copy(emit, info->def, src);
+        x86_gas_emit_copy(&emit->base, info->def, src);
         break;
     }
     case ANVIL_MIR_OP_ADD:

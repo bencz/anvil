@@ -465,86 +465,43 @@ static const char *x64_fp_copy_op(void)
     return "movaps";
 }
 
-static void x64_emit_copy(x64_mir_emit_t *emit, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
+/* FPR <- FPR, and the bit moves between an FPR and a GPR. */
+static void x64_fp_copy(void *user, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
 {
+    x64_mir_emit_t *emit = user;
     const anvil_mir_vreg_info_t *dst_info = x64_vreg_info_checked(emit, dst);
     const anvil_mir_vreg_info_t *src_info = x64_vreg_info_checked(emit, src);
     int dst_phys = x86_gas_phys_of(&emit->base, dst);
     int src_phys = x86_gas_phys_of(&emit->base, src);
     if (!dst_info || !src_info || emit->base.failed)
         return;
-
-    const char *dst_reg = x64_reg_name(emit, dst);
-    const char *src_reg = x64_reg_name(emit, src);
-    if (emit->base.failed)
-        return;
-
     if (dst_info->reg_class == ANVIL_MIR_REG_FPR && src_info->reg_class == ANVIL_MIR_REG_FPR) {
-        if (dst_phys == src_phys)
-            return;
-        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", x64_fp_copy_op(), src_reg, dst_reg);
-    } else if (dst_info->reg_class == ANVIL_MIR_REG_GPR && src_info->reg_class == ANVIL_MIR_REG_GPR) {
-        if (dst_phys == src_phys)
-            return;
+        if (dst_phys != src_phys)
+            anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", x64_fp_copy_op(), x86_gas_xmm(src_phys), x86_gas_xmm(dst_phys));
+    } else if (dst_info->reg_class == ANVIL_MIR_REG_FPR) {
         int size = x64_size_bytes(dst_info->size_bits);
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(size), x86_gas_gpr(src_phys, size), x86_gas_gpr(dst_phys, size));
-    } else if (dst_info->reg_class == ANVIL_MIR_REG_FPR && src_info->reg_class == ANVIL_MIR_REG_GPR) {
-        int size = x64_size_bytes(dst_info->size_bits);
-        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", size <= 4 ? "movd" : "movq", x86_gas_gpr(src_phys, size <= 4 ? 4 : 8), dst_reg);
-    } else if (dst_info->reg_class == ANVIL_MIR_REG_GPR && src_info->reg_class == ANVIL_MIR_REG_FPR) {
-        int size = x64_size_bytes(src_info->size_bits);
-        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", size <= 4 ? "movd" : "movq", src_reg, x86_gas_gpr(dst_phys, size <= 4 ? 4 : 8));
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", size <= 4 ? "movd" : "movq", x86_gas_gpr(src_phys, size <= 4 ? 4 : 8), x86_gas_xmm(dst_phys));
     } else {
-        emit->base.failed = true;
+        int size = x64_size_bytes(src_info->size_bits);
+        anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", size <= 4 ? "movd" : "movq", x86_gas_xmm(src_phys), x86_gas_gpr(dst_phys, size <= 4 ? 4 : 8));
     }
 }
 
-static void x64_emit_mov(x64_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
+/* An FP constant through R11 (the printer's temporary). */
+static void x64_fp_constant(void *user, anvil_mir_vreg_t dst, uint64_t bits)
 {
-    const anvil_mir_vreg_info_t *def_info = x64_vreg_info_checked(emit, info->def);
-    if (!def_info)
+    x64_mir_emit_t *emit = user;
+    const anvil_mir_vreg_info_t *info = x64_vreg_info_checked(emit, dst);
+    int dst_phys = x86_gas_phys_of(&emit->base, dst);
+    if (!info || emit->base.failed)
         return;
-    if (!anvil_mir_isel_materialize(&emit->base.isel, info->def))
-        return;
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-
-    int64_t imm = info->has_imm ? info->imm : 0;
-
-    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        int size = x64_size_bytes(def_info->size_bits);
-        const char *dst = x86_gas_xmm(dst_phys);
-        if (imm == 0) {
-            anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", dst, dst);
-            return;
-        }
-        if (size <= 4) {
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl $%u, %%r11d\n", (uint32_t)imm);
-            anvil_strbuf_appendf(&emit->base.code, "\tmovd %%r11d, %%%s\n", dst);
-        } else {
-            anvil_strbuf_appendf(&emit->base.code, "\tmovabsq $%llu, %%r11\n", (unsigned long long)(uint64_t)imm);
-            anvil_strbuf_appendf(&emit->base.code, "\tmovq %%r11, %%%s\n", dst);
-        }
-        return;
-    }
-
-    /* The shortest form: xor for zero (flags are dead here: a compare fused
-     * with its consumer is adjacent to it), movl when the value fits 32
-     * unsigned bits (it zero-extends), movq when it is a signed 32-bit
-     * immediate, movabsq otherwise. */
-    int size = x64_size_bytes(def_info->size_bits);
-    const char *dst32 = x86_gas_gpr(dst_phys, 4);
-    if (size < 8)
-        imm = (int64_t)(uint32_t)imm;
-    if (imm == 0)
-        anvil_strbuf_appendf(&emit->base.code, "\txorl %%%s, %%%s\n", dst32, dst32);
-    else if (imm > 0 && imm <= (int64_t)UINT32_MAX)
-        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%lld, %%%s\n", (long long)imm, dst32);
-    else if (imm >= INT32_MIN && imm < 0)
-        anvil_strbuf_appendf(&emit->base.code, "\tmovq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
+    const char *xmm = x86_gas_xmm(dst_phys);
+    if (bits == 0)
+        anvil_strbuf_appendf(&emit->base.code, "\txorps %%%s, %%%s\n", xmm, xmm);
+    else if (x64_size_bytes(info->size_bits) <= 4)
+        anvil_strbuf_appendf(&emit->base.code, "\tmovl $%u, %%r11d\n\tmovd %%r11d, %%%s\n", (uint32_t)bits, xmm);
     else
-        anvil_strbuf_appendf(&emit->base.code, "\tmovabsq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
+        anvil_strbuf_appendf(&emit->base.code, "\tmovabsq $%llu, %%r11\n\tmovq %%r11, %%%s\n", (unsigned long long)bits, xmm);
 }
 
 /* Division in RDX:RAX, which are this instruction's scratch: no operand
@@ -853,7 +810,7 @@ static void x64_emit_cast(x64_mir_emit_t *emit, size_t instr_index, const anvil_
         break;
     case ANVIL_MIR_OP_TRUNC:
     case ANVIL_MIR_OP_BITCAST:
-        x64_emit_copy(emit, info->def, src);
+        x86_gas_emit_copy(&emit->base, info->def, src);
         break;
     case ANVIL_MIR_OP_SITOFP: {
         if (dst_info->reg_class != ANVIL_MIR_REG_FPR || src_info->reg_class != ANVIL_MIR_REG_GPR) {
@@ -1077,6 +1034,8 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     gas->fp_compare = x64_fp_compare;
     gas->fp_binary = x64_fp_binary;
     gas->gpr_divide = x64_gpr_divide;
+    gas->fp_copy = x64_fp_copy;
+    gas->fp_constant = x64_fp_constant;
     gas->local_label_prefix = desc ? desc->format->local_label_prefix : "";
 }
 
@@ -1295,7 +1254,7 @@ static void x64_emit_instr(x64_mir_emit_t *emit, size_t instr_index, const anvil
         return;
 
     case ANVIL_MIR_OP_MOV:
-        x64_emit_mov(emit, info);
+        x86_gas_emit_mov(&emit->base, info);
         break;
     case ANVIL_MIR_OP_COPY: {
         anvil_mir_vreg_t src = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
@@ -1303,7 +1262,7 @@ static void x64_emit_instr(x64_mir_emit_t *emit, size_t instr_index, const anvil
             emit->base.failed = true;
             break;
         }
-        x64_emit_copy(emit, info->def, src);
+        x86_gas_emit_copy(&emit->base, info->def, src);
         break;
     }
     case ANVIL_MIR_OP_ADD:

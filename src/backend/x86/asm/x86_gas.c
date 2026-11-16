@@ -876,3 +876,57 @@ void x86_gas_emit_binary(x86_gas_t *gas, size_t index, const anvil_mir_instr_inf
         return;
     gas->gpr_divide(gas, index, info, dst_phys, a_phys, b_phys, size);
 }
+
+void x86_gas_emit_copy(x86_gas_t *gas, anvil_mir_vreg_t dst, anvil_mir_vreg_t src)
+{
+    const anvil_mir_vreg_info_t *dst_info = anvil_mir_get_vreg_info(gas->mir, dst), *src_info = anvil_mir_get_vreg_info(gas->mir, src);
+    if (!dst_info || !src_info) {
+        gas->failed = true;
+        return;
+    }
+    if (dst_info->reg_class == ANVIL_MIR_REG_FPR || src_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_copy(gas, dst, src);
+        return;
+    }
+    int dst_phys = x86_gas_phys_of(gas, dst), src_phys = x86_gas_phys_of(gas, src);
+    if (gas->failed || dst_phys == src_phys)
+        return;
+    int bytes = (dst_info->size_bits + 7) / 8;
+    if (bytes < gas->min_operation_bytes)
+        bytes = gas->min_operation_bytes;
+    anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src_phys, bytes), x86_gas_gpr(dst_phys, bytes));
+}
+
+void x86_gas_emit_mov(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
+{
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    if (!def_info) {
+        gas->failed = true;
+        return;
+    }
+    if (!anvil_mir_isel_materialize(&gas->isel, info->def))
+        return;
+    int dst_phys = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    int64_t imm = info->has_imm ? info->imm : 0;
+    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_constant(gas, info->def, (uint64_t)imm);
+        return;
+    }
+    /* The shortest form: xor for zero (the flags are dead here: a compare
+     * fused with its consumer is adjacent to it), movl for a value of 32
+     * bits or one that fits 32 unsigned bits (it zero-extends), movq for a
+     * signed 32-bit immediate, movabsq otherwise. */
+    const char *dst32 = x86_gas_gpr(dst_phys, 4);
+    if (def_info->size_bits <= 32)
+        imm = (int32_t)imm;
+    if (imm == 0)
+        anvil_strbuf_appendf(&gas->code, "\txorl %%%s, %%%s\n", dst32, dst32);
+    else if (def_info->size_bits <= 32 || (imm > 0 && imm <= (int64_t)UINT32_MAX))
+        anvil_strbuf_appendf(&gas->code, "\tmovl $%lld, %%%s\n", (long long)imm, dst32);
+    else if (imm >= INT32_MIN && imm < 0)
+        anvil_strbuf_appendf(&gas->code, "\tmovq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
+    else
+        anvil_strbuf_appendf(&gas->code, "\tmovabsq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
+}
