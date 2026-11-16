@@ -1,5 +1,104 @@
 #include "../systemz_internal.h"
 
+/* The general-register forms of one operation on a word and on a
+ * doubleword (a storage form also has the word's RXY spelling, for a 20-bit
+ * displacement): logical adds and subtracts (never an overflow interrupt),
+ * the distinct-operands forms (K; the 64-bit shifts name their source on
+ * every z/Architecture model) and the storage-operand forms. */
+typedef enum {
+    SYSTEMZ_COPY,
+    SYSTEMZ_XOR,
+    SYSTEMZ_OR,
+    SYSTEMZ_AND,
+    SYSTEMZ_ADD,
+    SYSTEMZ_SUB,
+    SYSTEMZ_ADD_DISTINCT,
+    SYSTEMZ_SUB_DISTINCT,
+    SYSTEMZ_AND_DISTINCT,
+    SYSTEMZ_OR_DISTINCT,
+    SYSTEMZ_XOR_DISTINCT,
+    SYSTEMZ_SHL,
+    SYSTEMZ_SHR,
+    SYSTEMZ_SAR,
+    SYSTEMZ_SHL_DISTINCT,
+    SYSTEMZ_SHR_DISTINCT,
+    SYSTEMZ_SAR_DISTINCT,
+    SYSTEMZ_ADD_IMMEDIATE,
+    SYSTEMZ_ADD_IMMEDIATE_DISTINCT,
+    SYSTEMZ_MUL_IMMEDIATE,
+    SYSTEMZ_COMPARE,
+    SYSTEMZ_COMPARE_LOGICAL,
+    SYSTEMZ_COMPARE_IMMEDIATE,
+    SYSTEMZ_LOAD_IMMEDIATE,
+    SYSTEMZ_NEGATE,
+    SYSTEMZ_TEST,
+    SYSTEMZ_ADD_CARRY,
+    SYSTEMZ_BRANCH_COUNT,
+    SYSTEMZ_BRANCH_COUNT_RX,
+    SYSTEMZ_STORE,
+    SYSTEMZ_XOR_STORAGE,
+    SYSTEMZ_OR_STORAGE,
+    SYSTEMZ_ADD_STORAGE,
+    SYSTEMZ_SUB_STORAGE,
+    SYSTEMZ_AND_STORAGE,
+    SYSTEMZ_FORM_COUNT
+} systemz_form_t;
+
+static const char *const systemz_forms[SYSTEMZ_FORM_COUNT][3] = {
+    [SYSTEMZ_COPY] = {"LR", "LGR", NULL},
+    [SYSTEMZ_XOR] = {"XR", "XGR", NULL},
+    [SYSTEMZ_OR] = {"OR", "OGR", NULL},
+    [SYSTEMZ_AND] = {"NR", "NGR", NULL},
+    [SYSTEMZ_ADD] = {"ALR", "ALGR", NULL},
+    [SYSTEMZ_SUB] = {"SLR", "SLGR", NULL},
+    [SYSTEMZ_ADD_DISTINCT] = {"ALRK", "ALGRK", NULL},
+    [SYSTEMZ_SUB_DISTINCT] = {"SLRK", "SLGRK", NULL},
+    [SYSTEMZ_AND_DISTINCT] = {"NRK", "NGRK", NULL},
+    [SYSTEMZ_OR_DISTINCT] = {"ORK", "OGRK", NULL},
+    [SYSTEMZ_XOR_DISTINCT] = {"XRK", "XGRK", NULL},
+    [SYSTEMZ_SHL] = {"SLL", "SLLG", NULL},
+    [SYSTEMZ_SHR] = {"SRL", "SRLG", NULL},
+    [SYSTEMZ_SAR] = {"SRA", "SRAG", NULL},
+    [SYSTEMZ_SHL_DISTINCT] = {"SLLK", "SLLG", NULL},
+    [SYSTEMZ_SHR_DISTINCT] = {"SRLK", "SRLG", NULL},
+    [SYSTEMZ_SAR_DISTINCT] = {"SRAK", "SRAG", NULL},
+    [SYSTEMZ_ADD_IMMEDIATE] = {"AHI", "AGHI", NULL},
+    [SYSTEMZ_ADD_IMMEDIATE_DISTINCT] = {"AHIK", "AGHIK", NULL},
+    [SYSTEMZ_MUL_IMMEDIATE] = {"MHI", "MGHI", NULL},
+    [SYSTEMZ_COMPARE] = {"CR", "CGR", NULL},
+    [SYSTEMZ_COMPARE_LOGICAL] = {"CLR", "CLGR", NULL},
+    [SYSTEMZ_COMPARE_IMMEDIATE] = {"CHI", "CGHI", NULL},
+    [SYSTEMZ_LOAD_IMMEDIATE] = {"LHI", "LGHI", NULL},
+    [SYSTEMZ_NEGATE] = {"LCR", "LCGR", NULL},
+    [SYSTEMZ_TEST] = {"LTR", "LTGR", NULL},
+    [SYSTEMZ_ADD_CARRY] = {"ALCR", "ALCGR", NULL},
+    [SYSTEMZ_BRANCH_COUNT] = {"BRCT", "BRCTG", NULL},
+    [SYSTEMZ_BRANCH_COUNT_RX] = {"BCT", "BCTG", NULL},
+    [SYSTEMZ_STORE] = {"ST", "STG", NULL},
+    [SYSTEMZ_XOR_STORAGE] = {"X", "XG", "XY"},
+    [SYSTEMZ_OR_STORAGE] = {"O", "OG", "OY"},
+    [SYSTEMZ_ADD_STORAGE] = {"AL", "ALG", "ALY"},
+    [SYSTEMZ_SUB_STORAGE] = {"SL", "SLG", "SLY"},
+    [SYSTEMZ_AND_STORAGE] = {"N", "NG", "NY"},
+};
+
+static const char *systemz_form(systemz_form_t form, bool wide)
+{
+    return systemz_forms[form][wide];
+}
+
+/* The form for the variant's whole general register. */
+static const char *systemz_register_form(const systemz_emit_t *emit, systemz_form_t form)
+{
+    return systemz_form(form, emit->desc->has_64bit_gprs);
+}
+
+/* A storage form, the word's RXY spelling for a 20-bit displacement. */
+static const char *systemz_storage_form(systemz_form_t form, bool wide, bool long_displacement)
+{
+    return !wide && long_displacement ? systemz_forms[form][2] : systemz_forms[form][wide];
+}
+
 static const char *systemz_gpr_name(int reg)
 {
     static const char *names[] = {"R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"};
@@ -255,7 +354,7 @@ static void systemz_emit_narrow_load_prefix(systemz_emit_t *emit, const anvil_mi
     /* IC inserts the byte: the rest of the register is cleared first. */
     if (!systemz_narrow_needs_extension(emit, info, dst) || info->size_bits > 8)
         return;
-    anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", emit->desc->has_64bit_gprs ? "XGR" : "XR", systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, dst));
+    anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", systemz_register_form(emit, SYSTEMZ_XOR), systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, dst));
 }
 
 static void systemz_emit_narrow_load_suffix(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info, anvil_mir_vreg_t dst)
@@ -315,7 +414,7 @@ static void systemz_emit_copy(systemz_emit_t *emit, anvil_mir_vreg_t dst, anvil_
     if (info->reg_class == ANVIL_MIR_REG_FPR) {
         anvil_strbuf_appendf(&emit->code, "         %s   %s,%s\n", info->size_bits == 32 ? "LER" : "LDR", systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, src));
     } else {
-        anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, src));
+        anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), systemz_vreg_reg_name(emit, dst), systemz_vreg_reg_name(emit, src));
     }
 }
 
@@ -324,8 +423,8 @@ static void systemz_emit_unsigned_divmod(systemz_emit_t *emit, anvil_mir_instr_i
     const char *divisor = systemz_vreg_reg_name(emit, rhs);
     const char *dividend = systemz_vreg_reg_name(emit, lhs);
     const char *dst = systemz_vreg_reg_name(emit, instr.def);
-    anvil_strbuf_appendf(&emit->code, "         %s    R1,%s\n", wide ? "LGR" : "LR", dividend);
-    anvil_strbuf_appendf(&emit->code, "         %s   R0,R0\n", wide ? "XGR" : "XR");
+    anvil_strbuf_appendf(&emit->code, "         %s    R1,%s\n", systemz_form(SYSTEMZ_COPY, wide), dividend);
+    anvil_strbuf_appendf(&emit->code, "         %s   R0,R0\n", systemz_form(SYSTEMZ_XOR, wide));
 
     unsigned bits = wide ? 64u : 32u;
     for (unsigned bit = 0; bit < bits; bit++) {
@@ -376,7 +475,7 @@ static void systemz_emit_unsigned_divmod(systemz_emit_t *emit, anvil_mir_instr_i
         anvil_strbuf_appendf(&emit->code, "%-8s DS    0H\n", no_subtract);
     }
     emit->label_counter++;
-    anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", wide ? "LGR" : "LR", dst, instr.op == ANVIL_MIR_OP_UMOD ? "R0" : "R1");
+    anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", systemz_form(SYSTEMZ_COPY, wide), dst, instr.op == ANVIL_MIR_OP_UMOD ? "R0" : "R1");
 }
 
 /* Immediate operand forms, by CPU facility: AHI/MHI/CHI need the
@@ -549,8 +648,8 @@ static bool systemz_emit_distinct(systemz_emit_t *emit, anvil_mir_instr_info_t i
     bool distinct = (emit->features & ANVIL_FEATURE_ZARCH_DISTINCT) != 0;
     bool shift = instr.op == ANVIL_MIR_OP_SHL || instr.op == ANVIL_MIR_OP_SHR || instr.op == ANVIL_MIR_OP_SAR;
     const char *dst = systemz_vreg_reg_name(emit, instr.def), *src = systemz_vreg_reg_name(emit, lhs);
-    const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (wide ? "SLLG" : "SLLK") : instr.op == ANVIL_MIR_OP_SHR ? (wide ? "SRLG" : "SRLK")
-                                                                                                                    : (wide ? "SRAG" : "SRAK");
+    const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (systemz_form(SYSTEMZ_SHL_DISTINCT, wide)) : instr.op == ANVIL_MIR_OP_SHR ? (systemz_form(SYSTEMZ_SHR_DISTINCT, wide))
+                                                                                                                    : (systemz_form(SYSTEMZ_SAR_DISTINCT, wide));
     int64_t imm;
     if (systemz_rhs_immediate(emit, index, &instr, &imm)) {
         if (shift && (wide || distinct)) {
@@ -560,14 +659,14 @@ static bool systemz_emit_distinct(systemz_emit_t *emit, anvil_mir_instr_info_t i
         /* A multiply by 2^k: the left shift. */
         int power = instr.op == ANVIL_MIR_OP_MUL ? systemz_pow2_shift(imm, wide) : -1;
         if (power > 0 && (wide || distinct)) {
-            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", wide ? "SLLG" : "SLLK", dst, src, power);
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", systemz_form(SYSTEMZ_SHL_DISTINCT, wide), dst, src, power);
             return true;
         }
         if (distinct && (instr.op == ANVIL_MIR_OP_ADD || instr.op == ANVIL_MIR_OP_SUB)) {
             int64_t addend = instr.op == ANVIL_MIR_OP_ADD ? imm : -imm;
             if (!systemz_simm16(addend))
                 return false;
-            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%lld\n", wide ? "AGHIK" : "AHIK", dst, src, (long long)addend);
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%lld\n", systemz_form(SYSTEMZ_ADD_IMMEDIATE_DISTINCT, wide), dst, src, (long long)addend);
             /* As AHI: a nonzero immediate cannot overflow to zero. */
             if (addend != 0)
                 anvil_print_flags_set(&emit->flags, def_reg, wide ? 8 : 4);
@@ -585,9 +684,9 @@ static bool systemz_emit_distinct(systemz_emit_t *emit, anvil_mir_instr_info_t i
     }
     if (!distinct)
         return false;
-    const char *op = instr.op == ANVIL_MIR_OP_ADD ? (wide ? "ALGRK" : "ALRK") : instr.op == ANVIL_MIR_OP_SUB ? (wide ? "SLGRK" : "SLRK")
-                   : instr.op == ANVIL_MIR_OP_AND ? (wide ? "NGRK" : "NRK")   : instr.op == ANVIL_MIR_OP_OR  ? (wide ? "OGRK" : "ORK")
-                   : instr.op == ANVIL_MIR_OP_XOR ? (wide ? "XGRK" : "XRK")
+    const char *op = instr.op == ANVIL_MIR_OP_ADD ? (systemz_form(SYSTEMZ_ADD_DISTINCT, wide)) : instr.op == ANVIL_MIR_OP_SUB ? (systemz_form(SYSTEMZ_SUB_DISTINCT, wide))
+                   : instr.op == ANVIL_MIR_OP_AND ? (systemz_form(SYSTEMZ_AND_DISTINCT, wide))   : instr.op == ANVIL_MIR_OP_OR  ? (systemz_form(SYSTEMZ_OR_DISTINCT, wide))
+                   : instr.op == ANVIL_MIR_OP_XOR ? (systemz_form(SYSTEMZ_XOR_DISTINCT, wide))
                                                   : NULL;
     if (!op)
         return false;
@@ -628,7 +727,7 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
     switch (instr.op) {
     case ANVIL_MIR_OP_ADD:
     case ANVIL_MIR_OP_SUB:
-        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", wide ? "AGHI" : "AHI", dst,
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", systemz_form(SYSTEMZ_ADD_IMMEDIATE, wide), dst,
                              (long long)(instr.op == ANVIL_MIR_OP_ADD ? imm : -imm));
         /* Condition code 0 exactly when the result is zero: adding a
          * nonzero 16-bit immediate cannot overflow to zero. */
@@ -645,7 +744,7 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
                 anvil_strbuf_appendf(&emit->code, "         SLL   %s,%d\n", dst, shift);
         }
         else if (shift < 0)
-            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", wide ? "MGHI" : "MHI", dst, (long long)imm);
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", systemz_form(SYSTEMZ_MUL_IMMEDIATE, wide), dst, (long long)imm);
         break;
     }
     case ANVIL_MIR_OP_AND:
@@ -665,7 +764,7 @@ static bool systemz_emit_binary_imm(systemz_emit_t *emit, anvil_mir_instr_info_t
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR: {
         int count = (int)(imm & (wide ? 63 : 31));
-        const char *op = instr.op == ANVIL_MIR_OP_SHL ? (wide ? "SLLG" : "SLL") : instr.op == ANVIL_MIR_OP_SHR ? (wide ? "SRLG" : "SRL") : (wide ? "SRAG" : "SRA");
+        const char *op = instr.op == ANVIL_MIR_OP_SHL ? (systemz_form(SYSTEMZ_SHL, wide)) : instr.op == ANVIL_MIR_OP_SHR ? (systemz_form(SYSTEMZ_SHR, wide)) : (systemz_form(SYSTEMZ_SAR, wide));
         if (wide)
             anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", op, dst, dst, count);
         else
@@ -709,7 +808,7 @@ static void systemz_emit_binary(systemz_emit_t *emit, anvil_mir_instr_info_t ins
             } else {
                 /* Shift counts are base registers, where R0 means none. */
                 const char *temp = shift ? "R1" : "R0";
-                anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", temp, rhs_name);
+                anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), temp, rhs_name);
                 rhs_name = temp;
             }
         }
@@ -749,10 +848,10 @@ static void systemz_emit_binary(systemz_emit_t *emit, anvil_mir_instr_info_t ins
     case ANVIL_MIR_OP_ADD:
         /* Logical forms: same result modulo 2^n, never a fixed-point
          * overflow interrupt (word-pair arithmetic relies on wrapping). */
-        op = wide ? "ALGR" : "ALR";
+        op = systemz_form(SYSTEMZ_ADD, wide);
         break;
     case ANVIL_MIR_OP_SUB:
-        op = wide ? "SLGR" : "SLR";
+        op = systemz_form(SYSTEMZ_SUB, wide);
         break;
     case ANVIL_MIR_OP_MUL:
         if (wide) {
@@ -785,13 +884,13 @@ static void systemz_emit_binary(systemz_emit_t *emit, anvil_mir_instr_info_t ins
         }
         return;
     case ANVIL_MIR_OP_AND:
-        op = wide ? "NGR" : "NR";
+        op = systemz_form(SYSTEMZ_AND, wide);
         break;
     case ANVIL_MIR_OP_OR:
-        op = wide ? "OGR" : "OR";
+        op = systemz_form(SYSTEMZ_OR, wide);
         break;
     case ANVIL_MIR_OP_XOR:
-        op = wide ? "XGR" : "XR";
+        op = systemz_form(SYSTEMZ_XOR, wide);
         break;
     default:
         break;
@@ -806,7 +905,7 @@ static void systemz_emit_binary(systemz_emit_t *emit, anvil_mir_instr_info_t ins
     }
 
     if (instr.op == ANVIL_MIR_OP_SHL || instr.op == ANVIL_MIR_OP_SHR || instr.op == ANVIL_MIR_OP_SAR) {
-        const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (wide ? "SLLG" : "SLL") : instr.op == ANVIL_MIR_OP_SHR ? (wide ? "SRLG" : "SRL") : (wide ? "SRAG" : "SRA");
+        const char *shift_op = instr.op == ANVIL_MIR_OP_SHL ? (systemz_form(SYSTEMZ_SHL, wide)) : instr.op == ANVIL_MIR_OP_SHR ? (systemz_form(SYSTEMZ_SHR, wide)) : (systemz_form(SYSTEMZ_SAR, wide));
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,0(%s)\n", shift_op, systemz_vreg_reg_name(emit, instr.def), rhs_name);
     }
 }
@@ -893,7 +992,7 @@ static bool systemz_emit_carry_compare(systemz_emit_t *emit, anvil_mir_instr_inf
         return false;
     bool wide = systemz_operand_wide(emit, lhs);
     anvil_mir_vreg_t higher = instr.op == ANVIL_MIR_OP_CMP_UGT ? lhs : rhs, lower = higher == lhs ? rhs : lhs;
-    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", wide ? "CLGR" : "CLR", systemz_vreg_reg_name(emit, higher), systemz_vreg_reg_name(emit, lower));
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_form(SYSTEMZ_COMPARE_LOGICAL, wide), systemz_vreg_reg_name(emit, higher), systemz_vreg_reg_name(emit, lower));
     emit->extension_skip = extension;
     emit->carry_add_at = add;
     emit->carry_other = other;
@@ -908,10 +1007,10 @@ static void systemz_emit_carry_add(systemz_emit_t *emit, anvil_mir_instr_info_t 
         return;
     bool wide = info->size_bits > 32;
     /* Neither LGHI nor a copy changes the condition code. */
-    anvil_strbuf_appendf(&emit->code, "         %s  R0,0\n", wide ? "LGHI" : "LHI ");
+    anvil_strbuf_appendf(&emit->code, "         %-5s R0,0\n", systemz_form(SYSTEMZ_LOAD_IMMEDIATE, wide));
     if (systemz_phys_reg(emit, instr.def) != systemz_phys_reg(emit, emit->carry_other))
         systemz_emit_copy(emit, instr.def, emit->carry_other);
-    anvil_strbuf_appendf(&emit->code, "         %-5s %s,R0\n", wide ? "ALCGR" : "ALCR", systemz_vreg_reg_name(emit, instr.def));
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,R0\n", systemz_form(SYSTEMZ_ADD_CARRY, wide), systemz_vreg_reg_name(emit, instr.def));
 }
 
 static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
@@ -943,7 +1042,7 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
     } else {
         bool wide = lhs_info->size_bits > 32 && emit->desc->has_64bit_gprs;
         bool unsigned_cmp = systemz_cmp_unsigned(instr.op);
-        const char *cmp = unsigned_cmp ? (wide ? "CLGR" : "CLR") : (wide ? "CGR" : "CR");
+        const char *cmp = unsigned_cmp ? (systemz_form(SYSTEMZ_COMPARE_LOGICAL, wide)) : (systemz_form(SYSTEMZ_COMPARE, wide));
         int64_t imm;
         const char *a = systemz_vreg_reg_name(emit, lhs);
         bool immediate = systemz_rhs_immediate(emit, index, &instr, &imm);
@@ -972,7 +1071,7 @@ static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
                 anvil_strbuf_appendf(&emit->code, "         CLM   %s,B'%s',=X'%s'\n", a, byte ? "0001" : "0011", byte ? "00" : "0000");
         } else if (immediate) {
             if (!unsigned_cmp && (emit->features & ANVIL_FEATURE_ZARCH_IMMREL) && systemz_simm16(imm))
-                anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", wide ? "CGHI" : "CHI", a, (long long)imm);
+                anvil_strbuf_appendf(&emit->code, "         %-5s %s,%lld\n", systemz_form(SYSTEMZ_COMPARE_IMMEDIATE, wide), a, (long long)imm);
             else
                 anvil_strbuf_appendf(&emit->code, "         %-5s %s,=F'%lld'\n", unsigned_cmp ? "CL" : "C", a, (long long)imm);
         } else {
@@ -1063,10 +1162,10 @@ static void systemz_emit_unary(systemz_emit_t *emit, anvil_mir_instr_info_t inst
 
     switch (instr.op) {
     case ANVIL_MIR_OP_NEG:
-        anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", emit->desc->has_64bit_gprs ? "LCGR" : "LCR", systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, instr.def));
+        anvil_strbuf_appendf(&emit->code, "         %s    %s,%s\n", systemz_register_form(emit, SYSTEMZ_NEGATE), systemz_vreg_reg_name(emit, instr.def), systemz_vreg_reg_name(emit, instr.def));
         break;
     case ANVIL_MIR_OP_NOT:
-        anvil_strbuf_appendf(&emit->code, "         %s    %s,=X'%s'\n", emit->desc->has_64bit_gprs ? "XG" : "X", systemz_vreg_reg_name(emit, instr.def),
+        anvil_strbuf_appendf(&emit->code, "         %s    %s,=X'%s'\n", systemz_register_form(emit, SYSTEMZ_XOR_STORAGE), systemz_vreg_reg_name(emit, instr.def),
                              emit->desc->has_64bit_gprs ? "FFFFFFFFFFFFFFFF" : "FFFFFFFF");
         break;
     default:
@@ -1243,7 +1342,7 @@ static void systemz_emit_numeric_cast(systemz_emit_t *emit, anvil_mir_instr_info
         bool is_unsigned = instr.op == ANVIL_MIR_OP_UITOFP;
         const char *integer = source;
         if (src_info->size_bits < (emit->desc->has_64bit_gprs ? 64 : 32)) {
-            anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", source);
+            anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), source);
             systemz_emit_integer_normalize(emit, "R0", src_info->size_bits, !is_unsigned);
             integer = "R0";
             /* A zero-extended u8/u16/u32 fits the wider signed domain:
@@ -1261,17 +1360,17 @@ static void systemz_emit_numeric_cast(systemz_emit_t *emit, anvil_mir_instr_info
         char end_label[SYSTEMZ_INTERNAL_LABEL_CAP];
         snprintf(low_label, sizeof(low_label), "%s#UIFP_L_%u", emit->func_label, emit->label_counter);
         snprintf(end_label, sizeof(end_label), "%s#UIFP_E_%u", emit->func_label, emit->label_counter++);
-        anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", emit->desc->has_64bit_gprs ? "LTGR" : "LTR", source, source);
+        anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_register_form(emit, SYSTEMZ_TEST), source, source);
         anvil_strbuf_appendf(&emit->code, "         BNM   %s\n", low_label);
-        anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", source);
+        anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), source);
         if (emit->desc->has_64bit_gprs) {
             anvil_strbuf_append(&emit->code, "         SRLG  R0,R0,1\n");
         } else {
             anvil_strbuf_append(&emit->code, "         SRL   R0,1\n");
         }
-        anvil_strbuf_appendf(&emit->code, "         %s    R1,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", source);
+        anvil_strbuf_appendf(&emit->code, "         %s    R1,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), source);
         anvil_strbuf_append(&emit->code, emit->desc->has_64bit_gprs ? "         NILL  R1,X'0001'\n" : "         N     R1,=X'00000001'\n");
-        anvil_strbuf_appendf(&emit->code, "         %s    R0,R1\n", emit->desc->has_64bit_gprs ? "OGR" : "OR");
+        anvil_strbuf_appendf(&emit->code, "         %s    R0,R1\n", systemz_register_form(emit, SYSTEMZ_OR));
         systemz_emit_signed_int_to_fp(emit, dst, "R0", src_info->size_bits, dst_info->size_bits);
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", ieee ? (dst_info->size_bits == 32 ? "AEBR" : "ADBR") : (dst_info->size_bits == 32 ? "AER" : "ADR"), dst, dst);
         anvil_strbuf_appendf(&emit->code, "         B     %s\n", end_label);
@@ -1310,7 +1409,7 @@ static void systemz_emit_numeric_cast(systemz_emit_t *emit, anvil_mir_instr_info
     anvil_strbuf_appendf(&emit->code, "         %-5s F0,%s\n", ieee ? (src_info->size_bits == 32 ? "SEBR" : "SDBR") : (src_info->size_bits == 32 ? "SER" : "SDR"), source);
     anvil_strbuf_appendf(&emit->code, "         %-5s F0,F0\n", ieee ? (src_info->size_bits == 32 ? "LCEBR" : "LCDBR") : (src_info->size_bits == 32 ? "LCER" : "LCDR"));
     systemz_emit_fp_to_signed_int(emit, dst, "F0", src_info->size_bits, dst_info->size_bits);
-    anvil_strbuf_appendf(&emit->code, "         %s    %s,=X'%s'\n", emit->desc->has_64bit_gprs ? "OG" : "O", dst, emit->desc->has_64bit_gprs ? "8000000000000000" : "80000000");
+    anvil_strbuf_appendf(&emit->code, "         %s    %s,=X'%s'\n", systemz_register_form(emit, SYSTEMZ_OR_STORAGE), dst, emit->desc->has_64bit_gprs ? "8000000000000000" : "80000000");
     anvil_strbuf_appendf(&emit->code, "         B     %s\n", end_label);
     anvil_strbuf_appendf(&emit->code, "%-8s DS    0H\n", low_label);
     systemz_emit_fp_to_signed_int(emit, dst, source, src_info->size_bits, dst_info->size_bits);
@@ -1470,27 +1569,11 @@ static void systemz_emit_load_operation(systemz_emit_t *emit, anvil_mir_instr_in
             break;
         }
     } else {
-        bool wide = info->size_bits > 32, y = emit->load_long && !wide;
-        switch (instr.op) {
-        case ANVIL_MIR_OP_ADD:
-            op = wide ? "ALG" : y ? "ALY" : "AL";
-            break;
-        case ANVIL_MIR_OP_SUB:
-            op = wide ? "SLG" : y ? "SLY" : "SL";
-            break;
-        case ANVIL_MIR_OP_AND:
-            op = wide ? "NG" : y ? "NY" : "N";
-            break;
-        case ANVIL_MIR_OP_OR:
-            op = wide ? "OG" : y ? "OY" : "O";
-            break;
-        case ANVIL_MIR_OP_XOR:
-            op = wide ? "XG" : y ? "XY" : "X";
-            break;
-        default:
-            op = "MSG";
-            break;
-        }
+        bool wide = info->size_bits > 32;
+        systemz_form_t form = instr.op == ANVIL_MIR_OP_ADD ? SYSTEMZ_ADD_STORAGE : instr.op == ANVIL_MIR_OP_SUB ? SYSTEMZ_SUB_STORAGE
+                            : instr.op == ANVIL_MIR_OP_AND ? SYSTEMZ_AND_STORAGE : instr.op == ANVIL_MIR_OP_OR  ? SYSTEMZ_OR_STORAGE
+                            : instr.op == ANVIL_MIR_OP_XOR ? SYSTEMZ_XOR_STORAGE : SYSTEMZ_FORM_COUNT;
+        op = form == SYSTEMZ_FORM_COUNT ? "MSG" : systemz_storage_form(form, wide, emit->load_long);
     }
     anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", op, systemz_vreg_reg_name(emit, instr.def), emit->load_address);
     /* The logical operations set condition code 0 for a zero result. */
@@ -1531,8 +1614,8 @@ static void systemz_emit_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr
         /* IC inserts into a cleared register; when the destination is an
          * address register, clear R1 instead and move the byte over. */
         anvil_strbuf_appendf(&emit->code, "         %s    R1,R1\n         %-5s R1,%s\n         %s    %s,R1\n",
-                             emit->desc->has_64bit_gprs ? "XGR" : "XR", systemz_long_disp(instr) ? "ICY" : "IC", address,
-                             emit->desc->has_64bit_gprs ? "LGR" : "LR",
+                             systemz_register_form(emit, SYSTEMZ_XOR), systemz_long_disp(instr) ? "ICY" : "IC", address,
+                             systemz_register_form(emit, SYSTEMZ_COPY),
                              systemz_vreg_reg_name(emit, instr.def));
         systemz_emit_narrow_load_suffix(emit, info, instr.def);
         return;
@@ -1583,7 +1666,7 @@ static void systemz_emit_frame_address(systemz_emit_t *emit, int reg, int offset
         return;
     }
     systemz_emit_load_imm(emit, reg, offset);
-    anvil_strbuf_appendf(&emit->code, "         %s %s,R11\n", emit->desc->has_64bit_gprs ? "ALGR " : "ALR  ", systemz_gpr_name(reg));
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,R11\n", systemz_register_form(emit, SYSTEMZ_ADD), systemz_gpr_name(reg));
 }
 
 /* Frame byte `offset` as a storage operand: a displacement from R11 when it
@@ -1651,7 +1734,7 @@ static void systemz_emit_call_stack_arg(systemz_emit_t *emit, anvil_mir_instr_in
         }
     }
     const char *list_mem = systemz_frame_operand(emit, list_off, 14, operand, sizeof(operand));
-    anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", emit->desc->has_64bit_gprs ? "STG" : "ST", list_mem);
+    anvil_strbuf_appendf(&emit->code, "         %s    R0,%s\n", systemz_register_form(emit, SYSTEMZ_STORE), list_mem);
 }
 
 static void systemz_emit_call(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
@@ -1660,7 +1743,7 @@ static void systemz_emit_call(systemz_emit_t *emit, anvil_mir_instr_info_t instr
     if (emit->outgoing_param_list_offset >= 0 && emit->call_arg_counts && emit->call_arg_counts[index] > 0) {
         systemz_emit_frame_address(emit, 1, emit->outgoing_param_list_offset);
     } else {
-        anvil_strbuf_appendf(&emit->code, "         %s    R1,R1\n", emit->desc->has_64bit_gprs ? "XGR" : "XR");
+        anvil_strbuf_appendf(&emit->code, "         %s    R1,R1\n", systemz_register_form(emit, SYSTEMZ_XOR));
     }
     if (instr.symbol) {
         char upper[96];
@@ -1672,7 +1755,7 @@ static void systemz_emit_call(systemz_emit_t *emit, anvil_mir_instr_info_t instr
         }
     } else if (instr.num_uses > 0) {
         anvil_mir_vreg_t callee = anvil_mir_get_instr_use(emit->mir, index, 0);
-        anvil_strbuf_appendf(&emit->code, "         %s    R15,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", systemz_vreg_reg_name(emit, callee));
+        anvil_strbuf_appendf(&emit->code, "         %s    R15,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), systemz_vreg_reg_name(emit, callee));
     }
     anvil_strbuf_append(&emit->code, "         BALR  R14,R15\n");
 }
@@ -1687,7 +1770,7 @@ static void systemz_emit_ret(systemz_emit_t *emit, anvil_mir_instr_info_t instr,
         anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, index, 0);
         const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, value);
         if (info && info->reg_class == ANVIL_MIR_REG_GPR && systemz_phys_reg(emit, value) != emit->desc->return_gpr) {
-            anvil_strbuf_appendf(&emit->code, "         %s    R15,%s\n", emit->desc->has_64bit_gprs ? "LGR" : "LR", systemz_vreg_reg_name(emit, value));
+            anvil_strbuf_appendf(&emit->code, "         %s    R15,%s\n", systemz_register_form(emit, SYSTEMZ_COPY), systemz_vreg_reg_name(emit, value));
         }
     }
     emit->desc->abi_ops->emit_epilogue(emit);
@@ -1804,7 +1887,7 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
         const anvil_mir_vreg_info_t *counter = systemz_emit_vreg_info(emit, emit->counter_vreg);
         bool wide = emit->desc->has_64bit_gprs && counter && counter->size_bits > 32;
         bool immrel = (emit->features & ANVIL_FEATURE_ZARCH_IMMREL) != 0;
-        const char *op = immrel ? (wide ? "BRCTG" : "BRCT") : (wide ? "BCTG" : "BCT");
+        const char *op = immrel ? (systemz_form(SYSTEMZ_BRANCH_COUNT, wide)) : (systemz_form(SYSTEMZ_BRANCH_COUNT_RX, wide));
         anvil_strbuf_appendf(&emit->code, "         %-5s %s,", op, emit->counter_branch);
         systemz_emit_branch_target(emit, instr.true_block);
         anvil_strbuf_append(&emit->code, "\n");
@@ -1820,7 +1903,7 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
     systemz_emit_instr_body(emit, instr, index);
     if (role == ANVIL_MIR_COUNTER_INIT) {
         const char *reg = systemz_vreg_reg_name(emit, instr.def);
-        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", emit->desc->has_64bit_gprs ? "LCGR" : "LCR", reg, reg);
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_register_form(emit, SYSTEMZ_NEGATE), reg, reg);
     }
 }
 
@@ -1954,7 +2037,7 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         emit->fused_branch = NULL;
         if (!taken) {
             const char *cond = systemz_vreg_reg_name(emit, u0);
-            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR", cond, cond);
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_form(SYSTEMZ_TEST, systemz_operand_wide(emit, u0)), cond, cond);
             taken = "BNE";
         }
         systemz_emit_cond_branch(emit, taken, instr.true_block, instr.false_block);
@@ -2005,7 +2088,7 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         if (def_info && def_info->reg_class == ANVIL_MIR_REG_GPR && emit->desc->has_64bit_gprs &&
             (emit->features & ANVIL_FEATURE_ZARCH_LOADSTORE)) {
             if (!fused)
-                anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
+                anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_form(SYSTEMZ_TEST, systemz_operand_wide(emit, u0)), systemz_vreg_reg_name(emit, u0),
                                      systemz_vreg_reg_name(emit, u0));
             int dst = systemz_phys_reg(emit, instr.def);
             if (dst == systemz_phys_reg(emit, u1)) {
@@ -2023,7 +2106,7 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         snprintf(end_label, sizeof(end_label), "%s#SEL_E_%u", emit->func_label, emit->label_counter++);
         /* Test the condition at its width (no copy needed: LTR leaves it). */
         if (!fused)
-            anvil_strbuf_appendf(&emit->code, "         %s  %s,%s\n", systemz_operand_wide(emit, u0) ? "LTGR" : "LTR ", systemz_vreg_reg_name(emit, u0),
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", systemz_form(SYSTEMZ_TEST, systemz_operand_wide(emit, u0)), systemz_vreg_reg_name(emit, u0),
                                  systemz_vreg_reg_name(emit, u0));
         anvil_strbuf_appendf(&emit->code, "         BC    %u,%s\n", mask, true_label);
         systemz_emit_copy(emit, instr.def, u2);
@@ -2059,7 +2142,7 @@ void systemz_emit_establish_base(systemz_emit_t *emit)
 {
     const char *label = emit->func_label;
     if (!(emit->features & ANVIL_FEATURE_ZARCH_IMMREL)) {
-        anvil_strbuf_append(&emit->code, emit->desc->has_64bit_gprs ? "         LGR   R12,R15\n" : "         LR    R12,R15\n");
+        anvil_strbuf_appendf(&emit->code, "         %-5s R12,R15\n", systemz_register_form(emit, SYSTEMZ_COPY));
         anvil_strbuf_appendf(&emit->code, "         USING %s,R12\n", label);
         return;
     }
