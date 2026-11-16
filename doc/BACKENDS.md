@@ -249,7 +249,10 @@ src/backend/x86/
                                         addresses, spills, selects, stack arguments,
                                         loads and stores with their memory operands,
                                         load folding and immediate rules, integer
-                                        arithmetic, shifts and compares
+                                        arithmetic, shifts, compares, copies, moves,
+                                        unary operations, extensions, and the
+                                        instruction dispatch (x86_gas_emit_instr; each
+                                        printer's own forms through target_instr)
         gas32.c                         Allocated MIR to 32-bit GAS/AT&T
         gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```

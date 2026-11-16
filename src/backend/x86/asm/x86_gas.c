@@ -1044,3 +1044,138 @@ void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr
     }
     anvil_strbuf_appendf(&gas->code, "\tmovz%s %%%s, %%%s\n", src_size == 1 ? "bl" : "wl", x86_gas_gpr(src_phys, src_size), x86_gas_gpr(dst_phys, 4));
 }
+
+/* The add of a compare's carry (x + (a u< b)): mov keeps the carry. */
+static void emit_add_carry(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
+{
+    const anvil_mir_vreg_info_t *def = anvil_mir_get_vreg_info(gas->mir, info->def);
+    int to = x86_gas_phys_of(gas, info->def), from = x86_gas_phys_of(gas, gas->adc_other);
+    if (!def || gas->failed) {
+        gas->failed = true;
+        return;
+    }
+    int bytes = (def->size_bits + 7) / 8 < 4 ? 4 : (def->size_bits + 7) / 8;
+    if (to != from)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(from, bytes), x86_gas_gpr(to, bytes));
+    anvil_strbuf_appendf(&gas->code, "\tadc%s $0, %%%s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(to, bytes));
+}
+
+static void emit_cond_branch(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    const char *cc = gas->fused_jcc;
+    gas->fused_jcc = NULL;
+    if (!cc) {
+        anvil_mir_vreg_t cond = anvil_mir_get_instr_use(gas->mir, index, 0);
+        const anvil_mir_vreg_info_t *cond_info = cond == ANVIL_MIR_NO_VREG ? NULL : anvil_mir_get_vreg_info(gas->mir, cond);
+        int cond_phys = cond_info ? x86_gas_phys_of(gas, cond) : -1;
+        if (!cond_info || gas->failed) {
+            gas->failed = true;
+            return;
+        }
+        /* A boolean tests in its byte register. */
+        int bytes = byte_register(gas, cond_phys) ? (cond_info->size_bits + 7) / 8 : 4;
+        const char *reg = x86_gas_gpr(cond_phys, bytes);
+        anvil_strbuf_appendf(&gas->code, "\ttest%s %%%s, %%%s\n", x86_gas_size_suffix(bytes), reg, reg);
+        cc = "ne";
+    }
+    gas->failed |= !x86_gas_emit_cond_branch(&gas->code, gas->local_label_prefix, gas->mir, &gas->layout, gas->block, cc, info->true_block, info->false_block);
+}
+
+void x86_gas_emit_instr(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    if (index == gas->adc_skip) {
+        gas->adc_skip = SIZE_MAX;
+        return;
+    }
+    if (index == gas->adc_at) {
+        gas->adc_at = SIZE_MAX;
+        emit_add_carry(gas, info);
+        return;
+    }
+    if (!anvil_mir_isel_registerless_ok(gas->mir, &gas->isel, index, info)) {
+        gas->failed = true;
+        return;
+    }
+    switch (info->op) {
+    case ANVIL_MIR_OP_MOV:
+        x86_gas_emit_mov(gas, info);
+        break;
+    case ANVIL_MIR_OP_COPY: {
+        anvil_mir_vreg_t src = anvil_mir_get_instr_use(gas->mir, index, 0);
+        if (src == ANVIL_MIR_NO_VREG)
+            gas->failed = true;
+        else
+            x86_gas_emit_copy(gas, info->def, src);
+        break;
+    }
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_DIV:
+    case ANVIL_MIR_OP_SDIV:
+    case ANVIL_MIR_OP_UDIV:
+    case ANVIL_MIR_OP_FDIV:
+    case ANVIL_MIR_OP_SMOD:
+    case ANVIL_MIR_OP_UMOD:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+        x86_gas_emit_binary(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_NEG:
+    case ANVIL_MIR_OP_NOT:
+    case ANVIL_MIR_OP_FABS:
+        x86_gas_emit_unary(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_FCMP:
+    case ANVIL_MIR_OP_CMP:
+    case ANVIL_MIR_OP_CMP_EQ:
+    case ANVIL_MIR_OP_CMP_NE:
+    case ANVIL_MIR_OP_CMP_LT:
+    case ANVIL_MIR_OP_CMP_LE:
+    case ANVIL_MIR_OP_CMP_GT:
+    case ANVIL_MIR_OP_CMP_GE:
+    case ANVIL_MIR_OP_CMP_ULT:
+    case ANVIL_MIR_OP_CMP_ULE:
+    case ANVIL_MIR_OP_CMP_UGT:
+    case ANVIL_MIR_OP_CMP_UGE:
+        x86_gas_emit_cmp(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_LOAD:
+        x86_gas_emit_load(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_STORE:
+        x86_gas_emit_store(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_FRAME_ADDR:
+        x86_gas_emit_frame_addr(gas, info);
+        break;
+    case ANVIL_MIR_OP_CALL_STACK_ARG:
+        x86_gas_emit_call_stack_arg(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_BR:
+        gas->failed |= !x86_gas_emit_jump(&gas->code, gas->local_label_prefix, gas->mir, &gas->layout, gas->block, info->true_block);
+        break;
+    case ANVIL_MIR_OP_SELECT:
+        x86_gas_emit_select(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_BR_COND:
+        emit_cond_branch(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_SPILL_LOAD:
+        x86_gas_emit_spill_load(gas, info);
+        break;
+    case ANVIL_MIR_OP_SPILL_STORE:
+        x86_gas_emit_spill_store(gas, index, info);
+        break;
+    case ANVIL_MIR_OP_KEEPALIVE:
+        break;
+    default:
+        if (!gas->target_instr(gas, index, info))
+            gas->failed = true;
+        break;
+    }
+}

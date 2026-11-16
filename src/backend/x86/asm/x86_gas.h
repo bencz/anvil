@@ -85,6 +85,11 @@ typedef struct {
     void (*fp_constant)(void *gas, anvil_mir_vreg_t dst, uint64_t bits);
     /* The FP unit's NEG and FABS. */
     void (*fp_unary)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t dst, anvil_mir_vreg_t src);
+    /* The printer's own instructions (atomics, vector and scalar forms,
+     * conversions, symbol addresses, VA_START, dynamic allocation, incoming
+     * arguments, calls, returns and their pseudos); false for one it does
+     * not print. */
+    bool (*target_instr)(void *gas, size_t index, const anvil_mir_instr_info_t *info);
     const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
@@ -147,6 +152,9 @@ void x86_gas_emit_unary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
  * above its width, a 32-bit operation's result on x86-64), movz/movs
  * otherwise. */
 void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, bool sign_extend);
+/* One MIR instruction: the shared forms here, the printer's own through
+ * target_instr. */
+void x86_gas_emit_instr(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
