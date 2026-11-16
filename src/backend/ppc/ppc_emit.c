@@ -459,34 +459,20 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
     int offset = emit->frame_pointer ? word : 0;
     emit->gpr_save_offsets[31] = emit->frame_pointer ? offset : -1;
 
-    /* The callee-saved registers printed code writes. */
-    for (int reg = 14; reg <= 30; reg++) {
-        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, reg))
-            emit->gpr_save_offsets[reg] = offset += word;
-    }
-    for (int reg = 14; reg <= 31; reg++) {
-        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, reg))
-            emit->fpr_save_offsets[reg] = offset = anvil_align_int(offset, 8) + 8;
-    }
+    /* The pools' registers a call preserves that printed code writes. */
+    int saved[32];
+    size_t count = anvil_mir_isel_saved_registers(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, ppc_alloc_gpr_regs, sizeof(ppc_alloc_gpr_regs) / sizeof(int),
+                                                  emit->desc->abi_ops->call_gpr_clobbers, saved);
+    for (size_t c = 0; c < count; c++)
+        emit->gpr_save_offsets[saved[c]] = offset += word;
+    count = anvil_mir_isel_saved_registers(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, ppc_alloc_fpr_regs, sizeof(ppc_alloc_fpr_regs) / sizeof(int),
+                                           emit->desc->abi_ops->call_fpr_clobbers, saved);
+    for (size_t c = 0; c < count; c++)
+        emit->fpr_save_offsets[saved[c]] = offset = anvil_align_int(offset, 8) + 8;
 
-    emit->num_frame_slot_offsets = anvil_mir_num_frame_slots(emit->mir);
-    if (emit->num_frame_slot_offsets > 0) {
-        emit->frame_slot_offsets = calloc(emit->num_frame_slot_offsets, sizeof(*emit->frame_slot_offsets));
-        if (!emit->frame_slot_offsets)
-            return false;
-    }
-
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, (uint32_t)word, emit->desc->stack_alignment, true, emit->frame_slot_offsets, &offset))
-        return false;
-
-    emit->num_spill_offsets = anvil_mir_num_spills(emit->mir);
-    if (emit->num_spill_offsets > 0) {
-        emit->spill_offsets = calloc(emit->num_spill_offsets, sizeof(*emit->spill_offsets));
-        if (!emit->spill_offsets)
-            return false;
-    }
-
-    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 0, 16, true, emit->spill_offsets, &offset))
+    anvil_mir_slot_rules_t rules = {(uint32_t)word, emit->desc->stack_alignment, 0, 16, true};
+    if (!anvil_mir_layout_slots(emit->mir, offset, &rules, &emit->frame_slot_offsets, &emit->num_frame_slot_offsets, &emit->spill_offsets, &emit->num_spill_offsets,
+                                &offset))
         return false;
 
     if (ppc_instr_needs_fp_scratch(emit)) {

@@ -434,10 +434,29 @@ bool anvil_mir_layout_frame_slots(const anvil_mir_func_t *func,
  * slots: each takes a multiple of `unit` bytes aligned to `unit`, or, when
  * `unit` is 0, its own size aligned to that size (at most `max_align`). */
 bool anvil_mir_layout_spill_slots(const anvil_mir_func_t *func, int start, uint32_t unit, uint32_t max_align, bool record_end, int *offsets, int *end);
+/* A printer's rules for both layouts above. */
+typedef struct {
+    uint32_t frame_default_align;
+    uint32_t frame_max_align;
+    uint32_t spill_unit;
+    uint32_t spill_max_align;
+    bool record_end;
+} anvil_mir_slot_rules_t;
+/* Allocates the frame and the spill slots' offsets (at least one entry
+ * each, zeroed), lays the frame slots out from `start` and the spill slots
+ * after them; `end` receives the offset past both.  On failure nothing
+ * stays allocated. */
+bool anvil_mir_layout_slots(const anvil_mir_func_t *func, int start, const anvil_mir_slot_rules_t *rules, int **frame_offsets, size_t *num_frame,
+                            int **spill_offsets, size_t *num_spill, int *end);
 /* The bytes the outgoing stack arguments of the function's calls reach:
  * each CALL_STACK_ARG at its offset, the value rounded up to whole slots of
  * `slot_bytes`.  False for a malformed argument. */
 bool anvil_mir_outgoing_stack_bytes(const anvil_mir_func_t *func, uint32_t slot_bytes, int *bytes);
+/* The outgoing argument area a frame reserves: the stack arguments' bytes
+ * (above), plus `home_bytes` (the callee's register home area, Win64) when
+ * the function calls anything, rounded up to `align`.  False for a
+ * malformed argument or stack arguments with no call. */
+bool anvil_mir_outgoing_area(const anvil_mir_func_t *func, uint32_t slot_bytes, int home_bytes, uint32_t align, int *bytes);
 bool anvil_mir_add_frame_addr(anvil_mir_func_t *func,
                               anvil_mir_vreg_t def,
                               int frame_slot);

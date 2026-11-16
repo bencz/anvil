@@ -126,6 +126,18 @@ static bool x86_allocation_registerless(anvil_mir_func_t *mir, const void *user)
     return anvil_x86_mark_registerless(mir);
 }
 
+int x86_gpr_pool(const anvil_mir_func_t *mir, const anvil_x86_cc_desc_t *desc, int *gprs)
+{
+    int count = 0;
+    for (int r = 0; r < desc->num_alloc_gpr_regs && count < X86_GPR_POOL_MAX - 1; r++)
+        gprs[count++] = desc->alloc_gpr_regs[r];
+    /* EBP joins the pool (last: callee-saved, no byte form) when the
+     * function keeps no frame pointer. */
+    if (!x86_keeps_frame_pointer(mir))
+        gprs[count++] = X86_EBP;
+    return count;
+}
+
 bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
 {
     const anvil_x86_cc_desc_t *desc = anvil_x86_get_cc_desc(ANVIL_CC_CDECL);
@@ -134,14 +146,8 @@ bool anvil_x86_regalloc_mir(anvil_mir_func_t *mir)
 
     /* Bytes (and booleans) only in the registers with a byte form. */
     const uint64_t byte_regs = (UINT64_C(1) << X86_EAX) | (UINT64_C(1) << X86_ECX) | (UINT64_C(1) << X86_EDX) | (UINT64_C(1) << X86_EBX);
-    /* EBP joins the pool (last: callee-saved, no byte form) when the
-     * function keeps no frame pointer. */
-    int gprs[16];
-    int num_gprs = 0;
-    for (int r = 0; r < desc->num_alloc_gpr_regs && num_gprs < 15; r++)
-        gprs[num_gprs++] = desc->alloc_gpr_regs[r];
-    if (!x86_keeps_frame_pointer(mir))
-        gprs[num_gprs++] = X86_EBP;
+    int gprs[X86_GPR_POOL_MAX];
+    int num_gprs = x86_gpr_pool(mir, desc, gprs);
     anvil_regalloc_class_config_t configs[] = {
         {.reg_class = ANVIL_MIR_REG_GPR, .num_phys_regs = num_gprs, .phys_regs = gprs,
          .two_address = true, .narrow_bits = 8, .narrow_regs = byte_regs},

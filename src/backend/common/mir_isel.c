@@ -662,6 +662,18 @@ size_t anvil_mir_isel_load_operand(const anvil_mir_func_t *mir, const anvil_mir_
     return reader;
 }
 
+size_t anvil_mir_isel_saved_registers(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, anvil_mir_reg_class_t reg_class, const int *pool,
+                                      size_t count, uint64_t call_clobbers, int *saved)
+{
+    size_t found = 0;
+    for (size_t i = 0; i < count; i++) {
+        int reg = pool[i];
+        if (reg >= 0 && reg < 64 && !((call_clobbers >> reg) & 1) && anvil_mir_isel_writes(mir, facts, reg_class, reg))
+            saved[found++] = reg;
+    }
+    return found;
+}
+
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window)
 {
     anvil_mir_instr_info_t info, next;

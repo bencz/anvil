@@ -158,4 +158,10 @@ bool x86_decorated_symbol(const anvil_x86_plat_desc_t *plat, const anvil_x86_cc_
  * (anvil_mir_isel_mark_registerless under its immediate rules). */
 bool anvil_x86_mark_registerless(anvil_mir_func_t *mir);
 
+/* The general registers allocation draws from (`gprs`, room for
+ * X86_GPR_POOL_MAX): the convention's pool, then EBP without a frame
+ * pointer.  Returns how many. */
+enum { X86_GPR_POOL_MAX = 16 };
+int x86_gpr_pool(const anvil_mir_func_t *mir, const anvil_x86_cc_desc_t *desc, int *gprs);
+
 #endif

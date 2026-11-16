@@ -118,6 +118,13 @@ bool anvil_mir_isel_registerless_ok(const anvil_mir_func_t *mir, const anvil_mir
  * exactly then. */
 bool anvil_mir_isel_writes(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, anvil_mir_reg_class_t reg_class, int phys);
 
+/* The registers of an allocation pool (`count` of them) that a call
+ * preserves (not in `call_clobbers`) and printed code writes, in the pool's
+ * order: those a prologue saves.  Fills `saved` (room for `count`) and
+ * returns how many. */
+size_t anvil_mir_isel_saved_registers(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, anvil_mir_reg_class_t reg_class, const int *pool,
+                                      size_t count, uint64_t call_clobbers, int *saved);
+
 /* The only reader of `index`'s result, at most `window` instructions on
  * in the same block with no call between; SIZE_MAX when there is none. */
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window);

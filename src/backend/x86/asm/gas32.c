@@ -80,15 +80,6 @@ bool x86_annotate_printer_registers(anvil_mir_func_t *mir)
     return ok;
 }
 
-static bool x86_scan_outgoing_stack_args(x86_mir_emit_t *emit)
-{
-    int outgoing_size = 0;
-    if (!anvil_mir_outgoing_stack_bytes(emit->base.mir, 4, &outgoing_size))
-        return false;
-    emit->base.outgoing_size = anvil_align_int(outgoing_size, 16);
-    return true;
-}
-
 static bool x86_func_returns_fp(const anvil_mir_func_t *mir)
 {
     for (size_t i = 0; i < anvil_mir_num_instrs(mir); i++) {
@@ -111,7 +102,7 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
         emit->gpr_save_offsets[i] = -1;
     }
 
-    if (!x86_scan_outgoing_stack_args(emit))
+    if (!anvil_mir_outgoing_area(emit->base.mir, 4, 0, (uint32_t)emit->plat->stack_alignment, &emit->base.outgoing_size))
         return false;
     emit->fp_returns = x86_func_returns_fp(emit->base.mir);
 
@@ -121,12 +112,16 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
      * would-be slot (offset 0). */
     int first_save = emit->frame_pointer ? 4 : 0;
     emit->num_pushes = 0;
-    static const int callee_saved[] = {X86_EBX, X86_ESI, X86_EDI, X86_EBP};
-    for (size_t c = 0; c < sizeof(callee_saved) / sizeof(callee_saved[0]); c++) {
-        int reg = callee_saved[c];
-        if (!anvil_mir_isel_writes(emit->base.mir, &emit->base.isel, ANVIL_MIR_REG_GPR, reg))
-            continue;
-        emit->gpr_save_offsets[reg] = offset = first_save + 4 * emit->num_pushes;
+    /* The pool's registers a call preserves (anvil_x86_regalloc_mir's). */
+    const anvil_x86_cc_desc_t *convention = anvil_x86_get_cc_desc(ANVIL_CC_CDECL);
+    int pool[X86_GPR_POOL_MAX], saved[X86_GPR_POOL_MAX];
+    if (!convention)
+        return false;
+    int pool_size = x86_gpr_pool(emit->base.mir, convention, pool);
+    size_t count = anvil_mir_isel_saved_registers(emit->base.mir, &emit->base.isel, ANVIL_MIR_REG_GPR, pool, (size_t)pool_size, convention->call_gpr_clobbers,
+                                                  saved);
+    for (size_t c = 0; c < count; c++) {
+        emit->gpr_save_offsets[saved[c]] = offset = first_save + 4 * emit->num_pushes;
         emit->num_pushes++;
     }
 
@@ -157,25 +152,10 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
         emit->fp_area_off = offset;
     }
 
-    emit->base.num_spill_offsets = anvil_mir_num_spills(emit->base.mir);
-    emit->base.num_frame_slot_offsets = anvil_mir_num_frame_slots(emit->base.mir);
-    if (emit->base.num_frame_slot_offsets > 0) {
-        emit->base.frame_slot_offsets = calloc(emit->base.num_frame_slot_offsets, sizeof(*emit->base.frame_slot_offsets));
-        if (!emit->base.frame_slot_offsets)
-            return false;
-    }
-
     /* Addressed downward from EBP. */
-    if (!anvil_mir_layout_frame_slots(emit->base.mir, offset, 4, (uint32_t)emit->plat->stack_alignment, true, emit->base.frame_slot_offsets, &offset))
-        return false;
-
-    if (emit->base.num_spill_offsets > 0) {
-        emit->base.spill_offsets = calloc(emit->base.num_spill_offsets, sizeof(*emit->base.spill_offsets));
-        if (!emit->base.spill_offsets)
-            return false;
-    }
-
-    if (!anvil_mir_layout_spill_slots(emit->base.mir, offset, 4, 4, true, emit->base.spill_offsets, &offset))
+    anvil_mir_slot_rules_t rules = {4, (uint32_t)emit->plat->stack_alignment, 4, 4, true};
+    if (!anvil_mir_layout_slots(emit->base.mir, offset, &rules, &emit->base.frame_slot_offsets, &emit->base.num_frame_slot_offsets, &emit->base.spill_offsets,
+                                &emit->base.num_spill_offsets, &offset))
         return false;
 
     offset += emit->base.outgoing_size;
@@ -786,19 +766,7 @@ static void x86_emit_rodata(x86_mir_emit_t *emit)
         anvil_strbuf_append(&emit->base.code, "\n");
     }
 
-    /* Sign masks, per function so several functions can use them. */
-    if (emit->base.emitted_fneg_mask || emit->base.emitted_fabs_mask) {
-        anvil_strbuf_append(&emit->base.code, format->literal16_section);
-        anvil_obj_emit_align(&emit->base.code, 16);
-    }
-    if (emit->base.emitted_fneg_mask) {
-        anvil_strbuf_appendf(&emit->base.code, "%s%s_fneg_mask32:\n\t.long 0x80000000, 0, 0, 0\n", emit->plat->format->local_label_prefix, name);
-        anvil_strbuf_appendf(&emit->base.code, "%s%s_fneg_mask64:\n\t.long 0, 0x80000000, 0, 0\n", emit->plat->format->local_label_prefix, name);
-    }
-    if (emit->base.emitted_fabs_mask) {
-        anvil_strbuf_appendf(&emit->base.code, "%s%s_fabs_mask32:\n\t.long 0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff\n", emit->plat->format->local_label_prefix, name);
-        anvil_strbuf_appendf(&emit->base.code, "%s%s_fabs_mask64:\n\t.long 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff\n", emit->plat->format->local_label_prefix, name);
-    }
+    x86_gas_emit_sign_masks(&emit->base, format);
 }
 
 bool anvil_x86_emit_mir_features(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_abi_t abi, anvil_syntax_t syntax,

@@ -46,27 +46,21 @@ static int systemz_size_bytes(uint16_t bits)
 
 static bool systemz_prepare_frame(systemz_emit_t *emit)
 {
-    size_t num_frame = anvil_mir_num_frame_slots(emit->mir);
-    size_t num_spills = anvil_mir_num_spills(emit->mir);
-    size_t num_instrs = anvil_mir_num_instrs(emit->mir);
-    emit->frame_offsets = calloc(num_frame ? num_frame : 1, sizeof(int));
-    emit->spill_offsets = calloc(num_spills ? num_spills : 1, sizeof(int));
+    size_t num_instrs = anvil_mir_num_instrs(emit->mir), num_frame, num_spills;
+    int offset;
+    anvil_mir_slot_rules_t rules = {1, emit->desc->stack_alignment, 0, emit->desc->stack_alignment, false};
+    if (!anvil_mir_layout_slots(emit->mir, (int)emit->desc->local_area_offset, &rules, &emit->frame_offsets, &num_frame, &emit->spill_offsets, &num_spills, &offset))
+        return false;
     emit->call_arg_value_offsets = malloc((num_instrs ? num_instrs : 1) * sizeof(*emit->call_arg_value_offsets));
     emit->call_arg_is_last = calloc(num_instrs ? num_instrs : 1, sizeof(*emit->call_arg_is_last));
     emit->call_arg_counts = calloc(num_instrs ? num_instrs : 1, sizeof(*emit->call_arg_counts));
-    if (!emit->frame_offsets || !emit->spill_offsets || !emit->call_arg_value_offsets || !emit->call_arg_is_last || !emit->call_arg_counts) {
+    if (!emit->call_arg_value_offsets || !emit->call_arg_is_last || !emit->call_arg_counts) {
         return false;
     }
     for (size_t i = 0; i < num_instrs; i++) {
         emit->call_arg_value_offsets[i] = -1;
     }
 
-    int offset;
-    if (!anvil_mir_layout_frame_slots(emit->mir, (int)emit->desc->local_area_offset, 1, emit->desc->stack_alignment, false, emit->frame_offsets, &offset))
-        return false;
-
-    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 0, emit->desc->stack_alignment, false, emit->spill_offsets, &offset))
-        return false;
 
     emit->max_call_args = 0;
     int max_call_value_bytes = 0;

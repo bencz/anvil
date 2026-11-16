@@ -581,6 +581,23 @@ void x86_gas_emit_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
     anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), address);
 }
 
+void x86_gas_emit_sign_masks(x86_gas_t *gas, const anvil_obj_format_t *format)
+{
+    if (!gas->emitted_fneg_mask && !gas->emitted_fabs_mask)
+        return;
+    const char *name = anvil_mir_func_name(gas->mir);
+    anvil_strbuf_append(&gas->code, format->literal16_section);
+    anvil_obj_emit_align(&gas->code, 16);
+    if (gas->emitted_fneg_mask) {
+        anvil_strbuf_appendf(&gas->code, "%s%s_fneg_mask32:\n\t.long 0x80000000, 0, 0, 0\n", format->local_label_prefix, name);
+        anvil_strbuf_appendf(&gas->code, "%s%s_fneg_mask64:\n\t.long 0, 0x80000000, 0, 0\n", format->local_label_prefix, name);
+    }
+    if (gas->emitted_fabs_mask) {
+        anvil_strbuf_appendf(&gas->code, "%s%s_fabs_mask32:\n\t.long 0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff\n", format->local_label_prefix, name);
+        anvil_strbuf_appendf(&gas->code, "%s%s_fabs_mask64:\n\t.long 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff\n", format->local_label_prefix, name);
+    }
+}
+
 bool x86_gas_takes_address(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset)
 {
     const x86_gas_t *gas = ctx;

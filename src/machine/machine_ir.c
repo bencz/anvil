@@ -599,6 +599,30 @@ bool anvil_mir_layout_spill_slots(const anvil_mir_func_t *func, int start, uint3
     return true;
 }
 
+bool anvil_mir_layout_slots(const anvil_mir_func_t *func, int start, const anvil_mir_slot_rules_t *rules, int **frame_offsets, size_t *num_frame,
+                            int **spill_offsets, size_t *num_spill, int *end)
+{
+    if (!func || !rules)
+        return false;
+    size_t frames = anvil_mir_num_frame_slots(func), spills = anvil_mir_num_spills(func);
+    int *frame = calloc(frames ? frames : 1, sizeof(*frame));
+    int *spill = calloc(spills ? spills : 1, sizeof(*spill));
+    int offset;
+    if (!frame || !spill ||
+        !anvil_mir_layout_frame_slots(func, start, rules->frame_default_align, rules->frame_max_align, rules->record_end, frame, &offset) ||
+        !anvil_mir_layout_spill_slots(func, offset, rules->spill_unit, rules->spill_max_align, rules->record_end, spill, &offset)) {
+        free(frame);
+        free(spill);
+        return false;
+    }
+    *frame_offsets = frame;
+    *num_frame = frames;
+    *spill_offsets = spill;
+    *num_spill = spills;
+    *end = offset;
+    return true;
+}
+
 bool anvil_mir_outgoing_stack_bytes(const anvil_mir_func_t *func, uint32_t slot_bytes, int *bytes)
 {
     if (!func || !bytes || !slot_bytes)
@@ -621,6 +645,27 @@ bool anvil_mir_outgoing_stack_bytes(const anvil_mir_func_t *func, uint32_t slot_
             reach = slot_end;
     }
     *bytes = (int)reach;
+    return true;
+}
+
+bool anvil_mir_outgoing_area(const anvil_mir_func_t *func, uint32_t slot_bytes, int home_bytes, uint32_t align, int *bytes)
+{
+    int size = 0;
+    if (!anvil_mir_outgoing_stack_bytes(func, slot_bytes, &size) || !align)
+        return false;
+    bool calls = false;
+    for (size_t i = 0; i < func->num_instrs && !calls; i++)
+        calls = func->instrs[i].op == ANVIL_MIR_OP_CALL;
+    if (!calls && size > 0)
+        return false;
+    if (calls) {
+        if (size > INT_MAX - home_bytes)
+            return false;
+        size += home_bytes;
+    }
+    if (size > INT_MAX - (int)align)
+        return false;
+    *bytes = anvil_align_int(size, (int)align);
     return true;
 }
 

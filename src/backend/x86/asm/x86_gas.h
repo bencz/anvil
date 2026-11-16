@@ -7,6 +7,7 @@
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_machine.h"
 #include "../../common/mir_isel.h"
+#include "../../common/obj_format.h"
 #include "../../common/print_flags.h"
 
 #include <stdbool.h>
@@ -135,6 +136,10 @@ const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol);
 /* The isel facts' address hook: a load's or store's base that is a frame
  * slot's address, or a symbol's as symbol_operands allows, needs no
  * register (x86_gas_memory_operand spells it). */
+/* The FP sign masks the function's code referred to (emitted_fneg_mask,
+ * emitted_fabs_mask): 16-byte constants per function, single precision
+ * then double, in `format`'s literal section. */
+void x86_gas_emit_sign_masks(x86_gas_t *gas, const anvil_obj_format_t *format);
 bool x86_gas_takes_address(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, const char *symbol, int64_t offset);
 bool x86_gas_facts_imm(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out);
 bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out);

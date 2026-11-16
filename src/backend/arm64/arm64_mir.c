@@ -1151,15 +1151,6 @@ static const char *mir_cmp_cond(anvil_mir_opcode_t op)
     }
 }
 
-static bool mir_scan_outgoing_stack_args(arm64_mir_emit_t *emit)
-{
-    int outgoing_size = 0;
-    if (!anvil_mir_outgoing_stack_bytes(emit->mir, 8, &outgoing_size))
-        return false;
-    emit->outgoing_size = anvil_align_int(outgoing_size, 16);
-    return true;
-}
-
 static bool mir_prepare_frame(arm64_mir_emit_t *emit)
 {
     for (size_t i = 0; i < 32; i++) {
@@ -1167,37 +1158,27 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
         emit->fpr_save_offsets[i] = -1;
     }
 
-    if (!mir_scan_outgoing_stack_args(emit)) return false;
+    if (!anvil_mir_outgoing_area(emit->mir, 8, 0, emit->abi->stack_alignment, &emit->outgoing_size))
+        return false;
 
     /* Callee-saved registers the function uses, given slots in register
      * order so that neighbours pair up (mir_emit_saves). */
-    int offset = 0;
-    for (int reg = 19; reg <= 28; reg++)
-        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, reg))
-            emit->gpr_save_offsets[reg] = offset += 8;
-    for (int reg = 8; reg <= 15; reg++)
-        if (anvil_mir_isel_writes(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, reg))
-            emit->fpr_save_offsets[reg] = offset += 8;
-
-    emit->num_spill_offsets = anvil_mir_num_spills(emit->mir);
-    emit->num_frame_slot_offsets = anvil_mir_num_frame_slots(emit->mir);
-    if (emit->num_frame_slot_offsets > 0) {
-        emit->frame_slot_offsets = calloc(emit->num_frame_slot_offsets,
-                                          sizeof(*emit->frame_slot_offsets));
-        if (!emit->frame_slot_offsets) return false;
-    }
+    int offset = 0, saved[32];
+    const arm64_register_convention_t *registers = &arm64_aapcs64_registers;
+    size_t count = anvil_mir_isel_saved_registers(emit->mir, &emit->isel, ANVIL_MIR_REG_GPR, registers->gprs, (size_t)registers->num_gprs,
+                                                  registers->call_gpr_clobbers, saved);
+    for (size_t c = 0; c < count; c++)
+        emit->gpr_save_offsets[saved[c]] = offset += 8;
+    /* v8-v15: their preserved low halves. */
+    count = anvil_mir_isel_saved_registers(emit->mir, &emit->isel, ANVIL_MIR_REG_FPR, registers->fprs, (size_t)registers->num_fprs, registers->call_fpr_clobbers,
+                                           saved);
+    for (size_t c = 0; c < count; c++)
+        emit->fpr_save_offsets[saved[c]] = offset += 8;
 
     /* Addressed downward from x29. */
-    if (!anvil_mir_layout_frame_slots(emit->mir, offset, 8, emit->abi->stack_alignment, true, emit->frame_slot_offsets, &offset))
-        return false;
-
-    if (emit->num_spill_offsets > 0) {
-        emit->spill_offsets = calloc(emit->num_spill_offsets,
-                                     sizeof(*emit->spill_offsets));
-        if (!emit->spill_offsets) return false;
-    }
-
-    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 8, 8, true, emit->spill_offsets, &offset))
+    anvil_mir_slot_rules_t rules = {8, emit->abi->stack_alignment, 8, 8, true};
+    if (!anvil_mir_layout_slots(emit->mir, offset, &rules, &emit->frame_slot_offsets, &emit->num_frame_slot_offsets, &emit->spill_offsets,
+                                &emit->num_spill_offsets, &offset))
         return false;
 
     offset += emit->outgoing_size;
