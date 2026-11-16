@@ -16,6 +16,7 @@
 #include "../common/mir_isel.h"
 #include "../common/narrow_mir.h"
 #include "../common/mir_legal.h"
+#include "../common/gnu_data.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1147,25 +1148,8 @@ static const char *mir_cmp_cond(anvil_mir_opcode_t op)
 static bool mir_scan_outgoing_stack_args(arm64_mir_emit_t *emit)
 {
     int outgoing_size = 0;
-
-    for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(emit->mir, i, &info)) return false;
-        if (info.op != ANVIL_MIR_OP_CALL_STACK_ARG) continue;
-        if (!info.has_imm || info.imm < 0 || info.num_uses != 1) return false;
-        if (info.imm > INT32_MAX - 8) return false;
-
-        anvil_mir_vreg_t arg = anvil_mir_get_instr_use(emit->mir, i, 0);
-        const anvil_mir_vreg_info_t *arg_info =
-            anvil_mir_get_vreg_info(emit->mir, arg);
-        if (!arg_info) return false;
-
-        int slot_size = align_int(mir_size_bytes(arg_info->size_bits), 8);
-        if (slot_size < 8) slot_size = 8;
-        int end = (int)info.imm + slot_size;
-        if (end > outgoing_size) outgoing_size = end;
-    }
-
+    if (!anvil_mir_outgoing_stack_bytes(emit->mir, 8, &outgoing_size))
+        return false;
     emit->outgoing_size = align_int(outgoing_size, 16);
     return true;
 }
@@ -1207,14 +1191,8 @@ static bool mir_prepare_frame(arm64_mir_emit_t *emit)
         if (!emit->spill_offsets) return false;
     }
 
-    for (size_t i = 0; i < emit->num_spill_offsets; i++) {
-        anvil_mir_spill_slot_info_t slot;
-        if (!anvil_mir_get_spill_slot_info(emit->mir, (int)i, &slot)) {
-            return false;
-        }
-        offset += align_int(mir_size_bytes(slot.size_bits), 8);
-        emit->spill_offsets[i] = offset;
-    }
+    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 8, 8, true, emit->spill_offsets, &offset))
+        return false;
 
     offset += emit->outgoing_size;
     emit->frame_size = align_int(offset, 16);
@@ -3070,53 +3048,6 @@ static void mir_emit_instr(arm64_mir_emit_t *emit,
     }
 }
 
-static void mir_emit_escaped_string(anvil_strbuf_t *code, const char *value)
-{
-    anvil_strbuf_append(code, "\t.asciz \"");
-    for (const char *p = value ? value : ""; *p; p++) {
-        switch (*p) {
-            case '\n':
-                anvil_strbuf_append(code, "\\n");
-                break;
-            case '\r':
-                anvil_strbuf_append(code, "\\r");
-                break;
-            case '\t':
-                anvil_strbuf_append(code, "\\t");
-                break;
-            case '\\':
-                anvil_strbuf_append(code, "\\\\");
-                break;
-            case '"':
-                anvil_strbuf_append(code, "\\\"");
-                break;
-            default:
-                anvil_strbuf_append_char(code, *p);
-                break;
-        }
-    }
-    anvil_strbuf_append(code, "\"\n");
-}
-
-static void mir_emit_string_literals(arm64_mir_emit_t *emit)
-{
-    size_t count = anvil_mir_num_string_literals(emit->mir);
-    if (count == 0) return;
-
-    anvil_strbuf_appendf(&emit->code, "%s\n", emit->abi->cstring_section);
-
-    for (size_t i = 0; i < count; i++) {
-        anvil_mir_string_literal_info_t info;
-        if (!anvil_mir_get_string_literal_info(emit->mir, i, &info) ||
-            !info.label) {
-            emit->failed = true;
-            return;
-        }
-        anvil_strbuf_appendf(&emit->code, "%s:\n", info.label);
-        mir_emit_escaped_string(&emit->code, info.value);
-    }
-}
-
 bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
                               anvil_abi_t abi,
                               char **output,
@@ -3199,9 +3130,8 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
             anvil_strbuf_append(&emit.code, "\t.cfi_endproc\n");
         emit.abi->emit_function_footer(&emit.code, symbol);
     }
-    if (!emit.failed && !emit.code.failed) {
-        mir_emit_string_literals(&emit);
-    }
+    if (!emit.failed && !emit.code.failed && !anvil_gnu_emit_mir_strings(&emit.code, mir, emit.abi->format))
+        emit.failed = true;
 
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);

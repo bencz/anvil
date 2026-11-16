@@ -424,6 +424,14 @@ bool anvil_mir_layout_frame_slots(const anvil_mir_func_t *func,
                                   bool record_end,
                                   int *offsets,
                                   int *end);
+/* Lays the spill slots out from byte offset `start` upward like the frame
+ * slots: each takes a multiple of `unit` bytes aligned to `unit`, or, when
+ * `unit` is 0, its own size aligned to that size (at most `max_align`). */
+bool anvil_mir_layout_spill_slots(const anvil_mir_func_t *func, int start, uint32_t unit, uint32_t max_align, bool record_end, int *offsets, int *end);
+/* The bytes the outgoing stack arguments of the function's calls reach:
+ * each CALL_STACK_ARG at its offset, the value rounded up to whole slots of
+ * `slot_bytes`.  False for a malformed argument. */
+bool anvil_mir_outgoing_stack_bytes(const anvil_mir_func_t *func, uint32_t slot_bytes, int *bytes);
 bool anvil_mir_add_frame_addr(anvil_mir_func_t *func,
                               anvil_mir_vreg_t def,
                               int frame_slot);

@@ -58,22 +58,13 @@ static void arm64_cleanup(anvil_backend_t *be)
     arm64_backend_t *priv = be->priv;
     anvil_strbuf_destroy(&priv->code);
     anvil_strbuf_destroy(&priv->data);
-    free(priv->strings);
     free(priv);
     be->priv = NULL;
 }
 
 static void arm64_reset(anvil_backend_t *be)
 {
-    if (!be || !be->priv) return;
-    
-    arm64_backend_t *priv = be->priv;
-    
-    /* Clear string table */
-    priv->num_strings = 0;
-    priv->string_counter = 0;
-    
-    /* Reset other state */
+    (void)be;
 }
 
 static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
@@ -151,34 +142,6 @@ static bool arm64_emit_globals(arm64_backend_t *be, anvil_module_t *mod)
  * String Constants
  * ============================================================================ */
 
-static void arm64_emit_strings(arm64_backend_t *be)
-{
-    const arm64_abi_desc_t *abi = arm64_backend_abi(be);
-    if (be->num_strings == 0 || !abi) return;
-
-    anvil_strbuf_appendf(&be->data, "%s\n", abi->cstring_section);
-    
-    for (size_t i = 0; i < be->num_strings; i++) {
-        arm64_string_entry_t *entry = &be->strings[i];
-        anvil_strbuf_appendf(&be->data, "%s:\n", entry->label);
-        anvil_strbuf_append(&be->data, "\t.asciz \"");
-        
-        for (const char *p = entry->str; *p; p++) {
-            switch (*p) {
-                case '\n': anvil_strbuf_append(&be->data, "\\n"); break;
-                case '\r': anvil_strbuf_append(&be->data, "\\r"); break;
-                case '\t': anvil_strbuf_append(&be->data, "\\t"); break;
-                case '\\': anvil_strbuf_append(&be->data, "\\\\"); break;
-                case '"':  anvil_strbuf_append(&be->data, "\\\""); break;
-                default:   anvil_strbuf_append_char(&be->data, *p); break;
-            }
-        }
-        anvil_strbuf_append(&be->data, "\"\n");
-    }
-    
-    anvil_strbuf_append(&be->data, "\n");
-}
-
 /* ============================================================================
  * Code Generation Entry Points
  * ============================================================================ */
@@ -196,7 +159,6 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
     anvil_strbuf_destroy(&priv->data);
     anvil_strbuf_init(&priv->code);
     anvil_strbuf_init(&priv->data);
-    priv->num_strings = 0;
     
     const arm64_abi_desc_t *abi = arm64_backend_abi(priv);
     if (!abi) {
@@ -211,13 +173,11 @@ static anvil_error_t arm64_codegen_module(anvil_backend_t *be, anvil_module_t *m
         if (err != ANVIL_OK) return err;
     }
     
-    /* Emit globals and strings */
     if (!arm64_emit_globals(priv, mod)) {
         anvil_set_error(be->ctx, ANVIL_ERR_CODEGEN,
                         "ARM64 global initializer is not representable");
         return ANVIL_ERR_CODEGEN;
     }
-    arm64_emit_strings(priv);
     if (priv->code.failed || priv->data.failed) return ANVIL_ERR_NOMEM;
     
     /* Combine output */

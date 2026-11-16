@@ -2,6 +2,7 @@
 #include "../x86_address.h"
 #include "../../common/parallel_move.h"
 #include "x86_gas.h"
+#include "../../common/gnu_data.h"
 #include "x86_sse_vector.h"
 #include "anvil/anvil_analysis.h"
 
@@ -14,14 +15,6 @@
 static int x86_align_int(int value, int align)
 {
     return (value + align - 1) & ~(align - 1);
-}
-
-static int x86_slot_size_bytes(uint16_t size_bits)
-{
-    if (size_bits == 0)
-        return 4;
-    int size = (int)((size_bits + 7) / 8);
-    return size > 0 ? size : 4;
 }
 
 /* The immediate a GPR operand is known to hold.  Every i386 GPR value has
@@ -198,23 +191,8 @@ static const char *x86_size_suffix(int size)
 static bool x86_scan_outgoing_stack_args(x86_mir_emit_t *emit)
 {
     int outgoing_size = 0;
-
-    for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(emit->mir, i, &info))
-            return false;
-        if (info.op != ANVIL_MIR_OP_CALL_STACK_ARG)
-            continue;
-        if (!info.has_imm || info.imm < 0 || info.num_uses != 1)
-            return false;
-        if (info.imm > INT32_MAX - 4)
-            return false;
-
-        int end = (int)info.imm + 4;
-        if (end > outgoing_size)
-            outgoing_size = end;
-    }
-
+    if (!anvil_mir_outgoing_stack_bytes(emit->mir, 4, &outgoing_size))
+        return false;
     emit->outgoing_size = x86_align_int(outgoing_size, 16);
     return true;
 }
@@ -305,14 +283,8 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
             return false;
     }
 
-    for (size_t i = 0; i < emit->num_spill_offsets; i++) {
-        anvil_mir_spill_slot_info_t slot;
-        if (!anvil_mir_get_spill_slot_info(emit->mir, (int)i, &slot)) {
-            return false;
-        }
-        offset += x86_align_int(x86_slot_size_bytes(slot.size_bits), 4);
-        emit->spill_offsets[i] = offset;
-    }
+    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 4, 4, true, emit->spill_offsets, &offset))
+        return false;
 
     offset += emit->outgoing_size;
     /* Entry leaves ESP 4 bytes below an aligned boundary and the EBP push
@@ -1844,49 +1816,13 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
     }
 }
 
-static void x86_emit_escaped_string(anvil_strbuf_t *code, const char *value)
-{
-    anvil_strbuf_append(code, "\t.asciz \"");
-    for (const char *p = value ? value : ""; *p; p++) {
-        switch (*p) {
-        case '\n':
-            anvil_strbuf_append(code, "\\n");
-            break;
-        case '\r':
-            anvil_strbuf_append(code, "\\r");
-            break;
-        case '\t':
-            anvil_strbuf_append(code, "\\t");
-            break;
-        case '\\':
-            anvil_strbuf_append(code, "\\\\");
-            break;
-        case '"':
-            anvil_strbuf_append(code, "\\\"");
-            break;
-        default:
-            anvil_strbuf_append_char(code, *p);
-            break;
-        }
-    }
-    anvil_strbuf_append(code, "\"\n");
-}
-
 static void x86_emit_rodata(x86_mir_emit_t *emit)
 {
     const anvil_obj_format_t *format = emit->plat->format;
     const char *name = anvil_mir_func_name(emit->mir);
-    size_t count = anvil_mir_num_string_literals(emit->mir);
-    if (count > 0)
-        anvil_strbuf_append(&emit->code, format->cstring_section);
-    for (size_t i = 0; i < count; i++) {
-        anvil_mir_string_literal_info_t info;
-        if (!anvil_mir_get_string_literal_info(emit->mir, i, &info) || !info.label) {
-            emit->failed = true;
-            return;
-        }
-        anvil_strbuf_appendf(&emit->code, "%s:\n", info.label);
-        x86_emit_escaped_string(&emit->code, info.value);
+    if (!anvil_gnu_emit_mir_strings(&emit->code, emit->mir, format)) {
+        emit->failed = true;
+        return;
     }
 
     /* The floating literal pool. */

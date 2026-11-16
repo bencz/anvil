@@ -1,5 +1,6 @@
 #include "ppc_internal.h"
 #include "../common/parallel_move.h"
+#include "../common/gnu_data.h"
 
 const char *const ppc_gpr_names[32] = {"%r0",  "%r1",  "%r2",  "%r3",  "%r4",  "%r5",  "%r6",  "%r7",  "%r8",  "%r9",  "%r10", "%r11", "%r12", "%r13", "%r14", "%r15",
                                       "%r16", "%r17", "%r18", "%r19", "%r20", "%r21", "%r22", "%r23", "%r24", "%r25", "%r26", "%r27", "%r28", "%r29", "%r30", "%r31"};
@@ -429,26 +430,12 @@ static bool ppc_scan_outgoing_stack_args(ppc_mir_emit_t *emit)
          * caller's parameter save area. */
         if (info.op == ANVIL_MIR_OP_CALL && info.has_imm && outgoing_size < (int)emit->desc->abi_ops->variadic_save_area)
             outgoing_size = (int)emit->desc->abi_ops->variadic_save_area;
-        if (info.op != ANVIL_MIR_OP_CALL_STACK_ARG)
-            continue;
-        if (!info.has_imm || info.imm < 0 || info.num_uses != 1)
-            return false;
-        if (info.imm > INT32_MAX - 8)
-            return false;
-
-        anvil_mir_vreg_t arg = anvil_mir_get_instr_use(emit->mir, i, 0);
-        const anvil_mir_vreg_info_t *arg_info = anvil_mir_get_vreg_info(emit->mir, arg);
-        if (!arg_info)
-            return false;
-
-        int slot_size = align_int(ppc_mir_size_bytes(arg_info->size_bits), (int)emit->desc->word_size);
-        if (slot_size < (int)emit->desc->word_size) {
-            slot_size = (int)emit->desc->word_size;
-        }
-        int end = (int)info.imm + slot_size;
-        if (end > outgoing_size)
-            outgoing_size = end;
     }
+    int arguments = 0;
+    if (!anvil_mir_outgoing_stack_bytes(emit->mir, emit->desc->word_size, &arguments))
+        return false;
+    if (arguments > outgoing_size)
+        outgoing_size = arguments;
 
     emit->outgoing_size = align_int(outgoing_size, 16);
     return true;
@@ -504,15 +491,8 @@ static bool ppc_prepare_frame(ppc_mir_emit_t *emit)
             return false;
     }
 
-    for (size_t i = 0; i < emit->num_spill_offsets; i++) {
-        anvil_mir_spill_slot_info_t slot;
-        if (!anvil_mir_get_spill_slot_info(emit->mir, (int)i, &slot)) {
-            return false;
-        }
-        offset = align_int(offset, ppc_mir_size_bytes(slot.size_bits));
-        offset += ppc_mir_size_bytes(slot.size_bits);
-        emit->spill_offsets[i] = offset;
-    }
+    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 0, 16, true, emit->spill_offsets, &offset))
+        return false;
 
     if (ppc_instr_needs_fp_scratch(emit)) {
         offset = align_int(offset, 8);
@@ -2613,52 +2593,6 @@ static void ppc_emit_instr_body(ppc_mir_emit_t *emit, size_t instr_index, const 
     }
 }
 
-static void ppc_emit_escaped_string(anvil_strbuf_t *code, const char *value)
-{
-    anvil_strbuf_append(code, "\t.asciz \"");
-    for (const char *p = value ? value : ""; *p; p++) {
-        switch (*p) {
-        case '\n':
-            anvil_strbuf_append(code, "\\n");
-            break;
-        case '\r':
-            anvil_strbuf_append(code, "\\r");
-            break;
-        case '\t':
-            anvil_strbuf_append(code, "\\t");
-            break;
-        case '\\':
-            anvil_strbuf_append(code, "\\\\");
-            break;
-        case '"':
-            anvil_strbuf_append(code, "\\\"");
-            break;
-        default:
-            anvil_strbuf_append_char(code, *p);
-            break;
-        }
-    }
-    anvil_strbuf_append(code, "\"\n");
-}
-
-static void ppc_emit_string_literals(ppc_mir_emit_t *emit)
-{
-    size_t count = anvil_mir_num_string_literals(emit->mir);
-    if (count == 0)
-        return;
-
-    anvil_strbuf_append(&emit->code, "\t.section .rodata\n");
-    for (size_t i = 0; i < count; i++) {
-        anvil_mir_string_literal_info_t info;
-        if (!anvil_mir_get_string_literal_info(emit->mir, i, &info) || !info.label) {
-            emit->failed = true;
-            return;
-        }
-        anvil_strbuf_appendf(&emit->code, "%s:\n", info.label);
-        ppc_emit_escaped_string(&emit->code, info.value);
-    }
-}
-
 bool anvil_ppc_emit_mir(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant, char **output, size_t *len)
 {
     const anvil_ppc_target_desc_t *desc = anvil_ppc_get_target_desc(variant);
@@ -2771,7 +2705,8 @@ bool ppc_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_ppc_variant_t variant
     free(loop_headers);
 
     anvil_strbuf_append(&emit.code, "\t.cfi_endproc\n");
-    ppc_emit_string_literals(&emit);
+    if (!anvil_gnu_emit_mir_strings(&emit.code, mir, &anvil_obj_format_elf))
+        emit.failed = true;
 
     free(emit.spill_offsets);
     free(emit.frame_slot_offsets);

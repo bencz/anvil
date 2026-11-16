@@ -72,15 +72,8 @@ static bool systemz_prepare_frame(systemz_emit_t *emit)
     if (!anvil_mir_layout_frame_slots(emit->mir, (int)emit->desc->local_area_offset, 1, emit->desc->stack_alignment, false, emit->frame_offsets, &offset))
         return false;
 
-    for (size_t i = 0; i < num_spills; i++) {
-        anvil_mir_spill_slot_info_t spill;
-        if (!anvil_mir_get_spill_slot_info(emit->mir, (int)i, &spill))
-            return false;
-        int size = systemz_size_bytes(spill.size_bits);
-        offset = systemz_align_int(offset, size > 8 ? 8 : size);
-        emit->spill_offsets[i] = offset;
-        offset += size;
-    }
+    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 0, emit->desc->stack_alignment, false, emit->spill_offsets, &offset))
+        return false;
 
     emit->max_call_args = 0;
     int max_call_value_bytes = 0;

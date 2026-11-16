@@ -134,7 +134,6 @@ typedef struct arm64_abi_desc {
      * already carry symbol_prefix. */
     const char *symbol_prefix;
     const char *module_header;
-    const char *cstring_section;
     void (*emit_function_header)(anvil_strbuf_t *code, const char *symbol, anvil_linkage_t linkage);
     void (*emit_function_footer)(anvil_strbuf_t *code, const char *symbol);
     void (*emit_symbol_address)(anvil_strbuf_t *code, const char *dst, const char *symbol, int64_t addend);
@@ -201,16 +200,6 @@ void arm64_emit_frame_access(anvil_strbuf_t *code, const char *op, const char *r
 extern const anvil_agg_target_t arm64_agg_target;
 
 /* ============================================================================
- * String Table Entry
- * ============================================================================ */
-
-typedef struct {
-    const char *str;
-    char label[32];
-    size_t len;
-} arm64_string_entry_t;
-
-/* ============================================================================
  * Backend State
  * ============================================================================ */
 
@@ -219,16 +208,9 @@ typedef struct {
     anvil_strbuf_t code;
     anvil_strbuf_t data;
     
-    int string_counter;
-    
     /* Context reference for ABI detection */
     anvil_ctx_t *ctx;
-    
-    /* String table */
-    arm64_string_entry_t *strings;
-    size_t num_strings;
-    size_t strings_cap;
-    
+
 } arm64_backend_t;
 
 /* ============================================================================

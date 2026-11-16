@@ -170,7 +170,16 @@ materialize spills -> emit assembly**. ARM64, x86, x86-64, and the PowerPC famil
 share this contract; the mainframe (S/370 family) backends use the same pipeline
 through the `systemz/` family components. The linear-scan allocator and the
 copy-coalescing / spill-materialization passes are target-independent and live in
-`src/machine/` (`regalloc.c`, `machine_ir.c`).
+`src/machine/` (`regalloc.c`, `machine_ir.c`). The printers lay their frames
+out with the same routines there: frame objects (`anvil_mir_layout_frame_slots`,
+capped at the ABI's stack alignment), spill slots
+(`anvil_mir_layout_spill_slots`: whole 8-byte units on x86-64 and ARM64, 4-byte
+units on i386, natural alignment on PowerPC and SystemZ, each slot aligned
+where it starts) and the outgoing argument area (`anvil_mir_outgoing_stack_bytes`,
+each argument rounded up to whole slots of the ABI's width). String literals
+a function uses go out through `anvil_gnu_emit_mir_strings` (`gnu_data.c`) in
+the object format's string section, escaped so the assembler reads back the
+same bytes.
 
 **PowerPC and SystemZ domain organization**
 

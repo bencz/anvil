@@ -6,6 +6,7 @@
 #define ANVIL_BACKEND_GNU_DATA_H
 
 #include "anvil/anvil_internal.h"
+#include "anvil/anvil_machine.h"
 #include "obj_format.h"
 
 typedef struct {
@@ -25,6 +26,9 @@ typedef bool (*anvil_gnu_format_symbol_fn)(char *buffer, size_t capacity, const 
 void anvil_gnu_string_pool_init(anvil_gnu_string_pool_t *pool, const char *label_prefix);
 void anvil_gnu_string_pool_destroy(anvil_gnu_string_pool_t *pool);
 bool anvil_gnu_string_pool_emit(anvil_strbuf_t *out, const anvil_gnu_string_pool_t *pool, const char *section);
+/* A MIR function's string literals in the format's string section: each
+ * label, then its bytes NUL-terminated and escaped for GNU as. */
+bool anvil_gnu_emit_mir_strings(anvil_strbuf_t *out, const anvil_mir_func_t *mir, const anvil_obj_format_t *format);
 bool anvil_gnu_emit_constant(anvil_strbuf_t *out, const anvil_type_t *type, const anvil_value_t *value, size_t pointer_size, const char *symbol_prefix, anvil_gnu_string_pool_t *strings,
                              anvil_gnu_format_symbol_fn format_symbol, void *format_user);
 

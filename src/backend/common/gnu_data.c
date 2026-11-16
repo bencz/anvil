@@ -47,6 +47,39 @@ static const char *anvil_gnu_string_pool_intern(anvil_gnu_string_pool_t *pool, c
     return entry->label;
 }
 
+/* `label`, then the NUL-terminated string `value` as GNU as reads it back
+ * byte for byte (escapes for quotes, backslashes and unprintable bytes). */
+static void emit_asciz(anvil_strbuf_t *out, const char *label, const char *value)
+{
+    anvil_strbuf_appendf(out, "%s:\n\t.asciz \"", label);
+    for (const unsigned char *p = (const unsigned char *)(value ? value : ""); *p; p++) {
+        switch (*p) {
+        case '\n':
+            anvil_strbuf_append(out, "\\n");
+            break;
+        case '\r':
+            anvil_strbuf_append(out, "\\r");
+            break;
+        case '\t':
+            anvil_strbuf_append(out, "\\t");
+            break;
+        case '\\':
+            anvil_strbuf_append(out, "\\\\");
+            break;
+        case '"':
+            anvil_strbuf_append(out, "\\\"");
+            break;
+        default:
+            if (*p < 0x20 || *p >= 0x7f)
+                anvil_strbuf_appendf(out, "\\%03o", *p);
+            else
+                anvil_strbuf_append_char(out, (char)*p);
+            break;
+        }
+    }
+    anvil_strbuf_append(out, "\"\n");
+}
+
 bool anvil_gnu_string_pool_emit(anvil_strbuf_t *out, const anvil_gnu_string_pool_t *pool, const char *section)
 {
     if (!out || !pool)
@@ -55,35 +88,21 @@ bool anvil_gnu_string_pool_emit(anvil_strbuf_t *out, const anvil_gnu_string_pool
         return true;
     if (section && section[0])
         anvil_strbuf_appendf(out, "%s\n", section);
-    for (size_t i = 0; i < pool->count; i++) {
-        anvil_strbuf_appendf(out, "%s:\n\t.asciz \"", pool->entries[i].label);
-        const unsigned char *p = (const unsigned char *)pool->entries[i].value->data.str;
-        for (; *p; p++) {
-            switch (*p) {
-            case '\n':
-                anvil_strbuf_append(out, "\\n");
-                break;
-            case '\r':
-                anvil_strbuf_append(out, "\\r");
-                break;
-            case '\t':
-                anvil_strbuf_append(out, "\\t");
-                break;
-            case '\\':
-                anvil_strbuf_append(out, "\\\\");
-                break;
-            case '"':
-                anvil_strbuf_append(out, "\\\"");
-                break;
-            default:
-                if (*p < 0x20 || *p >= 0x7f)
-                    anvil_strbuf_appendf(out, "\\%03o", *p);
-                else
-                    anvil_strbuf_append_char(out, (char)*p);
-                break;
-            }
-        }
-        anvil_strbuf_append(out, "\"\n");
+    for (size_t i = 0; i < pool->count; i++)
+        emit_asciz(out, pool->entries[i].label, pool->entries[i].value->data.str);
+    return !out->failed;
+}
+
+bool anvil_gnu_emit_mir_strings(anvil_strbuf_t *out, const anvil_mir_func_t *mir, const anvil_obj_format_t *format)
+{
+    size_t count = anvil_mir_num_string_literals(mir);
+    if (count > 0)
+        anvil_strbuf_append(out, format->cstring_section);
+    for (size_t i = 0; i < count; i++) {
+        anvil_mir_string_literal_info_t info;
+        if (!anvil_mir_get_string_literal_info(mir, i, &info) || !info.label)
+            return false;
+        emit_asciz(out, info.label, info.value);
     }
     return !out->failed;
 }

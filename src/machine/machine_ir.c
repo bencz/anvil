@@ -573,6 +573,57 @@ bool anvil_mir_layout_frame_slots(const anvil_mir_func_t *func,
     return true;
 }
 
+static int64_t round_up(int64_t value, int64_t unit)
+{
+    return (value + unit - 1) / unit * unit;
+}
+
+bool anvil_mir_layout_spill_slots(const anvil_mir_func_t *func, int start, uint32_t unit, uint32_t max_align, bool record_end, int *offsets, int *end)
+{
+    if (!func || start < 0 || !end || (func->num_spills && !offsets))
+        return false;
+    int64_t offset = start;
+    for (size_t i = 0; i < func->num_spills; i++) {
+        int64_t size = (func->spill_slots[i].size_bits + 7) / 8;
+        int64_t align = unit ? unit : size < max_align ? size : max_align;
+        if (align <= 0)
+            align = 1;
+        offset = round_up(offset, align);
+        int64_t slot_end = offset + (unit ? round_up(size, unit) : size);
+        if (slot_end > INT_MAX)
+            return false;
+        offsets[i] = (int)(record_end ? slot_end : offset);
+        offset = slot_end;
+    }
+    *end = (int)offset;
+    return true;
+}
+
+bool anvil_mir_outgoing_stack_bytes(const anvil_mir_func_t *func, uint32_t slot_bytes, int *bytes)
+{
+    if (!func || !bytes || !slot_bytes)
+        return false;
+    int64_t reach = 0;
+    for (size_t i = 0; i < func->num_instrs; i++) {
+        const anvil_mir_instr_t *instr = &func->instrs[i];
+        if (instr->op != ANVIL_MIR_OP_CALL_STACK_ARG)
+            continue;
+        if (!instr->has_imm || instr->imm < 0 || instr->imm > INT_MAX || instr->num_uses != 1)
+            return false;
+        const anvil_mir_vreg_info_t *value = anvil_mir_get_vreg_info(func, instr->uses[0]);
+        if (!value)
+            return false;
+        int64_t size = round_up((value->size_bits + 7) / 8, slot_bytes);
+        int64_t slot_end = instr->imm + (size > slot_bytes ? size : slot_bytes);
+        if (slot_end > INT_MAX)
+            return false;
+        if (slot_end > reach)
+            reach = slot_end;
+    }
+    *bytes = (int)reach;
+    return true;
+}
+
 bool anvil_mir_add_frame_addr(anvil_mir_func_t *func,
                               anvil_mir_vreg_t def,
                               int frame_slot)

@@ -4,6 +4,7 @@
 #include "../../common/mir_isel.h"
 #include "../../common/parallel_move.h"
 #include "x86_gas.h"
+#include "../../common/gnu_data.h"
 #include "../../common/print_flags.h"
 #include "x86_sse_vector.h"
 
@@ -295,23 +296,8 @@ static bool x64_instr_has_call(const anvil_mir_func_t *mir)
 static bool x64_scan_outgoing_stack_args(x64_mir_emit_t *emit)
 {
     int outgoing_size = 0;
-
-    for (size_t i = 0; i < anvil_mir_num_instrs(emit->mir); i++) {
-        anvil_mir_instr_info_t info;
-        if (!anvil_mir_get_instr_info(emit->mir, i, &info))
-            return false;
-        if (info.op != ANVIL_MIR_OP_CALL_STACK_ARG)
-            continue;
-        if (!info.has_imm || info.imm < 0 || info.num_uses != 1)
-            return false;
-        if (info.imm > INT32_MAX - 8)
-            return false;
-
-        int end = (int)info.imm + 8;
-        if (end > outgoing_size)
-            outgoing_size = end;
-    }
-
+    if (!anvil_mir_outgoing_stack_bytes(emit->mir, 8, &outgoing_size))
+        return false;
     bool has_call = x64_instr_has_call(emit->mir);
     if (!has_call && outgoing_size > 0)
         return false;
@@ -379,14 +365,8 @@ static bool x64_prepare_frame(x64_mir_emit_t *emit)
             return false;
     }
 
-    for (size_t i = 0; i < emit->num_spill_offsets; i++) {
-        anvil_mir_spill_slot_info_t slot;
-        if (!anvil_mir_get_spill_slot_info(emit->mir, (int)i, &slot)) {
-            return false;
-        }
-        offset += x64_align_int(x64_size_bytes(slot.size_bits), 8);
-        emit->spill_offsets[i] = offset;
-    }
+    if (!anvil_mir_layout_spill_slots(emit->mir, offset, 8, 8, true, emit->spill_offsets, &offset))
+        return false;
 
     offset += emit->outgoing_size;
     emit->frame_size = x64_align_int(offset, 16);
@@ -2182,34 +2162,6 @@ static void x64_emit_instr(x64_mir_emit_t *emit, size_t instr_index, const anvil
     }
 }
 
-static void x64_emit_escaped_string(anvil_strbuf_t *code, const char *value)
-{
-    anvil_strbuf_append(code, "\t.asciz \"");
-    for (const char *p = value ? value : ""; *p; p++) {
-        switch (*p) {
-        case '\n':
-            anvil_strbuf_append(code, "\\n");
-            break;
-        case '\r':
-            anvil_strbuf_append(code, "\\r");
-            break;
-        case '\t':
-            anvil_strbuf_append(code, "\\t");
-            break;
-        case '\\':
-            anvil_strbuf_append(code, "\\\\");
-            break;
-        case '"':
-            anvil_strbuf_append(code, "\\\"");
-            break;
-        default:
-            anvil_strbuf_append_char(code, *p);
-            break;
-        }
-    }
-    anvil_strbuf_append(code, "\"\n");
-}
-
 static void x64_emit_rodata(x64_mir_emit_t *emit)
 {
     size_t count = anvil_mir_num_string_literals(emit->mir);
@@ -2217,17 +2169,9 @@ static void x64_emit_rodata(x64_mir_emit_t *emit)
         return;
     }
 
-    if (count > 0)
-        anvil_strbuf_append(&emit->code, emit->desc->format->cstring_section);
-
-    for (size_t i = 0; i < count; i++) {
-        anvil_mir_string_literal_info_t info;
-        if (!anvil_mir_get_string_literal_info(emit->mir, i, &info) || !info.label) {
-            emit->failed = true;
-            return;
-        }
-        anvil_strbuf_appendf(&emit->code, "%s:\n", info.label);
-        x64_emit_escaped_string(&emit->code, info.value);
+    if (!anvil_gnu_emit_mir_strings(&emit->code, emit->mir, emit->desc->format)) {
+        emit->failed = true;
+        return;
     }
 
     if (emit->emitted_fneg_mask || emit->emitted_fabs_mask) {
