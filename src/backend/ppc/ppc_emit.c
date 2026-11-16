@@ -1832,10 +1832,9 @@ static void ppc_emit_gpr_extend(ppc_mir_emit_t *emit, size_t instr_index, const 
 
     int src_size = ppc_mir_size_bytes(src_info->size_bits);
     int dst_size = ppc_mir_size_bytes(dst_info->size_bits);
-    /* A narrow load of the same signedness already extended the value to
-     * the whole register (ppc_emit_load: lbz+extsb, lha, lhz, lwa, lwz). */
-    if ((src_size < (int)emit->desc->word_size && src_info->is_signed == sign_extend && anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD) ||
-        (!sign_extend && anvil_mir_isel_zero_extended(&emit->isel, src))) {
+    /* Loads extend narrow integers to the whole register (ppc_emit_load:
+     * lbz+extsb, lha, lhz, lwa, lwz). */
+    if (anvil_mir_isel_already_extended(&emit->isel, src, src_info, src_size, dst_size, sign_extend, (int)emit->desc->word_size)) {
         if (strcmp(dst, s) != 0)
             anvil_strbuf_appendf(&emit->code, "\tmr %s, %s\n", dst, s);
         return;

@@ -57,6 +57,13 @@ anvil_mir_opcode_t anvil_mir_isel_def_op(const anvil_mir_isel_facts_t *facts, an
  * leave the register's upper bits zero; there a ZEXT of the value is a
  * copy. */
 bool anvil_mir_isel_zero_extended(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg);
+/* Whether extending `src` (`src_bytes` wide, `src_info` its vreg) to
+ * `dst_bytes` by `sign_extend` needs only a copy: a narrow load of the same
+ * signedness already extended it (a printer's loads extend narrow integers
+ * by their signedness to `load_bytes`, and zero-extended ones to the whole
+ * register), or the value is zero above its width (anvil_mir_isel_zero_extended). */
+bool anvil_mir_isel_already_extended(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t src, const anvil_mir_vreg_info_t *src_info, int src_bytes,
+                                     int dst_bytes, bool sign_extend, int load_bytes);
 
 /* Whether every reader of `vreg` needs only the bits of its own width: a
  * store of it, a truncation, an == / != compare with zero, or an extension

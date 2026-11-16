@@ -817,3 +817,12 @@ bool anvil_mir_isel_condition_add(const anvil_mir_func_t *mir, const anvil_mir_i
     *add = index + 2;
     return true;
 }
+
+bool anvil_mir_isel_already_extended(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t src, const anvil_mir_vreg_info_t *src_info, int src_bytes,
+                                     int dst_bytes, bool sign_extend, int load_bytes)
+{
+    if (src_bytes < load_bytes && src_info->is_signed == sign_extend && (!sign_extend || dst_bytes <= load_bytes) &&
+        anvil_mir_isel_def_op(facts, src) == ANVIL_MIR_OP_LOAD)
+        return true;
+    return !sign_extend && src_bytes <= 4 && anvil_mir_isel_zero_extended(facts, src);
+}

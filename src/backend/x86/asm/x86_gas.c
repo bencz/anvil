@@ -1016,12 +1016,9 @@ void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr
             anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(dst_size), x86_gas_gpr(src_phys, dst_size), x86_gas_gpr(dst_phys, dst_size));
         return;
     }
-    /* A narrow load of the same signedness already extended the value
-     * (x86_gas_emit_load: movs*l to 32 bits, movz*l to 64), and a value
-     * known zero above its width needs no zero extension. */
-    if ((src_size < 4 && src_info->is_signed == sign_extend && (!sign_extend || dst_size <= 4) &&
-         anvil_mir_isel_def_op(&gas->isel, src) == ANVIL_MIR_OP_LOAD) ||
-        (!sign_extend && src_size <= 4 && anvil_mir_isel_zero_extended(&gas->isel, src))) {
+    /* x86_gas_emit_load extends narrow integers to 32 bits (movs*l, movz*l
+     * zero-extending to 64). */
+    if (anvil_mir_isel_already_extended(&gas->isel, src, src_info, src_size, dst_size, sign_extend, 4)) {
         move32_if_needed(gas, src_phys, dst_phys);
         return;
     }

@@ -2507,18 +2507,9 @@ static void mir_emit_gpr_extend(arm64_mir_emit_t *emit,
     const char *src_w = arm64_wreg_names[src_assignment->phys_reg];
     const char *dst_reg = mir_gpr_name_for_size(dst_assignment->phys_reg, dst_size);
 
-    /* A narrow load of the same signedness already extended the value
-     * (ldrs[bh] w to 32 bits, ldr[bh] w to 64). */
-    if (src_size < 4 && src_info->is_signed == sign_extend && (!sign_extend || dst_size <= 4) &&
-        anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD) {
-        if (dst_assignment->phys_reg != src_assignment->phys_reg)
-            anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_w, src_w);
-        return;
-    }
-
-    /* Already zero above its width (a w-register write clears the upper
-     * half). */
-    if (!sign_extend && src_size <= 4 && anvil_mir_isel_zero_extended(&emit->isel, src)) {
+    /* Loads extend narrow integers to 32 bits (ldrs[bh] w; ldr[bh] w
+     * zero-extending to 64), and a w-register write clears the upper half. */
+    if (anvil_mir_isel_already_extended(&emit->isel, src, src_info, src_size, dst_size, sign_extend, 4)) {
         if (dst_assignment->phys_reg != src_assignment->phys_reg)
             anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_w, src_w);
         return;
