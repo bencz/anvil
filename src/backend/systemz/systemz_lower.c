@@ -354,7 +354,7 @@ anvil_mir_func_t *anvil_mainframe_lower_func_to_mir(anvil_func_t *func, anvil_ma
     lower.base.stack_alignment = desc->stack_alignment;
     lower.base.displacement_fits = systemz_ir_displacement_fits;
     lower.base.pair_type = systemz_ir_pair_type;
-    lower.base.wide = (anvil_wide_target_t){systemz_wide_call_helper, &lower};
+    lower.base.wide = (anvil_wide_target_t){systemz_wide_call_helper, &lower, lower.desc->abi_ops->runtime_helpers};
     lower.base.select_classes = ANVIL_IR_SELECT_EVERY_CLASS;
     lower.sret_pointer = ANVIL_MIR_NO_VREG;
     lower.va_base = ANVIL_MIR_NO_VREG;

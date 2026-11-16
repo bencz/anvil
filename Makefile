@@ -46,6 +46,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/common/abi_layout.c \
 	$(SRC_DIR)/backend/common/aggregate_mir.c \
 	$(SRC_DIR)/backend/common/wide_mir.c \
+	$(SRC_DIR)/backend/common/runtime_helpers.c \
 	$(SRC_DIR)/backend/common/mir_isel.c \
 	$(SRC_DIR)/backend/common/switch_lower.c \
 	$(SRC_DIR)/backend/common/narrow_mir.c \

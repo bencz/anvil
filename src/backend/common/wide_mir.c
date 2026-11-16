@@ -59,14 +59,14 @@ static bool add_sub(anvil_mir_func_t *mir, bool subtract, anvil_wide_pair_t a, a
            op2(mir, op, partial, a.hi, b.hi) && op2(mir, op, out->hi, partial, carry_word);
 }
 
-static const char *binary_helper(anvil_op_t op)
+static const char *binary_helper(const anvil_runtime_helpers_t *helpers, anvil_op_t op)
 {
     switch (op) {
-    case ANVIL_OP_MUL: return "__muldi3";
-    case ANVIL_OP_SDIV: return "__divdi3";
-    case ANVIL_OP_UDIV: return "__udivdi3";
-    case ANVIL_OP_SMOD: return "__moddi3";
-    case ANVIL_OP_UMOD: return "__umoddi3";
+    case ANVIL_OP_MUL: return helpers->mul64;
+    case ANVIL_OP_SDIV: return helpers->sdiv64;
+    case ANVIL_OP_UDIV: return helpers->udiv64;
+    case ANVIL_OP_SMOD: return helpers->smod64;
+    case ANVIL_OP_UMOD: return helpers->umod64;
     default: return NULL;
     }
 }
@@ -88,9 +88,9 @@ bool anvil_wide_binary(anvil_mir_func_t *mir, const anvil_wide_target_t *target,
         return op2(mir, mop, out->hi, a.hi, b.hi) && op2(mir, mop, out->lo, a.lo, b.lo);
     }
     default: {
-        const char *helper = binary_helper(op);
+        const char *helper = target ? binary_helper(target->helpers, op) : NULL;
         anvil_wide_pair_t args[] = {a, b};
-        return helper && target && target->call_helper(target->ctx, helper, args, 2, *out);
+        return helper && target->call_helper(target->ctx, helper, args, 2, *out);
     }
     }
 }
@@ -156,9 +156,11 @@ bool anvil_wide_shift(anvil_mir_func_t *mir, const anvil_wide_target_t *target, 
     if (count_known && known_count >= 0 && known_count < 64)
         return shift_known(mir, op, a, known_count, out);
 
-    const char *helper = op == ANVIL_OP_SHL ? "__ashldi3" : op == ANVIL_OP_SHR ? "__lshrdi3" : "__ashrdi3";
+    if (!target || count == ANVIL_MIR_NO_VREG)
+        return false;
+    const char *helper = op == ANVIL_OP_SHL ? target->helpers->shl64 : op == ANVIL_OP_SHR ? target->helpers->lshr64 : target->helpers->ashr64;
     anvil_wide_pair_t args[] = {a, {ANVIL_MIR_NO_VREG, count}};
-    return target && count != ANVIL_MIR_NO_VREG && target->call_helper(target->ctx, helper, args, 2, *out);
+    return target->call_helper(target->ctx, helper, args, 2, *out);
 }
 
 bool anvil_wide_neg(anvil_mir_func_t *mir, anvil_wide_pair_t a, bool is_unsigned, anvil_wide_pair_t *out)
@@ -228,11 +230,12 @@ anvil_mir_vreg_t anvil_wide_truncate(anvil_mir_func_t *mir, anvil_wide_pair_t a,
 bool anvil_wide_to_fp(anvil_mir_func_t *mir, const anvil_wide_target_t *target, anvil_wide_pair_t a,
                       bool is_unsigned, uint16_t fp_bits, anvil_mir_vreg_t *out)
 {
-    const char *helper = is_unsigned ? (fp_bits == 32 ? "__floatundisf" : "__floatundidf")
-                                     : (fp_bits == 32 ? "__floatdisf" : "__floatdidf");
+    if (!target)
+        return false;
+    const char *helper = anvil_runtime_int_to_fp(target->helpers, is_unsigned, true, fp_bits != 32);
     *out = anvil_mir_add_vreg_typed(mir, ANVIL_MIR_REG_FPR, fp_bits, false);
     anvil_wide_pair_t result = {ANVIL_MIR_NO_VREG, *out};
-    return *out != ANVIL_MIR_NO_VREG && target && target->call_helper(target->ctx, helper, &a, 1, result);
+    return *out != ANVIL_MIR_NO_VREG && target->call_helper(target->ctx, helper, &a, 1, result);
 }
 
 bool anvil_wide_from_fp(anvil_mir_func_t *mir, const anvil_wide_target_t *target, anvil_mir_vreg_t src,
@@ -241,8 +244,9 @@ bool anvil_wide_from_fp(anvil_mir_func_t *mir, const anvil_wide_target_t *target
     const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(mir, src);
     if (!info || info->reg_class != ANVIL_MIR_REG_FPR)
         return false;
-    bool single = info->size_bits == 32;
-    const char *helper = is_unsigned ? (single ? "__fixunssfdi" : "__fixunsdfdi") : (single ? "__fixsfdi" : "__fixdfdi");
+    if (!target)
+        return false;
+    const char *helper = anvil_runtime_fp_to_int(target->helpers, is_unsigned, true, info->size_bits != 32);
     anvil_wide_pair_t arg = {ANVIL_MIR_NO_VREG, src};
-    return anvil_wide_new(mir, is_unsigned, out) && target && target->call_helper(target->ctx, helper, &arg, 1, *out);
+    return anvil_wide_new(mir, is_unsigned, out) && target->call_helper(target->ctx, helper, &arg, 1, *out);
 }

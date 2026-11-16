@@ -11,6 +11,7 @@
 #include "anvil/anvil.h"
 #include "anvil/anvil_machine.h"
 #include "lower_map.h"
+#include "runtime_helpers.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -22,12 +23,14 @@ typedef struct {
 } anvil_wide_pair_t;
 
 typedef struct anvil_wide_target {
-    /* Calls the run-time helper `name` (libgcc / compiler-rt ABI) with the
-     * target's C calling convention.  `result` vregs are allocated by the
-     * caller and must be defined by the call sequence. */
+    /* Calls the run-time helper `name` with the target's C calling
+     * convention.  `result` vregs are allocated by the caller and must be
+     * defined by the call sequence. */
     bool (*call_helper)(void *ctx, const char *name, const anvil_wide_pair_t *args, size_t num_args,
                         anvil_wide_pair_t result);
     void *ctx;
+    /* The ABI's run-time library names. */
+    const anvil_runtime_helpers_t *helpers;
 } anvil_wide_target_t;
 
 /* Whether a 64-bit value is unsigned (its pair's high half then is). */

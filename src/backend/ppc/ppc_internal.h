@@ -162,6 +162,8 @@ typedef struct anvil_ppc_abi_ops {
                                    const char *name);
     anvil_value_t *(*build_va_copy)(anvil_backend_t *be, anvil_value_t *cursor, const char *name);
     bool (*build_va_copy_into)(anvil_backend_t *be, anvil_value_t *destination, anvil_value_t *cursor);
+    /* The run-time library's helper names. */
+    const anvil_runtime_helpers_t *runtime_helpers;
 } ppc_abi_ops_t;
 
 /* Emitter helpers for the ABI modules: `op reg, offset(base)` in any

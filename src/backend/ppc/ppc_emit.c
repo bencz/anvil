@@ -2036,12 +2036,7 @@ static void ppc_emit_cast(ppc_mir_emit_t *emit, size_t instr_index, const anvil_
             anvil_strbuf_appendf(&emit->code, "\tmr %%r3, %s\n", source);
         }
 
-        const char *helper;
-        if (is_unsigned) {
-            helper = src_info->size_bits <= 32 ? (dst_info->size_bits == 32 ? "__floatunsisf" : "__floatunsidf") : (dst_info->size_bits == 32 ? "__floatundisf" : "__floatundidf");
-        } else {
-            helper = src_info->size_bits <= 32 ? (dst_info->size_bits == 32 ? "__floatsisf" : "__floatsidf") : (dst_info->size_bits == 32 ? "__floatdisf" : "__floatdidf");
-        }
+        const char *helper = anvil_runtime_int_to_fp(emit->desc->abi_ops->runtime_helpers, is_unsigned, src_info->size_bits > 32, dst_info->size_bits != 32);
         emit->desc->abi_ops->emit_direct_call(emit, helper, emit->reloc != ANVIL_RELOC_STATIC);
         if (strcmp(dst, "%f1") != 0) {
             anvil_strbuf_appendf(&emit->code, "\tfmr %s, %%f1\n", dst);
@@ -2054,12 +2049,7 @@ static void ppc_emit_cast(ppc_mir_emit_t *emit, size_t instr_index, const anvil_
         if (strcmp(source, "%f1") != 0) {
             anvil_strbuf_appendf(&emit->code, "\tfmr %%f1, %s\n", source);
         }
-        const char *helper;
-        if (is_unsigned) {
-            helper = dst_info->size_bits <= 32 ? (src_info->size_bits == 32 ? "__fixunssfsi" : "__fixunsdfsi") : (src_info->size_bits == 32 ? "__fixunssfdi" : "__fixunsdfdi");
-        } else {
-            helper = dst_info->size_bits <= 32 ? (src_info->size_bits == 32 ? "__fixsfsi" : "__fixdfsi") : (src_info->size_bits == 32 ? "__fixsfdi" : "__fixdfdi");
-        }
+        const char *helper = anvil_runtime_fp_to_int(emit->desc->abi_ops->runtime_helpers, is_unsigned, dst_info->size_bits > 32, src_info->size_bits != 32);
         emit->desc->abi_ops->emit_direct_call(emit, helper, emit->reloc != ANVIL_RELOC_STATIC);
 
         if (dst_info->size_bits <= 8) {

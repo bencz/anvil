@@ -623,7 +623,7 @@ anvil_mir_func_t *anvil_x86_lower_func_to_mir(anvil_func_t *func)
     lower.base.pointer_bits = 32;
     lower.base.stack_alignment = (unsigned)lower.plat->stack_alignment;
     lower.base.pair_type = ir_pair_type;
-    lower.base.wide = (anvil_wide_target_t){x86_wide_call_helper, &lower};
+    lower.base.wide = (anvil_wide_target_t){x86_wide_call_helper, &lower, lower.plat->runtime_helpers};
     lower.sret_pointer = ANVIL_MIR_NO_VREG;
     /* CMOVcc selects general registers; without it, and for FP values, a select branches. */
     if (anvil_ctx_get_cpu_features(func->owner_ctx) & ANVIL_FEATURE_X86_CMOV)

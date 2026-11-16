@@ -29,5 +29,6 @@ static void emit_epilogue(systemz_emit_t *emit)
 }
 
 const systemz_abi_ops_t systemz_mvs_arena_31_abi_ops = {
-    .name = "ANVIL MVS arena 31", .abi = ANVIL_ABI_MVS, .sret_returns_address = true, .pair_low_gpr = 0, .emit_prologue = emit_prologue, .emit_epilogue = emit_epilogue
+    .name = "ANVIL MVS arena 31", .abi = ANVIL_ABI_MVS, .sret_returns_address = true, .pair_low_gpr = 0, .emit_prologue = emit_prologue, .emit_epilogue = emit_epilogue,
+    .runtime_helpers = &anvil_libgcc_helpers,
 };

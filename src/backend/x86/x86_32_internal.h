@@ -9,6 +9,7 @@
 #define X86_32_INTERNAL_H
 
 #include "../common/obj_format.h"
+#include "../common/runtime_helpers.h"
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_x86_mir.h"
 #include "../common/aggregate_mir.h"
@@ -71,6 +72,8 @@ typedef struct {
      * first integer arguments in ECX and EDX instead of the stack. */
     anvil_cc_t local_cc;
     const anvil_obj_format_t *format;
+    /* The run-time library's helper names. */
+    const anvil_runtime_helpers_t *runtime_helpers;
 } anvil_x86_plat_desc_t;
 
 /* Placement of a struct, union or array passed (BYVAL) or returned (SRET)

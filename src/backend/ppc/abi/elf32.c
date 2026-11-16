@@ -148,5 +148,6 @@ const ppc_abi_ops_t ppc_elf32_abi_ops = {
     .assign_pair = assign_pair,
     .unnamed_fp_in_gprs = false,
     .variadic_save_area = 0,
-    .emit_variadic_call_setup = emit_variadic_call_setup
+    .emit_variadic_call_setup = emit_variadic_call_setup,
+    .runtime_helpers = &anvil_libgcc_helpers,
 };

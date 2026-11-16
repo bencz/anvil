@@ -162,9 +162,11 @@ so its hash order never reaches the output.
 **64-bit integers on 32-bit targets.** `src/backend/common/wide_mir.c` legalizes
 64-bit operations into pairs of 32-bit virtual registers with target-independent
 MachineIR (carries through unsigned compares, constant shifts inline).  A target
-supplies one hook, `anvil_wide_target_t.call_helper`, to call the libgcc/compiler-rt
-helpers (`__muldi3`, `__divdi3`, variable shifts, floating conversions) in its
-calling convention; x86-32, PPC32 and the 31-bit SystemZ targets use it.
+supplies one hook, `anvil_wide_target_t.call_helper`, to call the run-time
+helpers (multiply, divide, variable shifts, floating conversions) in its
+calling convention, and its ABI's helper names (`anvil_runtime_helpers_t`,
+`runtime_helpers.h`: libgcc/compiler-rt's `__muldi3`, `__divdi3`... in
+`anvil_libgcc_helpers`); x86-32, PPC32 and the 31-bit SystemZ targets use it.
 The lowering of pair operations is shared too
 (`src/backend/common/ir_lower_pair.c`): binary operations, shifts by a count
 of any width, compares, NEG/NOT, conversions to, from and between pairs (a

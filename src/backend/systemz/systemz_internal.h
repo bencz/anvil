@@ -11,6 +11,7 @@
 #include "../common/print_flags.h"
 #include "../common/rotate_mask.h"
 #include "../common/vector_isa.h"
+#include "../common/runtime_helpers.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -126,6 +127,8 @@ typedef struct anvil_systemz_abi_ops {
     int pair_low_gpr;
     void (*emit_prologue)(systemz_emit_t *emit);
     void (*emit_epilogue)(systemz_emit_t *emit);
+    /* The run-time library's helper names. */
+    const anvil_runtime_helpers_t *runtime_helpers;
 } systemz_abi_ops_t;
 
 typedef struct anvil_systemz_asm_ops {

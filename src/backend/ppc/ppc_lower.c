@@ -746,7 +746,7 @@ anvil_mir_func_t *anvil_ppc_lower_func_to_mir(anvil_func_t *func, anvil_ppc_vari
     lower.base.pointer_bits = (unsigned)(desc->word_size * 8);
     lower.base.stack_alignment = desc->stack_alignment;
     lower.base.pair_type = ir_pair_type;
-    lower.base.wide = (anvil_wide_target_t){ppc_wide_call_helper, &lower};
+    lower.base.wide = (anvil_wide_target_t){ppc_wide_call_helper, &lower, lower.desc->abi_ops->runtime_helpers};
     lower.base.select_classes = ANVIL_IR_SELECT_EVERY_CLASS;
     return anvil_ir_lower_function(&lower.base);
 }
