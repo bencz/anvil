@@ -48,6 +48,25 @@ typedef struct {
      * instruction's index and the address. */
     size_t fold_target, fold_load;
     char fold_address[400];
+    /* The mode, as each printer states it: the pointer width, the stack
+     * pointer, the register frame displacements count from and what is
+     * added to them (set once the frame is laid out), the narrowest move of
+     * a general register to or from a spill slot or a stack argument, the
+     * bytes below the outgoing stack arguments (Win64's home area), which
+     * registers have a byte form (NULL: all), and the FP unit's moves
+     * between a register and memory. */
+    int pointer_bytes;
+    const char *stack_reg;
+    const char *frame_reg;
+    int frame_bias;
+    int min_gpr_move;
+    int outgoing_base;
+    bool (*has_byte)(int phys);
+    void (*fp_load)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
+    void (*fp_store)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
+    /* Frame operands formatted for the instruction being printed. */
+    char frame_text[8][24];
+    unsigned frame_next;
 } x86_gas_t;
 
 /* A general register's name at `bytes` (1, 2, 4 or 8) and an XMM
@@ -59,6 +78,24 @@ const char *x86_gas_size_suffix(int bytes);
 /* The register an allocated vreg holds (-1, marking the printing failed,
  * when it was spilled or not allocated). */
 int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg);
+
+/* The frame operand `disp` bytes from the frame base (negative: locals,
+ * spills and saves; positive: incoming arguments), from a small ring of
+ * buffers (several per instruction). */
+const char *x86_gas_frame(x86_gas_t *gas, int disp);
+/* Whether the address of the access at `address_index` reads `phys`. */
+bool x86_gas_address_reads(x86_gas_t *gas, size_t address_index, const anvil_mir_instr_info_t *address, int phys);
+/* The anvil_parallel_move_ops_t moves of pointer-wide registers (`user`
+ * is the printer state). */
+void x86_gas_parallel_move(void *user, int dst, int src);
+void x86_gas_parallel_swap(void *user, int a, int b);
+/* FRAME_ADDR, SPILL_LOAD, SPILL_STORE, SELECT (CMOVcc on the flags a fused
+ * compare left, else on the condition register) and CALL_STACK_ARG. */
+void x86_gas_emit_frame_addr(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_spill_load(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_spill_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_select(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+void x86_gas_emit_call_stack_arg(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 
 /* The setcc mnemonic of an integer compare; the jcc suffix is the text
  * after "set". */

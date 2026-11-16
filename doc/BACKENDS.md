@@ -243,8 +243,10 @@ src/backend/x86/
         x86_64_varargs.c                 Native va_list operations
     asm/
         x86_gas.c, x86_gas.h            What both printers share: their common state
-                                        (x86_gas_t, the first member of each), register
-                                        names, condition codes, labels and branches
+                                        (x86_gas_t, the first member of each, with the
+                                        mode's facts and FP-unit hooks), register names,
+                                        condition codes, labels, branches, frame
+                                        addresses, spills, selects, stack arguments
         gas32.c                         Allocated MIR to 32-bit GAS/AT&T
         gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```

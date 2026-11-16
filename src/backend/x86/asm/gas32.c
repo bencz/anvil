@@ -152,21 +152,9 @@ static const char *x86_symbol_ref_prefix(const x86_mir_emit_t *emit, const char 
     return x86_symbol_is_local(symbol) ? "" : x86_symbol_prefix(emit);
 }
 
-static void x86_parallel_move_reg(void *user, int dst, int src)
-{
-    x86_mir_emit_t *emit = user;
-    anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(src, 4), x86_gas_gpr(dst, 4));
-}
-
-static void x86_parallel_swap_reg(void *user, int a, int b)
-{
-    x86_mir_emit_t *emit = user;
-    anvil_strbuf_appendf(&emit->base.code, "\txchgl %%%s, %%%s\n", x86_gas_gpr(a, 4), x86_gas_gpr(b, 4));
-}
-
 static void x86_emit_parallel_move(x86_mir_emit_t *emit, const int *dst, const int *src, size_t count)
 {
-    static const anvil_parallel_move_ops_t ops = { x86_parallel_move_reg, x86_parallel_swap_reg, -1 };
+    static const anvil_parallel_move_ops_t ops = { x86_gas_parallel_move, x86_gas_parallel_swap, -1 };
     if (!anvil_parallel_move(&ops, emit, dst, src, count))
         emit->base.failed = true;
 }
@@ -279,7 +267,23 @@ static bool x86_prepare_frame(x86_mir_emit_t *emit)
         emit->base.frame_size = anvil_align_int(offset + 8, align) - 8;
     else
         emit->base.frame_size = offset == 0 && emit->num_pushes == 0 ? -4 : offset;
+    emit->base.frame_reg = emit->frame_pointer ? "ebp" : "esp";
+    emit->base.frame_bias = emit->frame_pointer ? 0 : emit->base.frame_size;
     return true;
+}
+
+/* The FP unit's register-memory moves, for the shared spill and
+ * stack-argument printers. */
+static void x86_fp_load(void *gas, anvil_mir_vreg_t vreg, const char *mem)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->load(emit, vreg, mem);
+}
+
+static void x86_fp_store(void *gas, anvil_mir_vreg_t vreg, const char *mem)
+{
+    x86_mir_emit_t *emit = gas;
+    emit->fp->store(emit, vreg, mem);
 }
 
 static void x86_emit_func_header(x86_mir_emit_t *emit)
@@ -360,7 +364,7 @@ static void x86_emit_frame_entry(x86_mir_emit_t *emit)
 
     for (int reg = 0; reg < 8; reg++) {
         if (emit->gpr_save_offsets[reg] >= 0) {
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %s\n", x86_gas_gpr(reg, 4), x86_frame(emit, -(emit->gpr_save_offsets[reg])));
+            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %s\n", x86_gas_gpr(reg, 4), x86_gas_frame(&emit->base, -(emit->gpr_save_offsets[reg])));
             if (cfi)
                 anvil_strbuf_appendf(&emit->base.code, "\t.cfi_offset %%%s, %d\n", x86_gas_gpr(reg, 4), -emit->gpr_save_offsets[reg] - 8);
         }
@@ -377,7 +381,7 @@ static void x86_emit_epilogue(x86_mir_emit_t *emit, int64_t pop_bytes)
     if (emit->frame_pointer) {
         for (int reg = 7; reg >= 0; reg--) {
             if (emit->gpr_save_offsets[reg] >= 0)
-                anvil_strbuf_appendf(&emit->base.code, "\tmovl %s, %%%s\n", x86_frame(emit, -(emit->gpr_save_offsets[reg])), x86_gas_gpr(reg, 4));
+                anvil_strbuf_appendf(&emit->base.code, "\tmovl %s, %%%s\n", x86_gas_frame(&emit->base, -(emit->gpr_save_offsets[reg])), x86_gas_gpr(reg, 4));
         }
         anvil_strbuf_append(&emit->base.code, "\tmovl %ebp, %esp\n");
         anvil_strbuf_append(&emit->base.code, "\tpopl %ebp\n");
@@ -736,31 +740,6 @@ static bool x86_fuses(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_
     return anvil_mir_isel_feeds_next_branch(&emit->base.isel, instr_index, info) || anvil_mir_isel_feeds_next_select(&emit->base.isel, instr_index, info);
 }
 
-/* dst = cond ? then : else (x86_gas_emit_cmov) on the flags of the fused
- * compare right before, or a test of the boolean; on whole registers. */
-static void x86_emit_select(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    anvil_mir_vreg_t cond = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    anvil_mir_vreg_t then_v = anvil_mir_get_instr_use(emit->base.mir, instr_index, 1);
-    anvil_mir_vreg_t else_v = anvil_mir_get_instr_use(emit->base.mir, instr_index, 2);
-    if (cond == ANVIL_MIR_NO_VREG || then_v == ANVIL_MIR_NO_VREG || else_v == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-    int dst = x86_gas_phys_of(&emit->base, info->def), then_reg = x86_gas_phys_of(&emit->base, then_v), else_reg = x86_gas_phys_of(&emit->base, else_v);
-    const char *cc = emit->base.fused_jcc;
-    emit->base.fused_jcc = NULL;
-    if (!cc) {
-        int flag = x86_gas_phys_of(&emit->base, cond);
-        const char *name = x86_reg_has_byte(flag) ? x86_gas_gpr(flag, 1) : x86_gas_gpr(flag, 4);
-        if (!emit->base.failed)
-            anvil_strbuf_appendf(&emit->base.code, "\ttest%s %%%s, %%%s\n", x86_reg_has_byte(flag) ? "b" : "l", name, name);
-        cc = "ne";
-    }
-    if (!emit->base.failed && !x86_gas_emit_cmov(&emit->base.code, cc, "l", x86_gas_gpr(dst, 4), x86_gas_gpr(then_reg, 4), x86_gas_gpr(else_reg, 4)))
-        emit->base.failed = true;
-}
-
 static void x86_emit_cmp(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     if (instr_index == emit->base.test_at) {
@@ -1030,21 +1009,6 @@ static void x86_emit_cast(x86_mir_emit_t *emit, size_t instr_index, const anvil_
     }
 }
 
-static void x86_emit_frame_addr(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
-{
-    if (info->frame_slot < 0 || (size_t)info->frame_slot >= emit->base.num_frame_slot_offsets) {
-        emit->base.failed = true;
-        return;
-    }
-
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-
-    int offset = emit->base.frame_slot_offsets[info->frame_slot];
-    anvil_strbuf_appendf(&emit->base.code, "\tleal %s, %%%s\n", x86_frame(emit, -(offset)), x86_gas_gpr(dst_phys, 4));
-}
-
 static void x86_emit_dyn_alloca(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     if (!info->has_imm || info->imm <= 0 || info->num_uses != 1) {
@@ -1155,17 +1119,6 @@ static bool x86_memory_operand(x86_mir_emit_t *emit, size_t instr_index, const a
     return !emit->base.failed;
 }
 
-/* Whether register `phys` is one the address of access `address_index`
- * reads. */
-static bool x86_address_reads(x86_mir_emit_t *emit, size_t address_index, const anvil_mir_instr_info_t *address, int phys)
-{
-    size_t uses = address->index_scale ? 2 : 1;
-    for (size_t u = 0; u < uses && u < address->num_uses; u++)
-        if (x86_gas_phys_of(&emit->base, anvil_mir_get_instr_use(emit->base.mir, address_index, u)) == phys)
-            return true;
-    return false;
-}
-
 /* A 32-bit integer load read only by an instruction shortly after (no
  * store, call or address-register write between), an add/sub/and/or/xor
  * or imul, as its second operand (either, when the operation commutes):
@@ -1214,7 +1167,7 @@ static bool x86_fold_load(x86_mir_emit_t *emit, size_t instr_index, const anvil_
         return false;
     anvil_mir_vreg_t other = rhs == info->def ? lhs : rhs;
     int dst = x86_gas_phys_of(&emit->base, next.def), keep = x86_gas_phys_of(&emit->base, other);
-    if (emit->base.failed || x86_known_imm(&emit->base.isel, other, &imm) || (dst != keep && x86_address_reads(emit, instr_index, info, dst)))
+    if (emit->base.failed || x86_known_imm(&emit->base.isel, other, &imm) || (dst != keep && x86_gas_address_reads(&emit->base, instr_index, info, dst)))
         return false;
     if (!x86_memory_operand(emit, instr_index, info, 0, emit->base.fold_address, sizeof(emit->base.fold_address)))
         return false;
@@ -1307,7 +1260,7 @@ static void x86_emit_incoming_stack_arg(x86_mir_emit_t *emit, const anvil_mir_in
 
     if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
         char mem[32];
-        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, (int)(frame_offset)));
+        snprintf(mem, sizeof(mem), "%s", x86_gas_frame(&emit->base, (int)(frame_offset)));
         emit->fp->load(emit, info->def, mem);
         return;
     }
@@ -1323,37 +1276,7 @@ static void x86_emit_incoming_stack_arg(x86_mir_emit_t *emit, const anvil_mir_in
         op = "movzwl";
     else
         op = "movl";
-    anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", op, x86_frame(emit, (int)(frame_offset)), x86_gas_gpr(def_phys, 4));
-}
-
-static void x86_emit_call_stack_arg(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    if (!info->has_imm || info->imm < 0 || info->num_uses != 1 || info->imm > INT32_MAX) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (value == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *value_info = x86_vreg_info_checked(emit, value);
-    if (!value_info || emit->base.failed)
-        return;
-
-    int slot = (int)info->imm;
-    if (value_info->reg_class == ANVIL_MIR_REG_FPR) {
-        char mem[32];
-        snprintf(mem, sizeof(mem), "%d(%%esp)", slot);
-        emit->fp->store(emit, value, mem);
-        return;
-    }
-    const char *src = x86_gas_gpr(x86_gas_phys_of(&emit->base, value), 4);
-    if (emit->base.failed)
-        return;
-    anvil_strbuf_appendf(&emit->base.code, "\tmovl %%%s, %d(%%esp)\n", src, slot);
+    anvil_strbuf_appendf(&emit->base.code, "\t%s %s, %%%s\n", op, x86_gas_frame(&emit->base, (int)(frame_offset)), x86_gas_gpr(def_phys, 4));
 }
 
 static void x86_emit_call(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1429,73 +1352,6 @@ static void x86_emit_call(x86_mir_emit_t *emit, size_t instr_index, const anvil_
     }
     if (!emit->base.failed)
         x86_emit_call_pair_move(emit, def_phys, hi_phys, call_desc->int_ret_reg, call_desc->int_ret_hi_reg);
-}
-
-static void x86_emit_spill_load(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *info)
-{
-    if (info->spill_slot < 0 || (size_t)info->spill_slot >= emit->base.num_spill_offsets) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_spill_slot_info_t slot;
-    if (!anvil_mir_get_spill_slot_info(emit->base.mir, info->spill_slot, &slot)) {
-        emit->base.failed = true;
-        return;
-    }
-
-    const anvil_mir_vreg_info_t *def_info = x86_vreg_info_checked(emit, info->def);
-    int def_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (!def_info || emit->base.failed)
-        return;
-
-    int offset = emit->base.spill_offsets[info->spill_slot];
-    int size = x86_size_bytes(slot.size_bits);
-    if (slot.reg_class == ANVIL_MIR_REG_FPR) {
-        char mem[32];
-        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, -(offset)));
-        emit->fp->load(emit, info->def, mem);
-    } else {
-        if (size < 4)
-            size = 4;
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s %s, %%%s\n", x86_gas_size_suffix(size), x86_frame(emit, -(offset)), x86_gas_gpr(def_phys, size));
-    }
-}
-
-static void x86_emit_spill_store(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
-{
-    if (info->spill_slot < 0 || (size_t)info->spill_slot >= emit->base.num_spill_offsets) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_vreg_t src_vreg = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    if (src_vreg == ANVIL_MIR_NO_VREG) {
-        emit->base.failed = true;
-        return;
-    }
-
-    anvil_mir_spill_slot_info_t slot;
-    if (!anvil_mir_get_spill_slot_info(emit->base.mir, info->spill_slot, &slot)) {
-        emit->base.failed = true;
-        return;
-    }
-
-    int src_phys = x86_gas_phys_of(&emit->base, src_vreg);
-    if (emit->base.failed)
-        return;
-
-    int offset = emit->base.spill_offsets[info->spill_slot];
-    int size = x86_size_bytes(slot.size_bits);
-    if (slot.reg_class == ANVIL_MIR_REG_FPR) {
-        char mem[32];
-        snprintf(mem, sizeof(mem), "%s", x86_frame(emit, -(offset)));
-        emit->fp->store(emit, src_vreg, mem);
-    } else {
-        if (size < 4)
-            size = 4;
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(size), x86_gas_gpr(src_phys, size), x86_frame(emit, -(offset)));
-    }
 }
 
 static void x86_emit_ret(x86_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
@@ -1726,7 +1582,7 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         x86_emit_store(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_FRAME_ADDR:
-        x86_emit_frame_addr(emit, info);
+        x86_gas_emit_frame_addr(&emit->base, info);
         break;
     case ANVIL_MIR_OP_DYN_ALLOCA:
         x86_emit_dyn_alloca(emit, instr_index, info);
@@ -1736,20 +1592,20 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         break;
     case ANVIL_MIR_OP_VA_START:
         /* Address of the first unnamed stack argument. */
-        anvil_strbuf_appendf(&emit->base.code, "\tleal %s, %%%s\n", x86_frame(emit, (int)((8 + info->imm))),
+        anvil_strbuf_appendf(&emit->base.code, "\tleal %s, %%%s\n", x86_gas_frame(&emit->base, (int)((8 + info->imm))),
                              x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), 4));
         break;
     case ANVIL_MIR_OP_CALL:
         x86_emit_call(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_CALL_STACK_ARG:
-        x86_emit_call_stack_arg(emit, instr_index, info);
+        x86_gas_emit_call_stack_arg(&emit->base, instr_index, info);
         break;
     case ANVIL_MIR_OP_BR:
         emit->base.failed |= !x86_gas_emit_jump(&emit->base.code, emit->plat->format->local_label_prefix, emit->base.mir, &emit->base.layout, emit->base.block, info->true_block);
         break;
     case ANVIL_MIR_OP_SELECT:
-        x86_emit_select(emit, instr_index, info);
+        x86_gas_emit_select(&emit->base, instr_index, info);
         break;
     case ANVIL_MIR_OP_BR_COND: {
         const char *cc = emit->base.fused_jcc;
@@ -1776,10 +1632,10 @@ static void x86_emit_instr(x86_mir_emit_t *emit, size_t instr_index, const anvil
         x86_emit_ret(emit, instr_index, info);
         break;
     case ANVIL_MIR_OP_SPILL_LOAD:
-        x86_emit_spill_load(emit, info);
+        x86_gas_emit_spill_load(&emit->base, info);
         break;
     case ANVIL_MIR_OP_SPILL_STORE:
-        x86_emit_spill_store(emit, instr_index, info);
+        x86_gas_emit_spill_store(&emit->base, instr_index, info);
         break;
     case ANVIL_MIR_OP_RET_VALUE_PART:
         /* Moved together with RET's value. */
@@ -1871,6 +1727,12 @@ bool x86_emit_mir_reloc(const anvil_mir_func_t *mir, anvil_func_t *func, anvil_a
     /* Floating point in SSE2 registers where the CPU model has them,
      * otherwise on the x87 FPU. */
     emit.fp = (features & ANVIL_FEATURE_X86_SSE2) ? &x86_fp_sse2_unit : &x86_fp_x87_unit;
+    emit.base.pointer_bytes = 4;
+    emit.base.stack_reg = "esp";
+    emit.base.min_gpr_move = 4;
+    emit.base.has_byte = x86_reg_has_byte;
+    emit.base.fp_load = x86_fp_load;
+    emit.base.fp_store = x86_fp_store;
     emit.ret_hi_phys = -1;
     anvil_strbuf_init(&emit.base.code);
     if (!emit.base.code.data)

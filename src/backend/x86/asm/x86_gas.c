@@ -1,5 +1,7 @@
 #include "x86_gas.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 const char *x86_gas_setcc(anvil_mir_opcode_t op)
@@ -210,4 +212,147 @@ int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg)
         return -1;
     }
     return assignment->phys_reg;
+}
+
+const char *x86_gas_frame(x86_gas_t *gas, int disp)
+{
+    char *text = gas->frame_text[gas->frame_next++ % 8];
+    snprintf(text, sizeof(gas->frame_text[0]), "%d(%%%s)", disp + gas->frame_bias, gas->frame_reg);
+    return text;
+}
+
+bool x86_gas_address_reads(x86_gas_t *gas, size_t address_index, const anvil_mir_instr_info_t *address, int phys)
+{
+    size_t uses = address->index_scale ? 2 : 1;
+    for (size_t u = 0; u < uses && u < address->num_uses; u++)
+        if (x86_gas_phys_of(gas, anvil_mir_get_instr_use(gas->mir, address_index, u)) == phys)
+            return true;
+    return false;
+}
+
+void x86_gas_parallel_move(void *user, int dst, int src)
+{
+    x86_gas_t *gas = user;
+    anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", x86_gas_size_suffix(gas->pointer_bytes), x86_gas_gpr(src, gas->pointer_bytes),
+                         x86_gas_gpr(dst, gas->pointer_bytes));
+}
+
+void x86_gas_parallel_swap(void *user, int a, int b)
+{
+    x86_gas_t *gas = user;
+    anvil_strbuf_appendf(&gas->code, "\txchg%s %%%s, %%%s\n", x86_gas_size_suffix(gas->pointer_bytes), x86_gas_gpr(a, gas->pointer_bytes),
+                         x86_gas_gpr(b, gas->pointer_bytes));
+}
+
+void x86_gas_emit_frame_addr(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
+{
+    if (info->frame_slot < 0 || (size_t)info->frame_slot >= gas->num_frame_slot_offsets) {
+        gas->failed = true;
+        return;
+    }
+    int dst = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    anvil_strbuf_appendf(&gas->code, "\tlea%s %s, %%%s\n", x86_gas_size_suffix(gas->pointer_bytes), x86_gas_frame(gas, -gas->frame_slot_offsets[info->frame_slot]),
+                         x86_gas_gpr(dst, gas->pointer_bytes));
+}
+
+/* A spill slot's frame operand and the bytes a general register moves. */
+static bool spill_slot(x86_gas_t *gas, const anvil_mir_instr_info_t *info, anvil_mir_spill_slot_info_t *slot, const char **mem, int *bytes)
+{
+    if (info->spill_slot < 0 || (size_t)info->spill_slot >= gas->num_spill_offsets || !anvil_mir_get_spill_slot_info(gas->mir, info->spill_slot, slot)) {
+        gas->failed = true;
+        return false;
+    }
+    *mem = x86_gas_frame(gas, -gas->spill_offsets[info->spill_slot]);
+    *bytes = (slot->size_bits + 7) / 8;
+    if (*bytes < gas->min_gpr_move)
+        *bytes = gas->min_gpr_move;
+    return true;
+}
+
+void x86_gas_emit_spill_load(x86_gas_t *gas, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_spill_slot_info_t slot;
+    const char *mem;
+    int bytes;
+    if (!spill_slot(gas, info, &slot, &mem, &bytes) || !anvil_mir_get_vreg_info(gas->mir, info->def)) {
+        gas->failed = true;
+        return;
+    }
+    if (slot.reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_load(gas, info->def, mem);
+        return;
+    }
+    int def = x86_gas_phys_of(gas, info->def);
+    if (!gas->failed)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %s, %%%s\n", x86_gas_size_suffix(bytes), mem, x86_gas_gpr(def, bytes));
+}
+
+void x86_gas_emit_spill_store(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_spill_slot_info_t slot;
+    const char *mem;
+    int bytes;
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(gas->mir, index, 0);
+    if (value == ANVIL_MIR_NO_VREG || !spill_slot(gas, info, &slot, &mem, &bytes)) {
+        gas->failed = true;
+        return;
+    }
+    if (slot.reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_store(gas, value, mem);
+        return;
+    }
+    int src = x86_gas_phys_of(gas, value);
+    if (!gas->failed)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), mem);
+}
+
+void x86_gas_emit_select(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t cond = anvil_mir_get_instr_use(gas->mir, index, 0);
+    anvil_mir_vreg_t then_value = anvil_mir_get_instr_use(gas->mir, index, 1);
+    anvil_mir_vreg_t else_value = anvil_mir_get_instr_use(gas->mir, index, 2);
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    if (cond == ANVIL_MIR_NO_VREG || then_value == ANVIL_MIR_NO_VREG || else_value == ANVIL_MIR_NO_VREG || !def_info) {
+        gas->failed = true;
+        return;
+    }
+    int bytes = def_info->size_bits > 32 ? 8 : 4;
+    int dst = x86_gas_phys_of(gas, info->def), then_reg = x86_gas_phys_of(gas, then_value), else_reg = x86_gas_phys_of(gas, else_value);
+    const char *cc = gas->fused_jcc;
+    gas->fused_jcc = NULL;
+    if (!cc) {
+        int flag = x86_gas_phys_of(gas, cond);
+        bool byte = !gas->has_byte || gas->has_byte(flag);
+        const char *name = x86_gas_gpr(flag, byte ? 1 : 4);
+        if (!gas->failed)
+            anvil_strbuf_appendf(&gas->code, "\ttest%s %%%s, %%%s\n", byte ? "b" : "l", name, name);
+        cc = "ne";
+    }
+    if (!gas->failed && !x86_gas_emit_cmov(&gas->code, cc, x86_gas_size_suffix(bytes), x86_gas_gpr(dst, bytes), x86_gas_gpr(then_reg, bytes),
+                                           x86_gas_gpr(else_reg, bytes)))
+        gas->failed = true;
+}
+
+void x86_gas_emit_call_stack_arg(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(gas->mir, index, 0);
+    const anvil_mir_vreg_info_t *value_info = anvil_mir_get_vreg_info(gas->mir, value);
+    if (!info->has_imm || info->imm < 0 || info->num_uses != 1 || info->imm > INT32_MAX - gas->outgoing_base || !value_info) {
+        gas->failed = true;
+        return;
+    }
+    char mem[32];
+    snprintf(mem, sizeof(mem), "%d(%%%s)", gas->outgoing_base + (int)info->imm, gas->stack_reg);
+    if (value_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_store(gas, value, mem);
+        return;
+    }
+    int bytes = (value_info->size_bits + 7) / 8;
+    if (bytes < gas->min_gpr_move)
+        bytes = gas->min_gpr_move;
+    int src = x86_gas_phys_of(gas, value);
+    if (!gas->failed)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), mem);
 }

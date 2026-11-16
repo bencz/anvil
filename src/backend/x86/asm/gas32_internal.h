@@ -33,8 +33,6 @@ typedef struct {
      * from ESP, which stays frame_size bytes below where EBP would be
      * (the prologue reserves EBP's push slot too). */
     bool frame_pointer;
-    char frame_text[8][24];
-    unsigned frame_next;
     bool fp_returns;
     /* RET_VALUE_PART's register, moved to EDX together with RET's EAX. */
     int ret_hi_phys;
@@ -104,19 +102,6 @@ static inline const anvil_mir_vreg_info_t *x86_vreg_info_checked(x86_mir_emit_t 
 
 /* Width in bytes of an FPR vreg (4, 8, or 16 for a vector), or 0 after
  * marking failure. */
-/* The frame operand `offset` bytes from where EBP points with a frame
- * pointer (negative: locals, spills, saves; 8 and up: incoming
- * arguments), from a small ring of buffers (several per instruction). */
-static inline const char *x86_frame(x86_mir_emit_t *emit, int offset)
-{
-    char *text = emit->frame_text[emit->frame_next++ % 8];
-    if (emit->frame_pointer)
-        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%ebp)", offset);
-    else
-        snprintf(text, sizeof(emit->frame_text[0]), "%d(%%esp)", offset + emit->base.frame_size);
-    return text;
-}
-
 static inline int x86_fp_size(x86_mir_emit_t *emit, anvil_mir_vreg_t vreg)
 {
     const anvil_mir_vreg_info_t *info = x86_vreg_info_checked(emit, vreg);
