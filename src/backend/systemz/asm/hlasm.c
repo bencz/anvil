@@ -1379,6 +1379,86 @@ static void systemz_memory_operand(systemz_emit_t *emit, anvil_mir_instr_info_t 
              systemz_vreg_reg_name(emit, base));
 }
 
+/* A load whose only reader takes it as a storage operand (RX/RXY forms:
+ * AL, SL, N, O, X on 32 bits, with long displacements their Y forms; ALG,
+ * SLG, NG, OG, XG, MSG on 64; the FP arithmetic, BFP RXE forms with short
+ * displacements only).  The reader prints it (systemz_emit_load_operation). */
+static bool systemz_fold_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, const anvil_mir_vreg_info_t *info)
+{
+    anvil_mir_vreg_t other;
+    int64_t value;
+    bool fpr = info->reg_class == ANVIL_MIR_REG_FPR;
+    bool gpr = info->reg_class == ANVIL_MIR_REG_GPR && (info->size_bits == 32 || (info->size_bits == 64 && emit->desc->has_64bit_gprs));
+    if (emit->load_target != SIZE_MAX || !(gpr || (fpr && !systemz_long_disp(instr))))
+        return false;
+    size_t reader = anvil_mir_isel_load_operand(emit->mir, &emit->isel, index, &other);
+    anvil_mir_instr_info_t next;
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, reader, &next) ||
+        (emit->counter_roles && emit->counter_roles[reader] != ANVIL_MIR_COUNTER_NONE) || reader == emit->rotate_target ||
+        (gpr && next.op == ANVIL_MIR_OP_MUL && info->size_bits != 64) || (gpr && anvil_mir_isel_constant(&emit->isel, other, &value)))
+        return false;
+    bool overlaps;
+    systemz_memory_operand(emit, instr, index, 0, -1, &overlaps, emit->load_address, sizeof(emit->load_address));
+    emit->load_target = reader;
+    emit->load_other = other;
+    emit->load_long = systemz_long_disp(instr);
+    return true;
+}
+
+static void systemz_emit_load_operation(systemz_emit_t *emit, anvil_mir_instr_info_t instr)
+{
+    emit->load_target = SIZE_MAX;
+    const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, instr.def);
+    if (!info)
+        return;
+    if (systemz_phys_reg(emit, instr.def) != systemz_phys_reg(emit, emit->load_other))
+        systemz_emit_copy(emit, instr.def, emit->load_other);
+    const char *op;
+    if (info->reg_class == ANVIL_MIR_REG_FPR) {
+        bool f32 = info->size_bits == 32, ieee = systemz_use_ieee_fp(emit);
+        switch (instr.op) {
+        case ANVIL_MIR_OP_ADD:
+            op = ieee ? (f32 ? "AEB" : "ADB") : (f32 ? "AE" : "AD");
+            break;
+        case ANVIL_MIR_OP_SUB:
+            op = ieee ? (f32 ? "SEB" : "SDB") : (f32 ? "SE" : "SD");
+            break;
+        case ANVIL_MIR_OP_MUL:
+            op = ieee ? (f32 ? "MEEB" : "MDB") : (f32 ? "ME" : "MD");
+            break;
+        default:
+            op = ieee ? (f32 ? "DEB" : "DDB") : (f32 ? "DE" : "DD");
+            break;
+        }
+    } else {
+        bool wide = info->size_bits > 32, y = emit->load_long && !wide;
+        switch (instr.op) {
+        case ANVIL_MIR_OP_ADD:
+            op = wide ? "ALG" : y ? "ALY" : "AL";
+            break;
+        case ANVIL_MIR_OP_SUB:
+            op = wide ? "SLG" : y ? "SLY" : "SL";
+            break;
+        case ANVIL_MIR_OP_AND:
+            op = wide ? "NG" : y ? "NY" : "N";
+            break;
+        case ANVIL_MIR_OP_OR:
+            op = wide ? "OG" : y ? "OY" : "O";
+            break;
+        case ANVIL_MIR_OP_XOR:
+            op = wide ? "XG" : y ? "XY" : "X";
+            break;
+        default:
+            op = "MSG";
+            break;
+        }
+    }
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", op, systemz_vreg_reg_name(emit, instr.def), emit->load_address);
+    /* The logical operations set condition code 0 for a zero result. */
+    if (instr.op == ANVIL_MIR_OP_AND || instr.op == ANVIL_MIR_OP_OR || instr.op == ANVIL_MIR_OP_XOR)
+        anvil_print_flags_set(&emit->flags, systemz_phys_reg(emit, instr.def), info->size_bits > 32 ? 8 : 4);
+}
+
 static void systemz_emit_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
     const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, instr.def);
@@ -1400,6 +1480,8 @@ static void systemz_emit_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr
             return;
         }
     }
+    if (systemz_fold_load(emit, instr, index, info))
+        return;
     systemz_memory_operand(emit, instr, index, 0, systemz_phys_reg(emit, instr.def), &overlaps, address, sizeof(address));
     const char *extending = systemz_extending_load(emit, info);
     if (extending) {
@@ -1730,6 +1812,10 @@ static void systemz_emit_scalar(systemz_emit_t *emit, anvil_mir_instr_info_t ins
 
 static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
+    if (index == emit->load_target) {
+        systemz_emit_load_operation(emit, instr);
+        return;
+    }
     anvil_mir_vreg_t u0 = ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t u1 = ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t u2 = ANVIL_MIR_NO_VREG;
@@ -2224,7 +2310,7 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 
     systemz_emit_t emit;
     memset(&emit, 0, sizeof(emit));
-    emit.rotate_target = emit.rotate_skip = emit.extension_skip = emit.tm_at = SIZE_MAX;
+    emit.rotate_target = emit.rotate_skip = emit.extension_skip = emit.load_target = emit.tm_at = SIZE_MAX;
     emit.desc = desc;
     emit.ret_low_word = ANVIL_MIR_NO_VREG;
     emit.mir = mir;

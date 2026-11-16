@@ -182,7 +182,11 @@ in the instruction list of the Principles of Operation, SA22-7832-08). They
 take a base and a 12-bit unsigned displacement only, so an indexed or far
 address stores through R1. A 32-bit constant in a signed halfword loads with
 `LHI` where the relative-and-immediate facility exists (S/390 on), not from the
-literal pool. A
+literal pool. A load whose only reader is an operation taking a storage
+operand is that operand (`anvil_mir_isel_load_operand`): `AL`, `SL`, `N`, `O`, `X`
+(`ALY`... with long displacements), `ALG`, `SLG`, `NG`, `OG`, `XG`, `MSG`, and the
+FP arithmetic (`ADB`/`SDB`/`MDB`/`DDB`, RXE with short displacements only; HFP
+`AD`/`SD`/`MD`/`DD`); the 32-bit multiply keeps the R0:R1 pair. A
 constant address (a GEP of constant indices) becomes base + displacement
 where the CPU's forms reach it, and the displacement goes into an index
 register otherwise. The lowering, the MIR address folds and the legality

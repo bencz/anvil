@@ -509,26 +509,10 @@ bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
     /* An extension of the loaded value: movs/movz from memory. */
     if (!fpr && (next.op == ANVIL_MIR_OP_SEXT || next.op == ANVIL_MIR_OP_ZEXT))
         return fold_into(gas, index, info, reader);
-    if (def_info->size_bits < 32 || next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
-        return false;
-    bool gpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
-                  next.op == ANVIL_MIR_OP_XOR || next.op == ANVIL_MIR_OP_MUL;
-    bool fpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_DIV ||
-                  next.op == ANVIL_MIR_OP_FDIV;
-    const anvil_mir_vreg_info_t *result = anvil_mir_get_vreg_info(gas->mir, next.def);
-    if (!result || result->reg_class != def_info->reg_class || result->size_bits != def_info->size_bits || !(fpr ? fpr_op : gpr_op))
-        return false;
-    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, reader, 0), rhs = anvil_mir_get_instr_use(gas->mir, reader, 1);
-    bool commutes = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
-                    next.op == ANVIL_MIR_OP_XOR;
-    if (lhs == rhs || (rhs != info->def && !(commutes && lhs == info->def)))
-        return false;
-    anvil_mir_vreg_t other = rhs == info->def ? lhs : rhs;
-    int dst = x86_gas_phys_of(gas, next.def), keep = x86_gas_phys_of(gas, other);
-    const anvil_mir_vreg_info_t *other_info = anvil_mir_get_vreg_info(gas->mir, other);
-    /* The other operand in a register: not an immediate, nor a constant
-     * held in none (x86_gas_emit_gpr_arith's zero-extending masks). */
-    if (gas->failed || !other_info || other_info->registerless || (!fpr && x86_gas_known_imm(gas, other, &imm)) || (!fpr && dst != keep && x86_gas_address_reads(gas, index, info, dst)))
+    /* An operation reading it from memory, whose other operand is no
+     * immediate. */
+    anvil_mir_vreg_t other;
+    if (def_info->size_bits < 32 || anvil_mir_isel_load_operand(gas->mir, &gas->isel, index, &other) != reader || (!fpr && x86_gas_known_imm(gas, other, &imm)))
         return false;
     return fold_into(gas, index, info, reader);
 }

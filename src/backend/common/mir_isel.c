@@ -618,6 +618,44 @@ size_t anvil_mir_isel_extending_reader(const anvil_mir_func_t *mir, const anvil_
     return wide && wide->reg_class == ANVIL_MIR_REG_GPR && wide->size_bits > narrow->size_bits ? reader : SIZE_MAX;
 }
 
+size_t anvil_mir_isel_load_operand(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, anvil_mir_vreg_t *other)
+{
+    anvil_mir_instr_info_t load, next;
+    if (!anvil_mir_get_instr_info(mir, index, &load) || load.op != ANVIL_MIR_OP_LOAD || load.def >= facts->num_vregs || load.memory_access.is_volatile ||
+        facts->use_count[load.def] != 1)
+        return SIZE_MAX;
+    const anvil_mir_vreg_info_t *loaded = anvil_mir_get_vreg_info(mir, load.def);
+    if (!loaded || (loaded->reg_class != ANVIL_MIR_REG_GPR && loaded->reg_class != ANVIL_MIR_REG_FPR))
+        return SIZE_MAX;
+    size_t reader = anvil_mir_isel_fold_reader(mir, facts, index, 8, true);
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(mir, reader, &next) || next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
+        return SIZE_MAX;
+    bool fpr = loaded->reg_class == ANVIL_MIR_REG_FPR;
+    bool gpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
+                  next.op == ANVIL_MIR_OP_XOR || next.op == ANVIL_MIR_OP_MUL;
+    bool fpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_DIV ||
+                  next.op == ANVIL_MIR_OP_FDIV;
+    const anvil_mir_vreg_info_t *result = anvil_mir_get_vreg_info(mir, next.def);
+    if (!result || result->reg_class != loaded->reg_class || result->size_bits != loaded->size_bits || !(fpr ? fpr_op : gpr_op))
+        return SIZE_MAX;
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(mir, reader, 0), rhs = anvil_mir_get_instr_use(mir, reader, 1);
+    bool commutes = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_MUL || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
+                    next.op == ANVIL_MIR_OP_XOR;
+    if (lhs == rhs || (rhs != load.def && !(commutes && lhs == load.def)))
+        return SIZE_MAX;
+    *other = rhs == load.def ? lhs : rhs;
+    int dst = fold_phys(mir, next.def), keep = fold_phys(mir, *other);
+    /* Loaded into the result's register, a commutative operation reads it
+     * there with no copy: folding would copy the other operand instead. */
+    if (keep < 0 || dst < 0 || (dst != keep && commutes && fold_phys(mir, load.def) == dst))
+        return SIZE_MAX;
+    /* Address registers are general ones: an FP result shares none. */
+    for (size_t u = 0; !fpr && dst != keep && u < (load.index_scale ? 2u : 1u) && u < load.num_uses; u++)
+        if (fold_phys(mir, anvil_mir_get_instr_use(mir, index, u)) == dst)
+            return SIZE_MAX;
+    return reader;
+}
+
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window)
 {
     anvil_mir_instr_info_t info, next;

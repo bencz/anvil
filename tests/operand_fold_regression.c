@@ -1041,6 +1041,60 @@ static void test_x86_address_operands(void)
     }
 }
 
+/* SystemZ reads a load its only operation takes as a storage operand:
+ * x + p[k] is AL (ALY past 4095 bytes with long displacements, else AL
+ * with the displacement in an index register), x ^ q[k] on 64 bits XG, a
+ * double product MDB (BFP) or MD (HFP). */
+typedef struct {
+    anvil_arch_t arch;
+    anvil_cpu_model_t cpu;
+    int index;
+    bool wide;
+    bool fp;
+    const char *expected;
+} storage_operand_case_t;
+
+static const storage_operand_case_t storage_operand_cases[] = {
+    {ANVIL_ARCH_ZARCH, 0, 2, false, false, "AL    R"},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z990, 2000, false, false, "ALY   R"},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z900, 2000, false, false, "AL    R3,0(R"},
+    {ANVIL_ARCH_ZARCH, 0, 3, true, false, "XG    R"},
+    {ANVIL_ARCH_ZARCH, 0, 2, false, true, "MDB   F"},
+    {ANVIL_ARCH_S390, 0, 2, false, true, "MD    F"},
+    {ANVIL_ARCH_S370, 0, 2, false, false, "AL    R"},
+};
+
+static void test_systemz_storage_operands(void)
+{
+    for (size_t t = 0; t < sizeof(storage_operand_cases) / sizeof(storage_operand_cases[0]); t++) {
+        const storage_operand_case_t *test = &storage_operand_cases[t];
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(test->arch);
+        if (test->cpu)
+            anvil_ctx_set_cpu(ctx, test->cpu);
+        anvil_module_t *module = anvil_module_create(ctx, "storage");
+        anvil_type_t *type = test->fp ? anvil_type_f64(ctx) : test->wide ? anvil_type_i64(ctx) : anvil_type_i32(ctx);
+        anvil_type_t *params[] = {anvil_type_ptr(ctx, type), type};
+        anvil_func_t *func = anvil_func_create(module, "operand", anvil_type_func(ctx, type, params, 2, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_value_t *index[] = {anvil_const_i32(ctx, test->index)};
+        anvil_value_t *loaded = anvil_build_load(ctx, type, anvil_build_gep(ctx, type, anvil_func_get_param(func, 0), index, 1, "at"), "loaded");
+        anvil_value_t *x = anvil_func_get_param(func, 1);
+        anvil_value_t *result = test->fp ? anvil_build_fmul(ctx, x, loaded, "r") : test->wide ? anvil_build_xor(ctx, x, loaded, "r") : anvil_build_add(ctx, x, loaded, "r");
+        anvil_build_ret(ctx, result);
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, test->expected);
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d cpu %d: storage operand %s", (int)test->arch, (int)test->cpu, test->expected);
+        CHECK(valid, message);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -1102,6 +1156,7 @@ int main(void)
     test_arm64_bitfields();
     test_x86_zero_extending_masks();
     test_x86_address_operands();
+    test_systemz_storage_operands();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

@@ -90,6 +90,13 @@ typedef struct {
     size_t rotate_target, rotate_skip;  /* rotate_skip: a zero extension between */
     /* An extension its load already did (SIZE_MAX: none). */
     size_t extension_skip;
+    /* A load read by the operation at load_target as its storage operand
+     * (`AL R2,8(,R3)`): the operation's other operand and the address,
+     * long when it needs a 20-bit displacement. */
+    size_t load_target;
+    anvil_mir_vreg_t load_other;
+    bool load_long;
+    char load_address[64];
     /* x & c read only by `== 0` / `!= 0` feeding the branch: TMLL/TMLH,
      * the compare at tm_at prints nothing (SIZE_MAX: none). */
     size_t tm_at;

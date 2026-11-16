@@ -122,6 +122,18 @@ bool anvil_mir_isel_writes(const anvil_mir_func_t *mir, const anvil_mir_isel_fac
  * in the same block with no call between; SIZE_MAX when there is none. */
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window);
 
+/* The two-address operation that may read the load at `index` from memory
+ * (an RX-style operand): its only reader shortly after with no memory or
+ * address register written between (anvil_mir_isel_fold_reader), an ADD,
+ * SUB, AND, OR, XOR or MUL (FP: ADD, SUB, MUL, DIV) of the load's class
+ * and width with the load on the right (either side when it commutes),
+ * the other operand in a register (`other`), and a result register that
+ * is the other operand's or no address register (it receives the other
+ * operand before the memory is read) nor, for a commutative operation, the
+ * load's (no copy is needed then without the fold).  SIZE_MAX when there
+ * is none. */
+size_t anvil_mir_isel_load_operand(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, anvil_mir_vreg_t *other);
+
 /* The first instruction after `index` in its block that prints anything
  * (constants never materialized print nothing); SIZE_MAX when there is
  * none. */
