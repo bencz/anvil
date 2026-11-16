@@ -10,6 +10,7 @@
 #include "../common/mir_isel.h"
 #include "../common/print_flags.h"
 #include "../common/rotate_mask.h"
+#include "../common/vector_isa.h"
 
 #include <limits.h>
 #include <stdarg.h>
@@ -163,5 +164,10 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 bool systemz_emit_globals(anvil_strbuf_t *out, anvil_module_t *mod, anvil_fp_format_t fp_format, size_t pointer_size);
 
 bool anvil_systemz_mark_registerless(anvil_mir_func_t *mir, const anvil_mainframe_target_desc_t *desc, anvil_cpu_features_t features);
+
+/* The scalar operations a variant prices (systemz_scalar.c), and the
+ * z/Architecture backend's cost hook. */
+const anvil_vector_isa_t *systemz_scalar_table(const anvil_mainframe_target_desc_t *desc, size_t *count);
+unsigned anvil_zarch_vector_operation_cost(anvil_backend_t *be, anvil_op_t operation, anvil_type_t *type, anvil_vector_shape_t shape);
 
 #endif

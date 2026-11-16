@@ -85,4 +85,5 @@ const anvil_backend_ops_t anvil_backend_zarch = {
     .build_va_copy = anvil_systemz_build_va_copy,
     .build_va_copy_into = anvil_systemz_build_va_copy_into,
     .indexed_displacement = anvil_systemz_indexed_displacement,
+    .vector_operation_cost = anvil_zarch_vector_operation_cost,
 };

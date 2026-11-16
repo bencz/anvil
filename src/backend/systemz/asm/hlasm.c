@@ -442,6 +442,9 @@ static bool systemz_takes_immediate(void *ctx, size_t index, const anvil_mir_ins
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR:
         return true;
+    case ANVIL_MIR_OP_SCALAR:
+        /* RLL's count is a displacement. */
+        return info->ir_op == ANVIL_OP_ROTL;
     default: {
         const anvil_mir_vreg_info_t *lhs_info = anvil_mir_get_vreg_info(emit->mir, lhs);
         if (!anvil_mir_isel_is_compare(info->op) || !lhs_info || lhs_info->reg_class != ANVIL_MIR_REG_GPR)
@@ -1637,6 +1640,31 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
     }
 }
 
+/* A SCALAR operation of the variant's table: RLL/RLLG, the count an
+ * immediate displacement or a base register (never R0, outside the pools). */
+static void systemz_emit_scalar(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
+{
+    size_t count;
+    const anvil_vector_isa_t *table = systemz_scalar_table(emit->desc, &count);
+    const anvil_vector_isa_t *isa = anvil_vector_isa_for_mir(table, count, emit->mir, index, &instr, emit->features);
+    anvil_mir_vreg_t value = anvil_mir_get_instr_use(emit->mir, index, 0), amount = anvil_mir_get_instr_use(emit->mir, index, 1);
+    if (!isa || instr.ir_op != ANVIL_OP_ROTL || value == ANVIL_MIR_NO_VREG || amount == ANVIL_MIR_NO_VREG) {
+        emit->code.failed = true;
+        return;
+    }
+    const char *dst = systemz_vreg_reg_name(emit, instr.def), *src = systemz_vreg_reg_name(emit, value);
+    int64_t imm;
+    if (systemz_rhs_immediate(emit, index, &instr, &imm)) {
+        anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", isa->mnemonic, dst, src, (int)(imm & (instr.imm == 64 ? 63 : 31)));
+        return;
+    }
+    if (systemz_phys_reg(emit, amount) == 0) {
+        emit->code.failed = true;
+        return;
+    }
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,0(%s)\n", isa->mnemonic, dst, src, systemz_vreg_reg_name(emit, amount));
+}
+
 static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index)
 {
     anvil_mir_vreg_t u0 = ANVIL_MIR_NO_VREG;
@@ -1821,9 +1849,11 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         break;
     case ANVIL_MIR_OP_INVALID:
     case ANVIL_MIR_OP_VA_START:
+    case ANVIL_MIR_OP_SCALAR:
+        systemz_emit_scalar(emit, instr, index);
+        break;
     case ANVIL_MIR_OP_ATOMIC:
     case ANVIL_MIR_OP_VECTOR:
-    case ANVIL_MIR_OP_SCALAR:
         emit->code.failed = true;
         break;
     }

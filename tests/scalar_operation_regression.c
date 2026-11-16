@@ -180,6 +180,9 @@ typedef struct {
 static const lowering_case_t lowering_cases[] = {
     {ANVIL_ARCH_X86_64, 0, "roll $5", "roll %cl", "cmovg", "pushq %rbp"},
     {ANVIL_ARCH_X86, ANVIL_CPU_X86_PENTIUM4, "roll $5", "roll %cl", "cmovg", "pushl %ebp"},
+    /* z/Architecture: RLL takes the count as a displacement (immediate or
+     * base register); a select branches (no frame string to exclude). */
+    {ANVIL_ARCH_ZARCH, 0, "RLL   R2,R2,5", "RLL   R2,R2,0(R", "BRC ", "\x01"},
     {ANVIL_ARCH_ARM64, 0, "ror w0, w0, #27", "neg w16", "csel w0", "stp x29"},
     {ANVIL_ARCH_PPC64LE, ANVIL_CPU_PPC64_POWER8, "rotlwi", "rotlw ", "isel", "mflr"},
     {ANVIL_ARCH_PPC64, ANVIL_CPU_PPC64_POWER4, "rotlwi", "rotlw ", "bc ", "mflr"},
@@ -220,6 +223,32 @@ static bool run_lowering_case(const lowering_case_t *test)
                  strstr(assembly, test->rotate_variable) && strstr(assembly, test->select) && !strstr(assembly, test->frame);
     if (!valid)
         fprintf(stderr, "lowering failure: arch=%d rotated=%d\n%s\n", (int)test->arch, rotated, assembly ? assembly : "");
+    free(assembly);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid;
+}
+
+/* S/390 (ESA/390) has no RLL here: the rotate is not formed and the
+ * shifts stay. */
+static bool run_no_rotate_case(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_S390);
+    anvil_module_t *module = anvil_module_create(ctx, "no_rotate");
+    anvil_type_t *u32 = anvil_type_u32(ctx);
+    anvil_type_t *params[] = {u32};
+    anvil_func_t *func = anvil_func_create(module, "rotate_constant", anvil_type_func(ctx, u32, params, 1, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, func->entry);
+    anvil_value_t *x = anvil_func_get_param(func, 0);
+    anvil_value_t *left = anvil_build_shl(ctx, x, anvil_const_u32(ctx, 5), "left"), *right = anvil_build_shr(ctx, x, anvil_const_u32(ctx, 27), "right");
+    anvil_build_ret(ctx, anvil_build_or(ctx, left, right, "rotated"));
+    anvil_pass_strength_reduce(func);
+    char *assembly = NULL;
+    size_t length = 0;
+    bool valid = func->entry->last->operands[0]->data.instr->op != ANVIL_OP_ROTL && anvil_module_codegen(module, &assembly, &length) == ANVIL_OK &&
+                 assembly && !strstr(assembly, "RLL");
+    if (!valid)
+        fprintf(stderr, "S/390 rotate failure\n%s\n", assembly ? assembly : "");
     free(assembly);
     anvil_module_destroy(module);
     anvil_ctx_destroy(ctx);
@@ -395,6 +424,8 @@ int main(void)
         if (!run_lowering_case(&lowering_cases[index]))
             return 1;
     }
+    if (!run_no_rotate_case())
+        return 1;
     if (!run_division_case(anvil_type_u32, 32, false) || !run_division_case(anvil_type_i32, 32, true) ||
         !run_division_case(anvil_type_u64, 64, false) || !run_division_case(anvil_type_i64, 64, true))
         return 1;

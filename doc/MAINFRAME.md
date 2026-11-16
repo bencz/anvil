@@ -16,6 +16,7 @@ src/backend/systemz/
     systemz_target.c         Descriptor lookup and common register pools
     systemz_lower.c          Source IR to MIR, including 32-bit wide-value lowering
     systemz_legal.c          MIR legality and register-allocation bridge
+    systemz_scalar.c         Scalar operations the z/Architecture variant prices (RLL, RLLG)
     systemz_codegen.c        Configuration validation and pipeline orchestration
     targets/
         s370.c              S/370 identity, capabilities and policy binding

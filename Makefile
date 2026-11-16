@@ -87,6 +87,7 @@ BACKEND_SRCS = \
 	$(SRC_DIR)/backend/systemz/systemz_target.c \
 	$(SRC_DIR)/backend/systemz/systemz_lower.c \
 	$(SRC_DIR)/backend/systemz/systemz_legal.c \
+	$(SRC_DIR)/backend/systemz/systemz_scalar.c \
 	$(SRC_DIR)/backend/systemz/systemz_codegen.c \
 	$(SRC_DIR)/backend/systemz/abi/mvs_arena_31.c \
 	$(SRC_DIR)/backend/systemz/abi/mvs_arena_64.c \

@@ -95,6 +95,7 @@ bool anvil_mainframe_verify_mir_legal(const anvil_mir_func_t *mir, anvil_mainfra
         .hook = systemz_legal_hook,
         .user = desc,
     };
+    target.scalar_isa = systemz_scalar_table(desc, &target.scalar_isa_count);
     return anvil_mir_verify_legal(&target, mir, error, error_len) && systemz_verify_call_bundles(mir, error, error_len);
 }
 
