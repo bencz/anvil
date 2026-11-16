@@ -3916,6 +3916,36 @@ static bool mir_address_scaled(const anvil_mir_func_t *func, const mir_address_f
     return false;
 }
 
+/* `value` = inner + a constant, an ADD in `block` before `at` read only
+ * once (it goes once the access reads inner) whose inner operand nothing
+ * redefines before `at`: the constant can join an access's displacement. */
+static bool mir_address_offset(const anvil_mir_func_t *func, const mir_address_facts_t *facts, anvil_mir_vreg_t value, anvil_mir_block_t block,
+                               size_t at, anvil_mir_vreg_t *inner, int64_t *addend)
+{
+    if (!mir_address_single(func, facts, value) || facts->def_at[value] >= at || facts->uses[value] != 1)
+        return false;
+    size_t add_at = facts->def_at[value];
+    const anvil_mir_instr_t *add = &func->instrs[add_at];
+    if (add->op != ANVIL_MIR_OP_ADD || add->block != block)
+        return false;
+    if (add->num_uses == 1 && add->has_imm) {
+        *inner = add->uses[0];
+        *addend = add->imm;
+    } else if (add->num_uses == 2 && !add->has_imm && mir_address_constant(func, facts, add->uses[1], addend)) {
+        *inner = add->uses[0];
+    } else if (add->num_uses == 2 && !add->has_imm && mir_address_constant(func, facts, add->uses[0], addend)) {
+        *inner = add->uses[1];
+    } else {
+        return false;
+    }
+    if (*inner >= func->num_vregs || func->vregs[*inner].size_bits != func->vregs[value].size_bits || func->vregs[*inner].reg_class != ANVIL_MIR_REG_GPR)
+        return false;
+    for (size_t j = add_at + 1; j < at; j++)
+        if (func->instrs[j].block == block && func->instrs[j].def == *inner)
+            return false;
+    return true;
+}
+
 static bool mir_address_removable(const anvil_mir_func_t *func, const anvil_mir_instr_t *instr, const mir_address_facts_t *facts)
 {
     if (instr->def == ANVIL_MIR_NO_VREG || facts->uses[instr->def] != 0 || func->vregs[instr->def].has_fixed_reg)
@@ -4033,11 +4063,22 @@ bool anvil_mir_fold_address_arithmetic(anvil_mir_func_t *func, anvil_mir_address
         }
         if (!scale)
             continue;
+        /* A base that is another value plus a constant: the constant joins
+         * the displacement where the target's form takes it. */
+        anvil_mir_vreg_t inner;
+        int64_t addend, displacement = access->has_imm ? access->imm : 0;
+        bool offset = mir_address_offset(func, &facts, base, access->block, i, &inner, &addend) && addend <= INT32_MAX && addend >= INT32_MIN &&
+                      legal(user, scale, displacement + addend, func->vregs[accessed].size_bits, extend);
 
         anvil_mir_vreg_t *uses = realloc(access->uses, (access->num_uses + 1) * sizeof(*uses));
         if (!uses) {
             ok = false;
             break;
+        }
+        if (offset) {
+            base = inner;
+            access->has_imm = true;
+            access->imm = displacement + addend;
         }
         access->uses = uses;
         access->uses[pointer] = base;

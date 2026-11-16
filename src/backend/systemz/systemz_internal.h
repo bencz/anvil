@@ -95,6 +95,10 @@ typedef struct {
      * long when it needs a 20-bit displacement. */
     size_t load_target;
     anvil_mir_vreg_t load_other;
+    /* x + (a u< b) or x + (a u> b): the compare left the outcome in the
+     * carry, which the add at carry_add_at adds (ALCR); SIZE_MAX: none. */
+    size_t carry_add_at;
+    anvil_mir_vreg_t carry_other;
     bool load_long;
     char load_address[64];
     /* x & c read only by `== 0` / `!= 0` feeding the branch: TMLL/TMLH,

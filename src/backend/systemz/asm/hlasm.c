@@ -563,6 +563,12 @@ static bool systemz_emit_distinct(systemz_emit_t *emit, anvil_mir_instr_info_t i
             anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", shift_op, dst, src, (int)(imm & (wide ? 63 : 31)));
             return true;
         }
+        /* A multiply by 2^k: the left shift. */
+        int power = instr.op == ANVIL_MIR_OP_MUL ? systemz_pow2_shift(imm, wide) : -1;
+        if (power > 0 && (wide || distinct)) {
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s,%d\n", wide ? "SLLG" : "SLLK", dst, src, power);
+            return true;
+        }
         if (distinct && (instr.op == ANVIL_MIR_OP_ADD || instr.op == ANVIL_MIR_OP_SUB)) {
             int64_t addend = instr.op == ANVIL_MIR_OP_ADD ? imm : -imm;
             if (!systemz_simm16(addend))
@@ -877,8 +883,47 @@ static bool systemz_fuse_select(systemz_emit_t *emit, size_t index, const anvil_
     return true;
 }
 
+/* x + (a u> b) and x + (a u< b) on z/Architecture: a logical compare
+ * leaves condition code 2 (the carry, its leftmost bit) exactly when its
+ * first operand is the higher, and ADD LOGICAL WITH CARRY adds it
+ * (anvil_mir_isel_condition_add; ALCR is new in z/Architecture). */
+static bool systemz_emit_carry_compare(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
+{
+    size_t extension, add;
+    anvil_mir_vreg_t other;
+    int64_t constant;
+    if (!emit->desc->has_64bit_gprs || (instr.op != ANVIL_MIR_OP_CMP_ULT && instr.op != ANVIL_MIR_OP_CMP_UGT) || emit->carry_add_at != SIZE_MAX ||
+        emit->extension_skip != SIZE_MAX || !anvil_mir_isel_condition_add(emit->mir, &emit->isel, index, &extension, &add, &other) ||
+        anvil_mir_isel_constant(&emit->isel, other, &constant) || anvil_mir_isel_constant(&emit->isel, rhs, &constant) ||
+        (emit->counter_roles && emit->counter_roles[add] != ANVIL_MIR_COUNTER_NONE))
+        return false;
+    bool wide = systemz_operand_wide(emit, lhs);
+    anvil_mir_vreg_t higher = instr.op == ANVIL_MIR_OP_CMP_UGT ? lhs : rhs, lower = higher == lhs ? rhs : lhs;
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", wide ? "CLGR" : "CLR", systemz_vreg_reg_name(emit, higher), systemz_vreg_reg_name(emit, lower));
+    emit->extension_skip = extension;
+    emit->carry_add_at = add;
+    emit->carry_other = other;
+    return true;
+}
+
+static void systemz_emit_carry_add(systemz_emit_t *emit, anvil_mir_instr_info_t instr)
+{
+    emit->carry_add_at = SIZE_MAX;
+    const anvil_mir_vreg_info_t *info = systemz_emit_vreg_info(emit, instr.def);
+    if (!info)
+        return;
+    bool wide = info->size_bits > 32;
+    /* Neither LGHI nor a copy changes the condition code. */
+    anvil_strbuf_appendf(&emit->code, "         %s  R0,0\n", wide ? "LGHI" : "LHI ");
+    if (systemz_phys_reg(emit, instr.def) != systemz_phys_reg(emit, emit->carry_other))
+        systemz_emit_copy(emit, instr.def, emit->carry_other);
+    anvil_strbuf_appendf(&emit->code, "         %-5s %s,R0\n", wide ? "ALCGR" : "ALCR", systemz_vreg_reg_name(emit, instr.def));
+}
+
 static void systemz_emit_cmp(systemz_emit_t *emit, anvil_mir_instr_info_t instr, size_t index, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
+    if (systemz_emit_carry_compare(emit, instr, index, lhs, rhs))
+        return;
     if (index == emit->tm_at) {
         /* The test under mask before it set the condition code. */
         emit->tm_at = SIZE_MAX;
@@ -1816,6 +1861,10 @@ static void systemz_emit_instr_body(systemz_emit_t *emit, anvil_mir_instr_info_t
         systemz_emit_load_operation(emit, instr);
         return;
     }
+    if (index == emit->carry_add_at) {
+        systemz_emit_carry_add(emit, instr);
+        return;
+    }
     anvil_mir_vreg_t u0 = ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t u1 = ANVIL_MIR_NO_VREG;
     anvil_mir_vreg_t u2 = ANVIL_MIR_NO_VREG;
@@ -2310,7 +2359,7 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 
     systemz_emit_t emit;
     memset(&emit, 0, sizeof(emit));
-    emit.rotate_target = emit.rotate_skip = emit.extension_skip = emit.load_target = emit.tm_at = SIZE_MAX;
+    emit.rotate_target = emit.rotate_skip = emit.extension_skip = emit.load_target = emit.carry_add_at = emit.tm_at = SIZE_MAX;
     emit.desc = desc;
     emit.ret_low_word = ANVIL_MIR_NO_VREG;
     emit.mir = mir;

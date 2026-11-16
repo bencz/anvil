@@ -631,8 +631,6 @@ bool anvil_arm64_verify_mir_legal(const anvil_mir_func_t *mir, char *error, size
     return anvil_mir_verify_legal(&sized, mir, error, error_len);
 }
 
-/* [base, index{, lsl #log2(size)}]: no displacement, the index scaled by
- * one or by the access size. */
 /* [base, index{, lsl|sxtw|uxtw #log2(size)}]: the scale is 1 or the
  * access size, the index 64 bits or a 32-bit register extended. */
 static bool arm64_address_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)

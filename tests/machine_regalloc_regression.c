@@ -740,6 +740,51 @@ static void test_address_arithmetic_folds_into_accesses(void)
     }
 }
 
+/* A target whose indexed forms take no displacement. */
+static bool no_displacement_mode(void *user, unsigned scale, int64_t disp, uint16_t access_bits, anvil_mir_index_extend_t extend)
+{
+    return disp == 0 && any_scale_mode(user, scale, disp, access_bits, extend);
+}
+
+/* load (p + 16) + i * 8: where the indexed form takes a displacement, the
+ * access reads p + i * 8 + 16 and the ADD of 16 goes; elsewhere it stays
+ * the base. */
+static void test_address_offset_joins_displacement(void)
+{
+    for (int with_displacement = 0; with_displacement < 2; with_displacement++) {
+        anvil_mir_func_t *fn = anvil_mir_func_create("mir_address_offset");
+        anvil_mir_vreg_t p = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), sixteen = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t shifted = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), index = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t eight = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), scaled = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t address = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64), value = anvil_mir_add_vreg_ex(fn, ANVIL_MIR_REG_GPR, 64);
+        anvil_mir_vreg_t offset_uses[] = { p, sixteen }, mul_uses[] = { index, eight }, add_uses[] = { shifted, scaled }, load_uses[] = { address };
+        anvil_mir_vreg_t ret_uses[] = { value };
+        CHECK(anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, p, 4096) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, sixteen, 16) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, shifted, offset_uses, 2) && anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, index, 3) &&
+                  anvil_mir_add_instr_imm(fn, ANVIL_MIR_OP_MOV, eight, 8) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_MUL, scaled, mul_uses, 2) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_ADD, address, add_uses, 2) && anvil_mir_add_instr(fn, ANVIL_MIR_OP_LOAD, value, load_uses, 1) &&
+                  anvil_mir_add_instr(fn, ANVIL_MIR_OP_RET, ANVIL_MIR_NO_VREG, ret_uses, 1),
+              "offset address arithmetic should build");
+        CHECK(anvil_mir_fold_address_arithmetic(fn, with_displacement ? any_scale_mode : no_displacement_mode, NULL), "address folding should run");
+        char error[192] = { 0 };
+        CHECK(anvil_mir_verify(fn, error, sizeof(error)), "folded MachineIR should verify");
+        bool found = false;
+        for (size_t i = 0; i < anvil_mir_num_instrs(fn); i++) {
+            anvil_mir_instr_info_t info;
+            if (!anvil_mir_get_instr_info(fn, i, &info) || info.op != ANVIL_MIR_OP_LOAD)
+                continue;
+            found = true;
+            anvil_mir_vreg_t base = anvil_mir_get_instr_use(fn, i, 0);
+            if (with_displacement)
+                CHECK(info.index_scale == 8 && base == p && info.has_imm && info.imm == 16, "the constant addend joins the displacement");
+            else
+                CHECK(info.index_scale == 8 && base == shifted && (!info.has_imm || info.imm == 0), "without a displacement form p + 16 stays the base");
+        }
+        CHECK(found, "the load should remain");
+        anvil_mir_func_destroy(fn);
+    }
+}
+
 static void test_local_cse_reuses_pure_values_until_redefinition(void)
 {
     for (int redefine = 0; redefine < 2; redefine++) {
@@ -1737,6 +1782,7 @@ int main(void)
     test_local_cse_folds_conversions_of_constants();
     test_block_constants_merge();
     test_dead_values_removed();
+    test_address_offset_joins_displacement();
     test_address_folding_absorbs_index_extension();
     test_shared_scaled_index_folds_after_cse();
     test_loop_tests_rotate_and_phi_copies_retarget();

@@ -1095,6 +1095,63 @@ static void test_systemz_storage_operands(void)
     }
 }
 
+/* z/Architecture: x + (a u< b) and x + (a u> b) add the carry a logical
+ * compare leaves (CLR/CLGR then ALCR/ALCGR), and a multiply by 2^k into
+ * another register is one SLLG from the source. */
+static void test_systemz_carry_and_shift(void)
+{
+    for (int wide = 0; wide < 2; wide++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ZARCH);
+        anvil_module_t *module = anvil_module_create(ctx, "carry");
+        anvil_type_t *type = wide ? anvil_type_u64(ctx) : anvil_type_u32(ctx);
+        anvil_type_t *params[] = {type, type, type};
+        anvil_func_t *func = anvil_func_create(module, "count", anvil_type_func(ctx, type, params, 3, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_value_t *a = anvil_func_get_param(func, 1), *b = anvil_func_get_param(func, 2);
+        anvil_value_t *flag = wide ? anvil_build_cmp_ugt(ctx, a, b, "above") : anvil_build_cmp_ult(ctx, a, b, "below");
+        anvil_value_t *sum = anvil_build_add(ctx, anvil_func_get_param(func, 0), anvil_build_zext(ctx, flag, type, "carry"), "sum");
+        anvil_value_t *eight = wide ? anvil_const_u64(ctx, 8) : anvil_const_u32(ctx, 8);
+        anvil_value_t *scaled = anvil_build_mul(ctx, a, eight, "scaled");
+        anvil_build_ret(ctx, anvil_build_xor(ctx, sum, scaled, "mixed"));
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, wide ? "ALCGR R" : "ALCR  R") &&
+                     strstr(assembly, wide ? "CLGR  R" : "CLR   R") && (!wide || strstr(assembly, "SLLG  R"));
+        char message[128];
+        snprintf(message, sizeof(message), "z/Architecture %s: carry added by ALC, multiply by 8 one shift", wide ? "64-bit" : "32-bit");
+        CHECK(valid, message);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
+/* *p + (a u< b) on x86-64: the add prints as adc on the compare's carry,
+ * so the load stays a load (folded into the add, nothing printed it). */
+static void test_x86_carry_add_keeps_its_load(void)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+    anvil_module_t *module = anvil_module_create(ctx, "carry_load");
+    anvil_type_t *u32 = anvil_type_u32(ctx);
+    anvil_type_t *params[] = {anvil_type_ptr(ctx, u32), u32, u32};
+    anvil_func_t *func = anvil_func_create(module, "count", anvil_type_func(ctx, u32, params, 3, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, func->entry);
+    anvil_value_t *x = anvil_build_load(ctx, u32, anvil_func_get_param(func, 0), "x");
+    anvil_value_t *below = anvil_build_cmp_ult(ctx, anvil_func_get_param(func, 1), anvil_func_get_param(func, 2), "below");
+    anvil_build_ret(ctx, anvil_build_add(ctx, x, anvil_build_zext(ctx, below, u32, "carry"), "sum"));
+    char *assembly = NULL;
+    size_t length = 0;
+    bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, "adcl $0") && strstr(assembly, "movl (%rdi), %");
+    CHECK(valid, "x86-64: the load an adc adds stays a load");
+    if (!valid && assembly)
+        fprintf(stderr, "%s\n", assembly);
+    free(assembly);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -1157,6 +1214,8 @@ int main(void)
     test_x86_zero_extending_masks();
     test_x86_address_operands();
     test_systemz_storage_operands();
+    test_systemz_carry_and_shift();
+    test_x86_carry_add_keeps_its_load();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

@@ -487,7 +487,9 @@ order_blocks  ->  coalesce_copies  ->  split_early_return  ->  printer scratch
   (`index_scale` on LOAD/STORE) when the target's hook accepts the form:
   x86 `disp(base,index,scale)` (both widths, `x86_address.h`), ARM64
   `[base, index, lsl #log2(size)]` (a 32-bit index extended in place:
-  `sxtw`/`uxtw`, `index_extend`), PowerPC X-form, SystemZ `D(X,B)`. Targets without the hook never see indexed accesses.
+  `sxtw`/`uxtw`, `index_extend`), PowerPC X-form, SystemZ `D(X,B)`. Targets without the hook never see indexed accesses. A base that is another value plus a constant, read only there, gives
+  the constant to the displacement where the indexed form takes one (x86,
+  SystemZ; the ARM64 and PowerPC indexed forms take none).
 - **Call clobbers**: every CALL (and every instruction the printer expands into
   a helper call) carries the ABI's caller-saved set as a per-instruction
   clobber mask; the allocator keeps values that cross it out of those

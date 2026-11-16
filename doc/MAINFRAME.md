@@ -186,7 +186,12 @@ literal pool. A load whose only reader is an operation taking a storage
 operand is that operand (`anvil_mir_isel_load_operand`): `AL`, `SL`, `N`, `O`, `X`
 (`ALY`... with long displacements), `ALG`, `SLG`, `NG`, `OG`, `XG`, `MSG`, and the
 FP arithmetic (`ADB`/`SDB`/`MDB`/`DDB`, RXE with short displacements only; HFP
-`AD`/`SD`/`MD`/`DD`); the 32-bit multiply keeps the R0:R1 pair. A
+`AD`/`SD`/`MD`/`DD`); the 32-bit multiply keeps the R0:R1 pair. On
+z/Architecture `x + (a u< b)` and `x + (a u> b)` add the carry a logical
+compare leaves (condition code 2, its leftmost bit, when the first operand is
+the higher): `CLR`/`CLGR`, `LHI R0,0`, `ALCR`/`ALCGR` (new in z/Architecture,
+marked N3: added to ESA/390 later). A multiply by 2^k into another register
+is one `SLLG` (or `SLLK` with distinct operands) from its source. A
 constant address (a GEP of constant indices) becomes base + displacement
 where the CPU's forms reach it, and the displacement goes into an index
 register otherwise. The lowering, the MIR address folds and the legality

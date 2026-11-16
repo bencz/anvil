@@ -643,6 +643,12 @@ size_t anvil_mir_isel_load_operand(const anvil_mir_func_t *mir, const anvil_mir_
                     next.op == ANVIL_MIR_OP_XOR;
     if (lhs == rhs || (rhs != load.def && !(commutes && lhs == load.def)))
         return SIZE_MAX;
+    /* The add of x + (a cmp b) prints from the compare's flags (x86 adc,
+     * SystemZ ALCR), reading x from its register. */
+    size_t extension, add;
+    anvil_mir_vreg_t addend;
+    if (next.op == ANVIL_MIR_OP_ADD && reader >= 2 && anvil_mir_isel_condition_add(mir, facts, reader - 2, &extension, &add, &addend) && add == reader)
+        return SIZE_MAX;
     *other = rhs == load.def ? lhs : rhs;
     int dst = fold_phys(mir, next.def), keep = fold_phys(mir, *other);
     /* Loaded into the result's register, a commutative operation reads it

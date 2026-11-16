@@ -130,8 +130,9 @@ size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_i
  * the other operand in a register (`other`), and a result register that
  * is the other operand's or no address register (it receives the other
  * operand before the memory is read) nor, for a commutative operation, the
- * load's (no copy is needed then without the fold).  SIZE_MAX when there
- * is none. */
+ * load's (no copy is needed then without the fold); not the add of
+ * x + (a cmp b) (anvil_mir_isel_condition_add), which targets print from the
+ * compare's flags.  SIZE_MAX when there is none. */
 size_t anvil_mir_isel_load_operand(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, anvil_mir_vreg_t *other);
 
 /* The first instruction after `index` in its block that prints anything
