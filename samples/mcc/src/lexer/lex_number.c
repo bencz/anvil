@@ -181,6 +181,7 @@ mcc_token_t *lex_number(mcc_lexer_t *lex)
     } else {
         tok->literal.int_val.value = strtoull(text, NULL, base);
         tok->literal.int_val.suffix = int_suffix;
+        tok->literal.int_val.radix = (unsigned)base;
     }
     
     return tok;

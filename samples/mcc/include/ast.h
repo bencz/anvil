@@ -379,6 +379,10 @@ struct mcc_ast_node {
         struct {
             uint64_t value;
             mcc_int_suffix_t suffix;
+            /* As written (10, 16, 8 or 2), whose value picks the type (C11
+             * 6.4.4.1p5); 0 for a constant the compiler made, typed by its
+             * suffix alone. */
+            unsigned radix;
         } int_lit;
         
         /* Float literal */

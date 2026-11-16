@@ -204,6 +204,7 @@ typedef struct mcc_token {
         struct {
             uint64_t value;
             mcc_int_suffix_t suffix;
+            unsigned radix;  /* 10, 16, 8 or 2 as written */
         } int_val;
         
         struct {

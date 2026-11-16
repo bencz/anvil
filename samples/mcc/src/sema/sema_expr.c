@@ -12,9 +12,48 @@
  * Literal Analysis
  * ============================================================ */
 
+/* Whether `value` is representable in `type`. */
+static bool int_lit_fits(uint64_t value, mcc_type_t *type)
+{
+    size_t bits = mcc_type_sizeof(type) * 8;
+    uint64_t max = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    if (!type->is_unsigned)
+        max >>= 1;
+    return value <= max;
+}
+
+/* C11 6.4.4.1p5: an integer constant has the first type of its list that
+ * represents its value; the lists start at the suffix's type, and a
+ * decimal constant without u skips the unsigned types.  None fits: the
+ * widest unsigned type, as other compilers do (with a warning). */
+static mcc_type_t *int_lit_type_for_value(mcc_sema_t *sema, mcc_ast_node_t *expr)
+{
+    mcc_int_suffix_t suffix = expr->data.int_lit.suffix;
+    bool decimal = expr->data.int_lit.radix == 10;
+    bool u = suffix == INT_SUFFIX_U || suffix == INT_SUFFIX_UL || suffix == INT_SUFFIX_ULL;
+    unsigned rank = suffix == INT_SUFFIX_LL || suffix == INT_SUFFIX_ULL ? 2 : suffix == INT_SUFFIX_L || suffix == INT_SUFFIX_UL ? 1 : 0;
+    mcc_type_t *signed_types[] = {mcc_type_int(sema->types), mcc_type_long(sema->types), mcc_type_llong(sema->types)};
+    mcc_type_t *unsigned_types[] = {mcc_type_uint(sema->types), mcc_type_ulong(sema->types), mcc_type_ullong(sema->types)};
+    for (unsigned r = rank; r < 3; r++) {
+        if (!u && int_lit_fits(expr->data.int_lit.value, signed_types[r]))
+            return signed_types[r];
+        if ((u || !decimal) && int_lit_fits(expr->data.int_lit.value, unsigned_types[r]))
+            return unsigned_types[r];
+    }
+    mcc_warning_at(sema->ctx, expr->location, "integer constant is too large for its type");
+    return unsigned_types[2];
+}
+
 static mcc_type_t *analyze_int_lit(mcc_sema_t *sema, mcc_ast_node_t *expr)
 {
     mcc_type_t *type;
+    if (expr->data.int_lit.radix) {
+        type = int_lit_type_for_value(sema, expr);
+        if ((expr->data.int_lit.suffix == INT_SUFFIX_LL || expr->data.int_lit.suffix == INT_SUFFIX_ULL) && !sema_has_long_long(sema))
+            mcc_warning_at(sema->ctx, expr->location, "long long is a C99 extension");
+        expr->type = type;
+        return type;
+    }
     switch (expr->data.int_lit.suffix) {
         case INT_SUFFIX_U:
             type = mcc_type_uint(sema->types);

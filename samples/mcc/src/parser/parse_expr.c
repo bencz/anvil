@@ -29,6 +29,7 @@ mcc_ast_node_t *parse_primary(mcc_parser_t *p)
             node = mcc_ast_create(p->ctx, AST_INT_LIT, tok->location);
             node->data.int_lit.value = tok->literal.int_val.value;
             node->data.int_lit.suffix = tok->literal.int_val.suffix;
+            node->data.int_lit.radix = tok->literal.int_val.radix;
             return node;
             
         case TOK_FLOAT_LIT:
