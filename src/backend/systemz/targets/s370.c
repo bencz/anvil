@@ -42,22 +42,6 @@ const anvil_mainframe_target_desc_t s370_target_desc = {
     .asm_ops = &systemz_hlasm_ops
 };
 
-static const anvil_arch_info_t s370_arch_info = {
-    .arch = ANVIL_ARCH_S370,
-    .name = "S/370",
-    .ptr_size = 4,
-    .addr_bits = 24,
-    .word_size = 4,
-    .num_gpr = 16,
-    .num_fpr = 4,
-    .endian = ANVIL_ENDIAN_BIG,
-    .stack_dir = ANVIL_STACK_UP,
-    .fp_format = ANVIL_FP_HFP,
-    .abi = ANVIL_ABI_MVS,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 static anvil_error_t s370_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
     (void)be;
@@ -73,12 +57,6 @@ static void s370_cleanup(anvil_backend_t *be)
 static void s370_reset(anvil_backend_t *be)
 {
     (void)be;
-}
-
-static const anvil_arch_info_t *s370_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &s370_arch_info;
 }
 
 static anvil_error_t s370_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
@@ -99,7 +77,7 @@ const anvil_backend_ops_t anvil_backend_s370 = {
     .reset = s370_reset,
     .codegen_module = s370_codegen_module,
     .codegen_func = s370_codegen_func,
-    .get_arch_info = s370_get_arch_info,
+    .get_arch_info = anvil_backend_arch_info,
     .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
     .abi_support = (1u << ANVIL_ABI_MVS),
     .build_va_arg = anvil_systemz_build_va_arg,

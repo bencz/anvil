@@ -752,6 +752,11 @@ const anvil_arch_info_t *anvil_arch_get_info(anvil_arch_t arch)
     return &arch_info_table[arch];
 }
 
+const anvil_arch_info_t *anvil_backend_arch_info(anvil_backend_t *be)
+{
+    return be && be->ops ? anvil_arch_get_info(be->ops->arch) : NULL;
+}
+
 const char *anvil_ctx_get_error(anvil_ctx_t *ctx)
 {
     if (!ctx) return "Invalid context";

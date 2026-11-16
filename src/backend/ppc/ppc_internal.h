@@ -222,7 +222,6 @@ bool ppc_annotate_printer_scratch(anvil_mir_func_t *mir, anvil_cpu_features_t fe
 anvil_error_t anvil_ppc_backend_init(anvil_backend_t *be, anvil_ctx_t *ctx);
 void anvil_ppc_backend_cleanup(anvil_backend_t *be);
 void anvil_ppc_backend_reset(anvil_backend_t *be);
-const anvil_arch_info_t *anvil_ppc_backend_arch_info(anvil_backend_t *be);
 anvil_error_t anvil_ppc_backend_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len);
 anvil_error_t anvil_ppc_backend_codegen_func(anvil_backend_t *be, anvil_func_t *func, char **output, size_t *len);
 bool anvil_ppc_backend_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type);
@@ -240,7 +239,7 @@ size_t ppc_vector_isa_count(const anvil_ppc_target_desc_t *desc);
     .reset = anvil_ppc_backend_reset,                               \
     .codegen_module = anvil_ppc_backend_codegen_module,             \
     .codegen_func = anvil_ppc_backend_codegen_func,                 \
-    .get_arch_info = anvil_ppc_backend_arch_info,                   \
+    .get_arch_info = anvil_backend_arch_info,                   \
     .atomic_is_lock_free = anvil_ppc_backend_atomic_is_lock_free,   \
     .vector_operation_cost = anvil_ppc_backend_vector_operation_cost, \
     .build_va_arg = anvil_ppc_backend_build_va_arg,                 \

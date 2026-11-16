@@ -1996,7 +1996,7 @@ typedef struct anvil_backend_ops {
 | `prepare_ir` | Optional: lower/legalize/transform IR before codegen (NULL to skip) |
 | `codegen_module` | Generate assembly for entire module |
 | `codegen_func` | Generate assembly for single function |
-| `get_arch_info` | Return architecture information |
+| `get_arch_info` | Return architecture information (`anvil_backend_arch_info`: the core table's entry) |
 | `priv` | Private backend data |
 
 **Note:** The `reset` function is called by `anvil_ctx_destroy()` before destroying modules. This ensures that any cached pointers to `anvil_value_t` in backend data structures (like stack slots or string tables) are cleared before the IR values are freed.

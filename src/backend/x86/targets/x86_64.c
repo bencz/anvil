@@ -7,20 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const anvil_arch_info_t x64_arch_info = {
-    .arch = ANVIL_ARCH_X86_64,
-    .name = "x86-64",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 16,
-    .num_fpr = 16,
-    .endian = ANVIL_ENDIAN_LITTLE,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 static anvil_error_t x64_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
     x64_backend_t *priv = calloc(1, sizeof(x64_backend_t));
@@ -59,12 +45,6 @@ static void x64_reset(anvil_backend_t *be)
     priv->string_counter = 0;
 }
 
-static const anvil_arch_info_t *x64_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &x64_arch_info;
-}
-
 static bool x64_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
 {
     (void)be;
@@ -91,7 +71,7 @@ const anvil_backend_ops_t anvil_backend_x86_64 = {
     .reset = x64_reset,
     .codegen_module = x64_codegen_module,
     .codegen_func = x64_codegen_func,
-    .get_arch_info = x64_get_arch_info,
+    .get_arch_info = anvil_backend_arch_info,
     .classify_abi_value = x64_classify_abi_value,
     .build_va_arg = anvil_x64_build_va_arg,
     .build_va_copy = anvil_x64_build_va_copy,

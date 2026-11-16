@@ -43,22 +43,6 @@ const anvil_mainframe_target_desc_t zarch_target_desc = {
     .asm_ops = &systemz_hlasm_ops
 };
 
-static const anvil_arch_info_t zarch_arch_info = {
-    .arch = ANVIL_ARCH_ZARCH,
-    .name = "z/Architecture",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 16,
-    .num_fpr = 16,
-    .endian = ANVIL_ENDIAN_BIG,
-    .stack_dir = ANVIL_STACK_UP,
-    .fp_format = ANVIL_FP_HFP_IEEE,
-    .abi = ANVIL_ABI_MVS,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 static anvil_error_t zarch_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
     (void)be;
@@ -74,12 +58,6 @@ static void zarch_cleanup(anvil_backend_t *be)
 static void zarch_reset(anvil_backend_t *be)
 {
     (void)be;
-}
-
-static const anvil_arch_info_t *zarch_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &zarch_arch_info;
 }
 
 static anvil_error_t zarch_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
@@ -100,7 +78,7 @@ const anvil_backend_ops_t anvil_backend_zarch = {
     .reset = zarch_reset,
     .codegen_module = zarch_codegen_module,
     .codegen_func = zarch_codegen_func,
-    .get_arch_info = zarch_get_arch_info,
+    .get_arch_info = anvil_backend_arch_info,
     .param_attr_support = (1u << ANVIL_PARAM_BYVAL) | (1u << ANVIL_PARAM_SRET),
     .abi_support = (1u << ANVIL_ABI_MVS),
     .build_va_arg = anvil_systemz_build_va_arg,

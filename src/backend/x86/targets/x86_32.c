@@ -7,20 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const anvil_arch_info_t x86_arch_info = {
-    .arch = ANVIL_ARCH_X86,
-    .name = "x86",
-    .ptr_size = 4,
-    .addr_bits = 32,
-    .word_size = 4,
-    .num_gpr = 8,
-    .num_fpr = 8,
-    .endian = ANVIL_ENDIAN_LITTLE,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 static anvil_error_t x86_init(anvil_backend_t *be, anvil_ctx_t *ctx)
 {
     x86_backend_priv_t *priv = calloc(1, sizeof(x86_backend_priv_t));
@@ -53,12 +39,6 @@ static void x86_reset(anvil_backend_t *be)
     (void)be;
 }
 
-static const anvil_arch_info_t *x86_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &x86_arch_info;
-}
-
 /* Words and smaller, with CMPXCHG/XADD (i486 and later). 64-bit atomics
  * would need CMPXCHG8B sequences, which the lowering does not produce. */
 static bool x86_atomic_is_lock_free(anvil_backend_t *be, anvil_type_t *type)
@@ -88,7 +68,7 @@ const anvil_backend_ops_t anvil_backend_x86 = {
     .reset = x86_reset,
     .codegen_module = x86_codegen_module,
     .codegen_func = x86_codegen_func,
-    .get_arch_info = x86_get_arch_info,
+    .get_arch_info = anvil_backend_arch_info,
     .build_va_arg = anvil_x86_build_va_arg,
     .build_va_copy = anvil_x86_build_va_copy,
     .build_va_copy_into = anvil_x86_build_va_copy_into,

@@ -54,7 +54,6 @@ typedef struct {
     const int *scratch_fpr_regs;
     size_t num_scratch_fpr_regs;
     const struct anvil_ppc_abi_ops *abi_ops;
-    const anvil_arch_info_t *arch_info;
 } anvil_ppc_target_desc_t;
 
 const anvil_ppc_target_desc_t *

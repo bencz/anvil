@@ -210,6 +210,7 @@ TESTS = \
 	$(BUILD_DIR)/tests/pair_lowering_regression \
 	$(BUILD_DIR)/tests/mir_legal_regression \
 	$(BUILD_DIR)/tests/printer_data_regression \
+	$(BUILD_DIR)/tests/arch_info_regression \
 	$(BUILD_DIR)/tests/jump_threading_regression \
 	$(BUILD_DIR)/tests/abi_plan_regression \
 	$(BUILD_DIR)/tests/optimization_pipeline_regression \

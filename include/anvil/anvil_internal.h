@@ -335,6 +335,10 @@ struct anvil_backend {
     void *priv;
 };
 
+/* The backends' get_arch_info: the architecture's one descriptor (the
+ * core table, anvil_arch_get_info). */
+const anvil_arch_info_t *anvil_backend_arch_info(anvil_backend_t *be);
+
 /* Context structure */
 struct anvil_ctx {
     anvil_arch_t arch;

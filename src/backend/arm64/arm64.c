@@ -20,20 +20,6 @@
  * Architecture Info
  * ============================================================================ */
 
-static const anvil_arch_info_t arm64_arch_info = {
-    .arch = ANVIL_ARCH_ARM64,
-    .name = "ARM64",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 31,
-    .num_fpr = 32,
-    .endian = ANVIL_ENDIAN_LITTLE,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 /* ============================================================================
  * Backend Lifecycle
  * ============================================================================ */
@@ -65,12 +51,6 @@ static void arm64_cleanup(anvil_backend_t *be)
 static void arm64_reset(anvil_backend_t *be)
 {
     (void)be;
-}
-
-static const anvil_arch_info_t *arm64_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &arm64_arch_info;
 }
 
 /* ============================================================================
@@ -261,7 +241,7 @@ const anvil_backend_ops_t anvil_backend_arm64 = {
     .reset = arm64_reset,
     .codegen_module = arm64_codegen_module,
     .codegen_func = arm64_codegen_func,
-    .get_arch_info = arm64_get_arch_info,
+    .get_arch_info = anvil_backend_arch_info,
     .atomic_is_lock_free = arm64_atomic_is_lock_free,
     .build_va_arg = arm64_build_va_arg,
     .build_va_copy = arm64_build_va_copy,

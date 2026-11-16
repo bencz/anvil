@@ -175,12 +175,6 @@ void anvil_ppc_backend_reset(anvil_backend_t *be)
     (void)be;
 }
 
-const anvil_arch_info_t *anvil_ppc_backend_arch_info(anvil_backend_t *be)
-{
-    const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);
-    return desc ? desc->arch_info : NULL;
-}
-
 anvil_error_t anvil_ppc_backend_codegen_module(anvil_backend_t *be, anvil_module_t *mod, char **output, size_t *len)
 {
     const anvil_ppc_target_desc_t *desc = ppc_backend_desc(be);

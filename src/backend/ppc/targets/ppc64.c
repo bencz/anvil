@@ -7,20 +7,6 @@
 
 #include "../ppc_internal.h"
 
-static const anvil_arch_info_t ppc64_arch_info = {
-    .arch = ANVIL_ARCH_PPC64,
-    .name = "PowerPC 64-bit",
-    .ptr_size = 8,
-    .addr_bits = 64,
-    .word_size = 8,
-    .num_gpr = 32,
-    .num_fpr = 32,
-    .endian = ANVIL_ENDIAN_BIG,
-    .stack_dir = ANVIL_STACK_DOWN,
-    .has_condition_codes = true,
-    .has_delay_slots = false,
-};
-
 const anvil_ppc_target_desc_t ppc64_target_desc = {
     .variant = ANVIL_PPC_VARIANT_PPC64,
     .arch = ANVIL_ARCH_PPC64,
@@ -50,7 +36,6 @@ const anvil_ppc_target_desc_t ppc64_target_desc = {
     .scratch_fpr_regs = ppc_scratch_fpr_regs,
     .num_scratch_fpr_regs = sizeof(ppc_scratch_fpr_regs) / sizeof(ppc_scratch_fpr_regs[0]),
     .abi_ops = &ppc_elfv1_abi_ops,
-    .arch_info = &ppc64_arch_info
 };
 
 const anvil_backend_ops_t anvil_backend_ppc64 = {

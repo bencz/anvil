@@ -643,8 +643,11 @@ typedef struct {
 
 ### Step 2: Define Architecture Info
 
+Add the architecture's entry to `arch_info_table` in `src/core/context.c`
+(the one descriptor every pass and backend reads):
+
 ```c
-static const anvil_arch_info_t myarch_arch_info = {
+[ANVIL_ARCH_MYARCH] = {
     .arch = ANVIL_ARCH_MYARCH,
     .name = "MyArch",
     .ptr_size = 4,                 // 4 bytes for 32-bit
@@ -656,7 +659,7 @@ static const anvil_arch_info_t myarch_arch_info = {
     .stack_dir = ANVIL_STACK_DOWN,
     .has_condition_codes = true,
     .has_delay_slots = false
-};
+},
 ```
 
 ### Step 3: Implement Init and Cleanup
@@ -699,13 +702,11 @@ static void myarch_reset(anvil_backend_t *be)
     priv->label_counter = 0;
     // Reset any stack_slots, strings, or other cached IR pointers
 }
-
-static const anvil_arch_info_t *myarch_get_arch_info(anvil_backend_t *be)
-{
-    (void)be;
-    return &myarch_arch_info;
-}
 ```
+
+The architecture's facts live in one place, its entry of the core table
+(`arch_info_table` in `src/core/context.c`); a backend's `get_arch_info` is
+`anvil_backend_arch_info`, which returns that entry.
 
 ### Step 4: Implement Code Emission Helpers
 
@@ -959,7 +960,7 @@ const anvil_backend_ops_t anvil_backend_myarch = {
     .reset = myarch_reset,
     .codegen_module = myarch_codegen_module,
     .codegen_func = myarch_codegen_func,
-    .get_arch_info = myarch_get_arch_info
+    .get_arch_info = anvil_backend_arch_info
 };
 ```
 
