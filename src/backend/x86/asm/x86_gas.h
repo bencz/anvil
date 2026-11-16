@@ -66,10 +66,16 @@ typedef struct {
     const char *frame_reg;
     int frame_bias;
     int min_gpr_move;
+    /* Integer operations narrower than this compute at this width (the
+     * low bytes are the same); shifts keep their own width. */
+    int min_operation_bytes;
     int outgoing_base;
     bool (*has_byte)(int phys);
     void (*fp_load)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
     void (*fp_store)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
+    /* The FP unit's compare of `a` with `b` into the flags (as ucomis b, a). */
+    void (*fp_compare)(void *gas, anvil_mir_vreg_t a, anvil_mir_vreg_t b);
+    const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
     unsigned frame_next;
@@ -104,6 +110,17 @@ bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
 /* Marks the operands the printers encode with no register (immediates
  * only: symbols stay materialized), for a mode set up by `mode`. */
 bool x86_gas_mark_registerless(anvil_mir_func_t *mir, void (*mode)(x86_gas_t *gas, const void *user), const void *user);
+/* ADD, SUB, MUL, AND, OR, XOR and the shifts on general registers: lea
+ * and shift forms where they do the work in one instruction, an
+ * immediate where the facts give one; false for any other operation (the
+ * printer's division). */
+bool x86_gas_emit_gpr_arith(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size);
+/* Whether the compare at `index` only feeds the branch or select right
+ * after it (which then reads the flags). */
+bool x86_gas_fuses(const x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* An integer or FP compare: the flags for a fused branch or select, a
+ * carry for an add of the condition (adc), or a 0/1 register. */
+void x86_gas_emit_cmp(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

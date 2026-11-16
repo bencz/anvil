@@ -1,4 +1,5 @@
 #include "x86_gas.h"
+#include "../x86_address.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -567,4 +568,238 @@ bool x86_gas_mark_registerless(anvil_mir_func_t *mir, void (*mode)(x86_gas_t *ga
 const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol)
 {
     return symbol && symbol[0] == '.' ? "" : gas->symbol_prefix;
+}
+
+/* The register shifts read a variable count from (CL). */
+enum { X86_GAS_COUNT_REG = 1 };
+
+static bool emit_shift(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size, int width)
+{
+    const char *sh = info->op == ANVIL_MIR_OP_SHL ? "shl" : info->op == ANVIL_MIR_OP_SHR ? "shr" : "sar";
+    const char *move = x86_gas_size_suffix(width), *suffix = x86_gas_size_suffix(size);
+    const char *a = x86_gas_gpr(a_phys, width), *dst = x86_gas_gpr(dst_phys, width);
+    int64_t count = 0;
+    if (size == 1 && gas->has_byte && !gas->has_byte(dst_phys)) {
+        gas->failed = true;
+        return true;
+    }
+    if (x86_gas_known_imm(gas, anvil_mir_get_instr_use(gas->mir, index, 1), &count)) {
+        if (dst_phys != a_phys)
+            anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", move, a, dst);
+        anvil_strbuf_appendf(&gas->code, "\t%s%s $%d, %%%s\n", sh, suffix, (int)(count & (size == 8 ? 63 : 31)), x86_gas_gpr(dst_phys, size));
+        return true;
+    }
+    /* CL is the printer's temporary; dst may share b's register: b reaches
+     * CL first. */
+    anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", move, x86_gas_gpr(b_phys, width), x86_gas_gpr(X86_GAS_COUNT_REG, width));
+    if (dst_phys != a_phys)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", move, a, dst);
+    anvil_strbuf_appendf(&gas->code, "\t%s%s %%cl, %%%s\n", sh, suffix, x86_gas_gpr(dst_phys, size));
+    return true;
+}
+
+bool x86_gas_emit_gpr_arith(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size)
+{
+    int width = size < gas->min_operation_bytes ? gas->min_operation_bytes : size, pointer = gas->pointer_bytes;
+    if (info->op == ANVIL_MIR_OP_SHL || info->op == ANVIL_MIR_OP_SHR || info->op == ANVIL_MIR_OP_SAR)
+        return gas->failed || emit_shift(gas, index, info, dst_phys, a_phys, b_phys, size, width);
+    const char *mnemonic = info->op == ANVIL_MIR_OP_ADD ? "add" : info->op == ANVIL_MIR_OP_SUB ? "sub" : info->op == ANVIL_MIR_OP_MUL ? "imul"
+                         : info->op == ANVIL_MIR_OP_AND ? "and" : info->op == ANVIL_MIR_OP_OR ? "or" : info->op == ANVIL_MIR_OP_XOR ? "xor" : NULL;
+    if (!mnemonic)
+        return false;
+    if (gas->failed)
+        return true;
+    const char *suffix = x86_gas_size_suffix(width);
+    const char *a = x86_gas_gpr(a_phys, width), *b = x86_gas_gpr(b_phys, width), *dst = x86_gas_gpr(dst_phys, width);
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, index, 0), rhs = anvil_mir_get_instr_use(gas->mir, index, 1);
+    bool commutative = info->op != ANVIL_MIR_OP_SUB;
+    int64_t imm = 0;
+    bool b_imm = x86_gas_known_imm(gas, rhs, &imm);
+    if (!b_imm && commutative && x86_gas_known_imm(gas, lhs, &imm)) {
+        /* x OP c == c OP x */
+        b_imm = true;
+        a_phys = b_phys;
+        a = b;
+    }
+    bool wide = width >= 4;
+    if (b_imm) {
+        unsigned shift = 0;
+        anvil_mir_mul_form_t form = info->op == ANVIL_MIR_OP_MUL ? anvil_mir_isel_mul_form(imm, (unsigned)width * 8, &shift) : ANVIL_MIR_MUL_MULTIPLY;
+        if (form == ANVIL_MIR_MUL_SHIFT) {
+            if (dst_phys != a_phys)
+                anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", suffix, a, dst);
+            if (shift != 0)
+                anvil_strbuf_appendf(&gas->code, "\tshl%s $%u, %%%s\n", suffix, shift, dst);
+        } else if (form == ANVIL_MIR_MUL_SHIFT_ADD && wide && x86_address_mode(NULL, 1u << shift, 0, 0, ANVIL_MIR_INDEX_PLAIN)) {
+            /* x * (2^k + 1): x + x * 2^k, one lea for scales 2, 4, 8. */
+            anvil_strbuf_appendf(&gas->code, "\tlea%s (%%%s,%%%s,%u), %%%s\n", suffix, x86_gas_gpr(a_phys, pointer), x86_gas_gpr(a_phys, pointer), 1u << shift, dst);
+        } else if (info->op == ANVIL_MIR_OP_MUL) {
+            /* Bytes multiply in 16 bits: the low byte is the same. */
+            int bytes = width >= 2 ? width : 2;
+            anvil_strbuf_appendf(&gas->code, "\timul%s $%lld, %%%s, %%%s\n", x86_gas_size_suffix(bytes), (long long)imm, x86_gas_gpr(a_phys, bytes),
+                                 x86_gas_gpr(dst_phys, bytes));
+        } else if (dst_phys != a_phys && wide && (info->op == ANVIL_MIR_OP_ADD || (info->op == ANVIL_MIR_OP_SUB && imm != INT32_MIN))) {
+            long long offset = info->op == ANVIL_MIR_OP_ADD ? (long long)imm : -(long long)imm;
+            anvil_strbuf_appendf(&gas->code, "\tlea%s %lld(%%%s), %%%s\n", suffix, offset, x86_gas_gpr(a_phys, pointer), dst);
+        } else {
+            if (dst_phys != a_phys)
+                anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", suffix, a, dst);
+            anvil_strbuf_appendf(&gas->code, "\t%s%s $%lld, %%%s\n", mnemonic, suffix, (long long)imm, dst);
+            anvil_print_flags_set(&gas->flags, dst_phys, width);
+        }
+        return true;
+    }
+    bool lea = dst_phys != a_phys && dst_phys != b_phys && info->op == ANVIL_MIR_OP_ADD && wide;
+    if (dst_phys == a_phys)
+        anvil_strbuf_appendf(&gas->code, "\t%s%s %%%s, %%%s\n", mnemonic, suffix, b, dst);
+    else if (lea)
+        anvil_strbuf_appendf(&gas->code, "\tlea%s (%%%s,%%%s), %%%s\n", suffix, x86_gas_gpr(a_phys, pointer), x86_gas_gpr(b_phys, pointer), dst);
+    else if (dst_phys != b_phys)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n\t%s%s %%%s, %%%s\n", suffix, a, dst, mnemonic, suffix, b, dst);
+    else if (commutative)
+        anvil_strbuf_appendf(&gas->code, "\t%s%s %%%s, %%%s\n", mnemonic, suffix, a, dst);
+    else
+        /* dst holds the subtrahend: a - b == -b + a. */
+        anvil_strbuf_appendf(&gas->code, "\tneg%s %%%s\n\tadd%s %%%s, %%%s\n", suffix, dst, suffix, a, dst);
+    /* Every form but lea (and imul's) ends with the operation into dst,
+     * which sets ZF from the result. */
+    if (!lea && info->op != ANVIL_MIR_OP_MUL)
+        anvil_print_flags_set(&gas->flags, dst_phys, width);
+    return true;
+}
+
+bool x86_gas_fuses(const x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    return anvil_mir_isel_feeds_next_branch(&gas->isel, index, info) || anvil_mir_isel_feeds_next_select(&gas->isel, index, info);
+}
+
+/* The boolean of the compare the flags hold: setcc, widened to 32 bits. */
+static void emit_setcc(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const char *dst8, const char *dst32)
+{
+    if (info->op == ANVIL_MIR_OP_FCMP)
+        x86_gas_emit_fcmp_bool(&gas->code, gas->local_label_prefix, anvil_mir_func_name(gas->mir), index, (anvil_fcmp_pred_t)info->imm, dst8);
+    else
+        anvil_strbuf_appendf(&gas->code, "\t%s %%%s\n", x86_gas_setcc(info->op), dst8);
+    anvil_strbuf_appendf(&gas->code, "\tmovzbl %%%s, %%%s\n", dst8, dst32);
+}
+
+static bool byte_register(const x86_gas_t *gas, int phys)
+{
+    return !gas->has_byte || gas->has_byte(phys);
+}
+
+/* An integer compare's flags (false when the compare needs no code of its
+ * own: the flags of the value just computed tell already). */
+static bool integer_compare(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, const anvil_mir_vreg_info_t *lhs_info, bool fuses)
+{
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, index, 0), rhs = anvil_mir_get_instr_use(gas->mir, index, 1);
+    int size = (lhs_info->size_bits + 7) / 8;
+    const char *suffix = x86_gas_size_suffix(size);
+    bool load_is_lhs;
+    anvil_mir_vreg_t compared;
+    anvil_mir_instr_info_t load;
+    if (index == gas->fold_target && anvil_mir_get_instr_info(gas->mir, gas->fold_load, &load) &&
+        x86_gas_compare_folds(gas->mir, index, load.def, lhs_info->size_bits, &load_is_lhs, &compared)) {
+        /* The folded load is the memory operand. */
+        gas->fold_target = SIZE_MAX;
+        const char *other = x86_gas_gpr(x86_gas_phys_of(gas, compared), size);
+        if (!gas->failed)
+            x86_gas_emit_memory_compare(&gas->code, suffix, gas->fold_address, load_is_lhs, other);
+        return true;
+    }
+    int a_phys = x86_gas_phys_of(gas, lhs), b_phys = x86_gas_phys_of(gas, rhs);
+    const char *a = x86_gas_gpr(a_phys, size);
+    int64_t imm = 0;
+    if (gas->failed || (size == 1 && !byte_register(gas, a_phys))) {
+        gas->failed = true;
+        return true;
+    }
+    if (x86_gas_known_imm(gas, rhs, &imm)) {
+        imm = size == 1 ? (int8_t)imm : size == 2 ? (int16_t)imm : imm;
+        /* == 0 or != 0 of the value just computed: its flags tell. */
+        if (imm == 0 && fuses && (info->op == ANVIL_MIR_OP_CMP_EQ || info->op == ANVIL_MIR_OP_CMP_NE) &&
+            anvil_print_flags_take(&gas->flags, &gas->code, a_phys, size))
+            return false;
+        /* test sets the flags of a compare with zero, in fewer bytes. */
+        if (imm == 0)
+            anvil_strbuf_appendf(&gas->code, "\ttest%s %%%s, %%%s\n", suffix, a, a);
+        else
+            anvil_strbuf_appendf(&gas->code, "\tcmp%s $%lld, %%%s\n", suffix, (long long)imm, a);
+        return true;
+    }
+    if (size == 1 && !byte_register(gas, b_phys)) {
+        gas->failed = true;
+        return true;
+    }
+    anvil_strbuf_appendf(&gas->code, "\tcmp%s %%%s, %%%s\n", suffix, x86_gas_gpr(b_phys, size), a);
+    return true;
+}
+
+void x86_gas_emit_cmp(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    if (index == gas->test_at) {
+        /* The test before it set the flags. */
+        gas->test_at = SIZE_MAX;
+        gas->fused_jcc = x86_gas_jcc(info->op);
+        return;
+    }
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, index, 0), rhs = anvil_mir_get_instr_use(gas->mir, index, 1);
+    const anvil_mir_vreg_info_t *lhs_info = lhs == ANVIL_MIR_NO_VREG ? NULL : anvil_mir_get_vreg_info(gas->mir, lhs);
+    if (!lhs_info || rhs == ANVIL_MIR_NO_VREG) {
+        gas->failed = true;
+        return;
+    }
+    int dst_phys = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    /* Booleans live in the byte registers (the allocator's narrow ones). */
+    const char *dst8 = byte_register(gas, dst_phys) ? x86_gas_gpr(dst_phys, 1) : NULL;
+    const char *dst32 = x86_gas_gpr(dst_phys, 4);
+    bool fuses = x86_gas_fuses(gas, index, info);
+    if (!dst8 && !fuses) {
+        gas->failed = true;
+        return;
+    }
+    if (lhs_info->reg_class == ANVIL_MIR_REG_FPR) {
+        /* A branch right after tests the predicates one condition decides
+         * (x86_gas_fcmp_branch); OEQ and UNE stay materialized. */
+        const char *branch_cc;
+        bool swap;
+        if (info->op == ANVIL_MIR_OP_FCMP && fuses && x86_gas_fcmp_branch((anvil_fcmp_pred_t)info->imm, &branch_cc, &swap)) {
+            gas->fp_compare(gas, swap ? rhs : lhs, swap ? lhs : rhs);
+            gas->fused_jcc = branch_cc;
+            return;
+        }
+        if (!dst8) {
+            gas->failed = true;
+            return;
+        }
+        gas->fp_compare(gas, lhs, rhs);
+        if (!gas->failed)
+            emit_setcc(gas, index, info, dst8, dst32);
+        return;
+    }
+    if (!integer_compare(gas, index, info, lhs_info, fuses) || fuses) {
+        /* Consumed only by the branch or select right after it: the flags. */
+        if (!gas->failed)
+            gas->fused_jcc = x86_gas_jcc(info->op);
+        return;
+    }
+    if (gas->failed)
+        return;
+    /* x + (a u< b): the carry of the compare is the condition (an add at
+     * least the width operations compute at). */
+    size_t extension = SIZE_MAX, add = SIZE_MAX;
+    anvil_mir_vreg_t other = ANVIL_MIR_NO_VREG;
+    int64_t constant;
+    const anvil_mir_vreg_info_t *other_info = NULL;
+    if (info->op == ANVIL_MIR_OP_CMP_ULT && anvil_mir_isel_condition_add(gas->mir, &gas->isel, index, &extension, &add, &other) &&
+        !anvil_mir_isel_constant(&gas->isel, other, &constant) && (other_info = anvil_mir_get_vreg_info(gas->mir, other)) &&
+        other_info->size_bits >= gas->min_operation_bytes * 8) {
+        gas->adc_skip = extension;
+        gas->adc_at = add;
+        gas->adc_other = other;
+        return;
+    }
+    emit_setcc(gas, index, info, dst8, dst32);
 }

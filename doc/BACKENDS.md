@@ -248,7 +248,8 @@ src/backend/x86/
                                         condition codes, labels, branches, frame
                                         addresses, spills, selects, stack arguments,
                                         loads and stores with their memory operands,
-                                        load folding and immediate rules
+                                        load folding and immediate rules, integer
+                                        arithmetic, shifts and compares
         gas32.c                         Allocated MIR to 32-bit GAS/AT&T
         gas64.c                         Allocated MIR to 64-bit GAS/AT&T
 ```
