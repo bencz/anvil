@@ -803,3 +803,76 @@ void x86_gas_emit_cmp(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t
     }
     emit_setcc(gas, index, info, dst8, dst32);
 }
+
+/* The instruction a load folded into: its other operand first, then the
+ * operation from memory. */
+static void emit_folded_binary(x86_gas_t *gas, const anvil_mir_instr_info_t *info, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs,
+                               const anvil_mir_vreg_info_t *def_info)
+{
+    gas->fold_target = SIZE_MAX;
+    anvil_mir_instr_info_t load;
+    if (!anvil_mir_get_instr_info(gas->mir, gas->fold_load, &load)) {
+        gas->failed = true;
+        return;
+    }
+    anvil_mir_vreg_t other = rhs == load.def ? lhs : rhs;
+    bool fpr = def_info->reg_class == ANVIL_MIR_REG_FPR;
+    int size = (def_info->size_bits + 7) / 8;
+    int width = fpr || size >= gas->min_operation_bytes ? size : gas->min_operation_bytes;
+    const char *op = info->op == ANVIL_MIR_OP_ADD ? "add" : info->op == ANVIL_MIR_OP_SUB ? "sub" : info->op == ANVIL_MIR_OP_MUL ? (fpr ? "mul" : "imul")
+                   : info->op == ANVIL_MIR_OP_AND ? "and" : info->op == ANVIL_MIR_OP_OR ? "or" : info->op == ANVIL_MIR_OP_XOR ? "xor" : "div";
+    const char *suffix = fpr ? (size <= 4 ? "ss" : "sd") : x86_gas_size_suffix(width);
+    int dst_phys = x86_gas_phys_of(gas, info->def), keep_phys = x86_gas_phys_of(gas, other);
+    const char *dst = fpr ? x86_gas_xmm(dst_phys) : x86_gas_gpr(dst_phys, width);
+    const char *keep = fpr ? x86_gas_xmm(keep_phys) : x86_gas_gpr(keep_phys, width);
+    if (gas->failed)
+        return;
+    if (dst_phys != keep_phys)
+        anvil_strbuf_appendf(&gas->code, "\t%s%s %%%s, %%%s\n", fpr ? "movaps" : "mov", fpr ? "" : suffix, keep, dst);
+    anvil_strbuf_appendf(&gas->code, "\t%s%s %s, %%%s\n", op, suffix, gas->fold_address, dst);
+    if (!fpr && info->op != ANVIL_MIR_OP_MUL)
+        anvil_print_flags_set(&gas->flags, dst_phys, width);
+}
+
+/* x & c only tested against zero by the next branch: test, which keeps x
+ * and writes no register (a mask within a narrow value's own bits when
+ * the test is wider). */
+static bool emit_and_as_test(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info, int a_phys, int size, int width)
+{
+    int64_t mask, zero = 1;
+    if (info->op != ANVIL_MIR_OP_AND || gas->test_at != SIZE_MAX || !x86_gas_known_imm(gas, anvil_mir_get_instr_use(gas->mir, index, 1), &mask) ||
+        (size < width && ((uint64_t)mask >> (8 * size)) != 0))
+        return false;
+    size_t reader = anvil_mir_isel_fold_reader(gas->mir, &gas->isel, index, 4, false);
+    anvil_mir_instr_info_t next;
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(gas->mir, reader, &next) || (next.op != ANVIL_MIR_OP_CMP_EQ && next.op != ANVIL_MIR_OP_CMP_NE) ||
+        next.num_uses != 2 || !x86_gas_known_imm(gas, anvil_mir_get_instr_use(gas->mir, reader, 1), &zero) || zero != 0 || !x86_gas_fuses(gas, reader, &next))
+        return false;
+    anvil_strbuf_appendf(&gas->code, "\ttest%s $%lld, %%%s\n", x86_gas_size_suffix(width), (long long)mask, x86_gas_gpr(a_phys, width));
+    gas->test_at = reader;
+    return true;
+}
+
+void x86_gas_emit_binary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(gas->mir, index, 0), rhs = anvil_mir_get_instr_use(gas->mir, index, 1);
+    const anvil_mir_vreg_info_t *def_info = anvil_mir_get_vreg_info(gas->mir, info->def);
+    if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG || !def_info) {
+        gas->failed = true;
+        return;
+    }
+    if (index == gas->fold_target) {
+        emit_folded_binary(gas, info, lhs, rhs, def_info);
+        return;
+    }
+    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
+        gas->fp_binary(gas, info->op, info->def, lhs, rhs);
+        return;
+    }
+    int size = (def_info->size_bits + 7) / 8;
+    int width = size < gas->min_operation_bytes ? gas->min_operation_bytes : size;
+    int dst_phys = x86_gas_phys_of(gas, info->def), a_phys = x86_gas_phys_of(gas, lhs), b_phys = x86_gas_phys_of(gas, rhs);
+    if (gas->failed || emit_and_as_test(gas, index, info, a_phys, size, width) || x86_gas_emit_gpr_arith(gas, index, info, dst_phys, a_phys, b_phys, size))
+        return;
+    gas->gpr_divide(gas, index, info, dst_phys, a_phys, b_phys, size);
+}

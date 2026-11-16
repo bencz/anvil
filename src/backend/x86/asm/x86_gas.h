@@ -75,6 +75,10 @@ typedef struct {
     void (*fp_store)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
     /* The FP unit's compare of `a` with `b` into the flags (as ucomis b, a). */
     void (*fp_compare)(void *gas, anvil_mir_vreg_t a, anvil_mir_vreg_t b);
+    /* The FP unit's ADD, SUB, MUL and DIV, and the printer's integer
+     * division (the operands' registers given). */
+    void (*fp_binary)(void *gas, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs);
+    void (*gpr_divide)(void *gas, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size);
     const char *local_label_prefix;
     /* Frame operands formatted for the instruction being printed. */
     char frame_text[8][24];
@@ -121,6 +125,10 @@ bool x86_gas_fuses(const x86_gas_t *gas, size_t index, const anvil_mir_instr_inf
 /* An integer or FP compare: the flags for a fused branch or select, a
  * carry for an add of the condition (adc), or a 0/1 register. */
 void x86_gas_emit_cmp(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* A binary operation: into a folded load's reader, as a test feeding the
+ * next branch (x & c compared with zero), on the FP unit, or on general
+ * registers. */
+void x86_gas_emit_binary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);

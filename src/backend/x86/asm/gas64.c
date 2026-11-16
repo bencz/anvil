@@ -547,11 +547,12 @@ static void x64_emit_mov(x64_mir_emit_t *emit, const anvil_mir_instr_info_t *inf
         anvil_strbuf_appendf(&emit->base.code, "\tmovabsq $%lld, %%%s\n", (long long)imm, x86_gas_gpr(dst_phys, 8));
 }
 
-static void x64_emit_gpr_binary(x64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info, int a_phys, int b_phys, int size)
+/* Division in RDX:RAX, which are this instruction's scratch: no operand
+ * is there. */
+static void x64_gpr_divide(void *user, size_t index, const anvil_mir_instr_info_t *info, int dst_phys, int a_phys, int b_phys, int size)
 {
-    int dst_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed || x86_gas_emit_gpr_arith(&emit->base, index, info, dst_phys, a_phys, b_phys, size))
-        return;
+    x64_mir_emit_t *emit = user;
+    (void)index;
     const char *suf = x86_gas_size_suffix(size);
     const char *rax = x86_gas_gpr(X64_RAX, size);
     const char *rdx = x86_gas_gpr(X64_RDX, size);
@@ -665,92 +666,19 @@ static void x64_emit_vector(x64_mir_emit_t *emit, size_t instr_index, const anvi
     emit->base.failed |= printer.failed;
 }
 
-static void x64_emit_binary(x64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info)
+static void x64_fp_binary(void *user, anvil_mir_opcode_t op, anvil_mir_vreg_t def, anvil_mir_vreg_t lhs, anvil_mir_vreg_t rhs)
 {
-    anvil_mir_vreg_t lhs = anvil_mir_get_instr_use(emit->base.mir, instr_index, 0);
-    anvil_mir_vreg_t rhs = anvil_mir_get_instr_use(emit->base.mir, instr_index, 1);
-    if (lhs == ANVIL_MIR_NO_VREG || rhs == ANVIL_MIR_NO_VREG) {
+    x64_mir_emit_t *emit = user;
+    const anvil_mir_vreg_info_t *info = anvil_mir_get_vreg_info(emit->base.mir, def);
+    bool single = info && x64_size_bytes(info->size_bits) <= 4;
+    const char *mnemonic = op == ANVIL_MIR_OP_ADD ? (single ? "addss" : "addsd") : op == ANVIL_MIR_OP_SUB ? (single ? "subss" : "subsd")
+                         : op == ANVIL_MIR_OP_MUL ? (single ? "mulss" : "mulsd") : op == ANVIL_MIR_OP_DIV || op == ANVIL_MIR_OP_FDIV ? (single ? "divss" : "divsd")
+                                                                                                                                   : NULL;
+    if (!info || !mnemonic) {
         emit->base.failed = true;
         return;
     }
-
-    const anvil_mir_vreg_info_t *def_info = x64_vreg_info_checked(emit, info->def);
-    if (!def_info)
-        return;
-
-    if (instr_index == emit->base.fold_target) {
-        /* The folded load's operand: the other one comes first. */
-        emit->base.fold_target = SIZE_MAX;
-        anvil_mir_instr_info_t load;
-        anvil_mir_get_instr_info(emit->base.mir, emit->base.fold_load, &load);
-        anvil_mir_vreg_t other = rhs == load.def ? lhs : rhs;
-        bool fpr = def_info->reg_class == ANVIL_MIR_REG_FPR;
-        int size = x64_size_bytes(def_info->size_bits);
-        const char *op = info->op == ANVIL_MIR_OP_ADD ? "add" : info->op == ANVIL_MIR_OP_SUB ? "sub" : info->op == ANVIL_MIR_OP_MUL ? (fpr ? "mul" : "imul")
-                       : info->op == ANVIL_MIR_OP_AND ? "and" : info->op == ANVIL_MIR_OP_OR ? "or" : info->op == ANVIL_MIR_OP_XOR ? "xor" : "div";
-        const char *suffix = fpr ? (size <= 4 ? "ss" : "sd") : x86_gas_size_suffix(size);
-        const char *dst = fpr ? x86_gas_xmm(x86_gas_phys_of(&emit->base, info->def)) : x86_gas_gpr(x86_gas_phys_of(&emit->base, info->def), size);
-        const char *keep = fpr ? x86_gas_xmm(x86_gas_phys_of(&emit->base, other)) : x86_gas_gpr(x86_gas_phys_of(&emit->base, other), size);
-        if (emit->base.failed)
-            return;
-        if (strcmp(dst, keep) != 0)
-            anvil_strbuf_appendf(&emit->base.code, "\t%s %%%s, %%%s\n", fpr ? "movaps" : (size == 8 ? "movq" : "movl"), keep, dst);
-        anvil_strbuf_appendf(&emit->base.code, "\t%s%s %s, %%%s\n", op, suffix, emit->base.fold_address, dst);
-        if (!fpr && info->op != ANVIL_MIR_OP_MUL)
-            anvil_print_flags_set(&emit->base.flags, x86_gas_phys_of(&emit->base, info->def), size);
-        return;
-    }
-
-    /* x & c only tested against zero by the next branch: test, which
-     * keeps x and writes no register. */
-    int64_t mask;
-    if (info->op == ANVIL_MIR_OP_AND && def_info->reg_class == ANVIL_MIR_REG_GPR && x86_gas_known_imm(&emit->base, rhs, &mask) && emit->base.test_at == SIZE_MAX) {
-        size_t reader = anvil_mir_isel_fold_reader(emit->base.mir, &emit->base.isel, instr_index, 4, false);
-        anvil_mir_instr_info_t next;
-        int64_t zero = 1;
-        if (reader != SIZE_MAX && anvil_mir_get_instr_info(emit->base.mir, reader, &next) && (next.op == ANVIL_MIR_OP_CMP_EQ || next.op == ANVIL_MIR_OP_CMP_NE) &&
-            next.num_uses == 2 && x86_gas_known_imm(&emit->base, anvil_mir_get_instr_use(emit->base.mir, reader, 1), &zero) && zero == 0 &&
-            x86_gas_fuses(&emit->base, reader, &next)) {
-            int size = x64_size_bytes(def_info->size_bits);
-            const char *source = x86_gas_gpr(x86_gas_phys_of(&emit->base, lhs), size);
-            if (!emit->base.failed)
-                anvil_strbuf_appendf(&emit->base.code, "\ttest%s $%lld, %%%s\n", x86_gas_size_suffix(size), (long long)mask, source);
-            emit->base.test_at = reader;
-            return;
-        }
-    }
-
-    if (def_info->reg_class == ANVIL_MIR_REG_FPR) {
-        int size = x64_size_bytes(def_info->size_bits);
-        const char *op = NULL;
-        switch (info->op) {
-        case ANVIL_MIR_OP_ADD:
-            op = size <= 4 ? "addss" : "addsd";
-            break;
-        case ANVIL_MIR_OP_SUB:
-            op = size <= 4 ? "subss" : "subsd";
-            break;
-        case ANVIL_MIR_OP_MUL:
-            op = size <= 4 ? "mulss" : "mulsd";
-            break;
-        case ANVIL_MIR_OP_DIV:
-        case ANVIL_MIR_OP_FDIV:
-            op = size <= 4 ? "divss" : "divsd";
-            break;
-        default:
-            emit->base.failed = true;
-            return;
-        }
-        x64_emit_sse_destructive(emit, op, info->def, lhs, rhs, info->op == ANVIL_MIR_OP_ADD || info->op == ANVIL_MIR_OP_MUL);
-        return;
-    }
-
-    int size = x64_size_bytes(def_info->size_bits);
-    int a_phys = x86_gas_phys_of(&emit->base, lhs);
-    int b_phys = x86_gas_phys_of(&emit->base, rhs);
-    if (emit->base.failed)
-        return;
-    x64_emit_gpr_binary(emit, instr_index, info, a_phys, b_phys, size);
+    x64_emit_sse_destructive(emit, mnemonic, def, lhs, rhs, op == ANVIL_MIR_OP_ADD || op == ANVIL_MIR_OP_MUL);
 }
 
 static void x64_emit_cond_branch(x64_mir_emit_t *emit, const char *cc, anvil_mir_block_t true_block, anvil_mir_block_t false_block)
@@ -1147,6 +1075,8 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     gas->fp_load = x64_fp_load;
     gas->fp_store = x64_fp_store;
     gas->fp_compare = x64_fp_compare;
+    gas->fp_binary = x64_fp_binary;
+    gas->gpr_divide = x64_gpr_divide;
     gas->local_label_prefix = desc ? desc->format->local_label_prefix : "";
 }
 
@@ -1391,7 +1321,7 @@ static void x64_emit_instr(x64_mir_emit_t *emit, size_t instr_index, const anvil
     case ANVIL_MIR_OP_SHL:
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR:
-        x64_emit_binary(emit, instr_index, info);
+        x86_gas_emit_binary(&emit->base, instr_index, info);
         break;
     case ANVIL_MIR_OP_VECTOR:
     case ANVIL_MIR_OP_SCALAR:
