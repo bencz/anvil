@@ -831,6 +831,7 @@ static void x64_mode(x86_gas_t *gas, const void *user)
     /* Above the saved RBP and the return address, and the callee's home area. */
     gas->incoming_base = 16 + gas->outgoing_base;
     gas->alloca_scratch = X64_R11;
+    gas->atomic_temp = X64_R11;
     gas->stack_probe = desc && desc->is_win64 ? x64_alloca_probe : NULL;
     gas->fp_load = x64_fp_load;
     gas->fp_store = x64_fp_store;
@@ -916,96 +917,12 @@ static void x64_emit_ret(x64_mir_emit_t *emit, size_t instr_index, const anvil_m
 
 /* Pointer -> RDX, operand -> RCX, expected -> RAX (CMPXCHG: expected in
  * RAX, desired in RCX), as one parallel move. */
-static void x64_atomic_inputs(x64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info)
-{
-    static const anvil_parallel_move_ops_t ops = { x86_gas_parallel_move, x86_gas_parallel_swap, -1 };
-    int destinations[] = {X64_RDX, X64_RCX, X64_RAX};
-    if (info->ir_op == ANVIL_OP_ATOMIC_CMPXCHG) {
-        destinations[1] = X64_RAX;
-        destinations[2] = X64_RCX;
-    }
-
-    int sources[3];
-    size_t count = info->num_uses < 3 ? info->num_uses : 3;
-    for (size_t operand = 0; operand < count; operand++)
-        sources[operand] = x86_gas_phys_of(&emit->base, anvil_mir_get_instr_use(emit->base.mir, index, operand));
-    if (!emit->base.failed && !anvil_parallel_move(&ops, emit, destinations, sources, count))
-        emit->base.failed = true;
-}
-
-static void x64_emit_atomic(x64_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info)
-{
-    if (info->ir_op == ANVIL_OP_ATOMIC_FENCE) {
-        if (info->atomic.order == ANVIL_ORDER_SEQ_CST)
-            anvil_strbuf_append(&emit->base.code, "\tmfence\n");
-
-        return;
-    }
-
-    anvil_mir_vreg_t value = info->def;
-    if (value == ANVIL_MIR_NO_VREG)
-        value = anvil_mir_get_instr_use(emit->base.mir, index, 1);
-
-    const anvil_mir_vreg_info_t *type = x64_vreg_info_checked(emit, value);
-    if (!type)
-        return;
-
-    int size = x64_size_bytes(type->size_bits);
-    const char *suffix = x86_gas_size_suffix(size);
-    const char *accumulator = x86_gas_gpr(X64_RAX, size);
-    const char *operand = x86_gas_gpr(X64_RCX, size);
-    const char *temporary = x86_gas_gpr(X64_R11, size);
-    x64_atomic_inputs(emit, index, info);
-    if (emit->base.failed)
-        return;
-
-    switch (info->ir_op) {
-    case ANVIL_OP_ATOMIC_LOAD:
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s (%%rdx), %%%s\n", suffix, accumulator);
-        break;
-    case ANVIL_OP_ATOMIC_STORE:
-        anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, (%%rdx)\n", info->atomic.order == ANVIL_ORDER_SEQ_CST ? "xchg" : "mov", suffix, operand);
-        return;
-    case ANVIL_OP_ATOMIC_CMPXCHG:
-        anvil_strbuf_appendf(&emit->base.code, "\tlock cmpxchg%s %%%s, (%%rdx)\n", suffix, operand);
-        break;
-    case ANVIL_OP_ATOMIC_RMW:
-        if (info->atomic.rmw <= ANVIL_ATOMIC_SUB) {
-            if (info->atomic.rmw == ANVIL_ATOMIC_SUB)
-                anvil_strbuf_appendf(&emit->base.code, "\tneg%s %%%s\n", suffix, operand);
-
-            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_EXCHANGE ? "xchg" : "lock xadd";
-            anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, (%%rdx)\n\tmov%s %%%s, %%%s\n", operation, suffix, operand, suffix, operand, accumulator);
-        } else {
-            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_AND ? "and" : (info->atomic.rmw == ANVIL_ATOMIC_OR ? "or" : "xor");
-            const char *function = anvil_mir_func_name(emit->base.mir);
-            anvil_strbuf_appendf(&emit->base.code, "\tmov%s (%%rdx), %%%s\n%s%s_atomic_%zu:\n", suffix, accumulator, emit->desc->format->local_label_prefix, function, index);
-            anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n\t%s%s %%%s, %%%s\n", suffix, accumulator, temporary, operation, suffix, operand, temporary);
-            anvil_strbuf_appendf(&emit->base.code, "\tlock cmpxchg%s %%%s, (%%rdx)\n\tjne %s%s_atomic_%zu\n", suffix, temporary, emit->desc->format->local_label_prefix, function, index);
-        }
-        break;
-    default:
-        emit->base.failed = true;
-        return;
-    }
-
-    /* Narrow results are kept extended, as loads leave them. */
-    int def_phys = x86_gas_phys_of(&emit->base, info->def);
-    if (emit->base.failed)
-        return;
-    if (size < 4)
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%c%cl %%%s, %%%s\n", type->is_signed ? 's' : 'z', size == 1 ? 'b' : 'w', accumulator,
-                             x86_gas_gpr(def_phys, 4));
-    else
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s %%%s, %%%s\n", suffix, accumulator, x86_gas_gpr(def_phys, size));
-}
-
 static bool x64_target_instr(void *user, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     x64_mir_emit_t *emit = user;
     switch (info->op) {
     case ANVIL_MIR_OP_ATOMIC:
-        x64_emit_atomic(emit, instr_index, info);
+        x86_gas_emit_atomic(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_VECTOR:
     case ANVIL_MIR_OP_SCALAR:

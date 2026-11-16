@@ -88,13 +88,6 @@ bool x86_annotate_printer_registers(anvil_mir_func_t *mir)
     return ok;
 }
 
-static void x86_emit_parallel_move(x86_mir_emit_t *emit, const int *dst, const int *src, size_t count)
-{
-    static const anvil_parallel_move_ops_t ops = { x86_gas_parallel_move, x86_gas_parallel_swap, -1 };
-    if (!anvil_parallel_move(&ops, emit, dst, src, count))
-        emit->base.failed = true;
-}
-
 static bool x86_scan_outgoing_stack_args(x86_mir_emit_t *emit)
 {
     int outgoing_size = 0;
@@ -351,7 +344,7 @@ static void x86_emit_result_pair_move(x86_mir_emit_t *emit, int lo_phys, int hi_
     size_t count = 0;
     if (lo_phys >= 0) { dst[count] = lo_reg; src[count++] = lo_phys; }
     if (hi_phys >= 0) { dst[count] = hi_reg; src[count++] = hi_phys; }
-    x86_emit_parallel_move(emit, dst, src, count);
+    x86_gas_parallel_moves(&emit->base, dst, src, count);
 }
 
 /* The reverse: def <- EAX, hi_def <- EDX right after a call. */
@@ -361,7 +354,7 @@ static void x86_emit_call_pair_move(x86_mir_emit_t *emit, int def_phys, int hi_p
     size_t count = 0;
     if (def_phys >= 0) { dst[count] = def_phys; src[count++] = lo_reg; }
     if (hi_phys >= 0) { dst[count] = hi_phys; src[count++] = hi_reg; }
-    x86_emit_parallel_move(emit, dst, src, count);
+    x86_gas_parallel_moves(&emit->base, dst, src, count);
 }
 
 /* Integer arithmetic.  ADD..XOR and MUL work on the full registers (the
@@ -567,6 +560,9 @@ static void x86_mode(x86_gas_t *gas, const void *user)
     /* Above the saved EBP and the return address. */
     gas->incoming_base = 8;
     gas->alloca_scratch = X86_EAX;
+    /* EBX (callee-saved, allocatable) is borrowed around the loop. */
+    gas->atomic_temp = X86_EBX;
+    gas->atomic_temp_saved = true;
     gas->min_operation_bytes = 4;
     gas->has_byte = x86_reg_has_byte;
     gas->fp_load = x86_fp_load;
@@ -623,7 +619,7 @@ static void x86_emit_call(x86_mir_emit_t *emit, size_t instr_index, const anvil_
     }
     if (emit->base.failed)
         return;
-    x86_emit_parallel_move(emit, move_dst, move_src, num_moves);
+    x86_gas_parallel_moves(&emit->base, move_dst, move_src, num_moves);
 
     if (direct) {
         /* Lowering already spelled COFF stdcall/fastcall names in full. */
@@ -712,87 +708,12 @@ static void x86_emit_other(x86_mir_emit_t *emit, const anvil_mir_instr_info_t *i
 /* Atomics: pointer in EDX, operand in ECX, accumulator EAX (CMPXCHG:
  * expected in EAX, desired in ECX); the old value comes back in EAX.
  * Lowering admits CMPXCHG/XADD only on i486 and later models. */
-static void x86_emit_atomic(x86_mir_emit_t *emit, size_t index, const anvil_mir_instr_info_t *info)
-{
-    if (info->ir_op == ANVIL_OP_ATOMIC_FENCE) {
-        if (info->atomic.order == ANVIL_ORDER_SEQ_CST)
-            anvil_strbuf_append(&emit->base.code, (emit->features & ANVIL_FEATURE_X86_SSE2) ? "\tmfence\n" : "\tlock orl $0, (%esp)\n");
-        return;
-    }
-
-    anvil_mir_vreg_t value = info->def != ANVIL_MIR_NO_VREG ? info->def : anvil_mir_get_instr_use(emit->base.mir, index, 1);
-    const anvil_mir_vreg_info_t *type = x86_vreg_info_checked(emit, value);
-    if (!type || emit->base.failed)
-        return;
-
-    int dst[3] = {X86_EDX, X86_ECX, X86_EAX};
-    if (info->ir_op == ANVIL_OP_ATOMIC_CMPXCHG) {
-        dst[1] = X86_EAX;
-        dst[2] = X86_ECX;
-    }
-    int src[3];
-    size_t count = info->num_uses < 3 ? info->num_uses : 3;
-    for (size_t operand = 0; operand < count; operand++)
-        src[operand] = x86_gas_phys_of(&emit->base, anvil_mir_get_instr_use(emit->base.mir, index, operand));
-    if (emit->base.failed)
-        return;
-    x86_emit_parallel_move(emit, dst, src, count);
-
-    int size = x86_size_bytes(type->size_bits);
-    const char *suffix = x86_gas_size_suffix(size);
-    const char *accumulator = x86_gas_gpr(X86_EAX, size);
-    const char *operand = x86_gas_gpr(X86_ECX, size);
-    switch (info->ir_op) {
-    case ANVIL_OP_ATOMIC_LOAD:
-        anvil_strbuf_appendf(&emit->base.code, "\tmov%s (%%edx), %%%s\n", suffix, accumulator);
-        break;
-    case ANVIL_OP_ATOMIC_STORE:
-        anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, (%%edx)\n", info->atomic.order == ANVIL_ORDER_SEQ_CST ? "xchg" : "mov", suffix, operand);
-        return;
-    case ANVIL_OP_ATOMIC_CMPXCHG:
-        anvil_strbuf_appendf(&emit->base.code, "\tlock cmpxchg%s %%%s, (%%edx)\n", suffix, operand);
-        break;
-    case ANVIL_OP_ATOMIC_RMW:
-        if (info->atomic.rmw <= ANVIL_ATOMIC_SUB) {
-            if (info->atomic.rmw == ANVIL_ATOMIC_SUB)
-                anvil_strbuf_appendf(&emit->base.code, "\tneg%s %%%s\n", suffix, operand);
-            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_EXCHANGE ? "xchg" : "lock xadd";
-            anvil_strbuf_appendf(&emit->base.code, "\t%s%s %%%s, (%%edx)\n\tmovl %%ecx, %%eax\n", operation, suffix, operand);
-        } else {
-            /* EBX (callee-saved, allocatable) is borrowed around the loop. */
-            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_AND ? "and" : (info->atomic.rmw == ANVIL_ATOMIC_OR ? "or" : "xor");
-            const char *temporary = x86_gas_gpr(X86_EBX, size);
-            const char *prefix = emit->plat->format->local_label_prefix;
-            const char *function = anvil_mir_func_name(emit->base.mir);
-            anvil_strbuf_appendf(&emit->base.code, "\tpushl %%ebx\n\tmov%s (%%edx), %%%s\n%s%s_atomic_%zu:\n", suffix, accumulator, prefix, function, index);
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%eax, %%ebx\n\t%s%s %%%s, %%%s\n", operation, suffix, operand, temporary);
-            anvil_strbuf_appendf(&emit->base.code, "\tlock cmpxchg%s %%%s, (%%edx)\n\tjne %s%s_atomic_%zu\n\tpopl %%ebx\n", suffix, temporary, prefix, function, index);
-        }
-        break;
-    default:
-        emit->base.failed = true;
-        return;
-    }
-
-    /* Narrow results are kept extended, as loads leave them. */
-    if (info->def != ANVIL_MIR_NO_VREG) {
-        int def_phys = x86_gas_phys_of(&emit->base, info->def);
-        if (emit->base.failed)
-            return;
-        if (size < 4)
-            anvil_strbuf_appendf(&emit->base.code, "\tmov%c%cl %%%s, %%%s\n", type->is_signed ? 's' : 'z', size == 1 ? 'b' : 'w',
-                                 accumulator, x86_gas_gpr(def_phys, 4));
-        else if (def_phys != X86_EAX)
-            anvil_strbuf_appendf(&emit->base.code, "\tmovl %%eax, %%%s\n", x86_gas_gpr(def_phys, 4));
-    }
-}
-
 static bool x86_target_instr(void *user, size_t instr_index, const anvil_mir_instr_info_t *info)
 {
     x86_mir_emit_t *emit = user;
     switch (info->op) {
     case ANVIL_MIR_OP_ATOMIC:
-        x86_emit_atomic(emit, instr_index, info);
+        x86_gas_emit_atomic(&emit->base, instr_index, info);
         return true;
     case ANVIL_MIR_OP_SCALAR:
         x86_emit_scalar(emit, instr_index, info);

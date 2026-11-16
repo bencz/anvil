@@ -1,5 +1,6 @@
 #include "x86_gas.h"
 #include "../x86_address.h"
+#include "../../common/parallel_move.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -1272,4 +1273,93 @@ void x86_gas_emit_cast(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
         return;
     }
     gas->fp_convert(gas, info->op, info->def, src);
+}
+
+void x86_gas_parallel_moves(x86_gas_t *gas, const int *dst, const int *src, size_t count)
+{
+    static const anvil_parallel_move_ops_t ops = {x86_gas_parallel_move, x86_gas_parallel_swap, -1};
+    if (!anvil_parallel_move(&ops, gas, dst, src, count))
+        gas->failed = true;
+}
+
+/* The registers atomics take their operands in (EDX/RDX, ECX, EAX). */
+enum { X86_GAS_AX = 0, X86_GAS_CX = 1, X86_GAS_DX = 2 };
+
+void x86_gas_emit_atomic(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info)
+{
+    if (info->ir_op == ANVIL_OP_ATOMIC_FENCE) {
+        /* Without SSE2's mfence a locked operation orders memory. */
+        if (info->atomic.order == ANVIL_ORDER_SEQ_CST && (anvil_mir_func_cpu_features(gas->mir) & ANVIL_FEATURE_X86_SSE2))
+            anvil_strbuf_append(&gas->code, "\tmfence\n");
+        else if (info->atomic.order == ANVIL_ORDER_SEQ_CST)
+            anvil_strbuf_appendf(&gas->code, "\tlock orl $0, (%%%s)\n", gas->stack_reg);
+        return;
+    }
+    anvil_mir_vreg_t value = info->def != ANVIL_MIR_NO_VREG ? info->def : anvil_mir_get_instr_use(gas->mir, index, 1);
+    const anvil_mir_vreg_info_t *type = anvil_mir_get_vreg_info(gas->mir, value);
+    if (!type) {
+        gas->failed = true;
+        return;
+    }
+    int dst[3] = {X86_GAS_DX, X86_GAS_CX, X86_GAS_AX}, src[3];
+    if (info->ir_op == ANVIL_OP_ATOMIC_CMPXCHG) {
+        dst[1] = X86_GAS_AX;
+        dst[2] = X86_GAS_CX;
+    }
+    size_t count = info->num_uses < 3 ? info->num_uses : 3;
+    for (size_t operand = 0; operand < count; operand++)
+        src[operand] = x86_gas_phys_of(gas, anvil_mir_get_instr_use(gas->mir, index, operand));
+    if (gas->failed)
+        return;
+    x86_gas_parallel_moves(gas, dst, src, count);
+
+    int size = (type->size_bits + 7) / 8, width = size < gas->min_operation_bytes ? gas->min_operation_bytes : size;
+    const char *suffix = x86_gas_size_suffix(size), *address = x86_gas_gpr(X86_GAS_DX, gas->pointer_bytes);
+    const char *accumulator = x86_gas_gpr(X86_GAS_AX, size), *operand = x86_gas_gpr(X86_GAS_CX, size);
+    switch (info->ir_op) {
+    case ANVIL_OP_ATOMIC_LOAD:
+        anvil_strbuf_appendf(&gas->code, "\tmov%s (%%%s), %%%s\n", suffix, address, accumulator);
+        break;
+    case ANVIL_OP_ATOMIC_STORE:
+        anvil_strbuf_appendf(&gas->code, "\t%s%s %%%s, (%%%s)\n", info->atomic.order == ANVIL_ORDER_SEQ_CST ? "xchg" : "mov", suffix, operand, address);
+        return;
+    case ANVIL_OP_ATOMIC_CMPXCHG:
+        anvil_strbuf_appendf(&gas->code, "\tlock cmpxchg%s %%%s, (%%%s)\n", suffix, operand, address);
+        break;
+    case ANVIL_OP_ATOMIC_RMW:
+        if (info->atomic.rmw <= ANVIL_ATOMIC_SUB) {
+            if (info->atomic.rmw == ANVIL_ATOMIC_SUB)
+                anvil_strbuf_appendf(&gas->code, "\tneg%s %%%s\n", suffix, operand);
+            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_EXCHANGE ? "xchg" : "lock xadd";
+            anvil_strbuf_appendf(&gas->code, "\t%s%s %%%s, (%%%s)\n\tmov%s %%%s, %%%s\n", operation, suffix, operand, address, x86_gas_size_suffix(width),
+                                 x86_gas_gpr(X86_GAS_CX, width), x86_gas_gpr(X86_GAS_AX, width));
+        } else {
+            const char *operation = info->atomic.rmw == ANVIL_ATOMIC_AND ? "and" : (info->atomic.rmw == ANVIL_ATOMIC_OR ? "or" : "xor");
+            const char *temporary = x86_gas_gpr(gas->atomic_temp, size), *pointer = x86_gas_size_suffix(gas->pointer_bytes);
+            const char *function = anvil_mir_func_name(gas->mir);
+            if (gas->atomic_temp_saved)
+                anvil_strbuf_appendf(&gas->code, "\tpush%s %%%s\n", pointer, x86_gas_gpr(gas->atomic_temp, gas->pointer_bytes));
+            anvil_strbuf_appendf(&gas->code, "\tmov%s (%%%s), %%%s\n%s%s_atomic_%zu:\n", suffix, address, accumulator, gas->local_label_prefix, function, index);
+            anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n\t%s%s %%%s, %%%s\n", x86_gas_size_suffix(width), x86_gas_gpr(X86_GAS_AX, width),
+                                 x86_gas_gpr(gas->atomic_temp, width), operation, suffix, operand, temporary);
+            anvil_strbuf_appendf(&gas->code, "\tlock cmpxchg%s %%%s, (%%%s)\n\tjne %s%s_atomic_%zu\n", suffix, temporary, address, gas->local_label_prefix, function,
+                                 index);
+            if (gas->atomic_temp_saved)
+                anvil_strbuf_appendf(&gas->code, "\tpop%s %%%s\n", pointer, x86_gas_gpr(gas->atomic_temp, gas->pointer_bytes));
+        }
+        break;
+    default:
+        gas->failed = true;
+        return;
+    }
+    /* Narrow results are kept extended, as loads leave them. */
+    if (info->def == ANVIL_MIR_NO_VREG)
+        return;
+    int def = x86_gas_phys_of(gas, info->def);
+    if (gas->failed)
+        return;
+    if (size < 4)
+        anvil_strbuf_appendf(&gas->code, "\tmov%c%cl %%%s, %%%s\n", type->is_signed ? 's' : 'z', size == 1 ? 'b' : 'w', accumulator, x86_gas_gpr(def, 4));
+    else if (def != X86_GAS_AX)
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n", suffix, accumulator, x86_gas_gpr(def, size));
 }

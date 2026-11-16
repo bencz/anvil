@@ -74,6 +74,10 @@ typedef struct {
      * the register a dynamic allocation computes its size in. */
     int incoming_base;
     int alloca_scratch;
+    /* The temporary of an atomic read-modify-write loop, saved around it
+     * when it is an allocatable callee-saved register. */
+    int atomic_temp;
+    bool atomic_temp_saved;
     bool (*has_byte)(int phys);
     void (*fp_load)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
     void (*fp_store)(void *gas, anvil_mir_vreg_t vreg, const char *mem);
@@ -172,6 +176,10 @@ void x86_gas_emit_dyn_alloca(x86_gas_t *gas, size_t index, const anvil_mir_instr
 /* A conversion: integer extensions, truncations and bitcasts here, those
  * to, from or between FP values on the FP unit. */
 void x86_gas_emit_cast(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
+/* An atomic access, read-modify-write or fence: the address in EDX/RDX,
+ * the operand in ECX, the result in EAX (lock-prefixed or xchg forms, a
+ * cmpxchg loop for AND, OR and XOR). */
+void x86_gas_emit_atomic(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
 /* LOAD (narrow integers extended to 32 bits) and STORE (an immediate
  * where it takes one). */
 void x86_gas_emit_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_t *info);
@@ -187,6 +195,8 @@ bool x86_gas_address_reads(x86_gas_t *gas, size_t address_index, const anvil_mir
  * is the printer state). */
 void x86_gas_parallel_move(void *user, int dst, int src);
 void x86_gas_parallel_swap(void *user, int a, int b);
+/* Moves registers `src` to `dst` at once (cycles swapped). */
+void x86_gas_parallel_moves(x86_gas_t *gas, const int *dst, const int *src, size_t count);
 /* FRAME_ADDR, SPILL_LOAD, SPILL_STORE, SELECT (CMOVcc on the flags a fused
  * compare left, else on the condition register) and CALL_STACK_ARG. */
 void x86_gas_emit_frame_addr(x86_gas_t *gas, const anvil_mir_instr_info_t *info);
