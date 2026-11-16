@@ -58,7 +58,8 @@ typedef struct {
     int pointer_bytes;
     const char *symbol_prefix;
     /* Constants live in 32-bit registers: an immediate takes any value
-     * modulo 2^32 (else a value must fit a sign-extended imm32). */
+     * modulo 2^32 (else only a value of 32 bits or less does, and a wider
+     * one must fit a sign-extended imm32). */
     bool wraps_imm32;
     /* SSE arithmetic takes a folded load as its memory operand. */
     bool fp_memory_operands;
@@ -123,8 +124,9 @@ int x86_gas_phys_of(x86_gas_t *gas, anvil_mir_vreg_t vreg);
 /* The prefix a reference to `symbol` takes (none for a local label). */
 const char *x86_gas_symbol_ref_prefix(const x86_gas_t *gas, const char *symbol);
 /* A vreg the isel facts know as a constant that fits an instruction's
- * immediate (wrapped to 32 bits when `wraps_imm32`). */
-bool x86_gas_facts_imm(const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out);
+ * immediate: a value of 32 bits or less (or any, when `wraps_imm32`)
+ * modulo 2^32, a wider one when it fits a sign-extended imm32. */
+bool x86_gas_facts_imm(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out);
 bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out);
 /* The isel facts' callback: whether the printers encode operand `use` of
  * the instruction as an immediate (`ctx` is the printer state). */

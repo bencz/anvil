@@ -359,12 +359,20 @@ void x86_gas_emit_call_stack_arg(x86_gas_t *gas, size_t index, const anvil_mir_i
         anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %s\n", x86_gas_size_suffix(bytes), x86_gas_gpr(src, bytes), mem);
 }
 
-bool x86_gas_facts_imm(const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out)
+/* A value the instruction reads in 32 bits or less: its immediate is the
+ * value modulo 2^32. */
+static bool narrow_operand(const anvil_mir_func_t *mir, bool wraps_imm32, anvil_mir_vreg_t vreg)
+{
+    const anvil_mir_vreg_info_t *info = wraps_imm32 ? NULL : anvil_mir_get_vreg_info(mir, vreg);
+    return wraps_imm32 || (info && info->size_bits <= 32);
+}
+
+bool x86_gas_facts_imm(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, bool wraps_imm32, anvil_mir_vreg_t vreg, int64_t *out)
 {
     int64_t value;
     if (!anvil_mir_isel_constant(facts, vreg, &value))
         return false;
-    if (wraps_imm32)
+    if (narrow_operand(mir, wraps_imm32, vreg))
         value = (int32_t)value;
     else if (value < INT32_MIN || value > INT32_MAX)
         return false;
@@ -374,7 +382,7 @@ bool x86_gas_facts_imm(const anvil_mir_isel_facts_t *facts, bool wraps_imm32, an
 
 bool x86_gas_known_imm(const x86_gas_t *gas, anvil_mir_vreg_t vreg, int64_t *out)
 {
-    return x86_gas_facts_imm(&gas->isel, gas->wraps_imm32, vreg, out);
+    return x86_gas_facts_imm(gas->mir, &gas->isel, gas->wraps_imm32, vreg, out);
 }
 
 /* Mirrors the binary-operation and compare printers. */
@@ -382,7 +390,7 @@ bool x86_gas_use_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_
 {
     const x86_gas_t *gas = ctx;
     const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(gas->mir, info->def) : NULL;
-    bool fits = gas->wraps_imm32 || (value >= INT32_MIN && value <= INT32_MAX);
+    bool fits = narrow_operand(gas->mir, gas->wraps_imm32, anvil_mir_get_instr_use(gas->mir, index, use)) || (value >= INT32_MIN && value <= INT32_MAX);
     int64_t other;
     /* A stored integer: mov $imm, mem (64-bit: a sign-extended imm32). */
     if (info->op == ANVIL_MIR_OP_STORE && use == 0) {

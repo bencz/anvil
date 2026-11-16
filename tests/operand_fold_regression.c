@@ -701,6 +701,38 @@ static void test_range_check(void)
     }
 }
 
+/* A 32-bit operation takes any 32-bit constant as its immediate (modulo
+ * 2^32) on x86-64 as on i386: x + 0xFFFFFFF0 and x * 0x92492493 need no
+ * register for the constant. */
+static void test_wide_32bit_immediates(void)
+{
+    static const anvil_arch_t arches[] = {ANVIL_ARCH_X86_64, ANVIL_ARCH_X86};
+    for (size_t a = 0; a < 2; a++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(arches[a]);
+        anvil_module_t *module = anvil_module_create(ctx, "immediates");
+        anvil_type_t *u32 = anvil_type_u32(ctx);
+        anvil_type_t *params[] = {u32};
+        anvil_func_t *func = anvil_func_create(module, "mix", anvil_type_func(ctx, u32, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_value_t *x = anvil_func_get_param(func, 0);
+        anvil_value_t *sum = anvil_build_add(ctx, x, anvil_const_u32(ctx, 0xFFFFFFF0u), "sum");
+        anvil_build_ret(ctx, anvil_build_mul(ctx, sum, anvil_const_u32(ctx, 0x92492493u), "product"));
+        char *assembly = NULL;
+        size_t length = 0;
+        bool built = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+        char message[128];
+        snprintf(message, sizeof(message), "arch %d: 32-bit constants above INT32_MAX are immediates", (int)arches[a]);
+        CHECK(built && (strstr(assembly, "$-16,") || strstr(assembly, "-16(%")) && strstr(assembly, "imull $-1840700269") && !strstr(assembly, "movl $4294967280") &&
+                  !strstr(assembly, "movl $-1840700269"),
+              message);
+        if (built && !strstr(assembly, "imull $-1840700269"))
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -755,6 +787,7 @@ int main(void)
     test_systemz_byte_zero_test();
     test_narrow_extended_compare();
     test_range_check();
+    test_wide_32bit_immediates();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

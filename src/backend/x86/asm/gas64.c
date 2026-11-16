@@ -39,7 +39,7 @@ static uint64_t x64_printer_gpr_scratch(const anvil_mir_func_t *mir, const anvil
     case ANVIL_MIR_OP_SHL:
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR:
-        return def && def->reg_class == ANVIL_MIR_REG_GPR && !x86_gas_facts_imm(facts, false, anvil_mir_get_instr_use(mir, index, 1), &count) ? rcx : 0;
+        return def && def->reg_class == ANVIL_MIR_REG_GPR && !x86_gas_facts_imm(mir, facts, false, anvil_mir_get_instr_use(mir, index, 1), &count) ? rcx : 0;
     case ANVIL_MIR_OP_SDIV:
     case ANVIL_MIR_OP_UDIV:
     case ANVIL_MIR_OP_SMOD:
@@ -47,7 +47,7 @@ static uint64_t x64_printer_gpr_scratch(const anvil_mir_func_t *mir, const anvil
         return rax | rdx;
     case ANVIL_MIR_OP_SCALAR:
         if (info->ir_op == ANVIL_OP_ROTL)
-            return x86_gas_facts_imm(facts, false, anvil_mir_get_instr_use(mir, index, 1), &count) ? 0 : rcx;
+            return x86_gas_facts_imm(mir, facts, false, anvil_mir_get_instr_use(mir, index, 1), &count) ? 0 : rcx;
         return info->ir_op == ANVIL_OP_UMULH || info->ir_op == ANVIL_OP_SMULH ? rax | rdx : 0;
     case ANVIL_MIR_OP_UITOFP:
         return source && source->size_bits > 32 ? r11 | rax : r11;

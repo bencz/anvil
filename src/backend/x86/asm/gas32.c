@@ -34,12 +34,12 @@ static uint64_t x86_printer_gpr_scratch(const anvil_mir_func_t *mir, const anvil
     case ANVIL_MIR_OP_SHL:
     case ANVIL_MIR_OP_SHR:
     case ANVIL_MIR_OP_SAR:
-        return def && def->reg_class == ANVIL_MIR_REG_GPR && !x86_gas_facts_imm(facts, true, anvil_mir_get_instr_use(mir, index, 1), &count)
+        return def && def->reg_class == ANVIL_MIR_REG_GPR && !x86_gas_facts_imm(mir, facts, true, anvil_mir_get_instr_use(mir, index, 1), &count)
                    ? UINT64_C(1) << X86_ECX
                    : 0;
     case ANVIL_MIR_OP_SCALAR:
         /* A rotation by a variable count reads it from CL. */
-        return info->ir_op == ANVIL_OP_ROTL && !x86_gas_facts_imm(facts, true, anvil_mir_get_instr_use(mir, index, 1), &count) ? UINT64_C(1) << X86_ECX : 0;
+        return info->ir_op == ANVIL_OP_ROTL && !x86_gas_facts_imm(mir, facts, true, anvil_mir_get_instr_use(mir, index, 1), &count) ? UINT64_C(1) << X86_ECX : 0;
     default:
         return 0;
     }
