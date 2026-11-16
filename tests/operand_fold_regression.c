@@ -965,6 +965,40 @@ static void test_arm64_bitfields(void)
     }
 }
 
+/* x & 0xff, x & 0xffff and (64-bit) x & 0xffffffff are one zero-extending
+ * move on x86 (movzbl, movzwl, movl), into another register too; a loaded
+ * x is not folded into an and with the constant, which has no register. */
+static void test_x86_zero_extending_masks(void)
+{
+    static const anvil_arch_t arches[] = {ANVIL_ARCH_X86_64, ANVIL_ARCH_X86};
+    for (size_t a = 0; a < 2; a++)
+        for (int k = 0; k < 4; k++) {
+            if (k >= 2 && arches[a] == ANVIL_ARCH_X86)
+                continue;
+            anvil_ctx_t *ctx = anvil_ctx_create_for_target(arches[a]);
+            anvil_module_t *module = anvil_module_create(ctx, "masks");
+            anvil_type_t *type = k >= 2 ? anvil_type_u64(ctx) : anvil_type_u32(ctx);
+            anvil_type_t *params[] = {k == 3 ? anvil_type_ptr(ctx, type) : type};
+            anvil_func_t *func = anvil_func_create(module, "mask", anvil_type_func(ctx, type, params, 1, false), ANVIL_LINK_EXTERNAL);
+            anvil_set_insert_point(ctx, func->entry);
+            anvil_value_t *mask = k >= 2 ? anvil_const_u64(ctx, UINT32_MAX) : anvil_const_u32(ctx, k ? 0xffff : 0xff);
+            anvil_value_t *x = k == 3 ? anvil_build_load(ctx, type, anvil_func_get_param(func, 0), "x") : anvil_func_get_param(func, 0);
+            anvil_build_ret(ctx, anvil_build_and(ctx, x, mask, "low"));
+            char *assembly = NULL;
+            size_t length = 0;
+            static const char *const moves[] = {"movzbl %", "movzwl %", "movl %edi, %eax", "movl %"};
+            bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, moves[k]) && !strstr(assembly, "\tand");
+            char message[128];
+            snprintf(message, sizeof(message), "arch %d: a %s mask is %s", (int)arches[a], k == 0 ? "byte" : k == 1 ? "halfword" : k == 2 ? "word" : "loaded word", moves[k]);
+            CHECK(valid, message);
+            if (!valid && assembly)
+                fprintf(stderr, "%s\n", assembly);
+            free(assembly);
+            anvil_module_destroy(module);
+            anvil_ctx_destroy(ctx);
+        }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -1024,6 +1058,7 @@ int main(void)
     test_extending_loads();
     test_constant_stores();
     test_arm64_bitfields();
+    test_x86_zero_extending_masks();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

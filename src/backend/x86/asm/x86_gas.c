@@ -392,6 +392,9 @@ bool x86_gas_use_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_
     const anvil_mir_vreg_info_t *def = info->def != ANVIL_MIR_NO_VREG ? anvil_mir_get_vreg_info(gas->mir, info->def) : NULL;
     bool fits = narrow_operand(gas->mir, gas->wraps_imm32, anvil_mir_get_instr_use(gas->mir, index, use)) || (value >= INT32_MIN && value <= INT32_MAX);
     int64_t other;
+    /* x & 0xffffffff on 64 bits: movl (x86_gas_emit_gpr_arith). */
+    if (info->op == ANVIL_MIR_OP_AND && use == 1 && value == UINT32_MAX && def && def->reg_class == ANVIL_MIR_REG_GPR && def->size_bits == 64)
+        return true;
     /* A stored integer: mov $imm, mem (64-bit: a sign-extended imm32). */
     if (info->op == ANVIL_MIR_OP_STORE && use == 0) {
         const anvil_mir_vreg_info_t *stored = anvil_mir_get_vreg_info(gas->mir, anvil_mir_get_instr_use(gas->mir, index, 0));
@@ -507,7 +510,10 @@ bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
         return false;
     anvil_mir_vreg_t other = rhs == info->def ? lhs : rhs;
     int dst = x86_gas_phys_of(gas, next.def), keep = x86_gas_phys_of(gas, other);
-    if (gas->failed || (!fpr && x86_gas_known_imm(gas, other, &imm)) || (!fpr && dst != keep && x86_gas_address_reads(gas, index, info, dst)))
+    const anvil_mir_vreg_info_t *other_info = anvil_mir_get_vreg_info(gas->mir, other);
+    /* The other operand in a register: not an immediate, nor a constant
+     * held in none (x86_gas_emit_gpr_arith's zero-extending masks). */
+    if (gas->failed || !other_info || other_info->registerless || (!fpr && x86_gas_known_imm(gas, other, &imm)) || (!fpr && dst != keep && x86_gas_address_reads(gas, index, info, dst)))
         return false;
     return fold_into(gas, index, info, reader);
 }
@@ -640,6 +646,17 @@ bool x86_gas_emit_gpr_arith(x86_gas_t *gas, size_t index, const anvil_mir_instr_
         a = b;
     }
     bool wide = width >= 4;
+    /* x & 0xff, 0xffff or (64-bit) 0xffffffff, the last no imm32: one
+     * zero-extending move, into any register (no flags, unlike and). */
+    int64_t raw = 0;
+    bool masked = info->op == ANVIL_MIR_OP_AND && wide && anvil_mir_isel_constant(&gas->isel, rhs, &raw);
+    uint64_t mask = width >= 8 ? (uint64_t)raw : (uint64_t)raw & ((UINT64_C(1) << (8 * width)) - 1);
+    if (masked && (mask == 0xff || mask == 0xffff || (width == 8 && mask == UINT32_MAX)) && (mask != 0xff || !gas->has_byte || gas->has_byte(a_phys))) {
+        const char *move = mask == 0xff ? "movzbl" : mask == 0xffff ? "movzwl" : "movl";
+        int from = mask == 0xff ? 1 : mask == 0xffff ? 2 : 4;
+        anvil_strbuf_appendf(&gas->code, "\t%s %%%s, %%%s\n", move, x86_gas_gpr(a_phys, from), x86_gas_gpr(dst_phys, 4));
+        return true;
+    }
     if (b_imm) {
         unsigned shift = 0;
         anvil_mir_mul_form_t form = info->op == ANVIL_MIR_OP_MUL ? anvil_mir_isel_mul_form(imm, (unsigned)width * 8, &shift) : ANVIL_MIR_MUL_MULTIPLY;
