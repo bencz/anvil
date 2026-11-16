@@ -916,6 +916,55 @@ static void test_constant_stores(void)
     }
 }
 
+/* ARM64 bitfield moves from two shifts or a shift and a mask:
+ * (x >> 4) & 15 is ubfx #4, #4; (x & 255) << 3 ubfiz #3, #8; with an
+ * arithmetic right shift, (x << 20) >> 26 is sbfx #6, #6 and (x << 26) >> 20
+ * sbfiz #6, #6. */
+static void test_arm64_bitfields(void)
+{
+    static const struct {
+        anvil_op_t first, second;
+        int a, b;
+        bool sign;
+        const char *expected;
+    } cases[] = {
+        {ANVIL_OP_SHR, ANVIL_OP_AND, 4, 15, false, "ubfx w0, w0, #4, #4"},
+        {ANVIL_OP_AND, ANVIL_OP_SHL, 255, 3, false, "ubfiz w0, w0, #3, #8"},
+        {ANVIL_OP_SHL, ANVIL_OP_SHR, 20, 26, true, "sbfx w0, w0, #6, #6"},
+        {ANVIL_OP_SHL, ANVIL_OP_SHR, 26, 20, true, "sbfiz w0, w0, #6, #6"},
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_ARM64);
+        anvil_module_t *module = anvil_module_create(ctx, "fields");
+        anvil_type_t *type = cases[c].sign ? anvil_type_i32(ctx) : anvil_type_u32(ctx);
+        anvil_type_t *params[] = {type};
+        anvil_func_t *func = anvil_func_create(module, "field", anvil_type_func(ctx, type, params, 1, false), ANVIL_LINK_EXTERNAL);
+        anvil_set_insert_point(ctx, func->entry);
+        anvil_value_t *x = anvil_func_get_param(func, 0);
+        anvil_value_t *values[2];
+        anvil_op_t ops[2] = {cases[c].first, cases[c].second};
+        int amounts[2] = {cases[c].a, cases[c].b};
+        for (size_t k = 0; k < 2; k++) {
+            anvil_value_t *amount = cases[c].sign ? anvil_const_i32(ctx, amounts[k]) : anvil_const_u32(ctx, (uint32_t)amounts[k]);
+            x = values[k] = ops[k] == ANVIL_OP_SHR ? (cases[c].sign ? anvil_build_sar(ctx, x, amount, "step") : anvil_build_shr(ctx, x, amount, "step"))
+                          : ops[k] == ANVIL_OP_SHL ? anvil_build_shl(ctx, x, amount, "step")
+                                                   : anvil_build_and(ctx, x, amount, "step");
+        }
+        anvil_build_ret(ctx, values[1]);
+        char *assembly = NULL;
+        size_t length = 0;
+        bool valid = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly && strstr(assembly, cases[c].expected);
+        char message[128];
+        snprintf(message, sizeof(message), "ARM64: %s", cases[c].expected);
+        CHECK(valid, message);
+        if (!valid && assembly)
+            fprintf(stderr, "%s\n", assembly);
+        free(assembly);
+        anvil_module_destroy(module);
+        anvil_ctx_destroy(ctx);
+    }
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -974,6 +1023,7 @@ int main(void)
     test_free_zero_extension();
     test_extending_loads();
     test_constant_stores();
+    test_arm64_bitfields();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

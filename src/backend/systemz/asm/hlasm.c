@@ -415,7 +415,6 @@ static bool systemz_rotate_mask_form(const systemz_emit_t *emit, const anvil_rot
     return (emit->features & ANVIL_FEATURE_ZARCH_GIE) && emit->desc->has_64bit_gprs && rm->width == 64 && anvil_rotate_mask_run(rm, begin, end);
 }
 
-/* Mirrors the forms chosen by systemz_emit_binary and systemz_emit_cmp. */
 /* A constant `bits` wide (`value`, sign-extended from its width) that a
  * storage-immediate store writes: MVI any byte on every model, MVHHI,
  * MVHI and MVGHI a sign-extended halfword with the general-instructions
@@ -428,6 +427,8 @@ static bool systemz_stores_immediate(const systemz_emit_t *emit, unsigned bits, 
     return bits <= 64 && (emit->features & ANVIL_FEATURE_ZARCH_GIE) && systemz_simm16(v);
 }
 
+/* Mirrors the forms chosen by systemz_emit_binary, systemz_emit_cmp and
+ * systemz_emit_store. */
 static bool systemz_takes_immediate(void *ctx, size_t index, const anvil_mir_instr_info_t *info, size_t use, int64_t value)
 {
     const systemz_emit_t *emit = ctx;

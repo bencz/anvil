@@ -59,7 +59,13 @@ arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
 facility), so a folded constant never occupies a register.  A zero extension
 from 32 bits in the same register prints nothing after an operation whose
 32-bit form clears the upper half (`anvil_mir_isel_writes_zero_extended`:
-x86-64 and ARM64).  A load read only by an extension is one extending load:
+x86-64 and ARM64).  A shift or mask by a constant read only by another
+(`anvil_mir_rotate_mask_pair`, `rotate_mask.h`) is one rotate-and-mask where
+its mask is one run of ones the target spells: PowerPC `rlwinm`/`rldicl`/
+`rldicr`/`rldic`, SystemZ `RISBG` (general-instructions extension), ARM64
+`ubfx`/`ubfiz` (the field taken to or from bit 0); ARM64 also folds
+`(x << a) >> b` with a sign into `sbfx`/`sbfiz`, which no other target has
+in one instruction.  A load read only by an extension is one extending load:
 x86 folds it into the extension (`movsbq`/`movswq`/`movslq`, `movzbl`/`movzwl`,
 `movl` from memory), ARM64 and SystemZ load straight into the extension's
 register when it comes right after (`anvil_mir_isel_extending_reader`;

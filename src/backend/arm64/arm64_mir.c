@@ -9,6 +9,7 @@
 
 #include "../common/lower_map.h"
 #include "../common/switch_lower.h"
+#include "../common/rotate_mask.h"
 #include "anvil/anvil_arm64_mir.h"
 #include "anvil/anvil_internal.h"
 #include "anvil/anvil_analysis.h"
@@ -780,6 +781,13 @@ typedef struct {
     int16_t *pre_disp;
     const char *shift_kind;
     unsigned shift_amount;
+    /* Two shifts or a shift and a mask printed as one bitfield move at
+     * their reader (`ubfx d, s, #lsb, #width`): the reader, its source and
+     * the move. */
+    size_t field_target;
+    anvil_mir_vreg_t field_source;
+    const char *field_op;
+    unsigned field_lsb, field_width, field_bits;
     bool failed;
 } arm64_mir_emit_t;
 
@@ -1751,6 +1759,73 @@ static bool mir_fold_shift(arm64_mir_emit_t *emit, size_t instr_index, const anv
     return true;
 }
 
+/* A rotate-and-mask as one unsigned bitfield move: the field the mask
+ * keeps comes from one run of source bits, landing at bit 0 (ubfx) or
+ * taken from bit 0 (ubfiz). */
+static bool mir_unsigned_field(const anvil_rotate_mask_t *rm, const char **op, unsigned *lsb, unsigned *width)
+{
+    unsigned begin, end;
+    if (!anvil_rotate_mask_run(rm, &begin, &end))
+        return false;
+    unsigned w = rm->width, lo = w - 1 - end, hi = w - 1 - begin;
+    unsigned from = (lo + w - rm->rotate) % w, to = (hi + w - rm->rotate) % w;
+    if (from > to)
+        return false;
+    *width = hi - lo + 1;
+    if (lo == 0) {
+        *op = "ubfx";
+        *lsb = from;
+        return true;
+    }
+    if (from == 0) {
+        *op = "ubfiz";
+        *lsb = lo;
+        return true;
+    }
+    return false;
+}
+
+/* The shift or mask at `instr_index` composed with its only reader (a
+ * shift or mask by a constant, or an arithmetic right shift after a left
+ * one) into one bitfield move printed at the reader: ubfx/ubfiz, or
+ * sbfx/sbfiz for (x << a) >> b with a sign. */
+static bool mir_fold_field(arm64_mir_emit_t *emit, size_t instr_index, const anvil_mir_instr_info_t *info, int64_t imm)
+{
+    if (emit->field_target != SIZE_MAX || !emit->skip)
+        return false;
+    anvil_rotate_mask_t rm;
+    size_t reader, between;
+    anvil_mir_vreg_t source;
+    const char *op;
+    unsigned lsb, width;
+    if (anvil_mir_rotate_mask_pair(emit->mir, &emit->isel, instr_index, 32, &rm, &reader, &between, &source) && mir_unsigned_field(&rm, &op, &lsb, &width)) {
+        if (between != SIZE_MAX)
+            emit->skip[between] = true;
+        emit->field_bits = rm.width;
+    } else {
+        unsigned bits = mir_gpr_width(emit->mir, info->def);
+        anvil_mir_instr_info_t next;
+        int64_t right;
+        reader = info->op == ANVIL_MIR_OP_SHL ? anvil_mir_isel_fold_reader(emit->mir, &emit->isel, instr_index, 8, false) : SIZE_MAX;
+        if (reader == SIZE_MAX || !anvil_mir_get_instr_info(emit->mir, reader, &next) || next.op != ANVIL_MIR_OP_SAR ||
+            anvil_mir_get_instr_use(emit->mir, reader, 0) != info->def || !mir_rhs_immediate(emit, reader, &next, &right) ||
+            mir_gpr_width(emit->mir, next.def) != bits)
+            return false;
+        unsigned left = (unsigned)(imm & (int64_t)(bits - 1)), shift = (unsigned)(right & (int64_t)(bits - 1));
+        source = anvil_mir_get_instr_use(emit->mir, instr_index, 0);
+        op = shift >= left ? "sbfx" : "sbfiz";
+        lsb = shift >= left ? shift - left : left - shift;
+        width = bits - (shift >= left ? shift : left);
+        emit->field_bits = bits;
+    }
+    emit->field_target = reader;
+    emit->field_source = source;
+    emit->field_op = op;
+    emit->field_lsb = lsb;
+    emit->field_width = width;
+    return true;
+}
+
 /* x & 2^k read only by `== 0` / `!= 0` feeding the next branch: the branch
  * tests the bit itself (tbz / tbnz), the AND prints nothing. */
 static bool mir_bit_test(arm64_mir_emit_t *emit, size_t instr_index, anvil_mir_vreg_t source, int64_t imm)
@@ -1820,6 +1895,19 @@ static void mir_emit_binary(arm64_mir_emit_t *emit,
         return;
     }
 
+    if (instr_index == emit->field_target) {
+        emit->field_target = SIZE_MAX;
+        const anvil_regalloc_assignment_t *to = anvil_mir_get_assignment(emit->mir, info->def), *from = anvil_mir_get_assignment(emit->mir, emit->field_source);
+        if (!to || !from || to->phys_reg < 0 || from->phys_reg < 0) {
+            emit->failed = true;
+            return;
+        }
+        int bytes = (int)emit->field_bits / 8;
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, %s, #%u, #%u\n", emit->field_op, mir_gpr_name_for_size(to->phys_reg, bytes),
+                             mir_gpr_name_for_size(from->phys_reg, bytes), emit->field_lsb, emit->field_width);
+        return;
+    }
+
     if (instr_index == emit->shift_target) {
         /* The folded shift's result is one operand: the other comes first. */
         emit->shift_target = SIZE_MAX;
@@ -1838,6 +1926,8 @@ static void mir_emit_binary(arm64_mir_emit_t *emit,
     if (mir_rhs_immediate(emit, instr_index, info, &imm)) {
         unsigned width = mir_gpr_width(emit->mir, lhs);
         bool shift = info->op == ANVIL_MIR_OP_SHL || info->op == ANVIL_MIR_OP_SHR || info->op == ANVIL_MIR_OP_SAR || info->op == ANVIL_MIR_OP_MUL;
+        if ((shift || info->op == ANVIL_MIR_OP_AND) && mir_fold_field(emit, instr_index, info, imm))
+            return;
         if (shift && mir_fold_shift(emit, instr_index, info, lhs, imm))
             return;
         if (info->op == ANVIL_MIR_OP_AND && mir_bit_test(emit, instr_index, lhs, imm))
@@ -3086,6 +3176,7 @@ bool anvil_arm64_emit_mir_abi(const anvil_mir_func_t *mir,
     arm64_mir_emit_t emit;
     memset(&emit, 0, sizeof(emit));
     emit.shift_target = SIZE_MAX;
+    emit.field_target = SIZE_MAX;
     emit.bit_test_at = SIZE_MAX;
     emit.cinc_at = SIZE_MAX;
     emit.pre_disp = calloc(anvil_mir_num_instrs(mir) ? anvil_mir_num_instrs(mir) : 1, sizeof(*emit.pre_disp));
