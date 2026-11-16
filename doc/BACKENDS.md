@@ -59,7 +59,13 @@ arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
 facility), so a folded constant never occupies a register.  A zero extension
 from 32 bits in the same register prints nothing after an operation whose
 32-bit form clears the upper half (`anvil_mir_isel_writes_zero_extended`:
-x86-64 and ARM64).  A multiply by a
+x86-64 and ARM64).  A load read only by an extension is one extending load:
+x86 folds it into the extension (`movsbq`/`movswq`/`movslq`, `movzbl`/`movzwl`,
+`movl` from memory), ARM64 and SystemZ load straight into the extension's
+register when it comes right after (`anvil_mir_isel_extending_reader`;
+`ldrsb`/`ldrsh`/`ldrsw x`, `ldrb`/`ldrh`/
+`ldr w`; `LGB`/`LLGC`/`LGH`/`LLGH`/`LGF`/`LLGF`), and PowerPC's loads already
+extend to the whole register (`lha`, `lwa`, `lbz`, `lhz`, `lwz`).  A multiply by a
 constant runs without the multiplier where `anvil_mir_isel_mul_form` says
 how: by 2^k a shift on every target; by 2^k + 1, x + (x << k), one `lea`
 (scales 2, 4, 8) on x86 and one `add` of a shifted register on ARM64, while

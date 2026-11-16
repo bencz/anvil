@@ -568,6 +568,20 @@ bool anvil_mir_isel_keeps(const anvil_mir_func_t *mir, const anvil_mir_isel_fact
     return true;
 }
 
+size_t anvil_mir_isel_extending_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, anvil_mir_instr_info_t *extension)
+{
+    anvil_mir_instr_info_t info;
+    if (!anvil_mir_get_instr_info(mir, index, &info) || info.def == ANVIL_MIR_NO_VREG)
+        return SIZE_MAX;
+    const anvil_mir_vreg_info_t *narrow = anvil_mir_get_vreg_info(mir, info.def);
+    size_t reader = narrow && narrow->reg_class == ANVIL_MIR_REG_GPR ? anvil_mir_isel_only_reader(mir, facts, index, 1) : SIZE_MAX;
+    if (reader == SIZE_MAX || !anvil_mir_get_instr_info(mir, reader, extension) ||
+        (extension->op != ANVIL_MIR_OP_SEXT && extension->op != ANVIL_MIR_OP_ZEXT))
+        return SIZE_MAX;
+    const anvil_mir_vreg_info_t *wide = anvil_mir_get_vreg_info(mir, extension->def);
+    return wide && wide->reg_class == ANVIL_MIR_REG_GPR && wide->size_bits > narrow->size_bits ? reader : SIZE_MAX;
+}
+
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window)
 {
     anvil_mir_instr_info_t info, next;

@@ -2378,32 +2378,50 @@ static void mir_emit_load(arm64_mir_emit_t *emit,
     if (!def_info || !def_assignment || emit->failed) return;
 
     int size = mir_size_bytes(def_info->size_bits);
-    if (def_info->reg_class == ANVIL_MIR_REG_GPR &&
-        def_info->is_signed && size == 4) {
-        dst = arm64_xreg_names[def_assignment->phys_reg];
+    bool is_signed = def_info->is_signed;
+    int dst_phys = def_assignment->phys_reg, dst_size = size;
+    anvil_mir_vreg_t loaded = info->def;
+    /* Read only by its extension: one extending load into the extension's
+     * register (ldrsb/ldrsh/ldrsw x; a w destination zero-extends to 64
+     * bits).  Not with pre-index writeback, chosen for the load's own
+     * register. */
+    bool pre_index = emit->pre_disp && emit->pre_disp[instr_index];
+    anvil_mir_instr_info_t extension;
+    size_t reader = emit->skip && !pre_index ? anvil_mir_isel_extending_reader(emit->mir, &emit->isel, instr_index, &extension) : SIZE_MAX;
+    if (reader != SIZE_MAX) {
+        const anvil_mir_vreg_info_t *wide = anvil_mir_get_vreg_info(emit->mir, extension.def);
+        const anvil_regalloc_assignment_t *wide_assignment = anvil_mir_get_assignment(emit->mir, extension.def);
+        if (wide_assignment && wide_assignment->phys_reg >= 0 && wide_assignment->phys_reg <= 30) {
+            is_signed = extension.op == ANVIL_MIR_OP_SEXT;
+            dst_phys = wide_assignment->phys_reg;
+            dst_size = mir_size_bytes(wide->size_bits);
+            loaded = extension.def;
+            emit->skip[reader] = true;
+        }
     }
+    /* A signed load into x extends to 64 bits; a w one zero-extends. */
+    bool x_form = size > 4 || (is_signed && (size == 4 || dst_size > 4));
+    if (def_info->reg_class == ANVIL_MIR_REG_GPR)
+        dst = mir_gpr_name_for_size(dst_phys, x_form ? 8 : 4);
     if (info->index_scale) {
-        mir_emit_indexed_access(emit, instr_index, 1, mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
+        mir_emit_indexed_access(emit, instr_index, 1, mir_load_op(def_info->reg_class, size, is_signed), dst, base,
                                 info->index_scale, (anvil_mir_index_extend_t)info->index_extend);
         return;
     }
-    if (emit->pre_disp && emit->pre_disp[instr_index]) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, #%d]!\n", mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
+    if (pre_index) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s, #%d]!\n", mir_load_op(def_info->reg_class, size, is_signed), dst, base,
                              emit->pre_disp[instr_index]);
         return;
     }
-    if (mir_emit_pair(emit, instr_index, info, ptr, info->def, size, info->has_imm ? info->imm : 0, true))
+    if (loaded == info->def && mir_emit_pair(emit, instr_index, info, ptr, info->def, size, info->has_imm ? info->imm : 0, true))
         return;
     int64_t post = 0;
-    if (!(info->has_imm && info->imm) && mir_post_index(emit, instr_index, ptr, info->def, &post, -256, 255, 1)) {
-        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s], #%lld\n", mir_load_op(def_info->reg_class, size, def_info->is_signed), dst, base,
+    if (!(info->has_imm && info->imm) && mir_post_index(emit, instr_index, ptr, loaded, &post, -256, 255, 1)) {
+        anvil_strbuf_appendf(&emit->code, "\t%s %s, [%s], #%lld\n", mir_load_op(def_info->reg_class, size, is_signed), dst, base,
                              (long long)post);
         return;
     }
-    mir_emit_base_offset_access(&emit->code,
-                                mir_load_op(def_info->reg_class, size,
-                                            def_info->is_signed),
-                                dst, base, size,
+    mir_emit_base_offset_access(&emit->code, mir_load_op(def_info->reg_class, size, is_signed), dst, base, size,
                                 info->has_imm ? info->imm : 0);
 }
 

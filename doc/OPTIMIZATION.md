@@ -93,6 +93,9 @@ Evaluates constant expressions at compile time.
 | `x >> 0` | `x` |
 | `(x + c1) - c2` (any of `+`, `-`) | `x + (c1 - c2)`, or `x` when the constants cancel (modulo the width; no-wrap kept when both had it and the constant fits) |
 | `c op x`, op commutative (`anvil_opt_commutative`) | `x op c`: the constant on the right, where strength reduction and the targets' immediate forms look |
+| `sext(sext x)`, `zext(zext x)`, `sext(zext x)` | one extension of `x` (`sext` of a `zext` is the `zext`: its top bit is clear); `zext(sext x)` stays |
+| `trunc(trunc x)` | one truncation of `x` |
+| `trunc(ext x)` | `x` at its own width and type, `trunc x` narrower, `ext x` wider (`fold_cast_chain`) |
 
 **Comparison Folding:**
 

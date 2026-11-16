@@ -117,6 +117,12 @@ bool anvil_mir_isel_writes(const anvil_mir_func_t *mir, const anvil_mir_isel_fac
  * in the same block with no call between; SIZE_MAX when there is none. */
 size_t anvil_mir_isel_only_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, size_t window);
 
+/* The extension (SEXT or ZEXT into a wider general register) right after
+ * `index` that is the only reader of its general-register result, in
+ * *extension; SIZE_MAX when there is none.  A load followed by it is one
+ * extending load into the extension's register. */
+size_t anvil_mir_isel_extending_reader(const anvil_mir_func_t *mir, const anvil_mir_isel_facts_t *facts, size_t index, anvil_mir_instr_info_t *extension);
+
 /* Whether nothing strictly between instructions `from` and `to` writes the
  * register holding `vreg` (or clobbers it, or calls); constants never
  * materialized write nothing. */

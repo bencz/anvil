@@ -82,6 +82,8 @@ typedef struct {
     /* A shift or mask folded into the one reading it, which prints both
      * as one RISBG of `rotate_source`. */
     size_t rotate_target, rotate_skip;  /* rotate_skip: a zero extension between */
+    /* An extension its load already did (SIZE_MAX: none). */
+    size_t extension_skip;
     /* x & c read only by `== 0` / `!= 0` feeding the branch: TMLL/TMLH,
      * the compare at tm_at prints nothing (SIZE_MAX: none). */
     size_t tm_at;

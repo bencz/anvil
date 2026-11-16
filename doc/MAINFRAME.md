@@ -168,7 +168,14 @@ The RX forms (`L`, `ST`, `LH`, `IC`, `LE`, `LD`, ...) take an unsigned
 `ANVIL_FEATURE_ZARCH_LONGDISP`) gives their RXY forms (`LY`, `STY`, `LHY`,
 `STHY`, `ICY`, `STCY`, `LEY`, `LDY`, `STEY`, `STDY`) and the RXY loads
 (`LG`, `STG`, the extending `LGB`/`LLGC`/`LGH`/`LLGH`) a signed 20-bit one
-(-524288..524287); without it those RXY loads see only the low 12 bits. A
+(-524288..524287); without it those RXY loads see only the low 12 bits.
+`LGF`/`LLGF`, `LGH`/`LLGH` and `LLGC` are base z/Architecture instructions
+(marked N, new in z/Architecture, in the instruction list of the Principles of
+Operation, SA22-7832-03); `LB`/`LGB` came with the long-displacement facility
+(marked LD), so a z900 sign-extends a byte with `IC` and shifts. A narrow
+load that its extension alone reads loads into the extension's register
+already extended, and a narrow load printed extended needs no second
+extension. A
 constant address (a GEP of constant indices) becomes base + displacement
 where the CPU's forms reach it, and the displacement goes into an index
 register otherwise. The lowering, the MIR address folds and the legality

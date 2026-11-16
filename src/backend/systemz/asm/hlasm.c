@@ -279,16 +279,23 @@ static void systemz_emit_narrow_load_suffix(systemz_emit_t *emit, const anvil_mi
         anvil_strbuf_appendf(&emit->code, "         %s %s,%s\n", info->is_signed ? "LGFR " : "LLGFR", reg, reg);
 }
 
-/* The z/Architecture load that extends a narrow value itself (LLGC, LGB,
- * LLGH, LGH with the extended-immediate facility), or NULL. */
+/* The z/Architecture load that extends a narrow value to 64 bits itself,
+ * or NULL: LLGC, LGH and LLGH on every model, LGB with the
+ * long-displacement facility (z990). */
+static const char *systemz_narrow_extending_load(systemz_emit_t *emit, unsigned bits, bool is_signed)
+{
+    if (bits > 16 || !emit->desc->has_64bit_gprs)
+        return NULL;
+    if (bits <= 8 && is_signed)
+        return emit->features & ANVIL_FEATURE_ZARCH_LONGDISP ? "LGB" : NULL;
+    if (bits <= 8)
+        return "LLGC";
+    return is_signed ? "LGH" : "LLGH";
+}
+
 static const char *systemz_extending_load(systemz_emit_t *emit, const anvil_mir_vreg_info_t *info)
 {
-    if (!info || info->reg_class != ANVIL_MIR_REG_GPR || info->size_bits > 16 || !emit->desc->has_64bit_gprs ||
-        !(emit->features & ANVIL_FEATURE_ZARCH_EIMM))
-        return NULL;
-    if (info->size_bits <= 8)
-        return info->is_signed ? "LGB" : "LLGC";
-    return info->is_signed ? "LGH" : "LLGH";
+    return info && info->reg_class == ANVIL_MIR_REG_GPR ? systemz_narrow_extending_load(emit, info->size_bits, info->is_signed) : NULL;
 }
 
 /* A narrow load printed without its extension (IC into an uncleared
@@ -1285,6 +1292,11 @@ static void systemz_emit_cast(systemz_emit_t *emit, anvil_mir_instr_info_t instr
         if (extend && instr.op == ANVIL_MIR_OP_ZEXT && (!emit->desc->has_64bit_gprs || dst_info->size_bits <= 32) &&
             anvil_mir_isel_zero_extended(&emit->isel, src) && !systemz_load_left_unextended(emit, src))
             extend = false;
+        /* A narrow load printed extended by its signedness (an extending
+         * load, or its suffix: to the whole register) needs no other. */
+        if (extend && src_info->size_bits <= 16 && src_info->is_signed == (instr.op == ANVIL_MIR_OP_SEXT) &&
+            anvil_mir_isel_def_op(&emit->isel, src) == ANVIL_MIR_OP_LOAD && !systemz_load_left_unextended(emit, src))
+            extend = false;
         if (extend) {
             const char *dst = systemz_vreg_reg_name(emit, instr.def);
             bool sign = instr.op == ANVIL_MIR_OP_SEXT;
@@ -1360,6 +1372,20 @@ static void systemz_emit_load(systemz_emit_t *emit, anvil_mir_instr_info_t instr
         return;
     char address[64];
     bool overlaps;
+    /* Read only by its extension: one load extending into the extension's
+     * register (LGF/LLGF for a word, systemz_narrow_extending_load below). */
+    anvil_mir_instr_info_t extension;
+    size_t reader = emit->desc->has_64bit_gprs ? anvil_mir_isel_extending_reader(emit->mir, &emit->isel, index, &extension) : SIZE_MAX;
+    if (reader != SIZE_MAX) {
+        bool sign = extension.op == ANVIL_MIR_OP_SEXT;
+        const char *op = info->size_bits == 32 ? (sign ? "LGF" : "LLGF") : systemz_narrow_extending_load(emit, info->size_bits, sign);
+        if (op) {
+            systemz_memory_operand(emit, instr, index, 0, systemz_phys_reg(emit, extension.def), &overlaps, address, sizeof(address));
+            anvil_strbuf_appendf(&emit->code, "         %-5s %s,%s\n", op, systemz_vreg_reg_name(emit, extension.def), address);
+            emit->extension_skip = reader;
+            return;
+        }
+    }
     systemz_memory_operand(emit, instr, index, 0, systemz_phys_reg(emit, instr.def), &overlaps, address, sizeof(address));
     const char *extending = systemz_extending_load(emit, info);
     if (extending) {
@@ -1609,6 +1635,10 @@ static void systemz_emit_instr(systemz_emit_t *emit, anvil_mir_instr_info_t inst
     if (index == emit->rotate_skip) {
         /* A zero extension the RISBG after it does. */
         emit->rotate_skip = SIZE_MAX;
+        return;
+    }
+    if (index == emit->extension_skip) {
+        emit->extension_skip = SIZE_MAX;
         return;
     }
     if (role == ANVIL_MIR_COUNTER_TEST) {
@@ -2161,7 +2191,7 @@ bool systemz_emit_mir_ex(const anvil_mir_func_t *mir, anvil_mainframe_variant_t 
 
     systemz_emit_t emit;
     memset(&emit, 0, sizeof(emit));
-    emit.rotate_target = emit.rotate_skip = emit.tm_at = SIZE_MAX;
+    emit.rotate_target = emit.rotate_skip = emit.extension_skip = emit.tm_at = SIZE_MAX;
     emit.desc = desc;
     emit.ret_low_word = ANVIL_MIR_NO_VREG;
     emit.mir = mir;

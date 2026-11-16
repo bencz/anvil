@@ -136,6 +136,80 @@ static bool constant_chains(void)
     return true;
 }
 
+/* The value an integer cast gives `value` (`from` bits wide) at `to` bits. */
+static uint64_t cast_value(anvil_op_t op, unsigned from, unsigned to, uint64_t value)
+{
+    uint64_t from_mask = from == 64 ? UINT64_MAX : (UINT64_C(1) << from) - 1, to_mask = to == 64 ? UINT64_MAX : (UINT64_C(1) << to) - 1;
+    value &= from_mask;
+    if (op == ANVIL_OP_SEXT && from < 64 && (value >> (from - 1)) & 1)
+        value |= ~from_mask;
+    return value & to_mask;
+}
+
+/* outer(inner(x)) for every pair of integer casts (an extension widens, a
+ * truncation narrows) and every signedness of the middle and result types:
+ * constant folding leaves one cast or x itself, computing the same value. */
+static bool cast_chains(void)
+{
+    static const unsigned widths[] = { 8, 16, 32, 64 };
+    static const anvil_op_t ops[] = { ANVIL_OP_SEXT, ANVIL_OP_ZEXT, ANVIL_OP_TRUNC };
+    static const uint64_t samples[] = { 0, 1, 0x7f, 0x80, 0xff, 0x7fff, 0x8000, 0xffff, 0x7fffffff, 0x80000000, 0xffffffff, UINT64_MAX, 0x123456789abcdef0 };
+    for (size_t a = 0; a < 4; a++)
+        for (size_t b = 0; b < 4; b++)
+            for (size_t c = 0; c < 4; c++)
+                for (size_t inner = 0; inner < 3; inner++)
+                    for (size_t outer = 0; outer < 3; outer++)
+                        for (int signs = 0; signs < 8; signs++)
+                        {
+                            unsigned w0 = widths[a], w1 = widths[b], w2 = widths[c];
+                            if ((ops[inner] == ANVIL_OP_TRUNC ? w1 >= w0 : w1 <= w0) || (ops[outer] == ANVIL_OP_TRUNC ? w2 >= w1 : w2 <= w1))
+                                continue;
+                            anvil_ctx_t *ctx = anvil_ctx_create_for_target(ANVIL_ARCH_X86_64);
+                            anvil_module_t *module = anvil_module_create(ctx, "casts");
+                            anvil_type_t *(*const makers[2][4])(anvil_ctx_t *) = {
+                                { anvil_type_u8, anvil_type_u16, anvil_type_u32, anvil_type_u64 },
+                                { anvil_type_i8, anvil_type_i16, anvil_type_i32, anvil_type_i64 },
+                            };
+                            anvil_type_t *t0 = makers[signs & 1][a](ctx), *t1 = makers[(signs >> 1) & 1][b](ctx), *t2 = makers[(signs >> 2) & 1][c](ctx);
+                            anvil_func_t *function = anvil_func_create(module, "chain", anvil_type_func(ctx, t2, &t0, 1, false), ANVIL_LINK_EXTERNAL);
+                            anvil_set_insert_point(ctx, anvil_func_get_entry(function));
+                            anvil_value_t *x = anvil_func_get_param(function, 0);
+                            anvil_value_t *(*const builders[3])(anvil_ctx_t *, anvil_value_t *, anvil_type_t *, const char *) = {
+                                anvil_build_sext, anvil_build_zext, anvil_build_trunc,
+                            };
+                            anvil_value_t *middle = builders[inner](ctx, x, t1, "middle");
+                            anvil_build_ret(ctx, builders[outer](ctx, middle, t2, "result"));
+                            bool valid = anvil_pass_const_fold(function) != ANVIL_PASS_RUN_ERROR;
+                            const anvil_value_t *result = function->entry->last->operands[0];
+                            const anvil_instr_t *cast = result->kind == ANVIL_VAL_INSTR ? result->data.instr : NULL;
+                            /* Only a zext of a sext, an extension of a truncation and a
+                             * truncation back to the source's width but not its type stay
+                             * two casts. */
+                            bool kept = ops[inner] == ANVIL_OP_TRUNC ? ops[outer] != ANVIL_OP_TRUNC
+                                      : ops[outer] == ANVIL_OP_TRUNC ? w2 == w0 && (signs & 1) != ((signs >> 2) & 1)
+                                                                     : ops[outer] == ANVIL_OP_ZEXT && ops[inner] == ANVIL_OP_SEXT;
+                            valid &= result == x || (cast && cast->num_operands == 1 && (cast->operands[0] == x || (kept && cast->operands[0] == middle)));
+                            for (size_t s = 0; valid && s < sizeof(samples) / sizeof(samples[0]); s++)
+                            {
+                                uint64_t expected = cast_value(ops[outer], w1, w2, cast_value(ops[inner], w0, w1, samples[s]));
+                                uint64_t got = result == x ? cast_value(ANVIL_OP_ZEXT, w0, w2, samples[s])
+                                             : cast->operands[0] == x ? cast_value(cast->op, w0, w2, samples[s])
+                                                                      : cast_value(cast->op, w1, w2, cast_value(ops[inner], w0, w1, samples[s]));
+                                valid &= got == expected;
+                            }
+                            char error[256] = { 0 };
+                            valid &= anvil_func_verify(function, error, sizeof(error));
+                            anvil_module_destroy(module);
+                            anvil_ctx_destroy(ctx);
+                            if (!valid)
+                            {
+                                fprintf(stderr, "cast chain failed: %u -(%d)-> %u -(%d)-> %u signs=%d %s\n", w0, (int)ops[inner], w1, (int)ops[outer], w2, signs, error);
+                                return false;
+                            }
+                        }
+    return true;
+}
+
 int main(void)
 {
     for (int value = -128; value <= 127; value++)
@@ -147,5 +221,5 @@ int main(void)
         }
     }
 
-    return allocation_failures(false) && allocation_failures(true) && constant_chains() ? 0 : 1;
+    return allocation_failures(false) && allocation_failures(true) && constant_chains() && cast_chains() ? 0 : 1;
 }

@@ -488,6 +488,9 @@ bool x86_gas_fold_load(x86_gas_t *gas, size_t index, const anvil_mir_instr_info_
             return false;
         return fold_into(gas, index, info, reader);
     }
+    /* An extension of the loaded value: movs/movz from memory. */
+    if (!fpr && (next.op == ANVIL_MIR_OP_SEXT || next.op == ANVIL_MIR_OP_ZEXT))
+        return fold_into(gas, index, info, reader);
     if (def_info->size_bits < 32 || next.num_uses != 2 || next.def == ANVIL_MIR_NO_VREG)
         return false;
     bool gpr_op = next.op == ANVIL_MIR_OP_ADD || next.op == ANVIL_MIR_OP_SUB || next.op == ANVIL_MIR_OP_AND || next.op == ANVIL_MIR_OP_OR ||
@@ -992,6 +995,16 @@ void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr
         dst_size = src_size;
     if (dst_size < gas->min_operation_bytes)
         dst_size = gas->min_operation_bytes;
+    if (index == gas->fold_target) {
+        /* The extension of a folded load: one extending load (a 32-bit
+         * destination zero-extends to 64 bits). */
+        gas->fold_target = SIZE_MAX;
+        const char *op = src_size == dst_size ? x86_gas_size_suffix(dst_size) : !sign_extend ? (src_size == 1 ? "zbl" : src_size == 2 ? "zwl" : "l")
+                       : src_size == 1 ? (dst_size <= 4 ? "sbl" : "sbq") : src_size == 2 ? (dst_size <= 4 ? "swl" : "swq") : "slq";
+        int width = src_size != dst_size && !sign_extend ? 4 : dst_size;
+        anvil_strbuf_appendf(&gas->code, "\tmov%s %s, %%%s\n", op, gas->fold_address, x86_gas_gpr(dst_phys, width));
+        return;
+    }
     /* The whole register: a copy. */
     if (src_size == dst_size && dst_size >= gas->pointer_bytes) {
         if (src_phys != dst_phys)

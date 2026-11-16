@@ -753,8 +753,9 @@ static bool has_self_move(const char *assembly, const char *name)
 
 /* r = x - y * 3 (32-bit, optimized), then z * r + r in 64 bits:
  * zero-extending r costs nothing on x86-64 and ARM64, whose 32-bit
- * operations clear the upper half.  A signed word load in its place
- * (unoptimized, so ARM64 prints ldrsw x) keeps the zero extension. */
+ * operations clear the upper half.  A signed word load in its place, also
+ * stored (so not one extending load; unoptimized, so ARM64 prints ldrsw x),
+ * keeps the zero extension. */
 static bool free_zero_extension_case(anvil_arch_t arch, bool loaded)
 {
     anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
@@ -774,6 +775,9 @@ static bool free_zero_extension_case(anvil_arch_t arch, bool loaded)
         anvil_value_t *tripled = anvil_build_mul(ctx, anvil_func_get_param(func, 1), anvil_const_u32(ctx, 3), "tripled");
         narrow = anvil_build_sub(ctx, anvil_func_get_param(func, 0), tripled, "narrow");
     }
+    /* A second reader keeps the load from extending into the zext. */
+    if (loaded)
+        anvil_build_store(ctx, narrow, anvil_func_get_param(func, 0));
     anvil_value_t *wide = anvil_build_zext(ctx, narrow, u64, "wide");
     anvil_value_t *product = anvil_build_mul(ctx, anvil_func_get_param(func, loaded ? 1 : 2), wide, "product");
     anvil_build_ret(ctx, anvil_build_add(ctx, product, wide, "result"));
@@ -795,6 +799,61 @@ static void test_free_zero_extension(void)
     CHECK(free_zero_extension_case(ANVIL_ARCH_X86_64, false) && free_zero_extension_case(ANVIL_ARCH_ARM64, false),
           "x86-64, ARM64: a 32-bit difference is zero-extended for free");
     CHECK(free_zero_extension_case(ANVIL_ARCH_ARM64, true), "ARM64: a signed word load (ldrsw x) keeps its zero extension");
+}
+
+/* ext(load p) to 64 bits, signed and unsigned, from a byte, a halfword and
+ * a word: one load that extends on every 64-bit target (no separate
+ * extension). */
+typedef struct {
+    anvil_arch_t arch;
+    anvil_cpu_model_t cpu;
+    const char *loads[6]; /* sbyte, ubyte, shalf, uhalf, sword, uword */
+    const char *absent[3];
+} extending_load_case_t;
+
+static const extending_load_case_t extending_load_cases[] = {
+    {ANVIL_ARCH_X86_64, 0, {"movsbq (", "movzbl (", "movswq (", "movzwl (", "movslq (", "movl ("}, {"movsbq %", "movslq %", "movzbl %"}},
+    {ANVIL_ARCH_ARM64, 0, {"ldrsb x", "ldrb w", "ldrsh x", "ldrh w", "ldrsw x", "ldr w"}, {"sxt", "uxt", "mov w"}},
+    {ANVIL_ARCH_PPC64LE, 0, {"lbz", "lbz", "lha", "lhz", "lwa", "lwz"}, {"extsw", "rldicl", "clrldi"}},
+    /* z900: LGB needs the long-displacement facility; the signed byte is
+     * inserted and extended in place. */
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z900, {"IC ", "LLGC ", "LGH ", "LLGH ", "LGF ", "LLGF "}, {"LGFR ", "LLGFR ", "\x01"}},
+    {ANVIL_ARCH_ZARCH, ANVIL_CPU_ZARCH_Z990, {"LGB ", "LLGC ", "LGH ", "LLGH ", "LGF ", "LLGF "}, {"LGFR ", "LLGFR ", "SLL "}},
+};
+
+static void test_extending_loads(void)
+{
+    for (size_t t = 0; t < sizeof(extending_load_cases) / sizeof(extending_load_cases[0]); t++) {
+        const extending_load_case_t *test = &extending_load_cases[t];
+        anvil_ctx_t *ctx = anvil_ctx_create_for_target(test->arch);
+        if (test->cpu)
+            anvil_ctx_set_cpu(ctx, test->cpu);
+        anvil_type_t *narrow[6] = {anvil_type_i8(ctx), anvil_type_u8(ctx), anvil_type_i16(ctx), anvil_type_u16(ctx), anvil_type_i32(ctx), anvil_type_u32(ctx)};
+        for (size_t k = 0; k < 6; k++) {
+            anvil_module_t *module = anvil_module_create(ctx, "extending");
+            bool sign = k % 2 == 0;
+            anvil_type_t *wide = sign ? anvil_type_i64(ctx) : anvil_type_u64(ctx);
+            anvil_type_t *params[] = {anvil_type_ptr(ctx, narrow[k])};
+            anvil_func_t *func = anvil_func_create(module, "widen", anvil_type_func(ctx, wide, params, 1, false), ANVIL_LINK_EXTERNAL);
+            anvil_set_insert_point(ctx, func->entry);
+            anvil_value_t *value = anvil_build_load(ctx, narrow[k], anvil_func_get_param(func, 0), "value");
+            anvil_build_ret(ctx, sign ? anvil_build_sext(ctx, value, wide, "wide") : anvil_build_zext(ctx, value, wide, "wide"));
+            char *assembly = NULL;
+            size_t length = 0;
+            bool built = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+            bool valid = built && strstr(assembly, test->loads[k]);
+            for (size_t a = 0; valid && a < 3; a++)
+                valid = !strstr(assembly, test->absent[a]) || (test->arch == ANVIL_ARCH_ZARCH && k == 0 && test->cpu == ANVIL_CPU_ZARCH_Z900);
+            char message[128];
+            snprintf(message, sizeof(message), "arch %d cpu %d load %zu: one extending load (%s)", (int)test->arch, (int)test->cpu, k, test->loads[k]);
+            CHECK(valid, message);
+            if (!valid && built)
+                fprintf(stderr, "%s\n", assembly);
+            free(assembly);
+            anvil_module_destroy(module);
+        }
+        anvil_ctx_destroy(ctx);
+    }
 }
 
 /* Compares of extensions compare the narrow values when the extension's
@@ -853,6 +912,7 @@ int main(void)
     test_range_check();
     test_wide_32bit_immediates();
     test_free_zero_extension();
+    test_extending_loads();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

@@ -980,19 +980,24 @@ static void test_mainframe_narrow_loads_extend_exactly(void)
         CHECK(anvil_mainframe_emit_mir(mir, variants[v], &text, &len),
               "narrow loads should emit");
         if (text) {
-            CHECK(count_occurrences(text, "IC    R") == 2,
-                  "i8/u8 loads should use exactly two byte loads");
+            /* z/Architecture (here without the long-displacement facility)
+             * loads u8, i16 and u16 extended to 64 bits (LLGC, LGH, LLGH);
+             * the signed byte is inserted and extended (LGB needs the
+             * facility). */
+            CHECK(count_occurrences(text, "IC    R") == (wide ? 1 : 2),
+                  "i8/u8 loads should use exactly the byte inserts needed");
             check_contains(text, "SLL   R", "signed i8 load must shift for sign extension");
             check_contains(text, "SRA   R", "signed i8 load must arithmetically extend");
-            CHECK(count_occurrences(text, "LH    R") == 2,
-                  "i16/u16 loads should use exactly two halfword loads");
-            check_contains(text, "=X'0000FFFF'",
-                           "unsigned i16 load must clear sign-extended bits");
+            CHECK(count_occurrences(text, "LH    R") == (wide ? 0 : 2),
+                  "i16/u16 loads should use exactly the halfword loads needed");
             if (wide) {
-                check_contains(text, "LGFR  R",
-                               "signed narrow z/Arch load must normalize all 64 bits");
-                check_contains(text, "LLGFR R",
-                               "unsigned narrow z/Arch load must normalize all 64 bits");
+                check_contains(text, "LGFR  R", "signed narrow z/Arch load must normalize all 64 bits");
+                check_contains(text, "LLGC  R", "unsigned byte z/Arch load extends in the load");
+                check_contains(text, "LGH   R", "signed halfword z/Arch load extends in the load");
+                check_contains(text, "LLGH  R", "unsigned halfword z/Arch load extends in the load");
+                CHECK(!strstr(text, "LGB"), "LGB needs the long-displacement facility");
+            } else {
+                check_contains(text, "=X'0000FFFF'", "unsigned i16 load must clear sign-extended bits");
             }
             free(text);
         }

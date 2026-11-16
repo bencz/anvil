@@ -564,6 +564,48 @@ static bool fold_constant_chain(anvil_ctx_t *ctx, anvil_instr_t *instr, anvil_va
     return true;
 }
 
+/* An integer cast of an integer cast reads the first cast's source: an
+ * extension of an extension of one kind is one (sext of a zext is the
+ * zext: its top bit is clear), a truncation of a truncation one, and a
+ * truncation of an extension the source itself, its truncation or its
+ * extension.  Rewrites `instr` in place, or sets *replacement to the
+ * source when the cast does nothing. */
+static bool fold_cast_chain(anvil_instr_t *instr, anvil_value_t **replacement)
+{
+    if ((instr->op != ANVIL_OP_SEXT && instr->op != ANVIL_OP_ZEXT && instr->op != ANVIL_OP_TRUNC) || instr->num_operands != 1 ||
+        instr->operands[0]->kind != ANVIL_VAL_INSTR)
+        return false;
+    anvil_instr_t *inner = instr->operands[0]->data.instr;
+    if ((inner->op != ANVIL_OP_SEXT && inner->op != ANVIL_OP_ZEXT && inner->op != ANVIL_OP_TRUNC) || inner->num_operands != 1 || !inner->result)
+        return false;
+    anvil_value_t *source = inner->operands[0];
+    if (!anvil_type_is_integer(source->type) || !anvil_type_is_integer(inner->result->type) || !anvil_type_is_integer(instr->result->type))
+        return false;
+    unsigned source_bits = type_int_bits(source->type), middle_bits = type_int_bits(inner->result->type), bits = type_int_bits(instr->result->type);
+    anvil_op_t op;
+    if (instr->op != ANVIL_OP_TRUNC) {
+        if (inner->op == ANVIL_OP_TRUNC || middle_bits <= source_bits || (instr->op == ANVIL_OP_ZEXT && inner->op == ANVIL_OP_SEXT))
+            return false;
+        op = inner->op;
+    } else if (inner->op == ANVIL_OP_TRUNC) {
+        op = ANVIL_OP_TRUNC;
+    } else {
+        if (middle_bits <= source_bits)
+            return false;
+        if (bits == source_bits) {
+            if (!anvil_types_equal(source->type, instr->result->type))
+                return false;
+            *replacement = source;
+            return true;
+        }
+        op = bits < source_bits ? ANVIL_OP_TRUNC : inner->op;
+    }
+    instr->no_wrap = op == ANVIL_OP_TRUNC && inner->op == ANVIL_OP_TRUNC && instr->no_wrap && inner->no_wrap;
+    instr->op = op;
+    instr->operands[0] = source;
+    return true;
+}
+
 anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
 {
     if (!func || !func->parent || !func->parent->ctx)
@@ -662,6 +704,8 @@ anvil_pass_result_t anvil_pass_const_fold(anvil_func_t *func)
                     case ANVIL_OP_SEXT:
                     case ANVIL_OP_BITCAST:
                         folded = anvil_opt_fold_integer(ctx, instr, val, NULL);
+                        if (!folded && fold_cast_chain(instr, &folded))
+                            changed = true;
                         break;
                         
                     default:
