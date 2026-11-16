@@ -57,6 +57,10 @@ anvil_mir_opcode_t anvil_mir_isel_def_op(const anvil_mir_isel_facts_t *facts, an
  * leave the register's upper bits zero; there a ZEXT of the value is a
  * copy. */
 bool anvil_mir_isel_zero_extended(const anvil_mir_isel_facts_t *facts, anvil_mir_vreg_t vreg);
+/* Whether `op`'s 32-bit form leaves the upper half of a 64-bit register
+ * zero (x86-64's and ARM64's 32-bit integer operations, loads and moves):
+ * a 32-to-64-bit zero extension in the same register is then nothing. */
+bool anvil_mir_isel_writes_zero_extended(anvil_mir_opcode_t op);
 /* Whether extending `src` (`src_bytes` wide, `src_info` its vreg) to
  * `dst_bytes` by `sign_extend` needs only a copy: a narrow load of the same
  * signedness already extended it (a printer's loads extend narrow integers

@@ -826,3 +826,27 @@ bool anvil_mir_isel_already_extended(const anvil_mir_isel_facts_t *facts, anvil_
         return true;
     return !sign_extend && src_bytes <= 4 && anvil_mir_isel_zero_extended(facts, src);
 }
+
+bool anvil_mir_isel_writes_zero_extended(anvil_mir_opcode_t op)
+{
+    switch (op) {
+    case ANVIL_MIR_OP_ADD:
+    case ANVIL_MIR_OP_SUB:
+    case ANVIL_MIR_OP_MUL:
+    case ANVIL_MIR_OP_AND:
+    case ANVIL_MIR_OP_OR:
+    case ANVIL_MIR_OP_XOR:
+    case ANVIL_MIR_OP_SHL:
+    case ANVIL_MIR_OP_SHR:
+    case ANVIL_MIR_OP_SAR:
+    case ANVIL_MIR_OP_SDIV:
+    case ANVIL_MIR_OP_UDIV:
+    case ANVIL_MIR_OP_SMOD:
+    case ANVIL_MIR_OP_UMOD:
+    case ANVIL_MIR_OP_LOAD:
+    case ANVIL_MIR_OP_MOV:
+        return true;
+    default:
+        return false;
+    }
+}

@@ -733,6 +733,70 @@ static void test_wide_32bit_immediates(void)
     }
 }
 
+/* A move of a 32-bit register onto itself in the function `name`
+ * ("mov w9, w9", "movl %edi, %edi"). */
+static bool has_self_move(const char *assembly, const char *name)
+{
+    char label[64];
+    snprintf(label, sizeof(label), "\n%s:\n", name);
+    const char *line = strstr(assembly, label);
+    for (line = line ? strchr(line + 1, '\n') : NULL; line && line[1] != '\0'; line = strchr(line + 1, '\n')) {
+        char first[16], second[16];
+        if (strncmp(line + 1, "\t.size", 7) == 0)
+            break;
+        if ((sscanf(line + 1, "\tmov %15[^,], %15s", first, second) == 2 || sscanf(line + 1, "\tmovl %15[^,], %15s", first, second) == 2) &&
+            strcmp(first, second) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* r = x - y * 3 (32-bit, optimized), then z * r + r in 64 bits:
+ * zero-extending r costs nothing on x86-64 and ARM64, whose 32-bit
+ * operations clear the upper half.  A signed word load in its place
+ * (unoptimized, so ARM64 prints ldrsw x) keeps the zero extension. */
+static bool free_zero_extension_case(anvil_arch_t arch, bool loaded)
+{
+    anvil_ctx_t *ctx = anvil_ctx_create_for_target(arch);
+    if (!loaded)
+        anvil_ctx_set_opt_level(ctx, ANVIL_OPT_STANDARD);
+    anvil_module_t *module = anvil_module_create(ctx, "extension");
+    anvil_type_t *u32 = anvil_type_u32(ctx), *i32 = anvil_type_i32(ctx), *u64 = anvil_type_u64(ctx);
+    anvil_type_t *params[] = {u32, u32, u64};
+    anvil_type_t *load_params[] = {anvil_type_ptr(ctx, i32), u64};
+    anvil_func_t *func = loaded ? anvil_func_create(module, "loaded", anvil_type_func(ctx, u64, load_params, 2, false), ANVIL_LINK_EXTERNAL)
+                                : anvil_func_create(module, "remainder", anvil_type_func(ctx, u64, params, 3, false), ANVIL_LINK_EXTERNAL);
+    anvil_set_insert_point(ctx, func->entry);
+    anvil_value_t *narrow;
+    if (loaded) {
+        narrow = anvil_build_load(ctx, i32, anvil_func_get_param(func, 0), "narrow");
+    } else {
+        anvil_value_t *tripled = anvil_build_mul(ctx, anvil_func_get_param(func, 1), anvil_const_u32(ctx, 3), "tripled");
+        narrow = anvil_build_sub(ctx, anvil_func_get_param(func, 0), tripled, "narrow");
+    }
+    anvil_value_t *wide = anvil_build_zext(ctx, narrow, u64, "wide");
+    anvil_value_t *product = anvil_build_mul(ctx, anvil_func_get_param(func, loaded ? 1 : 2), wide, "product");
+    anvil_build_ret(ctx, anvil_build_add(ctx, product, wide, "result"));
+    char *assembly = NULL;
+    size_t length = 0;
+    bool built = anvil_module_codegen(module, &assembly, &length) == ANVIL_OK && assembly;
+    bool signed_load = built && strstr(assembly, "ldrsw");
+    bool valid = built && (loaded ? !signed_load || has_self_move(assembly, "loaded") : !has_self_move(assembly, "remainder"));
+    if (!valid && built)
+        fprintf(stderr, "%s\n", assembly);
+    free(assembly);
+    anvil_module_destroy(module);
+    anvil_ctx_destroy(ctx);
+    return valid && (!loaded || arch != ANVIL_ARCH_ARM64 || signed_load);
+}
+
+static void test_free_zero_extension(void)
+{
+    CHECK(free_zero_extension_case(ANVIL_ARCH_X86_64, false) && free_zero_extension_case(ANVIL_ARCH_ARM64, false),
+          "x86-64, ARM64: a 32-bit difference is zero-extended for free");
+    CHECK(free_zero_extension_case(ANVIL_ARCH_ARM64, true), "ARM64: a signed word load (ldrsw x) keeps its zero extension");
+}
+
 /* Compares of extensions compare the narrow values when the extension's
  * kind agrees with the order (any kind for eq/ne); a mixed one stays wide. */
 static void test_narrow_extended_compare(void)
@@ -788,6 +852,7 @@ int main(void)
     test_narrow_extended_compare();
     test_range_check();
     test_wide_32bit_immediates();
+    test_free_zero_extension();
     test_condition_add();
     test_record_of_narrow_and();
     test_bit_branch();

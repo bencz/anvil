@@ -971,32 +971,6 @@ void x86_gas_emit_unary(x86_gas_t *gas, size_t index, const anvil_mir_instr_info
         anvil_strbuf_appendf(&gas->code, "\tmov%s %%%s, %%%s\n\t%s%s %%%s\n", suffix, value, dst, info->op == ANVIL_MIR_OP_NEG ? "neg" : "not", suffix, dst);
 }
 
-/* Operations whose 32-bit form zeroes the upper half of the register on
- * x86-64. */
-static bool writes_zero_extended(anvil_mir_opcode_t op)
-{
-    switch (op) {
-    case ANVIL_MIR_OP_ADD:
-    case ANVIL_MIR_OP_SUB:
-    case ANVIL_MIR_OP_MUL:
-    case ANVIL_MIR_OP_AND:
-    case ANVIL_MIR_OP_OR:
-    case ANVIL_MIR_OP_XOR:
-    case ANVIL_MIR_OP_SHL:
-    case ANVIL_MIR_OP_SHR:
-    case ANVIL_MIR_OP_SAR:
-    case ANVIL_MIR_OP_SDIV:
-    case ANVIL_MIR_OP_UDIV:
-    case ANVIL_MIR_OP_SMOD:
-    case ANVIL_MIR_OP_UMOD:
-    case ANVIL_MIR_OP_LOAD:
-    case ANVIL_MIR_OP_MOV:
-        return true;
-    default:
-        return false;
-    }
-}
-
 static void move32_if_needed(x86_gas_t *gas, int src_phys, int dst_phys)
 {
     if (src_phys != dst_phys)
@@ -1046,7 +1020,7 @@ void x86_gas_emit_gpr_extend(x86_gas_t *gas, size_t index, const anvil_mir_instr
     if (src_size >= 4) {
         /* A 32-bit operation already zeroed the upper half (an omitted
          * TRUNC or COPY in the same register did not). */
-        if (src_phys != dst_phys || !writes_zero_extended(anvil_mir_isel_def_op(&gas->isel, src)))
+        if (src_phys != dst_phys || !anvil_mir_isel_writes_zero_extended(anvil_mir_isel_def_op(&gas->isel, src)))
             anvil_strbuf_appendf(&gas->code, "\tmovl %%%s, %%%s\n", x86_gas_gpr(src_phys, 4), x86_gas_gpr(dst_phys, 4));
         return;
     }

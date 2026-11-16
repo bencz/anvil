@@ -56,7 +56,10 @@ which constant `MOV`s are still needed.  Each printer supplies one callback
 saying which operands it encodes as immediates (x86 imm32: any constant of a
 32-bit operation, modulo 2^32, and a sign-extended one of a 64-bit operation; ARM64 12-bit
 arithmetic and bitmask immediates, PowerPC 16-bit D-forms, SystemZ by CPU
-facility), so a folded constant never occupies a register.  A multiply by a
+facility), so a folded constant never occupies a register.  A zero extension
+from 32 bits in the same register prints nothing after an operation whose
+32-bit form clears the upper half (`anvil_mir_isel_writes_zero_extended`:
+x86-64 and ARM64).  A multiply by a
 constant runs without the multiplier where `anvil_mir_isel_mul_form` says
 how: by 2^k a shift on every target; by 2^k + 1, x + (x << k), one `lea`
 (scales 2, 4, 8) on x86 and one `add` of a shifted register on ARM64, while

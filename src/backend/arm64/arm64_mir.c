@@ -2530,11 +2530,16 @@ static void mir_emit_gpr_extend(arm64_mir_emit_t *emit,
         return;
     }
 
+    anvil_mir_opcode_t src_op = anvil_mir_isel_def_op(&emit->isel, src);
     if (src_size <= 1) {
         anvil_strbuf_appendf(&emit->code, "\tuxtb %s, %s\n", dst_w, src_w);
     } else if (src_size <= 2) {
         anvil_strbuf_appendf(&emit->code, "\tuxth %s, %s\n", dst_w, src_w);
-    } else {
+    } else if (dst_assignment->phys_reg != src_assignment->phys_reg || !anvil_mir_isel_writes_zero_extended(src_op) ||
+               (src_op == ANVIL_MIR_OP_LOAD && src_info->is_signed)) {
+        /* A w-register write already cleared the upper half (an omitted
+         * TRUNC or COPY in the same register did not, nor does a signed
+         * word load, printed as ldrsw x). */
         anvil_strbuf_appendf(&emit->code, "\tmov %s, %s\n", dst_w, src_w);
     }
 }
